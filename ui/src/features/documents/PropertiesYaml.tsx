@@ -176,8 +176,15 @@ export function PropertiesViews({ session, typeName }: PropertiesViewsProps) {
   const [typed, setTyped] = useState<TypedYaml | null>(null);
   const readNow = useRef<(() => void) | null>(null);
   // The text stands while the draft's properties are what they were when it was typed; a change
-  // made in the form since then replaces it.
-  const standing = typed !== null && typed.draft === session.properties ? typed : null;
+  // made in the form since then replaces it. The application's header is not the text's: when
+  // only it changed (the person archived or moved the item), the text stands.
+  const standing =
+    typed !== null &&
+    (typed.draft === session.properties ||
+      JSON.stringify(withoutHeader(typed.draft)) ===
+        JSON.stringify(withoutHeader(session.properties)))
+      ? typed
+      : null;
   const heldBack = standing !== null && (!standing.read.ok || standing.refused.length > 0);
   return (
     <Tabs.Root

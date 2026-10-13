@@ -19,7 +19,11 @@
  *   conflicts as deleted, and it can only be discarded), so the drafts list is not touched; the
  *   page remembers that the person deleted the item, to say so in its open tabs;
  * - `move_item` and `set_lifecycle` change one item, whose identity stays: its tabs go on reading
- *   it, by its id, at the new head.
+ *   it, by its id, at the new head. The person's draft of that item follows their own change
+ *   (`followOwnChange` in `drafts/saving.ts`): it takes the item's header as the change left it,
+ *   and the status word when the change set one, and is saved on the revision the change made, so
+ *   its next Snapshot does not conflict with the person's own change. Each of the two resolves
+ *   once the draft has followed, and says how the draft then stands.
  */
 import type { QueryClient } from '@tanstack/react-query';
 import { getItemOptions } from '../../api/generated/@tanstack/react-query.gen';
@@ -31,6 +35,7 @@ import {
   setLifecycle,
 } from '../../api/generated/sdk.gen';
 import type { ItemSummary, Revision } from '../../api/generated/types.gen';
+import { type DraftAfterChange, followOwnChange } from '../drafts/saving';
 import { adoptHead, checkHeadsAgain, type HeadChange } from '../explorer/head';
 import { useExplorerStore } from '../explorer/store';
 import { joinPath } from './names';
@@ -68,6 +73,19 @@ export interface Lifecycle {
   status?: StatusWord;
   archived?: boolean;
 }
+
+/** A change of one item, and how the person's draft of it stands after it. */
+export type ItemChange = HeadChange & { draft: DraftAfterChange };
+
+/** What is said of the person's draft after their own change of its item; nothing when they have none. */
+export const DRAFT_AFTER: Record<DraftAfterChange, string> = {
+  none: '',
+  follows:
+    'Your draft of this item follows the change: it now starts from this version, so its next Snapshot will not ask about it.',
+  asks: 'Your draft of this item is kept. It was started on an older version than the one you changed, so its next Snapshot will first ask whether to keep your text.',
+  'not-saved':
+    'Your draft of this item is kept, but it could not be saved on this version: its own notice says why. Until it is, its next Snapshot may first ask whether to keep your text.',
+};
 
 /** The shell shows the revision a change made; the head checks run again. */
 function changed(
@@ -142,7 +160,7 @@ export async function moveItemTo(
   client: QueryClient,
   workspaceId: string,
   attempt: Attempt<{ itemId: string; destination: string }>,
-): Promise<HeadChange> {
+): Promise<ItemChange> {
   const { itemId, destination } = attempt.values;
   const { data } = await moveItem({
     body: {
@@ -154,7 +172,11 @@ export async function moveItemTo(
     },
     throwOnError: true,
   });
-  return changed(client, workspaceId, data.revision, [itemId]);
+  const change = changed(client, workspaceId, data.revision, [itemId]);
+  const draft = await followOwnChange(client, workspaceId, itemId, attempt.base, data.revision, {
+    status: false,
+  });
+  return { ...change, draft };
 }
 
 /** Delete an item from the workspace as it is now; its history stays. */
@@ -185,7 +207,7 @@ export async function changeLifecycle(
   client: QueryClient,
   workspaceId: string,
   attempt: Attempt<Lifecycle>,
-): Promise<HeadChange> {
+): Promise<ItemChange> {
   const { itemId, status, archived } = attempt.values;
   const { data } = await setLifecycle({
     body: {
@@ -198,5 +220,9 @@ export async function changeLifecycle(
     },
     throwOnError: true,
   });
-  return changed(client, workspaceId, data.revision, [itemId]);
+  const change = changed(client, workspaceId, data.revision, [itemId]);
+  const draft = await followOwnChange(client, workspaceId, itemId, attempt.base, data.revision, {
+    status: status !== undefined,
+  });
+  return { ...change, draft };
 }

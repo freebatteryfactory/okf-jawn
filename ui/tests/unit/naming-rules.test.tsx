@@ -1153,3 +1153,75 @@ describe('the question before a renaming, when another preview is made', () => {
     expect(api.callsTo(PREVIEW)).toHaveLength(1);
   });
 });
+
+describe('the person’s drafts of items a renaming renames', () => {
+  const SAVE_DRAFT = '/api/items/save-draft';
+  const draft = {
+    item_id: NOTE,
+    base_revision: HEAD,
+    content_digest: DIGEST,
+    editor: 'ada',
+    saved_at: '2026-01-01T23:30:00.000Z',
+  };
+  const withDraftOfNote = (save: Handler): Record<string, Handler> => ({
+    '/api/items/list-drafts': () => ok({ items: [draft], next_cursor: null }),
+    '/api/items/get-item': (body) => {
+      const revision = revisionAsked(body, HEAD);
+      const item = body.item_id === NOTE ? noteSummary : otherSummary;
+      const document = itemDocument({ ...item, revision });
+      return ok(
+        body.item_id === NOTE
+          ? { ...document, draft: { body: 'My draft', properties: document.properties, draft } }
+          : document,
+      );
+    },
+    [SAVE_DRAFT]: save,
+  });
+  async function rename() {
+    await openRules();
+    await setPrefix('2025-');
+    await previewNow();
+    await userEvent.click(button('Apply this preview…'));
+    await userEvent.click(button('Rename 2 items'));
+    await waitFor(() => expect(said()).toContain('2 items were renamed.'));
+  }
+
+  it('follow it: each is saved on the revision the renaming made, and that is said', async () => {
+    const { api } = service(
+      withDraftOfNote((body) => ok({ ...draft, base_revision: text(body, 'base_revision') })),
+    );
+    await rename();
+    expect(said()).toContain(
+      '1 draft of yours follows the renaming: the next Snapshot will not ask about it.',
+    );
+    expect(said()).not.toContain('could not follow');
+    // The one renamed item the person has a draft of, and no other.
+    expect(api.callsTo(SAVE_DRAFT)).toEqual([
+      {
+        workspace_id: WS,
+        item_id: NOTE,
+        base_revision: FIRST,
+        body: 'My draft',
+        properties: { type: 'meeting-note', okf_jawn: { id: NOTE } },
+        idempotency_key: expect.stringMatching(UUID),
+      },
+    ]);
+  });
+
+  it('say so when one could not follow: the renaming is made all the same', async () => {
+    const { api } = service(withDraftOfNote(() => refuse(500, 'internal', 'the store broke')));
+    await rename();
+    expect(said()).toContain(
+      '1 draft of yours could not follow it: the next Snapshot will first ask whether to keep your text.',
+    );
+    expect(said()).not.toContain('follows the renaming');
+    expect(api.callsTo(APPLY)).toHaveLength(1);
+  });
+
+  it('are not spoken of when the person has none', async () => {
+    const { api } = service();
+    await rename();
+    expect(said()).not.toContain('draft');
+    expect(api.callsTo(SAVE_DRAFT)).toEqual([]);
+  });
+});

@@ -58,6 +58,7 @@ import {
   NothingToPreview,
   type Preview,
   previewRenames,
+  type Renamed,
   rulesOptions,
   rulesSchemaOptions,
   sameRules,
@@ -226,14 +227,20 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
   const stale = preview === null ? null : staleReason(preview, head, value, refused);
   // A question whose preview went out of date is over: it does not come back by itself.
   if (asking && stale !== null) setAsking(false);
-  const apply = useChange<Preview, HeadChange>(
+  const apply = useChange<Preview, Renamed>(
     applyPreview,
     (result, applied) => {
       const renamed = applied.plan.entries.filter((entry) => entry.from !== entry.to).length;
       setPreview(null);
       setAsking(false);
       setSaid(
-        `${count(renamed, 'item was', 'items were')} renamed. The workspace now shows revision ${short(result.revision)}, which includes the change.`,
+        `${count(renamed, 'item was', 'items were')} renamed. The workspace now shows revision ${short(result.revision)}, which includes the change.` +
+          (result.draftsFollowing > 0
+            ? ` ${count(result.draftsFollowing, 'draft of yours follows', 'drafts of yours follow')} the renaming: the next Snapshot will not ask about it.`
+            : '') +
+          (result.draftsNotFollowing > 0
+            ? ` ${count(result.draftsNotFollowing, 'draft of yours', 'drafts of yours')} could not follow it: the next Snapshot will first ask whether to keep your text.`
+            : ''),
       );
       focusNext.current = 'heading';
     },

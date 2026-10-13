@@ -5,6 +5,14 @@
  * The service is a small one that remembers: it keeps the tree of every revision it made, so a
  * listing or a read at a revision answers what that revision held, and a write on another base
  * than its head is a `conflict`, as the real one answers.
+ *
+ * It holds an item as the service does (`crates/core/src/items.rs`, `crates/contract/src/item.rs`):
+ * `archived` is in the application's header (`okf_jawn`), and the status word is the file's
+ * `status` property. And it keeps drafts as `save_draft` does
+ * (`crates/core/src/application/drafts.rs`): `not_found` for an item that is not at the head,
+ * `invalid_input` at `/properties/okf_jawn` for a header that is present and is not exactly the
+ * stored one, the head as the base of a first save and of a save that names the head, and the
+ * draft's own base otherwise.
  */
 import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -45,6 +53,7 @@ const LIST = '/api/items/list-items';
 const ITEM = '/api/items/get-item';
 const READ = '/api/reads/read-item';
 const SEARCH = '/api/search/search-items';
+const SAVE = '/api/items/save-draft';
 const CREATE = '/api/items/create-item';
 const FOLDER = '/api/items/create-folder';
 const MOVE = '/api/items/move-item';
@@ -89,11 +98,21 @@ const revisionAsked = (body: Json, head: string): string => {
  * The service. `drafts`: items the person has a draft of. A handler in `overrides` answers in
  * place of the service's own for that operation.
  */
-function service(overrides: Record<string, Handler> = {}, drafts: string[] = []) {
+function service(
+  overrides: Record<string, Handler> = {},
+  drafts: string[] = [],
+  draftBase: string = HEAD,
+) {
   const trees = new Map<string, Tree>([
     [HEAD, { items: [noteSummary, otherSummary, sourceSummary], folders: ['notes'] }],
   ]);
-  const state = { head: HEAD, made: 0, permissions: writableWorkspace.permissions };
+  const state = {
+    head: HEAD,
+    made: 0,
+    permissions: writableWorkspace.permissions,
+    /** How many saves were refused for their header. */
+    refusedSaves: 0,
+  };
   const treeAt = (revision: string): Tree => trees.get(revision) ?? { items: [], folders: [] };
   const commit = (change: (tree: Tree) => Tree): string => {
     const next = MADE.at(state.made) ?? '';
@@ -117,6 +136,20 @@ function service(overrides: Record<string, Handler> = {}, drafts: string[] = [])
     return item === undefined ? null : { ...item, revision };
   };
   const missing = refuse(404, 'not_found', 'no such item at this revision');
+  /** The item's properties as the service stores them: the header holds `archived`. */
+  const stored = (item: ItemSummary) =>
+    itemDocument(item, {
+      okf_jawn: { id: item.id, ...(item.archived ? { archived: true } : {}) },
+      ...(item.status === 'stable' ? {} : { status: item.status }),
+    });
+  /** The drafts the service holds, as they were last saved. */
+  const saved = new Map<string, { body: string; properties: unknown; base: string }>();
+  for (const id of drafts) {
+    const item = treeAt(HEAD).items.find((each) => each.id === id);
+    if (item !== undefined) {
+      saved.set(id, { body: 'My draft', properties: stored(item).properties, base: draftBase });
+    }
+  }
   const api = mockApi({
     [OPEN]: () => ok({ ...writableWorkspace, permissions: state.permissions, head: state.head }),
     [LIST]: (body) => {
@@ -135,18 +168,19 @@ function service(overrides: Record<string, Handler> = {}, drafts: string[] = [])
     [ITEM]: (body) => {
       const item = found(body);
       if (item === null) return missing;
-      const document = itemDocument(item);
+      const document = stored(item);
+      const draft = drafts.includes(item.id) ? saved.get(item.id) : undefined;
       return ok(
-        drafts.includes(item.id)
-          ? {
+        draft === undefined
+          ? document
+          : {
               ...document,
               draft: {
-                body: 'My draft',
-                properties: document.properties,
-                draft: draftOf(item.id),
+                body: draft.body,
+                properties: draft.properties,
+                draft: draftOf(item.id, draft.base),
               },
-            }
-          : document,
+            },
       );
     },
     [READ]: (body) => {
@@ -158,7 +192,37 @@ function service(overrides: Record<string, Handler> = {}, drafts: string[] = [])
     '/api/reads/get-sources': (body) =>
       ok({ revision: revisionAsked(body, state.head), sources: [], declared: [] }),
     '/api/items/list-drafts': () =>
-      ok({ items: drafts.map((id) => draftOf(id)), next_cursor: null }),
+      ok({
+        items: drafts.map((id) => draftOf(id, saved.get(id)?.base ?? HEAD)),
+        next_cursor: null,
+      }),
+    [SAVE]: (body) => {
+      const id = text(body, 'item_id');
+      const item = treeAt(state.head).items.find((each) => each.id === id);
+      if (item === undefined) return refuse(404, 'not_found', 'no such item at the head');
+      const properties = body.properties as Record<string, unknown>;
+      const header = properties.okf_jawn;
+      if (
+        header !== undefined &&
+        JSON.stringify(header) !== JSON.stringify(stored(item).properties.okf_jawn)
+      ) {
+        state.refusedSaves += 1;
+        return refuse(
+          400,
+          'invalid_input',
+          'the application header is server-owned and cannot be changed by a write',
+          '/properties/okf_jawn',
+        );
+      }
+      const before = drafts.includes(id) ? saved.get(id) : undefined;
+      const base =
+        before !== undefined && text(body, 'base_revision') !== state.head
+          ? before.base
+          : state.head;
+      saved.set(id, { body: text(body, 'body'), properties, base });
+      if (!drafts.includes(id)) drafts.push(id);
+      return ok(draftOf(id, base));
+    },
     '/api/types/list-types': () => ok({ items: [] }),
     [SEARCH]: (body) => ok({ revision: revisionAsked(body, state.head), hits: [] }),
     [CREATE]: (body) => {
@@ -223,6 +287,12 @@ function service(overrides: Record<string, Handler> = {}, drafts: string[] = [])
     state,
     /** Someone else changes the workspace: the head moves to a revision this page has not seen. */
     moveHead: () => commit((tree) => tree),
+    /** Someone else archives an item. */
+    archiveElsewhere: (itemId: string) =>
+      commit((tree) => ({
+        ...tree,
+        items: tree.items.map((item) => (item.id === itemId ? { ...item, archived: true } : item)),
+      })),
   };
 }
 
@@ -663,18 +733,6 @@ describe('a move or a rename', () => {
     await waitFor(() => expect(api.callsTo(SEARCH)).toHaveLength(2));
     expect(api.callsTo(SEARCH).map((body) => revisionAsked(body, ''))).toEqual([HEAD, FIRST]);
   });
-
-  it('warns that a draft of the item will ask at its next Snapshot', async () => {
-    service({}, [NOTE]);
-    await openTree(`/w/${WS}/i/${NOTE}`);
-    await findTextBox('Text of Meeting notes');
-    await userEvent.click(within(pane()).getByRole('button', { name: 'Rename or move' }));
-    expect(
-      screen.getByText(
-        /You have a draft of this item. It is kept. Because the item will have changed/,
-      ),
-    ).toBeTruthy();
-  });
 });
 
 describe('a delete', () => {
@@ -915,17 +973,6 @@ describe('the status word and Archive', () => {
     expect(screen.queryByText(/The status is now/)).toBeNull();
     expect(api.callsTo(LIFE)).toHaveLength(1);
   });
-
-  it('says what a status change means for the person’s draft of the item', async () => {
-    service({}, [NOTE]);
-    await openTree(`/w/${WS}/i/${NOTE}`);
-    await findTextBox('Text of Meeting notes');
-    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Status' }), 'draft');
-    const said = await screen.findByText(/The status is now draft\./);
-    expect(said.textContent).toContain(
-      'its next Snapshot will first ask whether to keep your text',
-    );
-  });
 });
 
 describe('a refusal that names a field', () => {
@@ -1057,7 +1104,6 @@ describe('a refusal that names a field', () => {
 
 describe('the draft of an item the person deleted', () => {
   const DISCARD = '/api/items/discard-draft';
-  const SAVE = '/api/items/save-draft';
   const leftText = () =>
     screen.queryByRole('textbox', { name: 'Text of your draft of “Meeting notes” (read-only)' });
   const draftsPanel = () => screen.getByRole('region', { name: /^Drafts/ });
@@ -1228,4 +1274,206 @@ describe('the draft of an item the person deleted', () => {
     expect(screen.queryByRole('button', { name: 'Discard draft' })).toBeNull();
     expect(deletedNotice(pane())?.textContent).not.toContain('Your draft');
   });
+});
+
+describe('a draft of an item the person changes themselves', () => {
+  const statusLine = () =>
+    within(pane())
+      .getAllByRole('status')
+      .map((each) => each.textContent ?? '')
+      .join(' ');
+  const FOLLOWS = 'Your draft of this item follows the change: it now starts from this version';
+  /** Open the note on its editor, type, and wait for the save of what was typed. */
+  async function editAndSave(api: ReturnType<typeof mockApi>, words: string) {
+    const { typeInto } = await import('./support/editor');
+    const before = api.callsTo(SAVE).length;
+    typeInto(await findTextBox(/Text of Meeting notes/), words);
+    await waitFor(() => expect(api.callsTo(SAVE).length).toBeGreaterThan(before), {
+      timeout: 4000,
+    });
+    await waitFor(() => expect(within(pane()).getByText(/Saved as a draft at/)).toBeTruthy());
+    return api.callsTo(SAVE).at(-1) ?? {};
+  }
+  const headerOf = (save: Json) => (save.properties as Record<string, unknown>).okf_jawn;
+
+  it('carries the header as the item has it at the head shown, through Archive and after it', async () => {
+    const { api, state } = service();
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Edit' }));
+    const first = await editAndSave(api, '\nfirst words');
+    expect(first).toMatchObject({ base_revision: HEAD });
+    expect(headerOf(first)).toEqual({ id: NOTE });
+
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Archive' }));
+    await waitFor(() => expect(statusLine()).toContain('Archived.'));
+    // The draft followed: saved once more, on the revision the change made, with its header.
+    expect(statusLine()).toContain(FOLLOWS);
+    const followed = api.callsTo(SAVE).at(-1) ?? {};
+    expect(api.callsTo(SAVE)).toHaveLength(2);
+    expect(followed).toMatchObject({ base_revision: FIRST, body: first.body });
+    expect(headerOf(followed)).toEqual({ id: NOTE, archived: true });
+    // The header is where it was among the properties, and nothing else of the draft changed.
+    expect(Object.keys(followed.properties as object)).toEqual(
+      Object.keys(first.properties as object),
+    );
+
+    const later = await editAndSave(api, '\nmore words');
+    expect(headerOf(later)).toEqual({ id: NOTE, archived: true });
+    expect(later).toMatchObject({ base_revision: FIRST });
+    // The service, which refuses a header that is not the stored one, refused none.
+    expect(state.refusedSaves).toBe(0);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(api.violations).toEqual([]);
+  }, 20000);
+
+  it('takes the status word the person set, so the draft never puts an old one back', async () => {
+    const { api, state } = service();
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Edit' }));
+    const first = await editAndSave(api, '\nfirst words');
+    expect((first.properties as Record<string, unknown>).status).toBeUndefined();
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Status' }), 'deprecated');
+    await waitFor(() => expect(statusLine()).toContain('The status is now deprecated.'));
+    expect(statusLine()).toContain(FOLLOWS);
+    const followed = api.callsTo(SAVE).at(-1) ?? {};
+    expect(followed).toMatchObject({ base_revision: FIRST, body: first.body });
+    expect(followed.properties).toEqual({ ...(first.properties as object), status: 'deprecated' });
+    // Archive sets no status word: the draft keeps the one it has.
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Archive' }));
+    await waitFor(() => expect(statusLine()).toContain('Archived.'));
+    const archived = api.callsTo(SAVE).at(-1) ?? {};
+    expect((archived.properties as Record<string, unknown>).status).toBe('deprecated');
+    expect(archived).toMatchObject({ base_revision: MADE.at(1) });
+    expect(state.refusedSaves).toBe(0);
+  }, 20000);
+
+  it('leaves a status word the person typed in the draft when the change sets none', async () => {
+    // The draft holds a status word of its own; a move does not touch it.
+    const { api } = service({}, [NOTE]);
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await findTextBox('Text of Meeting notes');
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const yaml = await findTextBox('Properties as YAML');
+    const { replaceText } = await import('./support/editor');
+    replaceText(yaml, 'type: meeting-note\nstatus: draft\n');
+    await waitFor(() => expect(api.callsTo(SAVE)).toHaveLength(1), { timeout: 4000 });
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Rename or move' }));
+    await type('File name', 'minutes.md');
+    await userEvent.keyboard('{Enter}');
+    await waitFor(() => expect(statusLine()).toContain('is now at notes/minutes.md'));
+    expect(statusLine()).toContain(FOLLOWS);
+    const followed = api.callsTo(SAVE).at(-1) ?? {};
+    expect(followed).toMatchObject({ base_revision: FIRST, body: 'My draft' });
+    expect((followed.properties as Record<string, unknown>).status).toBe('draft');
+  }, 20000);
+
+  it('keeps the base of a draft started on an older version, and says its Snapshot will ask', async () => {
+    const OLDER = 'b'.repeat(40);
+    const { api } = service({}, [NOTE], OLDER);
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await findTextBox('Text of Meeting notes');
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Status' }), 'draft');
+    await waitFor(() => expect(statusLine()).toContain('The status is now draft.'));
+    expect(statusLine()).toContain(
+      'It was started on an older version than the one you changed, so its next Snapshot will first ask whether to keep your text.',
+    );
+    expect(statusLine()).not.toContain(FOLLOWS);
+    // Saved once, with the status word and the header, on the base it had: no silent rebase.
+    expect(api.callsTo(SAVE)).toHaveLength(1);
+    expect(api.callsTo(SAVE).at(0)).toMatchObject({
+      base_revision: OLDER,
+      properties: { status: 'draft', okf_jawn: { id: NOTE } },
+    });
+  });
+
+  it('makes no draft of the change when editing was started and nothing typed', async () => {
+    const { api } = service();
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Edit' }));
+    await findTextBox(/Text of Meeting notes/);
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Status' }), 'deprecated');
+    await waitFor(() => expect(statusLine()).toContain('The status is now deprecated.'));
+    expect(statusLine()).not.toContain('Your draft');
+    expect(api.callsTo(SAVE)).toEqual([]);
+    expect(within(pane()).getByText('No changes to save.')).toBeTruthy();
+  });
+
+  it('follows a rename made from the folders for a draft whose tab is not open', async () => {
+    const { api, state } = service({}, [NOTE]);
+    await openTree();
+    const note = await row(/Meeting notes/);
+    act(() => note.focus());
+    await userEvent.keyboard('{F2}');
+    await type('File name', 'minutes.md');
+    await userEvent.keyboard('{Enter}');
+    const said = await screen.findByText(/is now at notes\/minutes.md\./);
+    expect(said.textContent).toContain(FOLLOWS);
+    expect(api.callsTo(SAVE)).toEqual([
+      {
+        workspace_id: WS,
+        item_id: NOTE,
+        base_revision: FIRST,
+        body: 'My draft',
+        properties: { type: 'meeting-note', okf_jawn: { id: NOTE } },
+        idempotency_key: expect.stringMatching(UUID),
+      },
+    ]);
+    expect(state.refusedSaves).toBe(0);
+  });
+
+  it('asks nothing of the drafts for an item the person has no draft of', async () => {
+    const { api } = service();
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Archive' }));
+    await waitFor(() => expect(statusLine()).toContain('Archived.'));
+    expect(statusLine()).not.toContain('Your draft');
+    expect(api.callsTo(SAVE)).toEqual([]);
+  });
+
+  it('says so when the draft could not be saved on the new version', async () => {
+    let failing = false;
+    const { api } = service(
+      {
+        [SAVE]: (body) =>
+          failing
+            ? refuse(500, 'internal', 'the store broke')
+            : ok(draftOf(text(body, 'item_id'), text(body, 'base_revision'))),
+      },
+      [NOTE],
+    );
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await findTextBox('Text of Meeting notes');
+    failing = true;
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Status' }), 'draft');
+    await waitFor(() => expect(statusLine()).toContain('The status is now draft.'));
+    expect(statusLine()).toContain(
+      'Your draft of this item is kept, but it could not be saved on this version: its own notice says why.',
+    );
+    expect(api.callsTo(SAVE)).toHaveLength(1);
+    // The change itself was made, and reads as made; the draft's own notice has the retry.
+    expect(screen.getByRole('combobox', { name: 'Status' })).toHaveProperty('value', 'draft');
+    expect((await screen.findByRole('alert')).textContent).toContain('Saving this draft');
+  });
+
+  it('carries the header of the head shown after a Refresh to someone else’s change', async () => {
+    const { api, state, archiveElsewhere } = service();
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Edit' }));
+    await editAndSave(api, '\nfirst words');
+    archiveElsewhere(NOTE);
+    await userEvent.click(await screen.findByRole('button', { name: /^Refresh/ }));
+    await waitFor(() =>
+      expect(screen.getByText(/Showing the workspace as of/).textContent).toContain('cccccccccc'),
+    );
+    const later = await editAndSave(api, '\nmore words');
+    expect(headerOf(later)).toEqual({ id: NOTE, archived: true });
+    // Not the person's own change: the draft keeps its base, and its Snapshot will ask.
+    expect(later).toMatchObject({ base_revision: HEAD });
+    expect(state.refusedSaves).toBe(0);
+  }, 20000);
 });

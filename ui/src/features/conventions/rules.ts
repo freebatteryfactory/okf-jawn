@@ -16,8 +16,10 @@
  * Applying sends back exactly the plan the service answered and the rules it was previewed with;
  * the service checks both again (the plan's base revision and the digest of the rules). The
  * revision it returns becomes the head the shell shows (`adoptHead`), and the head checks run
- * again; the renamed items keep their identity, so their tabs go on reading them. Saving the
- * rules is a commit too, and is told to the cache the same way.
+ * again; the renamed items keep their identity, so their tabs go on reading them. A draft the
+ * person has of a renamed item follows the renaming like any other change of their own
+ * (`followOwnChange`): the drafts this page knows of, from its sessions and the listed drafts.
+ * Saving the rules is a commit too, and is told to the cache the same way.
  */
 import type { QueryClient } from '@tanstack/react-query';
 import {
@@ -31,6 +33,9 @@ import type {
   RenamePlan,
   Revision,
 } from '../../api/generated/types.gen';
+import { listedDraft } from '../drafts/drafts-list';
+import { followOwnChange } from '../drafts/saving';
+import { sessionKey, useDraftSessions } from '../drafts/sessions';
 import { listingPageOptions } from '../explorer/folder-listing';
 import { adoptHead, checkHeadsAgain, type HeadChange } from '../explorer/head';
 import type { Attempt } from '../tree/changes';
@@ -158,12 +163,15 @@ export async function previewRenames(
   return { plan: data, rules, folder, looked: itemIds.length };
 }
 
+/** A renaming, and how many of the person's drafts of the renamed items follow it or do not. */
+export type Renamed = HeadChange & { draftsFollowing: number; draftsNotFollowing: number };
+
 /** Apply a preview: exactly the plan and the rules the person saw. */
 export async function applyPreview(
   client: QueryClient,
   workspaceId: string,
   attempt: Attempt<Preview>,
-): Promise<HeadChange> {
+): Promise<Renamed> {
   const { plan, rules } = attempt.values;
   const { data } = await applyNames({
     body: { workspace_id: workspaceId, idempotency_key: attempt.key, plan, rules },
@@ -171,9 +179,28 @@ export async function applyPreview(
   });
   const previousHead = adoptHead(client, workspaceId, data.revision);
   checkHeadsAgain(client, workspaceId);
+  // The person's drafts of the items that were renamed follow their own change.
+  const drafted = plan.entries
+    .filter((entry) => entry.from !== entry.to)
+    .map((entry) => entry.item_id)
+    .filter(
+      (itemId) =>
+        useDraftSessions.getState().sessions[sessionKey(workspaceId, itemId)] !== undefined ||
+        listedDraft(client, workspaceId, itemId) !== undefined,
+    );
+  const outcomes = await Promise.all(
+    drafted.map((itemId) =>
+      followOwnChange(client, workspaceId, itemId, plan.base_revision, data.revision, {
+        status: false,
+      }),
+    ),
+  );
   return {
     revision: data.revision,
     previousHead,
     itemIds: plan.entries.map((entry) => entry.item_id),
+    draftsFollowing: outcomes.filter((outcome) => outcome === 'follows').length,
+    draftsNotFollowing: outcomes.filter((outcome) => outcome === 'asks' || outcome === 'not-saved')
+      .length,
   };
 }

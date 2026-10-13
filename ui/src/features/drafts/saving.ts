@@ -29,10 +29,30 @@
  * answer makes the next discard another request (it would remove another draft), with a new key.
  *
  * A body larger than the service accepts is not sent; the session says so until it is shortened.
+ *
+ * The application's header (`okf_jawn`) and the status word are the service's and the item's, not
+ * the draft's to carry (the service keeps `archived` in the header, and refuses a save whose
+ * header is not exactly the stored one: `crates/core/src/application/drafts.rs`):
+ * - every save carries the header as the item has it at the head the workspace shows, read from
+ *   `get_item` at that head (its cached answer, else asked), never the copy from when the session
+ *   began. A session with nothing to save asks nothing. When the header cannot be read, the save
+ *   fails with what the read threw, and nothing is sent. When the page shows no head for the
+ *   workspace, the header is left as the session has it;
+ * - after the person's own change of an item (its status word, Archive or Unarchive, a move or a
+ *   rename), `followOwnChange` gives the draft the returned item's header, and its status word
+ *   when the change set one, keeps everything else of the draft, and saves it once. A draft that
+ *   was on the revision the change was made on is saved on the revision the change made (the
+ *   explicit rebase), so its next Snapshot does not conflict with the person's own change. A draft
+ *   on an older revision keeps its base: what changed before the person's own change is still
+ *   asked about at its Snapshot.
  */
-import type { QueryClient } from '@tanstack/react-query';
+import { isCancelledError, type QueryClient } from '@tanstack/react-query';
+import {
+  getItemOptions,
+  openWorkspaceQueryKey,
+} from '../../api/generated/@tanstack/react-query.gen';
 import { discardDraft, saveDraft } from '../../api/generated/sdk.gen';
-import type { ItemDocument, Revision } from '../../api/generated/types.gen';
+import type { ItemDocument, Revision, Workspace } from '../../api/generated/types.gen';
 import { zSaveDraftRequest } from '../../api/generated/zod.gen';
 import { rememberDraft } from './drafts-list';
 import {
@@ -80,6 +100,60 @@ export class DraftNotKept extends Error {
 
 const sessions = () => useDraftSessions.getState();
 
+/** The application's own header among an item's properties, and the item's status word. */
+const APP_HEADER_KEY = 'okf_jawn';
+const STATUS_KEY = 'status';
+
+/** `properties` with `value` under `key`, at the place the key had (else last); without it when undefined. */
+function withProperty(
+  properties: Record<string, unknown>,
+  key: string,
+  value: unknown,
+): Record<string, unknown> {
+  if (JSON.stringify(properties[key]) === JSON.stringify(value)) return properties;
+  const { [key]: _old, ...rest } = properties;
+  if (value === undefined) return rest;
+  return key in properties
+    ? Object.fromEntries(Object.entries(properties).map(([k, v]) => [k, k === key ? value : v]))
+    : { ...properties, [key]: value };
+}
+
+/** How often a read that was stopped under this one is asked again. */
+const READ_AGAIN = 2;
+
+/**
+ * `get_item` at `revision`: its cached answer when there is one, else asked now. A read of the
+ * item that is in flight is stopped when the cache is told of a draft (`drafts-list.ts`) and asked
+ * again right after; one stopped under this call is waited for again, not taken for a failure.
+ */
+async function itemAt(
+  client: QueryClient,
+  workspaceId: string,
+  itemId: string,
+  revision: Revision,
+): Promise<ItemDocument> {
+  const options = {
+    ...getItemOptions({
+      body: { workspace_id: workspaceId, item_id: itemId, at: { kind: 'revision', revision } },
+    }),
+    staleTime: Number.POSITIVE_INFINITY,
+  };
+  for (let stopped = 0; ; stopped += 1) {
+    try {
+      return await client.fetchQuery(options);
+    } catch (error) {
+      if (!isCancelledError(error) || stopped >= READ_AGAIN) throw error;
+    }
+  }
+}
+
+/** The head the workspace shows, as the cache holds it; undefined when the page shows none. */
+function shownHead(client: QueryClient, workspaceId: string): Revision | undefined {
+  return client.getQueryData<Workspace>(
+    openWorkspaceQueryKey({ body: { workspace_id: workspaceId } }),
+  )?.head;
+}
+
 /**
  * Start editing an item from what `get_item` answered at `revision`: the person's draft when it
  * carries one, otherwise the committed content. A session already there is left as it is.
@@ -88,7 +162,7 @@ export function beginSession(
   workspaceId: string,
   revision: Revision,
   document: ItemDocument,
-  pane: string,
+  pane: string | null,
 ) {
   const itemId = document.summary.id;
   if (sessions().sessions[sessionKey(workspaceId, itemId)] !== undefined) return;
@@ -212,7 +286,24 @@ async function send(client: QueryClient, key: string): Promise<void> {
     sessions().change(key, { tooLong: bytes });
     return;
   }
-  const text: DraftText = { body: session.body, properties: session.properties };
+  // The header is the service's: this save carries it as the item has it at the head shown.
+  const head = shownHead(client, session.workspaceId);
+  let properties = session.properties;
+  if (head !== undefined) {
+    try {
+      const shown = await itemAt(client, session.workspaceId, session.itemId, head);
+      const typed = sessions().sessions[key];
+      if (typed === undefined) return;
+      properties = withProperty(typed.properties, APP_HEADER_KEY, shown.properties[APP_HEADER_KEY]);
+      if (properties !== typed.properties) sessions().change(key, { properties });
+    } catch (error) {
+      sessions().change(key, { failure: error });
+      return;
+    }
+  }
+  const now = sessions().sessions[key];
+  if (now === undefined) return;
+  const text: DraftText = { body: now.body, properties };
   const last = session.attempt;
   const attempt: SaveAttempt =
     last !== null && last.baseRevision === session.baseRevision && sameText(last, text)
@@ -313,6 +404,79 @@ export async function discardSession(
   // A conflict of this draft is over with it: there is nothing left to keep.
   sessions().clearConflict(key);
   rememberDraft(client, workspaceId, itemId, null);
+}
+
+/** How a draft stands after the person's own change of its item. */
+export type DraftAfterChange =
+  /** The person has no draft of the item. */
+  | 'none'
+  /** The draft is on the revision the change made: its next Snapshot does not ask about it. */
+  | 'follows'
+  /** The draft keeps an older base: its next Snapshot asks, about what changed before. */
+  | 'asks'
+  /** The draft could not be read or saved; its own notice says why. */
+  | 'not-saved';
+
+/**
+ * The person changed an item themselves, on `base`, and the service made `revision`: their draft
+ * of it follows. It takes the returned item's header and, when the change set the status word
+ * (`took.status`), that word; everything else of the draft is kept. It is saved once: on
+ * `revision` when it was on `base` (the explicit rebase), else on the base it has. A draft the
+ * page did not hold yet (the service's, carried by `get_item`) becomes a session, as when its tab
+ * opens. Never rejects: the outcome says how the draft stands.
+ */
+export async function followOwnChange(
+  client: QueryClient,
+  workspaceId: string,
+  itemId: string,
+  base: Revision,
+  revision: Revision,
+  took: { status: boolean },
+): Promise<DraftAfterChange> {
+  const key = sessionKey(workspaceId, itemId);
+  let document: ItemDocument;
+  try {
+    document = await itemAt(client, workspaceId, itemId, revision);
+  } catch {
+    return sessions().sessions[key] === undefined ? 'none' : 'not-saved';
+  }
+  if (sessions().sessions[key] === undefined) {
+    if ((document.draft ?? null) === null) return 'none';
+    beginSession(workspaceId, revision, document, null);
+  }
+  cancelTimer(key);
+  // A save in flight answers first: what the service holds, and on which base, is known then.
+  await inFlight.get(key);
+  const session = sessions().sessions[key];
+  if (session === undefined) return 'none';
+  const committed: DraftText = { body: document.body, properties: document.properties };
+  if (
+    session.confirmed === null &&
+    session.failure === null &&
+    sameText(session, session.committed)
+  ) {
+    // Editing was started and nothing typed: there is no draft, and none is made of the change.
+    sessions().change(key, { ...committed, committed, baseRevision: revision });
+    return 'none';
+  }
+  const header = withProperty(
+    session.properties,
+    APP_HEADER_KEY,
+    document.properties[APP_HEADER_KEY],
+  );
+  const properties = took.status
+    ? withProperty(header, STATUS_KEY, document.properties[STATUS_KEY])
+    : header;
+  const onBase = session.baseRevision === base;
+  sessions().change(key, {
+    properties,
+    ...(onBase ? { committed, baseRevision: revision } : {}),
+  });
+  await save(client, key);
+  const after = sessions().sessions[key];
+  if (after === undefined) return 'none';
+  if (needsSave(after)) return 'not-saved';
+  return onBase ? 'follows' : 'asks';
 }
 
 /** End a session whose draft the service no longer holds (it was snapshotted or discarded). */

@@ -16,9 +16,15 @@
 import { useId, useLayoutEffect, useRef, useState } from 'react';
 import type { ItemSummary } from '../../api/generated/types.gen';
 import type { DraftMark } from '../drafts/marks';
-import type { HeadChange } from '../explorer/head';
 import { ChangeFailure, DeleteQuestion, MoveForm, useChange } from './ChangeForms';
-import { changeLifecycle, type Lifecycle, STATUS_WORDS, type StatusWord } from './changes';
+import {
+  changeLifecycle,
+  DRAFT_AFTER,
+  type ItemChange,
+  type Lifecycle,
+  STATUS_WORDS,
+  type StatusWord,
+} from './changes';
 
 export interface ItemActionsProps {
   /** The item as the pane last read it at the head the workspace shows. */
@@ -31,9 +37,6 @@ export interface ItemActionsProps {
   /** The pane is reading the item again (the head moved): nothing is changed meanwhile. */
   busy: boolean;
 }
-
-const DRAFT_FOLLOWS =
-  'You have a draft of this item: its next Snapshot will first ask whether to keep your text, because the item changed since the draft was started.';
 
 const isStatusWord = (word: string): word is StatusWord =>
   STATUS_WORDS.some((known) => known === word);
@@ -56,17 +59,18 @@ export function ItemActions({ item, mark, busy }: ItemActionsProps) {
     focusNext.current = to;
     setForm(null);
   };
-  const life = useChange<Lifecycle, HeadChange>(
+  const life = useChange<Lifecycle, ItemChange>(
     changeLifecycle,
-    (_result, values) => {
+    (result, values) => {
       const done =
         values.archived === undefined
           ? `The status is now ${values.status ?? item.status}.`
           : values.archived
             ? 'Archived. It no longer shows in the folders; its history is kept. Unarchive brings it back.'
             : 'Unarchived. It shows in the folders again.';
-      // The item changed under the person's draft, as the service will find at its Snapshot.
-      setSaid(mark() === null ? done : `${done} ${DRAFT_FOLLOWS}`);
+      // The person's draft of the item followed the change, or did not: said as it stands.
+      const draft = DRAFT_AFTER[result.draft];
+      setSaid(draft === '' ? done : `${done} ${draft}`);
     },
     statusRef,
   );
@@ -144,8 +148,9 @@ export function ItemActions({ item, mark, busy }: ItemActionsProps) {
           item={item}
           mark={mark()}
           onCancel={() => close('move')}
-          onDone={(_moved, destination) => {
-            setSaid(`“${title}” is now at ${destination}. This tab stays on it.`);
+          onDone={(_moved, destination, draft) => {
+            const done = `“${title}” is now at ${destination}. This tab stays on it.`;
+            setSaid(draft === '' ? done : `${done} ${draft}`);
             close('move');
           }}
         />

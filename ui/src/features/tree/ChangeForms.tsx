@@ -44,7 +44,9 @@ import {
   attemptFor,
   createNewFolder,
   createNote,
+  DRAFT_AFTER,
   deleteItemNow,
+  type ItemChange,
   moveItemTo,
   type NewNote,
 } from './changes';
@@ -606,7 +608,8 @@ export interface MoveFormProps {
   item: ItemSummary;
   /** How the person's draft of the item stands, when they have one. */
   mark: DraftMark | null;
-  onDone: (moved: HeadChange, destination: string) => void;
+  /** The item was moved; `said` is what to say of the person's draft of it ('' for nothing). */
+  onDone: (moved: ItemChange, destination: string, said: string) => void;
   onCancel: () => void;
 }
 
@@ -620,9 +623,9 @@ export function MoveForm({ item, mark, onDone, onCancel }: MoveFormProps) {
   const [folder, setFolder] = useState(from.folder);
   const [name, setName] = useState(from.name);
   const [checked, setChecked] = useState(false);
-  const change = useChange<{ itemId: string; destination: string }, HeadChange>(
+  const change = useChange<{ itemId: string; destination: string }, ItemChange>(
     moveItemTo,
-    (result, values) => onDone(result, values.destination),
+    (result, values) => onDone(result, values.destination, DRAFT_AFTER[result.draft]),
     submitRef,
   );
   const destination = joinPath(folder, name);
@@ -677,8 +680,8 @@ export function MoveForm({ item, mark, onDone, onCancel }: MoveFormProps) {
           }}
         />
         <DraftWarning mark={mark}>
-          You have a draft of this item. It is kept. Because the item will have changed since the
-          draft was started, the next Snapshot of it will first ask whether to keep your text.
+          You have a draft of this item. It is kept, and follows the item: it is saved again on the
+          version this change makes, and what comes of that is said here.
         </DraftWarning>
         <FormButtons
           submitRef={submitRef}

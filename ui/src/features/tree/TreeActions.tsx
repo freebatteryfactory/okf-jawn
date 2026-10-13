@@ -190,10 +190,11 @@ export function TreeActions({
           item={form.item.item}
           mark={form.item.mark}
           onCancel={cancel}
-          onDone={(change, destination) => {
+          onDone={(change, destination, draft) => {
             const moved = form.item;
             if (moved === null) return;
-            setSaid(`“${moved.item.title || moved.item.path}” is now at ${destination}.`);
+            const done = `“${moved.item.title || moved.item.path}” is now at ${destination}.`;
+            setSaid(draft === '' ? done : `${done} ${draft}`);
             revealInTree({
               workspaceId,
               revision: change.revision,
