@@ -94,6 +94,13 @@ pub struct FakeVersions {
 /// `consume` encodes the port doc: an incomplete upload is `InvalidInput`, one another job
 /// consumed is `Conflict`, and consuming it again for the same job changes nothing.
 /// `consume_batch` encodes its own (the sentences stand above it): all of the batch, or none.
+///
+/// Both also encode the purge refusal of their port docs, when a test set `purged`:
+/// `consume`'s "Refused with `Conflict` naming the purge, before the upload is read, when a
+/// purge names the workspace", and `consume_batch`'s "Refused with `Conflict` naming the purge,
+/// before any upload is read, when a purge names the workspace". The message is the storage
+/// adapter's (`purge::guard::refuse`): "workspace <id> is purged by purge <id> (<state>);
+/// nothing is written to it". The call is recorded, no upload is read and none is marked.
 #[derive(Default)]
 pub struct FakeUploads {
     /// The slots `get` returns.
@@ -107,6 +114,8 @@ pub struct FakeUploads {
     /// Another job that consumes this upload just before the next `consume_batch` is applied,
     /// as a concurrent import landing between a handler's check and its batch would (once).
     pub taken_before_batch: Mutex<Option<(UploadId, JobId)>>,
+    /// The purge that names the workspace, when one does: every consumption is then refused.
+    pub purged: Mutex<Option<PurgeId>>,
 }
 
 /// A `BlobStore` in memory; `materialize` writes the object into a temporary directory.
@@ -658,12 +667,35 @@ impl FakeUploads {
             .map_err(|_| poisoned())
     }
 
+    /// The refusal of a consumption in `scope` when a purge names the workspace, as the
+    /// storage adapter words it (`purge::guard::refuse`).
+    fn refuse_purged(&self, scope: &StorageScope) -> Result<(), ApiError> {
+        match *self.purged.lock().map_err(|_| poisoned())? {
+            Some(purge) => Err(ApiError::new(
+                ErrorCode::Conflict,
+                format!(
+                    "workspace {} is purged by purge {} (recorded); nothing is written to it",
+                    scope.workspace_id.0, purge.0
+                ),
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// The port's rule for `consume_batch`, on the fake's records.
-    fn take_batch(&self, uploads: &[UploadId], job: JobId) -> Result<Vec<UploadRecord>, ApiError> {
+    fn take_batch(
+        &self,
+        scope: &StorageScope,
+        uploads: &[UploadId],
+        job: JobId,
+    ) -> Result<Vec<UploadRecord>, ApiError> {
         self.batches
             .lock()
             .map_err(|_| poisoned())?
             .push((uploads.to_vec(), job));
+        // "Refused with `Conflict` naming the purge, before any upload is read, when a purge
+        // names the workspace."
+        self.refuse_purged(scope)?;
         let mut records = self.records.lock().map_err(|_| poisoned())?;
         let mut consumed = self.consumed.lock().map_err(|_| poisoned())?;
         if let Some((upload, taker)) = self
@@ -1120,6 +1152,9 @@ impl UploadStore for FakeUploads {
             .lock()
             .map(|mut singles| singles.push((upload, job)))
             .map_err(|_| poisoned())
+            // "Refused with `Conflict` naming the purge, before the upload is read, when a
+            // purge names the workspace."
+            .and_then(|()| self.refuse_purged(scope))
             .and_then(|()| self.records.lock().map_err(|_| poisoned()))
             .and_then(|mut records| {
                 let record = records
@@ -1158,11 +1193,11 @@ impl UploadStore for FakeUploads {
     }
     fn consume_batch<'a>(
         &'a self,
-        _scope: &'a StorageScope,
+        scope: &'a StorageScope,
         uploads: &'a [UploadId],
         job: JobId,
     ) -> PortFuture<'a, Vec<UploadRecord>> {
-        let taken = self.take_batch(uploads, job);
+        let taken = self.take_batch(scope, uploads, job);
         Box::pin(async move { taken })
     }
 }

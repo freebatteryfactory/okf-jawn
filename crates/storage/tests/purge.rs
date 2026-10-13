@@ -2402,6 +2402,63 @@ async fn purge_refuses_an_upload_batch_after_it_completes_naming_the_purge() -> 
     Ok(())
 }
 
+/// The job that consumed `upload`, as the records database holds it; `None` inside when no job
+/// did, and `None` outside when the row is gone.
+fn consumer_of(storage: &Storage, upload: UploadId) -> Fallible<Option<Option<String>>> {
+    use rusqlite::OptionalExtension as _;
+    Ok(rusqlite::Connection::open(storage.data().records_path())?
+        .query_row(
+            "SELECT consumed_by FROM uploads WHERE upload_id = ?1",
+            [upload.0.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// Review N9: a single `consume` (a restore takes its one archive with it) is refused by a
+/// purge of its workspace as the batch is, in the transaction of its read and its mark. From
+/// the moment the purge is recorded the upload is refused naming the purge and stays unmarked;
+/// after the purge completes, when the row is gone, it is still refused naming the purge and
+/// not answered `NotFound`. The other workspace's upload is consumed as before.
+#[tokio::test]
+async fn purge_refuses_a_single_upload_consumption_during_and_after_naming_the_purge() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let (survivor, _) = create(&storage, 2, "Garden").await?;
+    let archive = upload(&storage, &target, 8, b"a restore's archive", true).await?;
+    let elsewhere = upload(&storage, &survivor, 9, b"another archive", true).await?;
+    let uploads = storage.uploads();
+    let (restore, purge): (okf_jawn_contract::identity::JobId, PurgeId) = (uuid!(70)?, uuid!(60)?);
+    record_purge_of(&storage, &target, purge).await?;
+    refused(
+        uploads.consume(&target, archive, restore).await,
+        "a single upload consumption during the purge",
+    )?;
+    assert_eq!(
+        consumer_of(&storage, archive)?,
+        Some(None),
+        "the refused consumption marked nothing"
+    );
+    storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(61)?, purge, target.workspace_id)
+        .await?;
+    assert_eq!(consumer_of(&storage, archive)?, None, "the row is gone");
+    refused(
+        uploads.consume(&target, archive, restore).await,
+        "a single upload consumption after the purge",
+    )?;
+    let taken = uploads.consume(&survivor, elsewhere, restore).await?;
+    assert_eq!(
+        taken.consumed_by,
+        Some(restore),
+        "the other workspace goes on"
+    );
+    Ok(())
+}
+
 /// Record purge `purge` of `target` under mutation `mutation`.
 async fn record_purge_under(
     storage: &Storage,

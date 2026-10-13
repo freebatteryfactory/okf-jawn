@@ -324,7 +324,9 @@ impl IngestHandler {
     /// restore completes"): the job checks for a cancellation, then consumes the archive's
     /// upload under this job, then calls `restore_import`. A cancellation seen before the
     /// consume stops the job, consuming and restoring nothing. An upload another job consumed
-    /// refuses the job for good. From the moment `restore_import` is called a cancellation is
+    /// refuses the job for good, and so does a consumption the store refuses because a purge
+    /// names the workspace (`UploadStore::consume`): both are `Conflict`, and a retry would
+    /// meet the same refusal. From the moment `restore_import` is called a cancellation is
     /// no longer honoured: the job indexes and announces the revision and writes its completion
     /// with the restore report. Storage's `cancel_job` can still mark a running job cancelled
     /// meanwhile, and the store then refuses that completion; making `cancel_job` refuse a job

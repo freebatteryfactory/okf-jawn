@@ -89,6 +89,12 @@ pub trait UploadStore: Send + Sync {
     /// Consuming it again for the same job changes nothing and returns the same record; a
     /// second consumer is refused with `Conflict`, and an incomplete upload with
     /// `InvalidInput`.
+    ///
+    /// Refused with `Conflict` naming the purge, before the upload is read, when a purge names
+    /// the workspace (`storage::Purger`), in the same transaction as the read and the mark:
+    /// the upload is not marked, and an upload the purge already removed is refused this way,
+    /// not answered `NotFound`. A caller's retry meets the same refusal, so the job that
+    /// consumes (a restore) is refused for good.
     fn consume<'a>(
         &'a self,
         scope: &'a StorageScope,

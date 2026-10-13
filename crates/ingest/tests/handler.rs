@@ -1385,6 +1385,92 @@ mod job_handler {
         );
         Ok(())
     }
+
+    /// A purge now names the test workspace: the upload store refuses every consumption.
+    fn purge_names_the_workspace(world: &World) -> TestResult {
+        *world.uploads.purged.lock().map_err(|_| "poisoned")? =
+            Some(serde_json::from_value::<PurgeId>(json!(PURGE))?);
+        Ok(())
+    }
+
+    /// Assert that job `id` was refused for good by the purge's `Conflict`: failed once, not
+    /// retryable, its failure naming the purge.
+    fn assert_refused_by_the_purge(
+        world: &World,
+        id: okf_jawn_contract::identity::JobId,
+    ) -> TestResult {
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        assert!(entry.completions.is_empty(), "{:?}", entry.completions);
+        assert_eq!(entry.failures.len(), 1, "{:?}", entry.failures);
+        let (message, retryable) = some(entry.failures.first(), "the failure")?;
+        assert!(
+            message.contains("is purged by purge") && message.contains(PURGE),
+            "the failure names the purge: {message}"
+        );
+        assert!(!retryable, "a retry would meet the same refusal");
+        Ok(())
+    }
+
+    /// Review N9: a restore whose `consume` meets the purge's `Conflict` (the store refuses a
+    /// consumption in a workspace a purge names) is refused for good, like a restore of an
+    /// upload another job took: nothing is restored, the upload stays unmarked, and no commit
+    /// is written or announced.
+    #[tokio::test]
+    async fn a_restore_whose_upload_is_refused_by_a_purge_is_refused_for_good() -> TestResult {
+        let world = world()?;
+        let id = restore_job(&world, 126)?;
+        let upload_id = match &world.records.entry(id)?.created.spec {
+            JobSpec::RestoreWorkspace { upload_id, .. } => *upload_id,
+            _ => return Err("a restore was expected".into()),
+        };
+        purge_names_the_workspace(&world)?;
+        assert!(run(&world, id).await?);
+        assert_refused_by_the_purge(&world, id)?;
+        // It asked for its one upload, once, and the store marked nothing.
+        assert_eq!(world.uploads.singles()?, [(upload_id, id)]);
+        assert_eq!(world.uploads.consumed()?, Vec::new());
+        assert_eq!(
+            world.backups.restored.lock().map_err(|_| "poisoned")?.len(),
+            0,
+            "refused before restore_import"
+        );
+        assert!(world.versions.written()?.is_empty());
+        assert!(events_of(&world, &EventKind::Changed)?.is_empty());
+        Ok(())
+    }
+
+    /// Review N9: an import whose batch meets the purge's `Conflict` is refused for good, like
+    /// an import of an upload another job took: no upload is marked and nothing is written.
+    #[tokio::test]
+    async fn an_import_whose_batch_is_refused_by_a_purge_is_refused_for_good() -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let first = upload(&world, 170, "first.pdf", b"%PDF first")?;
+        let second = upload(&world, 171, "second.pdf", b"%PDF second")?;
+        let id = job(
+            &world,
+            170,
+            workspace_scope()?,
+            import_spec(vec![first, second], false)?,
+        )?;
+        purge_names_the_workspace(&world)?;
+        assert!(run(&world, id).await?);
+        assert_refused_by_the_purge(&world, id)?;
+        // One batch was asked for, whole, and the store marked neither upload.
+        assert_eq!(world.uploads.batches()?, [(vec![first, second], id)]);
+        assert_eq!(world.uploads.singles()?, Vec::new());
+        assert_eq!(world.uploads.consumed()?, Vec::new());
+        assert!(world.versions.written()?.is_empty());
+        assert!(
+            world
+                .converter
+                .windows
+                .lock()
+                .map_err(|_| "poisoned")?
+                .is_empty()
+        );
+        Ok(())
+    }
     #[tokio::test]
     async fn an_import_commits_pending_cards_then_each_converted_card() -> TestResult {
         // Six pages in windows of four; the second window hits the cap.

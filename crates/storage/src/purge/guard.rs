@@ -14,7 +14,8 @@
 //! discard), upload slots,
 //! upload content (which then removes the part file it appended to), upload completions (also
 //! checked before anything is read, so one after the purge is refused, not answered
-//! `NotFound`), upload batch consumptions (`UploadStore::consume_batch`, checked before any
+//! `NotFound`), upload consumptions, one upload or a batch (`UploadStore::consume` and
+//! `consume_batch`, each checked before any
 //! upload is read, for the same reason), artifacts, job completions, derived objects, receipts,
 //! reviews, proposals
 //! (insert, update), comments, confirmations (create, consume), sandbox capabilities and the

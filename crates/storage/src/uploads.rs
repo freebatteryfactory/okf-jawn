@@ -422,6 +422,10 @@ impl UploadStore for SqliteUploads {
     ) -> PortFuture<'a, UploadRecord> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
+            // The purge refusal the batch applies, in the transaction of the read and the
+            // mark and before either: an upload of a purged workspace is refused naming the
+            // purge, never marked and never answered `NotFound` for the row the purge removed.
+            guard::refuse(transaction, &tenant, &workspace)?;
             let record = read(transaction, &tenant, &workspace, upload)?
                 .ok_or_else(|| not_found("upload"))?;
             if record.object.is_none() {

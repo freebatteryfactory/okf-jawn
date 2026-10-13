@@ -207,8 +207,9 @@ pub(crate) async fn import(
             "naming rules at import wait for core's rule function (request R-I4); import without them",
         ));
     }
-    // Conflict from the batch check (an upload another job took, or took meanwhile) refuses
-    // the job for good, like a collision: retrying it meets the same refusal.
+    // Conflict from the batch check (an upload another job took, or took meanwhile, or a purge
+    // that names the workspace) refuses the job for good, like a collision: retrying it meets
+    // the same refusal.
     let cards = match pending_cards(ports, attempt.claimed, scope, &request).await {
         Ok(cards) => cards,
         Err(error) if error.code == ErrorCode::Conflict => return Ok(refused_as(error)),
