@@ -44,7 +44,7 @@ fn candidate_check_accepts_a_conformant_bundle() -> TestResult {
         "notes/plan.md",
         "---\ntype: Note\ntitle: Plan\ndescription: The plan.\n---\n# Plan\n",
     )?;
-    let warnings = OkfConformance.check(&staged.0)?;
+    let warnings = OkfConformance.check(&staged.0, &[])?;
     assert!(
         warnings
             .iter()
@@ -59,7 +59,7 @@ fn candidate_check_refuses_a_non_conformant_bundle_with_the_validators_diagnosti
     let staged = Staged::new()?;
     staged.write("notes/plan.md", "---\ntype: Note\n---\n# Plan\n")?;
     staged.write("notes/untyped.md", "---\ntitle: No type\n---\nBody\n")?;
-    let refused = err_of(OkfConformance.check(&staged.0))?;
+    let refused = err_of(OkfConformance.check(&staged.0, &[]))?;
     assert_eq!(refused.code, ErrorCode::InvalidInput);
     assert!(
         refused.message.contains("notes/untyped.md")
@@ -85,7 +85,7 @@ fn candidate_check_returns_soft_findings_as_located_warnings() -> TestResult {
         "notes/odd.md",
         "---\ntype: Note\ntitle: Odd\ndescription: Odd.\nstatus: shelved\n---\nBody\n",
     )?;
-    let warnings = OkfConformance.check(&staged.0)?;
+    let warnings = OkfConformance.check(&staged.0, &[])?;
     let located: Vec<_> = warnings
         .iter()
         .filter(|warning| warning.location.as_deref() == Some("notes/odd.md"))
@@ -104,7 +104,7 @@ fn candidate_check_returns_soft_findings_as_located_warnings() -> TestResult {
 #[test]
 fn candidate_check_refuses_a_candidate_it_cannot_read_as_internal() -> TestResult {
     let missing = std::env::temp_dir().join(format!("okf-jawn-absent-{}", Uuid::new_v4()));
-    let refused = err_of(OkfConformance.check(&missing))?;
+    let refused = err_of(OkfConformance.check(&missing, &[]))?;
     assert_eq!(refused.code, ErrorCode::Internal);
     Ok(())
 }
@@ -132,7 +132,7 @@ fn candidate_check_of_an_edit_reports_lint_only_for_the_files_it_touched() -> Te
         &[WorkspacePath::try_from("notes/plan.md".to_owned())?],
         None,
     );
-    let edit = plan.check(&staged.0)?;
+    let edit = plan.check(&staged.0, &[])?;
     assert!(
         edit.iter().any(|warning| warning.code == "okf_lint_l1"),
         "{edit:?}"
@@ -140,15 +140,15 @@ fn candidate_check_of_an_edit_reports_lint_only_for_the_files_it_touched() -> Te
     assert_eq!(located(&edit), vec!["notes/plan.md".to_owned()]);
     let type_change = EditCheck::new(&[], Some("Meeting".to_owned()));
     assert_eq!(
-        located(&type_change.check(&staged.0)?),
+        located(&type_change.check(&staged.0, &[])?),
         vec!["notes/meeting.md".to_owned()]
     );
     // The conformance check alone reports no lint.
-    let conformance_only = OkfConformance.check(&staged.0)?;
+    let conformance_only = OkfConformance.check(&staged.0, &[])?;
     assert_eq!(located(&conformance_only), Vec::<String>::new());
     // Lint never refuses; a conformance violation still does.
     staged.write("notes/untyped.md", "---\ntitle: No type\n---\nBody\n")?;
-    let refused = err_of(plan.check(&staged.0))?;
+    let refused = err_of(plan.check(&staged.0, &[]))?;
     assert_eq!(refused.code, ErrorCode::InvalidInput);
     Ok(())
 }
@@ -175,7 +175,7 @@ fn candidate_check_of_an_edit_reports_validator_warnings_only_for_the_files_it_t
     };
     let odd = Some("notes/odd.md".to_owned());
     // The whole-bundle check reports the warning about the odd file and the unlocated info.
-    let whole = validator(&OkfConformance.check(&staged.0)?);
+    let whole = validator(&OkfConformance.check(&staged.0, &[])?);
     assert!(whole.contains(&odd), "{whole:?}");
     assert!(whole.contains(&None), "{whole:?}");
     // An edit of the plan reports nothing about the file it did not touch, nor any warning
@@ -184,7 +184,7 @@ fn candidate_check_of_an_edit_reports_validator_warnings_only_for_the_files_it_t
         &[WorkspacePath::try_from("notes/plan.md".to_owned())?],
         None,
     );
-    let edit = validator(&plan.check(&staged.0)?);
+    let edit = validator(&plan.check(&staged.0, &[])?);
     assert!(
         edit.iter()
             .all(|location| location.as_deref() == Some("notes/plan.md")),
@@ -192,16 +192,66 @@ fn candidate_check_of_an_edit_reports_validator_warnings_only_for_the_files_it_t
     );
     // An edit of the odd file reports its warning.
     let touched_odd = EditCheck::new(&[WorkspacePath::try_from("notes/odd.md".to_owned())?], None);
-    assert!(validator(&touched_odd.check(&staged.0)?).contains(&odd));
+    assert!(validator(&touched_odd.check(&staged.0, &[])?).contains(&odd));
     // A refusal stands whatever file it names: the untyped file is not the one edited.
     staged.write("notes/untyped.md", "---\ntitle: No type\n---\nBody\n")?;
-    let refused = err_of(plan.check(&staged.0))?;
+    let refused = err_of(plan.check(&staged.0, &[]))?;
     assert_eq!(refused.code, ErrorCode::InvalidInput);
     assert!(
         refused.message.contains("notes/untyped.md"),
         "{}",
         refused.message
     );
+    Ok(())
+}
+
+/// R-I12: the files the store reports it rewrote on its own (a move's referrers) count as
+/// touched, for lint and for the validator's warnings alike; a file neither the edit nor the
+/// store touched stays unreported.
+#[test]
+fn candidate_check_of_an_edit_counts_the_files_the_store_rewrote_as_touched() -> TestResult {
+    let staged = Staged::new()?;
+    staged.write(
+        "notes/plan.md",
+        "---\ntype: Note\ntitle: Plan\ndescription: The plan.\n---\n# Plan\n",
+    )?;
+    // No heading (lint) and a status outside OKF's words (a validator warning), twice.
+    let flawed =
+        "---\ntype: Note\ntitle: Odd\ndescription: Odd.\nstatus: shelved\n---\n\nNo heading.\n";
+    staged.write("notes/referrer.md", flawed)?;
+    staged.write("notes/bystander.md", flawed)?;
+    let located = |warnings: &[Warning], code: &str| -> Vec<String> {
+        let mut located: Vec<String> = warnings
+            .iter()
+            .filter(|warning| warning.code.starts_with(code))
+            .filter_map(|warning| warning.location.clone())
+            .filter(|location| location != "notes/plan.md")
+            .collect();
+        located.sort();
+        located.dedup();
+        located
+    };
+    let moved = EditCheck::new(
+        &[WorkspacePath::try_from("notes/plan.md".to_owned())?],
+        None,
+    );
+    // The edit alone names the plan: nothing about either other file.
+    let alone = moved.check(&staged.0, &[])?;
+    assert_eq!(located(&alone, "okf_lint"), Vec::<String>::new());
+    assert_eq!(located(&alone, "okf_validator_"), Vec::<String>::new());
+    // The store rewrote the referrer's link: its findings are reported, the bystander's not.
+    let rewritten = [WorkspacePath::try_from("notes/referrer.md".to_owned())?];
+    let told = moved.check(&staged.0, &rewritten)?;
+    assert_eq!(located(&told, "okf_lint"), ["notes/referrer.md"]);
+    assert_eq!(located(&told, "okf_validator_"), ["notes/referrer.md"]);
+    assert!(
+        told.iter().any(|warning| warning.code == "okf_lint_l1"
+            && warning.location.as_deref() == Some("notes/referrer.md")),
+        "{told:?}"
+    );
+    // The conformance check alone reports no lint, whatever was rewritten.
+    let conformance_only = OkfConformance.check(&staged.0, &rewritten)?;
+    assert_eq!(located(&conformance_only, "okf_lint"), Vec::<String>::new());
     Ok(())
 }
 

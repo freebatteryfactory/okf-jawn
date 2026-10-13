@@ -48,7 +48,11 @@ struct Seeded {
 }
 
 impl CandidateCheck for Accept {
-    fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
+    fn check(
+        &self,
+        _root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
         Ok(Vec::new())
     }
 }

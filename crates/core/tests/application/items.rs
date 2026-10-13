@@ -756,6 +756,47 @@ async fn an_edit_reports_lint_only_for_the_files_it_touched() -> TestResult {
     assert_eq!(world.versions.commits()?.len(), 1);
     Ok(())
 }
+/// R-I12: a move reports the lint of a file whose link to the moved item the store rewrote. The
+/// request names only the item and its destination, so only the store can name that file; a
+/// file nothing was done to stays unreported.
+#[tokio::test]
+async fn a_move_reports_the_lint_of_the_referrer_the_store_rewrote() -> TestResult {
+    let world = World::new()?;
+    note_at(&world, &['a'])?;
+    world.versions.queue_revision(revision('b')?)?;
+    world
+        .versions
+        .put_referrer(ItemId(Uuid::from_u128(NOTE)), path("notes/referrer.md")?)?;
+    let stage = world.versions.stage();
+    for at in ["notes/referrer.md", "notes/bystander.md"] {
+        stage.write(at, "---\ntype: Note\n---\n\nNo heading.\n")?;
+    }
+    let moved = world
+        .service
+        .move_item(
+            &alice(OperationName::MoveItem, Some(mutation(1)))?,
+            move_request()?,
+        )
+        .await?;
+    let located: Vec<&str> = moved
+        .warnings
+        .iter()
+        .filter(|warning| warning.code.starts_with("okf_lint"))
+        .filter_map(|warning| warning.location.as_deref())
+        .collect();
+    assert!(
+        located.contains(&"notes/referrer.md"),
+        "{:?}",
+        moved.warnings
+    );
+    assert!(
+        !located.contains(&"notes/bystander.md"),
+        "{:?}",
+        moved.warnings
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_write_on_a_moved_head_conflicts_and_one_on_a_purged_base_is_refused() -> TestResult {
     let world = World::new()?;

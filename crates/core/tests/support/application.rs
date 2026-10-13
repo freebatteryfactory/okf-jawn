@@ -14,7 +14,10 @@
 //! `Conflict` for a destination whose collision key is taken) and a `RestoreItem` (the item as
 //! `from` holds it, its source appearance included, with the port's `NotFound` and
 //! `Conflict`). The fake does NOT rewrite links: a move or a restore changes no other item, so
-//! a rule about what links say after a write is proven only against real storage. Its `MoveItem`
+//! a rule about what links say after a write is proven only against real storage. A test
+//! scripts which files link to an item (`put_referrer`), and a commit that moves the item
+//! reports them to its check as rewritten, as the port documents, though the fake changes none
+//! of their text. Its `MoveItem`
 //! and restore are also kinder than storage's about a destination: they do not refuse a folder
 //! at the destination (a file under `destination/`), a file standing where a folder of the
 //! destination is needed, or a reserved or non-Markdown destination (`check_item_path`'s
@@ -128,6 +131,10 @@ use uuid::Uuid;
 /// Result of a fixture builder.
 pub type Built<T> = Result<T, Box<dyn Error>>;
 
+/// What a commit's edits did to the fake's tree (`VersionState::applied`): each written item
+/// with whether it replaces a scripted document, and the items an edit moved.
+type Applied = (Vec<(ItemDocument, bool)>, Vec<ItemId>);
+
 /// The composed service and the fakes behind it.
 pub struct World {
     /// The service under test.
@@ -181,6 +188,8 @@ struct VersionState {
     types: Vec<TypeDefinition>,
     queued: Vec<Revision>,
     commits: Vec<(CommitChanges, Revision)>,
+    /// Files that link to an item, as a test scripted them (`put_referrer`).
+    referrers: Vec<(ItemId, WorkspacePath)>,
     /// The warnings the check gave for each commit, by its mutation, kept before it landed.
     warnings: Vec<(MutationId, Vec<Warning>)>,
     landed: Vec<(Revision, Revision)>,
@@ -377,6 +386,18 @@ impl FakeVersions {
             fail_next_log: Mutex::new(None),
             fail_next_list: Mutex::new(None),
         })
+    }
+
+    /// Script a file that links to `item`. The fake rewrites no link, so it cannot find a
+    /// referrer itself; with this, a commit that moves `item` (a `MoveItem` that changes its
+    /// path, or a `RestoreItem` that puts it back at another path than the tree held it at)
+    /// reports `referrer` to its check as rewritten, as storage does.
+    ///
+    /// # Errors
+    /// Returns an error when the state lock is poisoned.
+    pub fn put_referrer(&self, item: ItemId, referrer: WorkspacePath) -> Built<()> {
+        lock(&self.state)?.referrers.push((item, referrer));
+        Ok(())
     }
 
     /// Forget the warnings kept for every commit so far, as a store that wrote those commits
@@ -714,8 +735,10 @@ impl VersionState {
     ///   before any is written back, so only another item holding a restored path (by
     ///   collision key) is a `Conflict`. A later listing of an item wins.
     ///
-    /// Every other edit is not applied.
-    fn applied(&self, changes: &CommitChanges) -> Result<Vec<(ItemDocument, bool)>, ApiError> {
+    /// Every other edit is not applied. The second value lists the items an edit moved: by a
+    /// `MoveItem` that changed the path, or by a `RestoreItem` whose `from` holds the item at
+    /// another path than the tree held it at.
+    fn applied(&self, changes: &CommitChanges) -> Result<Applied, ApiError> {
         let at = |revision: &Revision, item: ItemId| {
             self.documents
                 .iter()
@@ -732,6 +755,7 @@ impl VersionState {
             }
         }
         let mut written: Vec<(ItemId, bool)> = Vec::new();
+        let mut moved: Vec<ItemId> = Vec::new();
         let mut wrote = |item: ItemId, replaces: bool| {
             let before = written
                 .iter()
@@ -766,6 +790,7 @@ impl VersionState {
                 ] => {
                     if move_in(&mut tree, *item_id, destination)? {
                         wrote(*item_id, false);
+                        moved.push(*item_id);
                     }
                 }
                 _ => {
@@ -779,6 +804,14 @@ impl VersionState {
                             _ => None,
                         })
                         .collect();
+                    for (item_id, earlier) in &listed {
+                        let held = tree.iter().find(|held| held.summary.id == *item_id);
+                        if let (Some(held), Some(earlier)) = (held, earlier)
+                            && held.summary.path != earlier.summary.path
+                        {
+                            moved.push(*item_id);
+                        }
+                    }
                     restore_in(&mut tree, &listed)?;
                     for (item_id, _) in &listed {
                         wrote(*item_id, true);
@@ -786,14 +819,15 @@ impl VersionState {
                 }
             }
         }
-        Ok(written
+        let written = written
             .into_iter()
             .filter_map(|(item, replaces)| {
                 tree.iter()
                     .find(|held| held.summary.id == item)
                     .map(|held| (held.clone(), replaces))
             })
-            .collect())
+            .collect();
+        Ok((written, moved))
     }
 
     /// The commit before `revision` on the line: the head a written commit was based on, or the
@@ -1267,8 +1301,21 @@ impl VersionStore for FakeVersions {
             if state.head.as_ref() != Some(&changes.expected_head) {
                 return Err(ApiError::new(ErrorCode::Conflict, "the head moved"));
             }
-            let written = state.applied(&changes)?;
-            let warnings = check.check(&self.stage.0)?;
+            let (written, moved) = state.applied(&changes)?;
+            // "`rewritten` names the files of the candidate that the store rewrote on its own
+            // while it applied the edits ...: the referrers whose links a move rewrote, for a
+            // `MoveItem` and for a `RestoreItem` that moves an item back to its earlier path
+            // ... in path order and each once". The fake rewrites nothing, so the referrers
+            // are the ones a test scripted for the items this commit moved.
+            let mut rewritten: Vec<WorkspacePath> = state
+                .referrers
+                .iter()
+                .filter(|(item, _)| moved.contains(item))
+                .map(|(_, referrer)| referrer.clone())
+                .collect();
+            rewritten.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+            rewritten.dedup();
+            let warnings = check.check(&self.stage.0, &rewritten)?;
             // "The store keeps those warnings, an empty list included, in a record of its own
             // keyed by the workspace and the mutation, written before the commit lands"; a
             // record an attempt left without a commit is replaced.

@@ -12,7 +12,9 @@
 //!
 //! Lint is not conformance and never refuses: an edit's check (`EditCheck`) adds okf-validator's
 //! lint findings about the files the edit touched as warnings, and an import's
-//! (`portable::ImportCheck`) adds those of the imported files. An edit's check also reports the
+//! (`portable::ImportCheck`) adds those of the imported files. The files an edit touched are the
+//! ones its caller names and the ones the store reports it rewrote on its own (a move's
+//! referrers, `CandidateCheck::check`). An edit's check also reports the
 //! validator's own warnings and infos only for the files it touched; its refusal stands whatever
 //! file it names.
 //!
@@ -43,7 +45,9 @@ pub struct OkfConformance;
 /// validation refusal stands whatever file it names, because a non-conformant candidate is never
 /// committed. Every other finding, the validator's warnings and infos and every lint finding, is
 /// reported only for the files the edit touched, as `portable::ImportCheck` reports only the
-/// imported files': the paths it wrote, moved (old and new) or deleted, and for a type change
+/// imported files': the paths it wrote, moved (old and new) or deleted, the files the store
+/// rewrote on its own while it applied the edit (the referrers whose links a move rewrote, which
+/// the store reports to the check as `rewritten`), and for a type change
 /// the concepts of that type in the candidate. So an edit reports no warning about a file it did
 /// not touch, and a warning that names no file is not reported.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -58,7 +62,7 @@ pub struct EditCheck {
 const VALIDATOR_CODE: &str = "okf_validator";
 
 impl CandidateCheck for OkfConformance {
-    fn check(&self, root: &Path) -> Result<Vec<Warning>, ApiError> {
+    fn check(&self, root: &Path, _rewritten: &[WorkspacePath]) -> Result<Vec<Warning>, ApiError> {
         conformance(root, &load(root)?)
     }
 }
@@ -78,11 +82,13 @@ impl EditCheck {
 }
 
 impl CandidateCheck for EditCheck {
-    fn check(&self, root: &Path) -> Result<Vec<Warning>, ApiError> {
+    fn check(&self, root: &Path, rewritten: &[WorkspacePath]) -> Result<Vec<Warning>, ApiError> {
         let bundle = load(root)?;
         // A refusal stands whatever file it names: a non-conformant candidate is never committed.
         let validated = conformance(root, &bundle)?;
         let mut reported = self.touched.clone();
+        // The files the store rewrote on its own (a move's referrers) are touched too.
+        reported.extend(rewritten.iter().map(|path| path.as_str().to_owned()));
         if let Some(type_name) = self.of_type.as_deref() {
             reported.extend(
                 bundle

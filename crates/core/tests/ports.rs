@@ -64,7 +64,11 @@ use check::{TestResult, err_of, some};
 struct OkfConformance;
 
 impl CandidateCheck for OkfConformance {
-    fn check(&self, root: &Path) -> Result<Vec<Warning>, ApiError> {
+    fn check(
+        &self,
+        root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
         let bundle = okf_core::Bundle::load(root)
             .map_err(|error| ApiError::new(ErrorCode::InvalidInput, error.to_string()))?;
         let report = okf_validator::validate_bundle(&bundle);
@@ -988,7 +992,7 @@ fn a_proposed_change_becomes_the_matching_tree_edit() -> TestResult {
 #[test]
 fn a_candidate_check_rejects_a_tree_it_cannot_load() -> TestResult {
     let check: Arc<dyn CandidateCheck> = Arc::new(OkfConformance);
-    let error = err_of(check.check(Path::new("no-such-okf-jawn-candidate-directory")))?;
+    let error = err_of(check.check(Path::new("no-such-okf-jawn-candidate-directory"), &[]))?;
     assert_eq!(error.code, ErrorCode::InvalidInput);
     Ok(())
 }

@@ -1362,13 +1362,21 @@ impl Converter for FakeConverter {
 }
 
 impl CandidateCheck for AcceptAll {
-    fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
+    fn check(
+        &self,
+        _root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
         Ok(Vec::new())
     }
 }
 
 impl CandidateCheck for RefuseAll {
-    fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
+    fn check(
+        &self,
+        _root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
         Err(ApiError::new(
             ErrorCode::InvalidInput,
             "not a conformant OKF bundle",
@@ -1391,7 +1399,9 @@ fn staged_check(
         }
         std::fs::write(&file, rendered(card)).map_err(internal)?;
     }
-    check.check(staging.path())
+    // "Empty when the edits moved nothing": the commits this fake checks are the handler's,
+    // which write source cards and move no item, so the store rewrites no other file.
+    check.check(staging.path(), &[])
 }
 
 /// An item's file as the fake keeps it: its type and title as frontmatter, then its body.

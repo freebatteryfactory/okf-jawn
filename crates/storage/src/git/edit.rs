@@ -11,10 +11,12 @@
 //! back at another path than the one it holds now. An item, a move or a folder may not land on a
 //! reserved name (`.okf/`, `index.md`, `log.md`) in any letter case: it is refused naming the
 //! path before anything is written. After the edits, no two files may share a path collision
-//! key, the folder indexes are regenerated and the change is appended to `log.md`.
+//! key, the folder indexes are regenerated and the change is appended to `log.md`. The files a
+//! move rewrote besides the moved item's own (the referrers) are remembered, and the candidate
+//! check is told them (`Staged::rewritten`, `CandidateCheck::check`).
 //! Conformance is the `CandidateCheck`'s decision, not this module's.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use git2::Repository;
@@ -38,6 +40,9 @@ use crate::seam;
 pub(crate) struct Staged {
     root: PathBuf,
     items: BTreeMap<ItemId, String>,
+    /// Every file a move rewrote besides the moved item's own old and new file, as a
+    /// `/`-separated path relative to the root: the referrers whose links followed the item.
+    rewritten: BTreeSet<String>,
 }
 
 impl Staged {
@@ -46,6 +51,7 @@ impl Staged {
         let mut staged = Self {
             root: root.to_path_buf(),
             items: BTreeMap::new(),
+            rewritten: BTreeSet::new(),
         };
         staged.rescan()?;
         Ok(staged)
@@ -94,6 +100,20 @@ impl Staged {
         write_text(&self.root.join(path), &file.text())?;
         self.items.insert(file.header.item_id, path.to_owned());
         Ok(())
+    }
+
+    /// The files the edits made this store rewrite on its own, for the candidate check
+    /// (`CandidateCheck::check`, `rewritten`): the referrers every move so far rewrote that
+    /// are still files of the staged tree, in path order, each once. A referrer a later edit
+    /// removed or moved away is left out (its new path, if any, is one the caller's own edit
+    /// names), and so is one whose path is no `WorkspacePath`: no item has such a path
+    /// (`refuse_collisions`), so only a file that is no item can be left out for it.
+    pub(crate) fn rewritten(&self) -> Vec<WorkspacePath> {
+        self.rewritten
+            .iter()
+            .filter(|path| self.root.join(path).is_file())
+            .filter_map(|path| WorkspacePath::try_from(path.clone()).ok())
+            .collect()
     }
 
     /// Refuse two files of the staged tree whose paths share a collision key (Stage 1b design
@@ -610,15 +630,25 @@ fn relink(
         update_log: false,
         ..MoveOptions::default()
     };
-    okf_core::move_concept(&bundle, &from, &to, &options).map_err(|error| match error {
-        RefactorError::ConceptAlreadyExists(_) => conflict(error.to_string()),
-        other => match field {
-            Some(field) => {
-                ApiError::new(ErrorCode::InvalidInput, other.to_string()).with_field(field)
-            }
-            None => internal(format!("moving {source} to {destination} failed: {other}")),
-        },
-    })?;
+    let moved =
+        okf_core::move_concept(&bundle, &from, &to, &options).map_err(|error| match error {
+            RefactorError::ConceptAlreadyExists(_) => conflict(error.to_string()),
+            other => match field {
+                Some(field) => {
+                    ApiError::new(ErrorCode::InvalidInput, other.to_string()).with_field(field)
+                }
+                None => internal(format!("moving {source} to {destination} failed: {other}")),
+            },
+        })?;
+    // Every file the move wrote besides the item's own two: the referrers it rewrote.
+    for path in &moved.affected_files {
+        if *path != moved.source_path
+            && *path != moved.target_path
+            && let Some(relative) = relative(bundle.root(), path)
+        {
+            staged.rewritten.insert(relative);
+        }
+    }
     staged.rescan()
 }
 
@@ -760,6 +790,21 @@ fn concept(path: &str) -> Result<ConceptId, ApiError> {
         ApiError::new(ErrorCode::InvalidInput, format!("{path}: {error}"))
             .with_field("/destination")
     })
+}
+
+/// `path` as a `/`-separated path relative to `root`; `None` when it is not under `root` or a
+/// part of it is not UTF-8.
+fn relative(root: &Path, path: &Path) -> Option<String> {
+    let parts: Option<Vec<&str>> = path
+        .strip_prefix(root)
+        .ok()?
+        .components()
+        .map(|part| match part {
+            std::path::Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        .collect();
+    parts.map(|parts| parts.join("/"))
 }
 
 /// Every file under `root`, as `/`-separated paths relative to it.

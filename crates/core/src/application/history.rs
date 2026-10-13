@@ -44,7 +44,8 @@
 //! The store moves an item the base still holds back with its links. An item deleted since has
 //! no path at the base for its links to follow from, so its Rewind first puts it back at its
 //! last path before the delete and moves it from there (`item_restore`, R-I14): the links that
-//! pointed at that last path end pointing at the restored path.
+//! pointed at that last path end pointing at the restored path. In both cases the store tells
+//! the check which files it rewrote for those links, and they count as touched too.
 //!
 //! Both writes commit through `shared::commit` with the production edit check: OKF conformance
 //! refuses, and the validator's warnings and OKF lint about the files the write touches come
@@ -352,8 +353,9 @@ pub(super) async fn restore_items(
     }
     // What the restore leaves in the tree: every file present at the target. Restoring one
     // item moves it back from its path at the base, as `MoveItem` moves it, so that path counts
-    // too, as a move's old path does. Neither write counts the referrers whose links the move
-    // rewrote (R-I12).
+    // too, as a move's old path does. The referrers whose links the move back rewrites (or
+    // the `MoveItem` of a deleted item's Rewind, `item_restore`) are the store's to name: it
+    // reports them to the check, which counts them as touched.
     let restored: Vec<WorkspacePath> = changes
         .iter()
         .flat_map(|change| {

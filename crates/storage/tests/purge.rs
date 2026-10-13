@@ -94,7 +94,11 @@ struct Seeded {
 const MARKER: &[u8] = b"zanzibar";
 
 impl CandidateCheck for Accept {
-    fn check(&self, root: &Path) -> Result<Vec<Warning>, ApiError> {
+    fn check(
+        &self,
+        root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
         let mut marked = Vec::new();
         marked_paths(root, "", &mut marked)
             .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;

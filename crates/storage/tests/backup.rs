@@ -86,7 +86,11 @@ const RR5_COLUMNS: &str = "tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL, 
 const RR5_KEY: &str = "PRIMARY KEY (tenant_id, workspace_id, item_id, editor)";
 
 impl CandidateCheck for Accept {
-    fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
+    fn check(
+        &self,
+        _root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
         Ok(Vec::new())
     }
 }

@@ -2497,6 +2497,53 @@ async fn restoring_a_deleted_item_at_an_older_path_moves_it_there_from_its_last_
 }
 
 #[tokio::test]
+async fn a_rewind_of_a_deleted_item_reports_the_referrers_its_move_rewrote() -> TestResult {
+    // NOTE was at `notes/old.md` at the target, moved to `notes/new.md`, then deleted. The
+    // Rewind puts it back at `notes/new.md` and moves it to `notes/old.md` (R-I14); that
+    // `MoveItem` rewrites the link in `notes/referrer.md`, which only the store can name.
+    let world = deleted_since("notes/old.md", "notes/new.md")?;
+    world
+        .versions
+        .put_referrer(item(NOTE), path("notes/referrer.md")?)?;
+    let stage = world.versions.stage();
+    for at in ["notes/referrer.md", "notes/bystander.md"] {
+        stage.write(
+            at,
+            "---
+type: Note
+---
+
+No heading.
+",
+        )?;
+    }
+    let result = world
+        .service
+        .restore_items(
+            &alice(OperationName::RestoreItems, Some(mutation(1)))?,
+            rewind('b', 'a', Some(NOTE))?,
+        )
+        .await?;
+    let located: BTreeSet<_> = result
+        .warnings
+        .iter()
+        .filter(|warning| warning.code.starts_with("okf_lint"))
+        .filter_map(|warning| warning.location.as_deref())
+        .collect();
+    assert!(
+        located.contains("notes/referrer.md"),
+        "{:?}",
+        result.warnings
+    );
+    assert!(
+        !located.contains("notes/bystander.md"),
+        "{:?}",
+        result.warnings
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_rewind_moves_no_links_when_they_have_nothing_to_follow() -> TestResult {
     // The base still holds the item: the store moves it back itself, and no history is read.
     let world = World::new()?;
@@ -2771,10 +2818,13 @@ async fn a_rewind_that_cannot_read_where_the_item_is_writes_nothing() -> TestRes
 }
 
 #[tokio::test]
-async fn restoring_a_moved_item_touches_its_path_at_the_base_and_its_restored_path() -> TestResult {
+async fn restoring_a_moved_item_touches_both_its_paths_and_the_referrers_its_move_back_rewrote()
+-> TestResult {
     let world = World::new()?;
     // The note was at `notes/plan.md` at the target and moved to `archive/plan.md` since; the
-    // Rewind moves it back, as a `MoveItem` would, so both paths count, as a move's do.
+    // Rewind moves it back, as a `MoveItem` would, so both paths count, as a move's do, and so
+    // does the file whose link the store rewrote for that move back (R-I12), which only the
+    // store can name. A file nothing was done to stays unreported.
     note_at(&world, NOTE, "notes/plan.md", &['a'])?;
     note_at(&world, NOTE, "archive/plan.md", &['b'])?;
     world.versions.set_head(revision('b')?)?;
@@ -2789,9 +2839,17 @@ async fn restoring_a_moved_item_touches_its_path_at_the_base_and_its_restored_pa
         )],
     )?;
     world.versions.queue_revision(revision('c')?)?;
+    world
+        .versions
+        .put_referrer(item(NOTE), path("notes/referrer.md")?)?;
     let stage = world.versions.stage();
     std::fs::create_dir_all(stage.0.join("archive"))?;
-    for at in ["notes/plan.md", "archive/plan.md", "notes/referrer.md"] {
+    for at in [
+        "notes/plan.md",
+        "archive/plan.md",
+        "notes/referrer.md",
+        "notes/bystander.md",
+    ] {
         stage.write(at, "---\ntype: Note\n---\n\nNo heading.\n")?;
     }
     let result = world
@@ -2807,10 +2865,9 @@ async fn restoring_a_moved_item_touches_its_path_at_the_base_and_its_restored_pa
         .filter(|warning| warning.code.starts_with("okf_lint"))
         .filter_map(|warning| warning.location.as_deref())
         .collect();
-    // A referrer whose link the move rewrote is not counted, as a `MoveItem` does not (R-I12).
     assert_eq!(
         located,
-        BTreeSet::from(["archive/plan.md", "notes/plan.md"]),
+        BTreeSet::from(["archive/plan.md", "notes/plan.md", "notes/referrer.md"]),
         "{:?}",
         result.warnings
     );

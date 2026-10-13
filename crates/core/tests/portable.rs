@@ -30,12 +30,33 @@ use check::{TestResult, err_of, some};
 /// The conformance half of an import commit's check: answers as the test sets it.
 struct ScriptedConformance(Result<Vec<Warning>, ApiError>);
 
+/// A conformance half that answers one warning for each rewritten path it is handed, located at
+/// that path, so a test sees what an `ImportCheck` passed on.
+struct EchoingRewritten;
+
 /// A candidate directory under the system temporary directory, removed when dropped.
 struct Candidate(PathBuf);
 
 impl CandidateCheck for ScriptedConformance {
-    fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
+    fn check(
+        &self,
+        _root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
         self.0.clone()
+    }
+}
+
+impl CandidateCheck for EchoingRewritten {
+    fn check(&self, _root: &Path, rewritten: &[WorkspacePath]) -> Result<Vec<Warning>, ApiError> {
+        Ok(rewritten
+            .iter()
+            .map(|path| Warning {
+                code: "handed".to_owned(),
+                message: "the store rewrote this file".to_owned(),
+                location: Some(path.as_str().to_owned()),
+            })
+            .collect())
     }
 }
 
@@ -425,7 +446,7 @@ fn lint_at_import_reports_the_imported_files_findings_as_warnings() -> TestResul
         imported.clone(),
     );
 
-    let warnings = check.check(&candidate.0)?;
+    let warnings = check.check(&candidate.0, &[])?;
     let first = some(warnings.first(), "the conformance warning")?;
     assert_eq!(
         (first.code.as_str(), first.message.as_str()),
@@ -457,6 +478,55 @@ fn lint_at_import_reports_the_imported_files_findings_as_warnings() -> TestResul
 }
 
 #[test]
+fn an_import_check_hands_the_rewritten_paths_to_its_conformance_check() -> TestResult {
+    let candidate = Candidate::new()?;
+    candidate.write(
+        "notes/imported.md",
+        "---
+type: Note
+---
+
+No heading.
+",
+    )?;
+    candidate.write(
+        "notes/referrer.md",
+        "---
+type: Note
+---
+
+No heading.
+",
+    )?;
+    let check = ImportCheck::new(
+        Arc::new(EchoingRewritten),
+        vec![WorkspacePath::try_from("notes/imported.md".to_owned())?],
+    );
+    let rewritten = [WorkspacePath::try_from("notes/referrer.md".to_owned())?];
+    let warnings = check.check(&candidate.0, &rewritten)?;
+    let located = |code: &str| -> Vec<&str> {
+        warnings
+            .iter()
+            .filter(|warning| warning.code.starts_with(code))
+            .filter_map(|warning| warning.location.as_deref())
+            .collect()
+    };
+    // The conformance half was handed the path the store rewrote, as it was.
+    assert_eq!(located("handed"), ["notes/referrer.md"]);
+    // The import's own lint stays on the imported file (an import commit moves nothing).
+    let lint = located("okf_lint");
+    assert!(lint.contains(&"notes/imported.md"), "{warnings:?}");
+    assert!(!lint.contains(&"notes/referrer.md"), "{warnings:?}");
+    // With nothing rewritten, nothing is handed on.
+    let none = check.check(&candidate.0, &[])?;
+    assert!(
+        none.iter().all(|warning| warning.code != "handed"),
+        "{none:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn lint_at_import_never_overrides_a_conformance_refusal() -> TestResult {
     let candidate = Candidate::new()?;
     candidate.write("notes/imported.md", "---\ntype: Note\n---\n\nNo heading.\n")?;
@@ -465,7 +535,7 @@ fn lint_at_import_never_overrides_a_conformance_refusal() -> TestResult {
         Arc::new(ScriptedConformance(Err(refusal.clone()))),
         vec![WorkspacePath::try_from("notes/imported.md".to_owned())?],
     );
-    let refused = err_of(check.check(&candidate.0))?;
+    let refused = err_of(check.check(&candidate.0, &[]))?;
     assert_eq!(refused.code, refusal.code);
     assert_eq!(refused.message, refusal.message);
 

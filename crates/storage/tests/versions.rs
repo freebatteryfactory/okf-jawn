@@ -77,7 +77,11 @@ struct WarnsAsTheHeadMoves {
 const CLOSING: &str = "\n---\n";
 
 impl CandidateCheck for Counting {
-    fn check(&self, root: &Path) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
+    fn check(
+        &self,
+        root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
         self.runs.fetch_add(1, Ordering::SeqCst);
         assert!(root.is_dir(), "the check reads a staged directory");
         Ok(Vec::new())
@@ -85,13 +89,21 @@ impl CandidateCheck for Counting {
 }
 
 impl CandidateCheck for Refusing {
-    fn check(&self, _root: &Path) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
+    fn check(
+        &self,
+        _root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
         Err(ApiError::new(ErrorCode::InvalidInput, "not conformant"))
     }
 }
 
 impl CandidateCheck for NamingStagedFile {
-    fn check(&self, root: &Path) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
+    fn check(
+        &self,
+        root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
         Err(ApiError::new(
             ErrorCode::InvalidInput,
             format!("{}/notes/x.md is not conformant", root.display()),
@@ -100,7 +112,11 @@ impl CandidateCheck for NamingStagedFile {
 }
 
 impl CandidateCheck for Interloper {
-    fn check(&self, _root: &Path) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
+    fn check(
+        &self,
+        _root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
         let fault = |error: git2::Error| ApiError::new(ErrorCode::Internal, error.to_string());
         let repository = git2::Repository::open_bare(&self.repository).map_err(fault)?;
         let head = repository.refname_to_id("refs/heads/main").map_err(fault)?;
@@ -134,15 +150,23 @@ impl Warns {
 }
 
 impl CandidateCheck for Warns {
-    fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
+    fn check(
+        &self,
+        _root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
         self.runs.fetch_add(1, Ordering::SeqCst);
         Ok(self.warnings.clone())
     }
 }
 
 impl CandidateCheck for WarnsAsTheHeadMoves {
-    fn check(&self, root: &Path) -> Result<Vec<Warning>, ApiError> {
-        self.interloper.check(root)?;
+    fn check(
+        &self,
+        root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
+        self.interloper.check(root, &[])?;
         Ok(self.warnings.clone())
     }
 }

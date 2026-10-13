@@ -41,6 +41,9 @@ use crate::storage::CandidateCheck;
 /// then OKF lint of the imported files, whose findings are added to its warnings.
 ///
 /// Lint findings never refuse a commit; okf-validator's lint is not a conformance check.
+/// The paths the store reports it rewrote on its own (`CandidateCheck::check`, `rewritten`) are
+/// handed to the conformance check as they are. The lint stays on the imported files: an
+/// import commit writes source cards, which move nothing, so the store rewrites no other file.
 pub struct ImportCheck {
     conformance: Arc<dyn CandidateCheck>,
     imported: Vec<WorkspacePath>,
@@ -77,8 +80,8 @@ impl ImportCheck {
 }
 
 impl CandidateCheck for ImportCheck {
-    fn check(&self, root: &Path) -> Result<Vec<Warning>, ApiError> {
-        let mut warnings = self.conformance.check(root)?;
+    fn check(&self, root: &Path, rewritten: &[WorkspacePath]) -> Result<Vec<Warning>, ApiError> {
+        let mut warnings = self.conformance.check(root, rewritten)?;
         warnings.extend(lint_imported(root, &self.imported)?);
         Ok(warnings)
     }
