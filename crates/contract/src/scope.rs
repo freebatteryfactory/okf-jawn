@@ -86,8 +86,10 @@ macro_rules! workspace_keyed {
 }
 
 macro_rules! tenant_admin_keyed {
-    ($($request:ty),* $(,)?) => {
+    ($($request:ty => $workspace:literal),* $(,)?) => {
         $(impl RequestScope for $request {
+            const RESPONSE_WORKSPACE: Option<&'static str> = Some($workspace);
+
             fn targets(&self) -> Vec<Target> {
                 vec![Target::Deployment(Permission::Admin)]
             }
@@ -152,6 +154,16 @@ pub enum ReplayPolicy {
 pub trait RequestScope {
     /// Replay behaviour for this operation's completed mutations.
     const REPLAY: ReplayPolicy = ReplayPolicy::StoredResponse;
+
+    /// JSON pointer into the response to the one workspace a mutation authorized at the tenant
+    /// is about (the workspace it creates, or a purge's target); `None` for every other
+    /// request. The mutation ledger records that workspace when the mutation completes, so a
+    /// purge of it reaches the stored response by identity, never by its text, except for the
+    /// two purge operations, whose rows are kept (their response is the purge record). A
+    /// response in which the pointer finds nothing names no workspace (a tenant job's absent
+    /// `workspace_id`). A response that names workspaces only in a list (a connector's grants)
+    /// names no one workspace and declares none.
+    const RESPONSE_WORKSPACE: Option<&'static str> = None;
 
     /// Every resource that must be authorized, first the one named by the table permission.
     fn targets(&self) -> Vec<Target>;
@@ -242,9 +254,9 @@ workspace_keyed!(Admin:
 );
 
 tenant_admin_keyed!(
-    PurgeWorkspaceRequest,
-    PurgeItemRequest,
-    BackupInstallationRequest,
+    PurgeWorkspaceRequest => "/target/workspace_id",
+    PurgeItemRequest => "/target/workspace_id",
+    BackupInstallationRequest => "/workspace_id",
 );
 
 tenant_admin_read!(
@@ -263,6 +275,8 @@ authenticated!(
 );
 
 impl RequestScope for CreateWorkspaceRequest {
+    const RESPONSE_WORKSPACE: Option<&'static str> = Some("/id");
+
     fn targets(&self) -> Vec<Target> {
         vec![Target::Deployment(Permission::Admin)]
     }
