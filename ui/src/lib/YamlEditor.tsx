@@ -4,9 +4,17 @@
  *
  * Like the Markdown text box it is a multi-line text box to assistive technology, named by
  * `label`; Tab is not bound, so it moves keyboard focus on; no colors are added. It holds its own
- * text: `initialText` is read once, when it mounts, and every change is reported through
- * `onChange`. Its text is never set from outside while it is mounted, so a keystroke cannot be
- * undone by an older value arriving late.
+ * text: `initialText` is read when it mounts, and every change is reported through `onChange`.
+ * Its text is never set from outside as a value is, so a keystroke cannot be undone by an older
+ * value arriving late.
+ *
+ * The one way its text changes from outside is starting again (`restarts`): the caller says that
+ * the box holds nothing of the person’s and that what it shows is no longer what it should start
+ * from. The box then starts from the `initialText` of that commit, as a box just mounted would:
+ * that text, the caret at its start, no undo history, and nothing reported through `onChange`. It
+ * is the same element on the page, so keyboard focus that was in it is still in it, and focus
+ * that was elsewhere is not moved. A caller that remounted the box for this (a `key`) would take
+ * focus to the page body.
  *
  * Reading the text is not done at every keystroke, and never on the page's thread
  * (`lib/yaml-reading.ts`): `usePausedReading` starts reading it a short pause after the last
@@ -23,7 +31,7 @@ import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { yaml } from '@codemirror/lang-yaml';
 import { Compartment, EditorState } from '@codemirror/state';
 import { EditorView, keymap } from '@codemirror/view';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { keyed } from './keys';
 import { describeProblem, YAML_PAUSE_MS, type YamlRead } from './yaml';
 import { readOffThread } from './yaml-reading';
@@ -38,6 +46,11 @@ export interface YamlEditorProps {
   describedBy?: string;
   /** Keyboard focus left the text box. */
   onBlur?: () => void;
+  /**
+   * Counts the times the caller started the text again. When it changes, the box starts again
+   * from `initialText`, in place: the caller does so only while the box holds nothing typed.
+   */
+  restarts?: number;
 }
 
 export interface PausedReading {
@@ -126,58 +139,85 @@ const look = EditorView.theme({
   '.cm-content:focus-visible': { outline: '3px solid Highlight', outlineOffset: '-3px' },
 });
 
-export function YamlEditor({ label, initialText, onChange, describedBy, onBlur }: YamlEditorProps) {
+/** The text box’s name and description, as attributes of the box itself. */
+const named = (label: string, describedBy: string | undefined) =>
+  EditorView.contentAttributes.of({
+    'aria-label': label,
+    ...(describedBy === undefined ? {} : { 'aria-describedby': describedBy }),
+  });
+
+export function YamlEditor({
+  label,
+  initialText,
+  onChange,
+  describedBy,
+  onBlur,
+  restarts = 0,
+}: YamlEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
-  const first = useRef(initialText);
   const report = useRef(onChange);
   const left = useRef(onBlur);
   const naming = useRef(new Compartment());
+  // What the box starts from, as the last commit gave it: read when it mounts and when it starts
+  // again, never in between.
+  const start = useRef({ initialText, label, describedBy });
+  useLayoutEffect(() => {
+    start.current = { initialText, label, describedBy };
+  }, [initialText, label, describedBy]);
 
   useEffect(() => {
     report.current = onChange;
     left.current = onBlur;
   }, [onChange, onBlur]);
 
+  /** The box as it starts: the text, the caret at its start, and no undo history. */
+  const startState = useCallback(() => {
+    const from = start.current;
+    return EditorState.create({
+      doc: from.initialText,
+      extensions: [
+        history(),
+        keymap.of([...defaultKeymap, ...historyKeymap]),
+        yaml(),
+        look,
+        naming.current.of(named(from.label, from.describedBy)),
+        EditorView.domEventHandlers({
+          blur: () => {
+            left.current?.();
+          },
+        }),
+        EditorView.updateListener.of((update) => {
+          if (update.docChanged) report.current(update.state.doc.toString());
+        }),
+      ],
+    });
+  }, []);
+
   useEffect(() => {
     const host = hostRef.current;
     if (host === null) return;
-    const view = new EditorView({
-      parent: host,
-      state: EditorState.create({
-        doc: first.current,
-        extensions: [
-          history(),
-          keymap.of([...defaultKeymap, ...historyKeymap]),
-          yaml(),
-          look,
-          naming.current.of([]),
-          EditorView.domEventHandlers({
-            blur: () => {
-              left.current?.();
-            },
-          }),
-          EditorView.updateListener.of((update) => {
-            if (update.docChanged) report.current(update.state.doc.toString());
-          }),
-        ],
-      }),
-    });
+    const view = new EditorView({ parent: host, state: startState() });
     viewRef.current = view;
     return () => {
       viewRef.current = null;
       view.destroy();
     };
-  }, []);
+  }, [startState]);
+
+  // Starting again, in the commit that asks for it and before it is painted. The view keeps its
+  // element and gives focus back to it only when it had it (`EditorView.setState`), so focus is
+  // where it was. A box not built yet starts from the same text when it is built.
+  const started = useRef(restarts);
+  useLayoutEffect(() => {
+    if (started.current === restarts) return;
+    started.current = restarts;
+    viewRef.current?.setState(startState());
+  }, [restarts, startState]);
 
   useEffect(() => {
     viewRef.current?.dispatch({
-      effects: naming.current.reconfigure(
-        EditorView.contentAttributes.of({
-          'aria-label': label,
-          ...(describedBy === undefined ? {} : { 'aria-describedby': describedBy }),
-        }),
-      ),
+      effects: naming.current.reconfigure(named(label, describedBy)),
     });
   }, [label, describedBy]);
 

@@ -47,3 +47,24 @@ export function replaceText(box: HTMLElement, text: string) {
     });
   });
 }
+
+/** Where the caret is in the box: the place in its text, counted from the start. */
+export function caretIn(box: HTMLElement): number {
+  return viewOf(box).state.selection.main.head;
+}
+
+/** Put the caret at `place` in the box, as a click or an arrow key does. */
+export function putCaret(box: HTMLElement, place: number) {
+  const view = viewOf(box);
+  act(() => {
+    view.dispatch({ selection: { anchor: place } });
+  });
+}
+
+/** Type `text` where the caret is. */
+export function typeAtCaret(box: HTMLElement, text: string) {
+  const view = viewOf(box);
+  act(() => {
+    view.dispatch(view.state.replaceSelection(text), { userEvent: 'input.type' });
+  });
+}

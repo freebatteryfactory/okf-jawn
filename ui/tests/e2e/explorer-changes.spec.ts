@@ -71,6 +71,10 @@ interface Service {
   sent: Array<{ path: string; body: Body }>;
   /** Refuse the next `count` writes as unavailable. */
   failNext: (count: number) => void;
+  /** Someone else saves other naming rules: the head moves to the revision that holds them. */
+  othersSave: (saved: unknown) => string;
+  /** Hold every answer about the workspace itself until the function given back is called. */
+  holdWorkspace: () => () => void;
 }
 
 async function service(): Promise<Service> {
@@ -80,6 +84,7 @@ async function service(): Promise<Service> {
   ]);
   const rules = new Map<string, unknown>([[HEAD, { schema_version: 1, rules: [rule] }]]);
   const state = { head: HEAD, made: 0, failing: 0 };
+  const held: { wait: Promise<void> | null } = { wait: null };
   const sent: Service['sent'] = [];
   const at = (body: Body) => {
     const asked = body.at as { revision?: string } | undefined;
@@ -131,7 +136,10 @@ async function service(): Promise<Service> {
     properties: { type: item.type_name, okf_jawn: { id: item.id } },
   });
   const answers: Answers = {
-    '/api/workspaces/open-workspace': () => ok({ ...writableWorkspace, head: state.head }),
+    '/api/workspaces/open-workspace': async () => {
+      if (held.wait !== null) await held.wait;
+      return ok({ ...writableWorkspace, head: state.head });
+    },
     '/api/items/list-items': (body) => {
       const revision = at(body);
       const tree = treeAt(revision);
@@ -259,6 +267,21 @@ async function service(): Promise<Service> {
     sent,
     failNext: (count) => {
       state.failing = count;
+    },
+    othersSave: (saved) => {
+      const next = commit((tree) => tree);
+      rules.set(next, saved);
+      return next;
+    },
+    holdWorkspace: () => {
+      let release = () => {};
+      held.wait = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return () => {
+        held.wait = null;
+        release();
+      };
     },
   };
 }
@@ -533,6 +556,50 @@ test.describe('changing the tree and the naming rules', () => {
     await expectVisibleFocus(page);
     await expectNoAxeViolations(page, 'the properties as YAML');
     await shot(page, '31-properties-yaml');
+  });
+
+  test('the YAML view of the naming rules follows newer rules where keyboard focus is', async ({
+    page,
+  }) => {
+    const played = await service();
+    await routeApi(page, played.answers);
+    await page.goto(`${server.origin()}/w/${WS}`);
+    await expect(row(page, 'notes')).toBeVisible();
+    await press(page, 'Naming rules');
+    await page.getByRole('tab', { name: 'Form' }).focus();
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Enter');
+    const box = page.getByRole('textbox', { name: 'The naming rules as YAML' });
+    await expect(box).toContainText('prefix: ""');
+
+    // Someone else saves other rules, and the person refreshes: the box holds nothing of theirs,
+    // so it shows the newer rules, and focus stays on Refresh, where the person put it.
+    played.othersSave({ schema_version: 1, rules: [{ ...rule, prefix: 'theirs-' }] });
+    await press(page, 'Refresh');
+    await expect(box).toContainText('prefix: theirs-');
+    expect(await focusSettled(page)).toBe('button:Refresh');
+
+    // Again, with a Refresh that is slow to answer. Meanwhile the person goes to the YAML box,
+    // moves the caret to the end of its text, and types nothing.
+    played.othersSave({ schema_version: 1, rules: [{ ...rule, prefix: 'newest-' }] });
+    const answer = played.holdWorkspace();
+    await press(page, 'Refresh');
+    await box.focus();
+    await page.keyboard.press('ControlOrMeta+End');
+    expect(await focusSettled(page)).toBe('textbox:The naming rules as YAML');
+    answer();
+    await expect(box).toContainText('prefix: newest-');
+    // Focus is where it was, in the box, never on the page body, and the person goes on typing:
+    // the text is another one, so the caret is at its start.
+    expect(await focusSettled(page)).toBe('textbox:The naming rules as YAML');
+    await expectVisibleFocus(page);
+    await page.keyboard.type('# mine');
+    await page.keyboard.press('Enter');
+    await expect(box.locator('.cm-line').first()).toHaveText('# mine');
+    await expect(box).toContainText('prefix: newest-');
+    expect(await focusSettled(page)).toBe('textbox:The naming rules as YAML');
+    await expectNoAxeViolations(page, 'the naming rules as YAML after they followed a Refresh');
+    expect(played.sent).toEqual([]);
   });
 
   test('reading YAML never stalls the page: the worker is ended at its limit, and the text stays', async ({

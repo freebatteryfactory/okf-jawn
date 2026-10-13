@@ -215,9 +215,12 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   // read or is being read, and text that cannot be read. It was typed over the rules shown then,
   // so they stay what it started from, and when it is read the rules saved meanwhile are seen.
   //
-  // The YAML text box takes its text once, when it mounts. While it holds nothing of the person's
-  // it follows the rules shown: when they change (a Refresh loaded other rules) it starts again
-  // from them, or an edit made next would be made in the older rules and saved over the newer.
+  // The YAML text box takes its text when it mounts. While it holds nothing of the person's it
+  // follows the rules shown: when they change (a Refresh loaded other rules) it starts again from
+  // them, or an edit made next would be made in the older rules and saved over the newer. It
+  // starts again in place (`restarts`), not as another element: the head can move while the caret
+  // is in the box with nothing typed (a Refresh pressed before answers; the workspace is asked
+  // again by itself when the network returns), and the person goes on typing where they were.
   const atHead = saved.data;
   const [basis, setBasis] = useState<NamingRules | undefined>(undefined);
   /** Counts the times the YAML view started again from rules that changed with nothing edited. */
@@ -624,7 +627,8 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
                 rules.
               </p>
               <YamlEditor
-                key={`${dropped} ${followed}`}
+                key={dropped}
+                restarts={followed}
                 label="The naming rules as YAML"
                 initialText={typed?.text ?? writeYaml(value)}
                 describedBy={findingsId}

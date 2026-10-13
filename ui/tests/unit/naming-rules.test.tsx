@@ -4,6 +4,7 @@
  * and refuses an apply whose plan was made on another revision than its head.
  */
 import type { RJSFSchema } from '@rjsf/utils';
+import { onlineManager } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
@@ -18,7 +19,7 @@ import { YAML_PAUSE_MS } from '../../src/lib/yaml';
 import { setYamlEngine, TOO_COMPLEX_WORDS, YAML_LIMIT_MS } from '../../src/lib/yaml-reading';
 import { type Handler, type Json, mockApi, ok, type Reply } from './support/api';
 import { CANCELLED, handed, TAKEN } from './support/drags';
-import { findTextBox, replaceText, textIn } from './support/editor';
+import { caretIn, findTextBox, putCaret, replaceText, textIn, typeAtCaret } from './support/editor';
 import {
   DIGEST,
   HEAD,
@@ -2282,5 +2283,102 @@ ${textIn(box)
     await waitFor(() => expect(savedNow()).not.toBeNull());
     expect(panel().textContent).toContain(changedUnderneath);
     expect(screen.queryByRole('button', { name: 'Save the rules' })).toBeNull();
+  });
+
+  /** The service, with every answer about the workspace itself given by `opened`. */
+  function serviceOpenedBy(opened: (state: ReturnType<typeof service>['state']) => Promise<Reply>) {
+    const holder: { own: ReturnType<typeof service> | null } = { own: null };
+    const own = service({
+      [OPEN]: async () => {
+        const state = holder.own?.state;
+        return state === undefined ? ok(writableWorkspace) : opened(state);
+      },
+    });
+    holder.own = own;
+    return own;
+  }
+  const opens = (state: ReturnType<typeof service>['state']) =>
+    ok({ ...writableWorkspace, permissions: state.permissions, head: state.head });
+
+  it('keeps the caret in the box when it follows the answer of a Refresh pressed before: the person goes on typing, in the newer rules', async () => {
+    const gate: { wait: Promise<void> | null; release: () => void } = {
+      wait: null,
+      release: () => {},
+    };
+    const own = serviceOpenedBy(async (state) => {
+      if (gate.wait !== null) await gate.wait;
+      return opens(state);
+    });
+    const { box } = await openYamlView(own);
+    const next = own.moveHead();
+    own.state.rules.set(next, theirs);
+    gate.wait = new Promise<void>((resolve) => {
+      gate.release = resolve;
+    });
+    await userEvent.click(await screen.findByRole('button', { name: /^Refresh/ }));
+    // The person goes on to the YAML box while the Refresh is answering, and types nothing.
+    act(() => box.focus());
+    putCaret(box, 12);
+    expect(document.activeElement).toBe(box);
+    await act(async () => {
+      gate.release();
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(textIn(screen.getByRole('textbox', { name: YAML }))).toContain('prefix: theirs-'),
+    );
+    // Focus never left the box: it is the box that was there, on the newer rules, the caret at
+    // the start of a text that is another one.
+    const now = screen.getByRole('textbox', { name: YAML });
+    expect(document.activeElement).toBe(now);
+    expect(now).toBe(box);
+    expect(caretIn(now)).toBe(0);
+    expect(panel().textContent).not.toContain(changedUnderneath);
+    // What is typed next is typed into the newer rules, and is an edit of those.
+    typeAtCaret(now, '# mine\n');
+    act(() => {
+      fireEvent.blur(now);
+    });
+    await turn();
+    expect(textIn(now)).toMatch(/^# mine\nschema_version: 1\n/);
+    await typeYaml(now, textIn(now).replace('prefix: theirs-', 'prefix: mine-'));
+    expect(savedNow()).toBeNull();
+    await userEvent.click(button('Save the rules'));
+    await waitFor(() => expect(own.api.callsTo(SET)).toHaveLength(1));
+    expect(own.api.callsTo(SET).at(0)).toMatchObject({ base_revision: next });
+    expect(own.api.callsTo(SET).at(0)?.rules).toEqual({
+      schema_version: 1,
+      rules: [{ ...rule, prefix: 'mine-', separator: '_' }],
+    });
+  });
+
+  it('keeps the caret in the box when it follows a head that moved by itself: the network returning after a Refresh that failed', async () => {
+    let failing = false;
+    const own = serviceOpenedBy(async (state) =>
+      failing ? refuse(500, 'internal', 'the store broke') : opens(state),
+    );
+    const { box } = await openYamlView(own);
+    const next = own.moveHead();
+    own.state.rules.set(next, theirs);
+    failing = true;
+    await userEvent.click(await screen.findByRole('button', { name: /^Refresh/ }));
+    await screen.findByText(/Refreshing this workspace/);
+    act(() => box.focus());
+    expect(document.activeElement).toBe(box);
+    // The network is back: the cache asks again for the workspace by itself, and the head moves.
+    failing = false;
+    const asked = own.api.callsTo(OPEN).length;
+    act(() => {
+      onlineManager.setOnline(false);
+      onlineManager.setOnline(true);
+    });
+    await waitFor(() => expect(own.api.callsTo(OPEN).length).toBeGreaterThan(asked));
+    await waitFor(() =>
+      expect(textIn(screen.getByRole('textbox', { name: YAML }))).toContain('prefix: theirs-'),
+    );
+    const now = screen.getByRole('textbox', { name: YAML });
+    expect(document.activeElement).toBe(now);
+    expect(now).toBe(box);
+    expect(caretIn(now)).toBe(0);
   });
 });
