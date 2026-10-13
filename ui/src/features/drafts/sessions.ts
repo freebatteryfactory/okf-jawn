@@ -10,7 +10,9 @@
  * from it. A session is called saved only when `save_draft` answered for exactly the content it
  * holds and no save has failed since. A save that failed or timed out may still have been
  * applied, so what the service holds is then unknown: the session stays "not saved" and needs a
- * save, whatever its text, until one has answered.
+ * save, whatever its text, until one has answered. What the person entered in the properties form
+ * and the draft has not taken (it would not fit the type) is kept here too, so it outlives the
+ * form; no save carries it, and while it is there the item is not called saved either.
  *
  * Beside the sessions: the items of a Snapshot that conflicted, each until the person resolves it
  * (the answer of `commit_items`, kept only to show it), what the last Snapshot did, as words, and
@@ -27,6 +29,22 @@ import type { zDraftConflictItem } from '../../api/generated/zod.gen';
 export interface DraftText {
   body: string;
   properties: Record<string, unknown>;
+}
+
+/**
+ * What the person entered in the properties form that the draft has not taken: the properties
+ * would not fit the item's type with it, so none of it is put into the draft or sent. It is kept
+ * here, with the session, so it is still there when the form is shown again.
+ */
+export interface HeldProperties {
+  /** The form's data with the person's input in it: every property but the application's header. */
+  form: Record<string, unknown>;
+  /** The properties the person changed in a field of the form. */
+  entered: string[];
+  /** The property map's keys as the form found them: where a property entered again goes back. */
+  opened: string[];
+  /** The properties a choice in the form took out, which the form goes on naming. */
+  takenOut: string[];
 }
 
 /** One `save_draft` request: repeated under the same key while it says the same thing. */
@@ -56,6 +74,11 @@ export interface DraftSession extends DraftText {
   /** A save is in flight. */
   saving: boolean;
   /**
+   * The save in flight has been under way for so long that the person is told, and may stop it.
+   * It says something only while `saving`: each save starts with it false.
+   */
+  stillSending: boolean;
+  /**
    * What the last save threw; null once a save has answered. While it is set, what the service
    * holds is unknown.
    */
@@ -64,10 +87,25 @@ export interface DraftSession extends DraftText {
   attempt: SaveAttempt | null;
   /** The text is larger than the service accepts, in bytes; nothing is sent while it is. */
   tooLong: number | null;
+  /**
+   * Input of the properties form that is held back; null when the draft has all that was entered.
+   * No save carries it, so while it is there the item is unsaved, whatever its text.
+   */
+  heldBack: HeldProperties | null;
 }
 
-/** How a session's save stands, as the person is told. */
-export type SaveState = 'unchanged' | 'unsaved' | 'saving' | 'saved' | 'failed' | 'too-long';
+/**
+ * How a session's save stands, as the person is told. "held-back": all that can be saved is
+ * saved, and input of the properties form is held back.
+ */
+export type SaveState =
+  | 'unchanged'
+  | 'unsaved'
+  | 'saving'
+  | 'saved'
+  | 'failed'
+  | 'too-long'
+  | 'held-back';
 
 /** One item of a `draft_conflict` answer, as the generated schema reads it off the wire. */
 export type ConflictItem = z.infer<typeof zDraftConflictItem>;
@@ -214,10 +252,14 @@ export function saveStateOf(session: DraftSession): SaveState {
   if (session.tooLong !== null) return 'too-long';
   if (session.failure !== null) return 'failed';
   if (needsSave(session)) return 'unsaved';
+  if (session.heldBack !== null) return 'held-back';
   return session.confirmed === null ? 'unchanged' : 'saved';
 }
 
-/** A session holds text that would be lost if the page went away now. */
+/**
+ * A session holds something that would be lost if the page went away now: text not confirmed, or
+ * input of the properties form that is held back (it is nowhere but in this page).
+ */
 export function atRisk(session: DraftSession): boolean {
-  return session.saving || needsSave(session);
+  return session.saving || needsSave(session) || session.heldBack !== null;
 }

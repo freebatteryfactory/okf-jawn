@@ -14,6 +14,7 @@ import {
   CSRF_COOKIE,
   CSRF_HEADER,
   REQUEST_TIMEOUT_MS,
+  RequestStopped,
   RequestTimedOut,
   sendRequest,
   UPLOAD_BYTES_PER_SECOND,
@@ -324,6 +325,19 @@ describe('the bounded wait', () => {
     expect(shouldRetry(0, timedOut)).toBe(false);
     // What it is told apart from: a service that was not reached is still tried once more.
     expect(shouldRetry(0, new TypeError('Failed to fetch'))).toBe(true);
+  });
+
+  it('says a request the person stopped as that, and never repeats it without the person', () => {
+    const stopped = new RequestStopped();
+    const failure = classifyFailure(stopped);
+    expect(failure).toEqual({ kind: 'stopped' });
+    expect(messageFor(failure)).toEqual({
+      title: 'You stopped this before the service answered.',
+      advice: 'Whether the service carried it out is not known. Try again to make sure.',
+      action: { kind: 'retry', label: 'Try again' },
+    });
+    // It is an Error like a failed connection, and is not one: the person stopped it.
+    expect(shouldRetry(0, stopped)).toBe(false);
   });
 });
 

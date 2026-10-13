@@ -29,15 +29,14 @@ import { short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
 import { MAX_DIFF_LINES, type PatchHunk, readPatch } from './patch';
-import { assertSaved, DraftNotKept, discardSession, rebaseSession } from './saving';
-import { type ConflictItem, type SnapshotConflict, useDraftSessions } from './sessions';
+import { DraftNotKept, discardSession, rebaseSession } from './saving';
 import {
-  draftConflictsOf,
-  type Snapshotted,
-  saySnapshotted,
-  takeSnapshot,
-  UnsavedSelection,
-} from './snapshot';
+  type ConflictItem,
+  type SnapshotConflict,
+  useDraftSession,
+  useDraftSessions,
+} from './sessions';
+import { draftConflictsOf, type Snapshotted, saySnapshotted, takeSnapshot } from './snapshot';
 
 export interface ConflictNoticeProps {
   workspaceId: string;
@@ -124,6 +123,9 @@ export function ConflictNotice({
 }: ConflictNoticeProps) {
   const client = useQueryClient();
   const heading = useId();
+  // Input of the properties form that is held back is in the session, and goes with it.
+  const session = useDraftSession(workspaceId, itemId);
+  const heldBack = session !== undefined && session.heldBack !== null;
   const item = conflict.conflict;
   // The diff on the page is bounded: so many lines over all of the item's files, the rest counted.
   const files: Array<{ change: FileChange; hunks: PatchHunk[] }> = [];
@@ -141,14 +143,11 @@ export function ConflictNotice({
 
   const keep = useMutation({
     mutationFn: async () => {
+      // The draft is kept once the text on screen is saved on that revision: text typed
+      // meanwhile is saved by it too, and a save that failed is its failure, said as such. The
+      // Snapshot that follows in the same turn therefore finds nothing unsaved.
       await rebaseSession(client, workspaceId, itemId, item.current_revision);
-      try {
-        return await takeSnapshot(client, workspaceId, [itemId], conflict.message);
-      } catch (error) {
-        // Text typed meanwhile could not be saved: the reason is the save's, and is said as such.
-        if (error instanceof UnsavedSelection) assertSaved(workspaceId, itemId);
-        throw error;
-      }
+      return takeSnapshot(client, workspaceId, [itemId], conflict.message);
     },
     onSuccess: (snapshotted) => {
       saySnapshotted(workspaceId, conflict.message, snapshotted);
@@ -243,8 +242,10 @@ export function ConflictNotice({
         <fieldset className="confirm">
           <legend>Discard your draft and take the newer version?</legend>
           <p>
-            Your text here will be removed. The newer version is shown once the workspace is
-            refreshed.
+            {heldBack
+              ? 'Your text here, and what you changed in the properties that is not saved, will be removed.'
+              : 'Your text here will be removed.'}{' '}
+            The newer version is shown once the workspace is refreshed.
           </p>
           <button
             type="button"

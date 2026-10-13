@@ -2,7 +2,8 @@
  * The mark an item carries wherever it is named (a tab, a row of the tree): how its draft stands.
  *
  * "draft": the service holds the person's draft of it. "unsaved": this page holds text of it the
- * service has not confirmed yet. "not saved": the last save of that text failed, or it is too long
+ * service has not confirmed yet, or input of its properties form that is held back and in no
+ * save. "not saved": the last save of that text failed, or it is too long
  * to save. No mark: no draft and nothing typed. The mark belongs to the item, not to a revision,
  * so a tab that shows a cited revision carries it as well.
  */
@@ -15,7 +16,7 @@ export type DraftMark = 'draft' | 'unsaved' | 'not saved';
 export function draftMarkOf(session: DraftSession | undefined, held: boolean): DraftMark | null {
   const state = session === undefined ? null : saveStateOf(session);
   if (state === 'failed' || state === 'too-long') return 'not saved';
-  if (state === 'unsaved' || state === 'saving') return 'unsaved';
+  if (state === 'unsaved' || state === 'saving' || state === 'held-back') return 'unsaved';
   if (state === 'saved') return 'draft';
   return held ? 'draft' : null;
 }

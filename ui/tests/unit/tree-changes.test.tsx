@@ -1205,7 +1205,11 @@ describe('the draft of an item the person deleted', () => {
 
   it('keeps text that was typed and never saved on the page, read-only, and says it is only there', async () => {
     const { typeInto } = await import('./support/editor');
-    service({ [SAVE]: () => refuse(404, 'not_found', 'no such item at the head') });
+    // As the service answers: the item is not at the head, and the person has no draft of it.
+    service({
+      [SAVE]: () => refuse(404, 'not_found', 'no such item at the head'),
+      [DISCARD]: () => refuse(404, 'not_found', 'the caller has no draft of this item'),
+    });
     await openTree(`/w/${WS}/i/${NOTE}`);
     await screen.findByText('Text of Meeting notes');
     await userEvent.click(within(pane()).getByRole('button', { name: 'Edit' }));

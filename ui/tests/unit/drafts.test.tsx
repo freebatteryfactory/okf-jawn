@@ -6,7 +6,7 @@
 import { QueryObserver } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { REQUEST_TIMEOUT_MS } from '../../src/app/api-client';
+import { REQUEST_TIMEOUT_MS, UPLOAD_BYTES_PER_SECOND } from '../../src/app/api-client';
 import { createQueryClient } from '../../src/app/query-client';
 import { itemOptions } from '../../src/features/documents/DocumentView';
 import { draftsOptions, rememberDraft } from '../../src/features/drafts/drafts-list';
@@ -14,6 +14,7 @@ import {
   AUTOSAVE_DELAY_MS,
   MAX_BODY_BYTES,
   resetDraftSessions,
+  STILL_SENDING_AFTER_MS,
 } from '../../src/features/drafts/saving';
 import { fail, type Handler, type Json, mockApi, ok, type Reply } from './support/api';
 import { findTextBox, replaceText, textBox, textIn, typeInto } from './support/editor';
@@ -164,10 +165,107 @@ describe('who may edit, and where', () => {
     expect(api.callsTo(SAVE)).toHaveLength(0);
   });
 
+  // The line that leads to editing is for Notes too: a pane of a Source or a View that reads
+  // another revision is not offered a way to an editor it does not have.
+  it.each([
+    ['a Source', 'source', 'Annual report'],
+    ['a View', 'view', 'Quarterly'],
+  ] as const)(
+    'says nothing of editing for %s that is read at another revision',
+    async (_what, kind, title) => {
+      const item = summary(SOURCE, 'things/it.md', title, 'thing', kind);
+      writable({
+        [ITEM]: () => ok(itemDocument(item)),
+        '/api/reads/read-item': () => ok(readResponse(item, `# ${title}\n\nCommitted text`)),
+      });
+      renderAt(`/w/${WS}/i/${SOURCE}?rev=${OLD}`);
+      await screen.findByText('Committed text');
+      // `get_item` has answered: the header says what kind of item this is.
+      await screen.findByText(new RegExp(`${kind === 'source' ? 'Source' : 'View'} · type`));
+      expect(screen.queryByText(/Editing starts from/)).toBeNull();
+      expect(
+        screen.queryByRole('button', { name: 'Open the version this workspace shows' }),
+      ).toBeNull();
+      expect(screen.queryByRole('button', { name: /Edit/ })).toBeNull();
+    },
+  );
+
   it('lets a tab that cites the shown version be edited', async () => {
     writable();
     renderAt(`/w/${WS}/i/${NOTE}?rev=${HEAD}`);
     expect(await screen.findByRole('button', { name: 'Edit' })).toBeDefined();
+  });
+
+  // Nothing says an item's kind stays what it was: it is what the last read of the item answered.
+  describe('an item whose kind is another at the next revision', () => {
+    const NEWER = 'd'.repeat(40);
+    const asSource = summary(NOTE, 'notes/meeting.md', 'Meeting notes', 'meeting-note', 'source');
+
+    /** The note at the head shown; at the newer head the same item is a Source. */
+    function becomesSource() {
+      const held = { head: HEAD };
+      const api = writable({
+        '/api/workspaces/open-workspace': () => ok({ ...writableWorkspace, head: held.head }),
+        [ITEM]: (body) =>
+          ok(
+            itemDocument(
+              body.item_id !== NOTE
+                ? otherSummary
+                : JSON.stringify(body.at).includes(NEWER)
+                  ? asSource
+                  : noteSummary,
+            ),
+          ),
+      });
+      return { api, held };
+    }
+
+    it('stops offering "Edit" once a read says it is a Source, and focus on the switch goes to the page’s heading', async () => {
+      const { held } = becomesSource();
+      renderAt(`/w/${WS}/i/${NOTE}`);
+      const edit = await screen.findByRole('button', { name: 'Edit' });
+      await screen.findByText('Text of Meeting notes');
+      act(() => edit.focus());
+      held.head = NEWER;
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+      await screen.findByText(`Refreshed: now showing revision ${NEWER.slice(0, 10)}.`);
+      await screen.findByText(/Source · type/);
+      expect(screen.queryByRole('button', { name: /Edit/ })).toBeNull();
+      expect(edit.isConnected).toBe(false);
+      expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1 }));
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    it('keeps the switch, with focus, while the item is read again', async () => {
+      const read: { hold: boolean; answer?: () => void } = { hold: false };
+      const held = { head: HEAD };
+      writable({
+        '/api/workspaces/open-workspace': () => ok({ ...writableWorkspace, head: held.head }),
+        [ITEM]: (body) => {
+          const reply = ok(itemDocument(body.item_id === NOTE ? noteSummary : otherSummary));
+          if (body.item_id !== NOTE || !read.hold) return reply;
+          return new Promise<Reply>((resolve) => {
+            read.answer = () => resolve(reply);
+          });
+        },
+      });
+      renderAt(`/w/${WS}/i/${NOTE}`);
+      const edit = await screen.findByRole('button', { name: 'Edit' });
+      await screen.findByText('Text of Meeting notes');
+      act(() => edit.focus());
+      held.head = NEWER;
+      read.hold = true;
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+      await screen.findByText(`Refreshed: now showing revision ${NEWER.slice(0, 10)}.`);
+      await waitFor(() => expect(read.answer).toBeDefined());
+      // The read at the new revision has no answer yet: what the last one said stands.
+      expect(edit.isConnected).toBe(true);
+      expect(document.activeElement).toBe(edit);
+      expect(edit.getAttribute('aria-disabled')).toBe('true');
+      act(() => read.answer?.());
+      await waitFor(() => expect(edit.getAttribute('aria-disabled')).toBe('false'));
+      expect(document.activeElement).toBe(edit);
+    });
   });
 });
 
@@ -563,6 +661,21 @@ describe('a text too long to save', () => {
     expect(api.violations).toEqual([]);
   });
 
+  it('is no longer called too long once the text is back to what is saved', async () => {
+    const api = writable();
+    const { box } = await startEditing();
+    replaceText(box, 'x'.repeat(MAX_BODY_BYTES + 1));
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(saveState()).toBe('Not saved: the text is too long.'));
+    // Pasted too long and undone: the text is what the service has, and there is nothing to send.
+    replaceText(box, COMMITTED);
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(saveState()).toBe('No changes to save.'));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
+    expect(api.callsTo(SAVE)).toHaveLength(0);
+  });
+
   it('counts bytes, not characters', async () => {
     const api = writable();
     const { box } = await startEditing();
@@ -575,6 +688,136 @@ describe('a text too long to save', () => {
     await pass(AUTOSAVE_DELAY_MS);
     await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+});
+
+// A large text on a slow link may take long (the wait allows for what is sent): the person is
+// told, and may stop it.
+describe('a save that takes long', () => {
+  /** Large enough that its wait is four seconds longer than an ordinary request's. */
+  const LARGE = 'x'.repeat(4 * UPLOAD_BYTES_PER_SECOND);
+  const stop = () => screen.queryByRole('button', { name: 'Stop' });
+  /** The signals of the `save_draft` requests sent so far. */
+  const saveSignals = () =>
+    vi
+      .mocked(globalThis.fetch)
+      .mock.calls.filter(([input]) => input instanceof Request && input.url.endsWith(SAVE))
+      .map(([, init]) => init?.signal);
+
+  /** A large text is being saved, and `STILL_SENDING_AFTER_MS` less one millisecond have passed. */
+  async function sending(save: Handler) {
+    const api = writable({ [SAVE]: save });
+    const { box } = await startEditing();
+    replaceText(box, LARGE);
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+    await pass(STILL_SENDING_AFTER_MS - 1);
+    return { api, box };
+  }
+
+  it('says it is still sending after 30 seconds, and offers "Stop": not before, and focus stays', async () => {
+    const { box } = await sending(() => new Promise<never>(() => {}));
+    expect(STILL_SENDING_AFTER_MS).toBe(30_000);
+    expect(saveState()).toBe('Saving…');
+    expect(stop()).toBeNull();
+    await pass(1);
+    expect(saveState()).toBe('Still sending…');
+    expect(stop()).not.toBeNull();
+    // Nothing takes focus from where the person put it.
+    expect(document.activeElement).toBe(box);
+    expect(screen.getByRole('tab', { name: 'Meeting notes (unsaved)' })).toBeDefined();
+  });
+
+  it('stops the request at "Stop": the text is not saved, a save is owed, and focus is in the text box', async () => {
+    let answering = false;
+    const { api, box } = await sending((body) =>
+      answering ? saved(body) : new Promise<never>(() => {}),
+    );
+    await pass(1);
+    // A change made meanwhile has come due, and waits for the save in flight.
+    typeInto(box, ' and more');
+    await pass(AUTOSAVE_DELAY_MS);
+    expect(api.callsTo(SAVE)).toHaveLength(1);
+    const button = stop();
+    if (button === null) throw new Error('no "Stop"');
+    act(() => button.focus());
+    fireEvent.click(button);
+    await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+    // The request itself was aborted, not only forgotten.
+    expect(saveSignals().map((signal) => signal?.aborted)).toEqual([true]);
+    expect(
+      screen.getByText('Saving this draft: You stopped this before the service answered.'),
+    ).toBeDefined();
+    expect(screen.getByText(/Whether the service carried it out is not known\./)).toBeDefined();
+    expect(stop()).toBeNull();
+    expect(document.activeElement).toBe(box);
+    expect(textIn(box)).toBe(`${LARGE} and more`);
+    expect(screen.getByRole('tab', { name: 'Meeting notes (not saved)' })).toBeDefined();
+    // Stopped is stopped: nothing is sent by itself, though a change was waiting.
+    await pass(AUTOSAVE_DELAY_MS * 5);
+    expect(api.callsTo(SAVE)).toHaveLength(1);
+    // The save is owed: the retry sends the text on screen, as a save like any other.
+    answering = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+    expect(api.callsTo(SAVE).at(1)?.body).toBe(`${LARGE} and more`);
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+    expect(api.violations).toEqual([]);
+  });
+
+  it('sends nothing by itself after Stop, for a change still inside the autosave delay', async () => {
+    const { api, box } = await sending(() => new Promise<never>(() => {}));
+    await pass(1);
+    // A change made while the save is in flight, its autosave still pending when Stop is pressed.
+    typeInto(box, ' and more');
+    await pass(100);
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+    await pass(AUTOSAVE_DELAY_MS * 5);
+    expect(api.callsTo(SAVE)).toHaveLength(1);
+    expect(textIn(box)).toBe(`${LARGE} and more`);
+  });
+
+  it('repeats a stopped save under its key when the text is the same, and starts it as "Saving…"', async () => {
+    const { api } = await sending(() => new Promise<never>(() => {}));
+    await pass(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+    // It may have been applied: the same request, so the service does not apply it twice.
+    expect(api.callsTo(SAVE).at(1)).toEqual(api.callsTo(SAVE).at(0));
+    // A new save starts as one: it is not "still" being sent, and there is nothing to stop yet.
+    expect(saveState()).toBe('Saving…');
+    expect(stop()).toBeNull();
+  });
+
+  it('moves focus from "Stop" to the text box when the save answers by itself', async () => {
+    const answers: Array<() => void> = [];
+    const { box } = await sending(
+      (body) => new Promise<Reply>((resolve) => answers.push(() => resolve(saved(body)))),
+    );
+    await pass(1);
+    const button = stop();
+    if (button === null) throw new Error('no "Stop"');
+    act(() => button.focus());
+    act(() => answers.at(0)?.());
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+    expect(button.isConnected).toBe(false);
+    expect(document.activeElement).toBe(box);
+  });
+
+  it('times out an ordinary save at that same moment, with nothing to stop', async () => {
+    writable({ [SAVE]: () => new Promise<never>(() => {}) });
+    const { box } = await startEditing();
+    typeInto(box, ' one');
+    await pass(AUTOSAVE_DELAY_MS);
+    await pass(STILL_SENDING_AFTER_MS);
+    await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+    expect(stop()).toBeNull();
+    expect(
+      screen.getByText('Saving this draft: The workspace service did not answer in time.'),
+    ).toBeDefined();
   });
 });
 
@@ -810,6 +1053,27 @@ describe('the same item in two panes', () => {
     await eventually(() =>
       expect(api.callsTo(SAVE).at(-1)?.body).toBe(`${COMMITTED} first words then these`),
     );
+  });
+
+  it('gives the editor up when its pane goes back to reading: no pane is said to edit while none does', async () => {
+    const { box } = await editedAndSplit();
+    await eventually(() =>
+      expect(within(pane(2, 2)).getByRole('button', { name: 'Edit here' })).toBeDefined(),
+    );
+    const first = () => screen.getByRole('region', { name: /^Documents, pane 1 of 2/ });
+    const second = () => screen.getByRole('region', { name: /^Documents, pane 2 of 2/ });
+    fireEvent.click(within(first()).getByRole('button', { name: 'Read the committed text' }));
+    // The pane that had said "being edited in another pane" wanted the editor: it has it now.
+    await eventually(() => expect(boxes()).toHaveLength(1));
+    const moved = boxes().at(0);
+    if (moved === undefined) throw new Error('no editor');
+    expect(moved).not.toBe(box);
+    expect(second().contains(moved)).toBe(true);
+    expect(textIn(moved)).toBe(`${COMMITTED} first words`);
+    expect(within(second()).queryByText(/being edited in another pane/)).toBeNull();
+    // The one line that says so is in the pane that reads, and it is true.
+    expect(within(first()).getByText(/being edited in another pane/)).toBeDefined();
+    expect(screen.getAllByText(/being edited in another pane/)).toHaveLength(1);
   });
 
   it('lets the other pane edit once the editing pane is closed', async () => {
@@ -1260,24 +1524,150 @@ describe('discarding a draft', () => {
     expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
   });
 
-  it('asks nothing of the service for text that was never saved', async () => {
-    const api = writable({ [SAVE]: () => fail(503, 'unavailable', 'busy') });
+  it('asks nothing of the service for text no save of which was ever sent', async () => {
+    const api = writable();
     const { box } = await startEditing();
     expect(
       screen.getByRole('button', { name: 'Discard draft' }).getAttribute('aria-disabled'),
     ).toBe('true');
     typeInto(box, ' unwanted');
-    await pass(AUTOSAVE_DELAY_MS);
-    await screenButton('Try again');
+    // Discarded before the autosave: the service was never asked to hold any of it.
     fireEvent.click(screen.getByRole('button', { name: 'Discard draft' }));
     fireEvent.click(screen.getByRole('button', { name: 'Discard the draft' }));
     await eventually(() => expect(screen.getByText('Text of Meeting notes')).toBeDefined());
+    await pass(AUTOSAVE_DELAY_MS * 3);
     expect(api.callsTo(DISCARD)).toHaveLength(0);
+    expect(api.callsTo(SAVE)).toHaveLength(0);
     expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
     // Editing again starts from the committed text, not from what was discarded.
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
     await eventually(() => textBox('Text of Meeting notes'));
     expect(textIn(textBox('Text of Meeting notes'))).toBe(COMMITTED);
+  });
+
+  // A first save that failed or timed out may have been applied: the service may hold the draft.
+  describe('after a first save whose outcome is unknown', () => {
+    const COMMIT = '/api/history/commit-items';
+
+    /** A service that holds what it is sent, and whose first save answers as `first` says. */
+    function service(first: 'never answers' | 'refuses and holds nothing') {
+      const state: { draft: string | null; committed: string } = {
+        draft: null,
+        committed: COMMITTED,
+      };
+      const held = () => (state.draft === null ? null : draftOf(NOTE, HEAD, LATER));
+      const api = writable({
+        [ITEM]: (body) => {
+          if (body.item_id !== NOTE) return ok(itemDocument(otherSummary));
+          const document = { ...itemDocument(noteSummary), body: state.committed };
+          const draft = held();
+          return ok(
+            state.draft === null || draft === null
+              ? document
+              : {
+                  ...document,
+                  draft: { body: state.draft, properties: document.properties, draft },
+                },
+          );
+        },
+        [DRAFTS]: () => {
+          const draft = held();
+          return ok({ items: draft === null ? [] : [draft], next_cursor: null });
+        },
+        [SAVE]: (body) => {
+          if (first === 'refuses and holds nothing') return fail(503, 'unavailable', 'busy');
+          // Applied, and its answer never arrives.
+          state.draft = String(body.body);
+          return new Promise<never>(() => {});
+        },
+        [DISCARD]: () => {
+          const was = held();
+          state.draft = null;
+          return was === null ? fail(404, 'not_found', 'you hold no draft of this item') : ok(was);
+        },
+        [COMMIT]: () => {
+          state.committed = state.draft ?? state.committed;
+          state.draft = null;
+          return ok({ revision: 'c'.repeat(40), receipt_id: NOTE, warnings: [] });
+        },
+      });
+      return { api, state };
+    }
+
+    async function discardAfterTheSave() {
+      const { box } = await startEditing();
+      typeInto(box, ' secret words');
+      await pass(AUTOSAVE_DELAY_MS);
+      await pass(REQUEST_TIMEOUT_MS);
+      await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+      const discard = screen.getByRole('button', { name: 'Discard draft' });
+      act(() => discard.focus());
+      fireEvent.click(discard);
+      fireEvent.click(screen.getByRole('button', { name: 'Discard the draft' }));
+      await eventually(() =>
+        expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull(),
+      );
+    }
+
+    it('asks the service to discard, so the draft is not listed and no Snapshot commits it', async () => {
+      const { api, state } = service('never answers');
+      await discardAfterTheSave();
+      expect(api.callsTo(DISCARD)).toHaveLength(1);
+      expect(api.callsTo(DISCARD).at(0)).toMatchObject({ workspace_id: WS, item_id: NOTE });
+      expect(state.draft).toBeNull();
+      // The pane and the panel agree: no draft, anywhere.
+      const drafts = await eventuallyGet(() => screen.getByRole('region', { name: 'Drafts (0)' }));
+      expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Edit' }));
+      // A Snapshot has nothing to take, and takes nothing.
+      fireEvent.change(within(drafts).getByRole('textbox', { name: 'Snapshot name' }), {
+        target: { value: 'Tidy' },
+      });
+      fireEvent.click(within(drafts).getByRole('button', { name: 'Snapshot 0 drafts' }));
+      await pass(AUTOSAVE_DELAY_MS * 3);
+      expect(api.callsTo(COMMIT)).toHaveLength(0);
+      expect(state.committed).toBe(COMMITTED);
+      expect(api.violations).toEqual([]);
+    });
+
+    it('takes the answer that the service holds no such draft as the discard done', async () => {
+      const { api } = service('refuses and holds nothing');
+      await discardAfterTheSave();
+      expect(api.callsTo(DISCARD)).toHaveLength(1);
+      // "Not found" here is what was asked for: nothing is shown as a failure.
+      expect(screen.queryByText(/^Discarding this draft:/)).toBeNull();
+      expect(screen.queryByText(/could not be found/)).toBeNull();
+      await eventually(() => expect(screen.getByText('Text of Meeting notes')).toBeDefined());
+      expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
+      expect(screen.getByRole('region', { name: 'Drafts (0)' })).toBeDefined();
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Edit' }));
+      // Editing again starts from the committed text.
+      fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+      await eventually(() => textBox('Text of Meeting notes'));
+      expect(textIn(textBox('Text of Meeting notes'))).toBe(COMMITTED);
+    });
+
+    it('keeps the text when the discard itself fails, and says so', async () => {
+      const { api } = service('refuses and holds nothing');
+      const { box } = await startEditing();
+      typeInto(box, ' secret words');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+      // The service is not there for the discard either.
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(() => Promise.reject(new TypeError('Failed to fetch'))),
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Discard draft' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Discard the draft' }));
+      await eventually(() =>
+        expect(
+          screen.getByText('Discarding this draft: The workspace service could not be reached.'),
+        ).toBeDefined(),
+      );
+      expect(textIn(textBox('Text of Meeting notes'))).toBe(`${COMMITTED} secret words`);
+      expect(api.callsTo(DISCARD)).toHaveLength(0);
+    });
   });
 });
 

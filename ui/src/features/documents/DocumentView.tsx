@@ -18,7 +18,8 @@
  * offers "Edit here", which moves the editor, its text and keyboard focus to this pane. So the
  * two can stand side by side, and two editors never write over one draft. An item that
  * has a draft opens on the draft, marked as one. Editing is for Notes: a Source or a View is shown
- * by the reader alone, with no "Edit". A draft is started only where the pane reads the version
+ * by the reader alone, with no "Edit"; the kind is the one the last read of the item answered.
+ * A draft is started only where the pane reads the version
  * the workspace shows and the person may write; a pane of a Note that reads another revision says
  * so and offers that version. The switch is one element whatever it says, so it keeps keyboard
  * focus; "Edit" moves focus into the text box, and after a discard focus is on the switch.
@@ -116,6 +117,7 @@ const DRAFT_STANDS = {
   saved: 'You have a draft of this item.',
   failed: 'You have changes to this item that are not saved.',
   'too-long': 'You have changes to this item that are not saved.',
+  'held-back': 'You changed this item’s properties, and that is held back and not saved.',
 } as const;
 
 const ROLE = { note: 'Note', source: 'Source', view: 'View' } as const;
@@ -354,19 +356,21 @@ export function DocumentView({
   // Reading or editing. Until the person chooses, an item with a draft opens on the draft.
   const session = useDraftSession(workspaceId, itemId);
   // Editing is for Notes: a Source's text is changed through corrections and a View has its own
-  // editor, so neither is offered "Edit". Whether the item is a Note is known once `get_item` has
-  // answered, and stays known while the item is read again at another revision (an item's kind
-  // never changes), so the switch does not leave under keyboard focus. A session exists only for
-  // a Note.
+  // editor, so neither is offered "Edit". What kind the item is, is what the last `get_item` that
+  // answered said. It is read with every read, not kept from the first: no sentence of SPEC or of
+  // the contract says an item's kind stays what it was (`ItemKind` is its "built-in rendering
+  // role", a field of each answer). While the item is read again at another revision the last
+  // answer stands, so the switch does not leave under keyboard focus for the time of a read. A
+  // session is begun only for a Note, and while there is one its editor stays, with its text.
   const atShown = canWrite && revision === head;
-  const [seenAsNote, setSeenAsNote] = useState(false);
-  if (!seenAsNote && document?.summary.kind === 'note') setSeenAsNote(true);
+  const [kind, setKind] = useState<ItemSummary['kind'] | null>(null);
+  if (document !== undefined && kind !== document.summary.kind) setKind(document.summary.kind);
   // The item's type, kept the same way: the form is drawn from it while the item is read again.
   const [typeName, setTypeName] = useState<string | null>(null);
   if (document !== undefined && typeName !== document.summary.type_name) {
     setTypeName(document.summary.type_name);
   }
-  const isNote = session !== undefined || seenAsNote;
+  const isNote = session !== undefined || kind === 'note';
   const editable = atShown && isNote;
   const hasDraft = session !== undefined || (document?.draft ?? null) !== null;
   const [chosen, setChosen] = useState<'read' | 'edit' | null>(null);
@@ -529,8 +533,14 @@ export function DocumentView({
   // pane's switch, as after the other ways out of the editor; with no switch, to the page's heading.
   const heldFocus = useRef<HTMLElement | null>(null);
   const [, editingRef] = useWatchedPart<HTMLDivElement>(heldFocus);
+  // The switch itself leaves when the pane stops being editable (a read says the item is not a
+  // Note any more, the pane no longer reads the version shown, or the person deleted the item).
+  // Focus on it goes to "Close this tab" of a deleted item, else to the page's heading.
+  const heldSwitch = useRef<HTMLElement | null>(null);
+  const [, switchPartRef] = useWatchedPart<HTMLParagraphElement>(heldSwitch);
   useLayoutEffect(() => {
     if (takeHeld(heldFocus)) (switchRef.current ?? pageHeading())?.focus();
+    if (takeHeld(heldSwitch)) (closeRef.current ?? pageHeading())?.focus();
   });
   const reading = JSON.stringify(request);
   const itemFailure = useRetry({
@@ -643,7 +653,7 @@ export function DocumentView({
         </p>
       )}
       {editable && !gone && (
-        <p className="document-actions">
+        <p ref={switchPartRef} className="document-actions">
           {/* aria-disabled, not disabled, while the item is read again: it may hold focus. */}
           <button
             type="button"
