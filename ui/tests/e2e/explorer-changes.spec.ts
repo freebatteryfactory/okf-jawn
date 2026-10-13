@@ -473,7 +473,13 @@ test.describe('changing the tree and the naming rules', () => {
     await shot(page, '28-naming-applied');
 
     // Back to the documents: the open item is the same item, at its new name.
+    // The rules that renamed were never saved, so leaving asks first, on the choice that keeps them.
     await press(page, 'Close the naming rules');
+    await expect(page.getByRole('button', { name: 'Keep editing' })).toBeFocused();
+    await expectVisibleFocus(page);
+    await expectNoAxeViolations(page, 'the question before leaving the naming rules');
+    await shot(page, '32-naming-leave-question');
+    await press(page, 'Discard my changes');
     await expect(page.getByText('notes/2025-plan.md', { exact: true })).toBeVisible();
     expect(await focusSettled(page)).toBe('button:Naming rules');
     await expectVisibleFocus(page);
@@ -502,7 +508,9 @@ test.describe('changing the tree and the naming rules', () => {
     await shot(page, '30-naming-rules-yaml');
     await press(page, 'Save the rules');
     expect(played.sent).toEqual([]);
+    // Text that cannot be read is an edit too: leaving asks, and the person discards it.
     await press(page, 'Close the naming rules');
+    await press(page, 'Discard my changes');
 
     // The properties of the open note: its editor, then the YAML tab.
     await press(page, 'Edit', documents(page));

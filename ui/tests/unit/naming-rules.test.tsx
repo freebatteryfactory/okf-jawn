@@ -556,8 +556,10 @@ describe('the naming rules', () => {
     expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Naming rules' }));
     expect(screen.getByText(/Showing the workspace as of/).textContent).toContain('cccccccccc');
     // The open item is the same item at its new name, once its tab is back in view: the tab
-    // that cited the old head cites the revision the renaming made.
+    // that cited the old head cites the revision the renaming made. The rules that renamed were
+    // never saved, so closing asks first.
     await userEvent.click(button('Close the naming rules'));
+    await userEvent.click(button('Discard my changes'));
     expect(await screen.findByText('notes/2025-meeting.md')).toBeTruthy();
     expect(screen.queryByText('notes/meeting.md')).toBeNull();
     expect(screen.getByRole('tab', { name: 'Meeting notes' }).getAttribute('data-item-id')).toBe(
@@ -1227,5 +1229,110 @@ describe('the person’s drafts of items a renaming renames', () => {
     expect(
       api.callsTo('/api/items/get-item').filter((body) => revisionAsked(body, '') === FIRST),
     ).toEqual([]);
+  });
+});
+
+describe('leaving the naming rules with edits that are not saved', () => {
+  const question = () =>
+    screen.queryByRole('group', { name: 'Leave the naming rules without saving?' });
+  const close = () => button('Close the naming rules');
+  const leavingAsks = () => {
+    const event = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  };
+
+  it('asks before Close, keeps the edits on "Keep editing", and discards them only when told', async () => {
+    service();
+    await openRules();
+    await setPrefix('unsaved-');
+    await userEvent.click(close());
+    // Still open, with the question; focus on the choice that loses nothing.
+    expect(question()).not.toBeNull();
+    expect(document.activeElement).toBe(button('Keep editing'));
+    await userEvent.keyboard('{Enter}');
+    expect(question()).toBeNull();
+    expect(document.activeElement).toBe(close());
+    expect(prefix()).toHaveProperty('value', 'unsaved-');
+    await userEvent.click(close());
+    await userEvent.click(button('Discard my changes'));
+    expect(screen.queryByRole('region', { name: 'Naming rules' })).toBeNull();
+    expect(document.activeElement).toBe(button('Naming rules'));
+    await userEvent.click(button('Naming rules'));
+    await within(panel()).findByRole('textbox', { name: /^prefix/ });
+    expect(prefix()).toHaveProperty('value', '');
+  });
+
+  it('asks nothing when there is nothing to lose: rules put back to the saved ones', async () => {
+    service();
+    await openRules();
+    await setPrefix('x');
+    // Put back in the YAML view (the form drops a text it is emptied of).
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const box = await findTextBox('The naming rules as YAML');
+    typeYaml(box, textIn(box).replace(/prefix: .*/, 'prefix: ""'));
+    expect(leavingAsks()).toBe(false);
+    await userEvent.click(close());
+    expect(screen.queryByRole('region', { name: 'Naming rules' })).toBeNull();
+  });
+
+  it('asks before an item is opened from the folders, and opens it only after "Discard my changes"', async () => {
+    service();
+    await openRules();
+    await setPrefix('unsaved-');
+    const tree = screen.getByRole('tree', { name: 'Folders' });
+    const report = within(tree).getByRole('treeitem', { name: /Annual report/ });
+    await userEvent.click(report);
+    expect(question()).not.toBeNull();
+    expect(screen.queryByText('Text of Annual report')).toBeNull();
+    await userEvent.click(button('Keep editing'));
+    // Back to what asked to leave: the row that was pressed.
+    expect(document.activeElement).toBe(report);
+    expect(prefix()).toHaveProperty('value', 'unsaved-');
+    await userEvent.click(report);
+    await userEvent.click(button('Discard my changes'));
+    expect(await screen.findByText('Text of Annual report')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Naming rules' })).toBeNull();
+  });
+
+  it('asks before the shell’s own button closes the panel', async () => {
+    service();
+    await openRules();
+    await setPrefix('unsaved-');
+    await userEvent.click(button('Naming rules'));
+    expect(question()).not.toBeNull();
+    expect(screen.getByRole('region', { name: 'Naming rules' })).toBeTruthy();
+    await userEvent.click(button('Keep editing'));
+    expect(document.activeElement).toBe(button('Naming rules'));
+  });
+
+  it('counts YAML that cannot be read, and text typed a moment ago, as edits', async () => {
+    service();
+    await openRules();
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const box = await findTextBox('The naming rules as YAML');
+    // Typed, and not yet read: the pause has not passed.
+    replaceText(box, textIn(box).replace(/prefix: .*/, 'prefix: typed-'));
+    await userEvent.click(close());
+    expect(question()).not.toBeNull();
+    await userEvent.click(button('Keep editing'));
+    typeYaml(await findTextBox('The naming rules as YAML'), 'rules: [\n');
+    expect(leavingAsks()).toBe(true);
+    await userEvent.click(close());
+    expect(question()).not.toBeNull();
+  });
+
+  it('lets the browser ask before a reload while the rules hold edits, and not after they are saved', async () => {
+    service();
+    await openRules();
+    expect(leavingAsks()).toBe(false);
+    await setPrefix('2025-');
+    expect(leavingAsks()).toBe(true);
+    await userEvent.click(button('Save the rules'));
+    await waitFor(() => expect(said()).toContain('The rules are saved.'));
+    await waitFor(() =>
+      expect(panel().textContent).toContain('These are the saved rules, unchanged.'),
+    );
+    expect(leavingAsks()).toBe(false);
   });
 });

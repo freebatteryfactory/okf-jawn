@@ -24,6 +24,14 @@
  * stale preview must not silently apply to changed source state"). A save that failed is tried
  * again only while the rules on screen are the ones it carried.
  *
+ * Edits that are not saved are not lost silently. While the rules differ from the saved ones, or
+ * the YAML view holds text that cannot be read, leaving asks first: "Close the naming rules",
+ * the shell's own ways out (its "Naming rules" button, opening an item, which puts the
+ * documents back in this place: `leaveGuard`), and a reload or a closed browser tab (the browser's
+ * own question, `beforeunload`, as for a draft's text). The question opens on "Keep editing",
+ * which gives focus back to what asked to leave. Not asked: leaving the workspace itself by a link
+ * to another page.
+ *
  * Focus: the panel opens on its heading; a preview puts focus on the preview's heading; the
  * question before renaming opens on the choice that keeps the names, and gives focus back to the
  * button that opened it; after the renaming focus is on the panel's heading. When the question
@@ -38,7 +46,7 @@
 import { Tabs } from '@base-ui/react/tabs';
 import type { RJSFSchema } from '@rjsf/utils';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useId, useLayoutEffect, useRef, useState } from 'react';
+import { type RefObject, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { z } from 'zod';
 import type { NamingRules, RenamePlan, Revision } from '../../api/generated/types.gen';
 import { takeHeld, useWatchedPart } from '../../lib/focus';
@@ -65,9 +73,17 @@ import {
   saveRules,
 } from './rules';
 
+/** Leave the naming rules by `proceed`, after a question when edits would be lost. */
+export type LeaveGuard = (proceed: () => void) => void;
+
 export interface NamingRulesProps {
   /** Leave the naming rules; the caller puts focus back on what opened them. */
   onClose: () => void;
+  /**
+   * Set, while the panel is on screen, to its guard: the caller leaves through it, so unsaved
+   * edits are asked about first.
+   */
+  leaveGuard?: RefObject<LeaveGuard | null>;
 }
 
 const zSchema = z.record(z.string(), z.unknown());
@@ -95,7 +111,7 @@ export function staleReason(
   return null;
 }
 
-export function NamingRulesPanel({ onClose }: NamingRulesProps) {
+export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   const client = useQueryClient();
   const { workspaceId, head, canWrite } = useWorkspaceChanges();
   const heading = useId();
@@ -166,7 +182,12 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
   const [refused, setRefused] = useState<RenamePlan | null>(null);
   const [asking, setAsking] = useState(false);
   // Where focus goes in the commit that shows what an action did.
-  const focusNext = useRef<'heading' | 'preview' | 'keep' | 'apply' | 'problems' | null>('heading');
+  const focusNext = useRef<
+    'heading' | 'preview' | 'keep' | 'apply' | 'problems' | 'stay' | 'opener' | null
+  >('heading');
+  const stayButton = useRef<HTMLButtonElement | null>(null);
+  /** What asked to leave: where focus goes back when the person stays. */
+  const opener = useRef<HTMLElement | null>(null);
   // The question before a renaming, watched: whether it left the page with keyboard focus in it.
   const heldInQuestion = useRef<HTMLElement | null>(null);
   const [, questionRef] = useWatchedPart<HTMLFieldSetElement>(heldInQuestion);
@@ -182,6 +203,9 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
             keep: keepButton,
             apply: applyButton,
             problems: problemsRef,
+            stay: stayButton,
+            // What asked to leave, when it is still on the page; else the panel's heading.
+            opener: opener.current?.isConnected === true ? opener : headingRef,
           }[next].current;
     if (target !== null) {
       focusNext.current = null;
@@ -277,6 +301,44 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
     const read = reading.flush();
     return read?.ok === true && staleReason(shown, head, read.value, refused) !== null;
   };
+  // Leaving with edits that are not saved asks first.
+  const [leaving, setLeaving] = useState<{ proceed: () => void } | null>(null);
+  /** Whether leaving now would lose edits; text typed a moment ago is read first. */
+  const unsavedNow = () => {
+    const read = reading.flush();
+    if (read === null) return unreadable || changed;
+    return !read.ok || (saved.data !== undefined && !sameRules(read.value, saved.data));
+  };
+  const leave: LeaveGuard = (proceed) => {
+    if (!unsavedNow()) {
+      proceed();
+      return;
+    }
+    opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    focusNext.current = 'stay';
+    setLeaving({ proceed });
+  };
+  const guard = useRef(leave);
+  const unsaved = useRef(unsavedNow);
+  useEffect(() => {
+    guard.current = leave;
+    unsaved.current = unsavedNow;
+  });
+  useEffect(() => {
+    if (leaveGuard === undefined) return;
+    leaveGuard.current = (proceed) => guard.current(proceed);
+    return () => {
+      leaveGuard.current = null;
+    };
+  }, [leaveGuard]);
+  // A reload or a closed browser tab: the browser asks, as it does for a draft's text.
+  useEffect(() => {
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (unsaved.current()) event.preventDefault();
+    };
+    window.addEventListener('beforeunload', beforeUnload);
+    return () => window.removeEventListener('beforeunload', beforeUnload);
+  }, []);
   const startPreview = () => {
     if (previewing.isPending) return;
     const wrong = folderProblem(folder);
@@ -303,10 +365,40 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
         <h2 id={heading} ref={headingRef} tabIndex={-1} className="panel-heading">
           Naming rules
         </h2>
-        <button type="button" onClick={onClose}>
+        <button type="button" onClick={() => leave(onClose)}>
           Close the naming rules
         </button>
       </div>
+      {leaving !== null && (
+        <fieldset className="confirm">
+          <legend>Leave the naming rules without saving?</legend>
+          <p>
+            Your changes to the rules are not saved. Leaving discards them; the saved rules and the
+            workspace stay as they are.
+          </p>
+          <p className="change-buttons">
+            <button
+              type="button"
+              ref={stayButton}
+              onClick={() => {
+                focusNext.current = 'opener';
+                setLeaving(null);
+              }}
+            >
+              Keep editing
+            </button>{' '}
+            <button
+              type="button"
+              onClick={() => {
+                setLeaving(null);
+                leaving.proceed();
+              }}
+            >
+              Discard my changes
+            </button>
+          </p>
+        </fieldset>
+      )}
       <p className="meta">
         How files in this workspace are named. These are the rules of the version shown, revision{' '}
         <code title={head}>{short(head)}</code>. Changing them here changes nothing until you save

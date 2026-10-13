@@ -19,7 +19,7 @@ import { openWorkspace } from '../../api/generated/sdk.gen';
 import type { Workspace } from '../../api/generated/types.gen';
 import { zItemId } from '../../api/generated/zod.gen';
 import { Instant } from '../../lib/instant';
-import { NamingRulesPanel } from '../conventions/NamingRules';
+import { type LeaveGuard, NamingRulesPanel } from '../conventions/NamingRules';
 import { itemOptions } from '../documents/DocumentView';
 import { short } from '../documents/describe';
 import { DraftsPanel } from '../drafts/DraftsPanel';
@@ -101,6 +101,13 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
   // is this page's own state, like its open tabs. Closing gives focus back to the button.
   const [rulesOpen, setRulesOpen] = useState(false);
   const rulesButton = useRef<HTMLButtonElement | null>(null);
+  // The panel's guard, while it is open: leaving it asks first when edits would be lost.
+  const rulesGuard = useRef<LeaveGuard | null>(null);
+  const leaveRules = (proceed: () => void) => {
+    const guard = rulesOpen ? rulesGuard.current : null;
+    if (guard === null) proceed();
+    else guard(proceed);
+  };
   const focusRulesButton = useRef(false);
   useLayoutEffect(() => {
     if (!focusRulesButton.current || rulesOpen) return;
@@ -128,8 +135,18 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
    * Links to a workspace (the list, failure notices) name no item revision.
    */
   const goToItem = (target: string, destination: Destination = {}) => {
-    // An item that is opened is shown: the documents come back in place of the naming rules.
-    if (destination.replace !== true) setRulesOpen(false);
+    // An item that is opened is shown: the documents come back in place of the naming rules,
+    // after the panel's question when its edits are not saved.
+    if (destination.replace !== true && rulesOpen) {
+      leaveRules(() => {
+        setRulesOpen(false);
+        openItemAt(target, destination);
+      });
+      return;
+    }
+    openItemAt(target, destination);
+  };
+  const openItemAt = (target: string, destination: Destination) => {
     void navigate({
       to: '/w/$workspaceId/i/$itemId',
       params: { workspaceId, itemId: target },
@@ -224,7 +241,10 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
             type="button"
             ref={rulesButton}
             aria-expanded={rulesOpen}
-            onClick={() => setRulesOpen((open) => !open)}
+            onClick={() => {
+              if (!rulesOpen) setRulesOpen(true);
+              else leaveRules(() => setRulesOpen(false));
+            }}
           >
             Naming rules
           </button>
@@ -270,6 +290,7 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
             {rulesOpen && (
               <div className="pane">
                 <NamingRulesPanel
+                  leaveGuard={rulesGuard}
                   onClose={() => {
                     focusRulesButton.current = true;
                     setRulesOpen(false);
