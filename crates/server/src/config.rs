@@ -4,7 +4,9 @@
 //! configuration, and "a missing or invalid hosted configuration never falls back to local
 //! authentication". `OKF_AUTH_MODE` selects the path: `local`, or `workos` for hosted, spelled
 //! exactly (a value with surrounding whitespace is refused, not trimmed into a mode). An unset
-//! mode is local only when no `WORKOS_*` setting is present: hosted settings are never ignored.
+//! mode is local only when no `WORKOS_*` setting is present: hosted settings are never ignored
+//! without a mode. With `OKF_AUTH_MODE=local` spelled out, `WORKOS_*` settings that are present
+//! are not read and do not stop startup: the operator chose local, in so many words.
 //! Any other value is refused, and `workos` with a missing or invalid setting is refused, so a
 //! hosted deployment either starts hosted or does not start. A hosted URL with a query, a
 //! fragment or user information is refused, naming its setting.

@@ -662,6 +662,31 @@ async fn a_credential_authenticates_only_while_it_would_authenticate_a_new_reque
     Ok(())
 }
 
+#[tokio::test]
+async fn a_credential_the_store_cannot_confirm_does_not_authenticate() -> TestResult {
+    let harness = Harness::new()?;
+    let clock = Arc::new(WallAt(AtomicU64::new(0)));
+    let identity = harness.identity_at(BearerAuth::Local, clock);
+    harness.owner_session("session-secret", FAR_FUTURE)?;
+    harness.connector(false)?;
+    let session = Credential::Session {
+        session_id: session_id_of("session-secret"),
+    };
+    let connector = Credential::Connector {
+        secret_hash: secret_hash(SECRET),
+        connector_id: CONNECTOR.to_owned(),
+    };
+    for credential in [&session, &connector] {
+        assert!(identity.still_authenticates(credential).await);
+        // The store is down: the credential cannot be confirmed, so the answer is no.
+        harness.credentials.fail_lookups(true);
+        assert!(!identity.still_authenticates(credential).await);
+        harness.credentials.fail_lookups(false);
+        assert!(identity.still_authenticates(credential).await);
+    }
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
 #[path = "../../core/tests/support/mod.rs"]

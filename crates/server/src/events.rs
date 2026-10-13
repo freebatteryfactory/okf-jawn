@@ -15,7 +15,10 @@
 //! `Identity::still_authenticates` whether the credential that opened it would authenticate a new
 //! request now (the session not revoked or expired, the connector not revoked, the Connect token
 //! not past its `exp`), and ends if not. So a logout or a revocation closes an open stream within
-//! one poll interval, and no event is delivered after that check fails.
+//! one poll interval, and no event is delivered after that check fails. The check guards the
+//! next poll, not what an earlier poll already fetched: notifications fetched while the
+//! credential lived (at most one page, [`PAGE_LIMIT`]) are still delivered after it dies, as
+//! they would have been a moment sooner. A check the store cannot answer counts as failed.
 //!
 //! A poll that returns a full page is followed by the next poll at once; only a page that is not
 //! full is followed by a wait of the poll interval. Each open stream costs one `list_events` per

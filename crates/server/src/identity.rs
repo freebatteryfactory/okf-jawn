@@ -23,6 +23,9 @@
 //!   `permission_denied`.
 //! - **None**: no `Principal`; every route that needs one answers 401.
 //!
+//! `Identity::still_authenticates` fails closed: when the store cannot be read, the answer is
+//! no, and the response that asked (an event stream) ends. It never keeps one alive on a fault.
+//!
 //! The MCP route accepts the bearer path only: a browser session never reaches it, and a request
 //! without a bearer is answered 401 here, with the `WWW-Authenticate` challenge MCP clients read.
 //! Loopback is never trust and there is no guest owner.

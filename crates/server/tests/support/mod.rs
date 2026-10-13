@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -30,6 +31,8 @@ pub struct FakeCredentials {
     connectors: Mutex<BTreeMap<[u8; 32], Connector>>,
     sessions: Mutex<BTreeMap<String, SessionRecord>>,
     revoked_sessions: Mutex<Vec<String>>,
+    /// While set, every session and connector lookup fails, as a store that is down.
+    down: AtomicBool,
 }
 
 /// A Connect verifier that accepts exactly one token.
@@ -127,6 +130,19 @@ impl FakeCredentials {
         Ok(())
     }
 
+    /// Make every session and connector lookup fail (`true`) or answer again (`false`).
+    pub fn fail_lookups(&self, down: bool) {
+        self.down.store(down, Ordering::SeqCst);
+    }
+
+    /// The fault a lookup answers while the store is down.
+    fn fault(&self) -> Result<(), ApiError> {
+        if self.down.load(Ordering::SeqCst) {
+            return Err(ApiError::new(ErrorCode::Unavailable, "the store is down"));
+        }
+        Ok(())
+    }
+
     /// Every session id revoked so far.
     ///
     /// # Errors
@@ -173,6 +189,7 @@ impl CredentialStore for FakeCredentials {
 
     fn lookup_connector(&self, hash: [u8; 32]) -> PortFuture<'_, Option<Connector>> {
         Box::pin(async move {
+            self.fault()?;
             Ok(self
                 .connectors
                 .lock()
@@ -191,6 +208,7 @@ impl CredentialStore for FakeCredentials {
 
     fn get_session<'a>(&'a self, session_id: &'a str) -> PortFuture<'a, Option<SessionRecord>> {
         Box::pin(async move {
+            self.fault()?;
             Ok(self
                 .sessions
                 .lock()
@@ -380,6 +398,12 @@ mod tests {
         let other = credentials.get_session("s").await?.ok_or("the session")?;
         credentials.add_session_under("t", other)?;
         assert!(credentials.get_session("t").await?.is_some());
+        // A store that is down answers no lookup, and answers again when it is back.
+        credentials.fail_lookups(true);
+        assert!(credentials.get_session("s").await.is_err());
+        assert!(credentials.lookup_connector([0; 32]).await.is_err());
+        credentials.fail_lookups(false);
+        assert!(credentials.lookup_connector([0; 32]).await?.is_none());
         credentials.revoke_session("s").await?;
         assert!(credentials.get_session("s").await?.is_none());
         assert_eq!(credentials.revoked_sessions()?, vec!["s".to_owned()]);
