@@ -295,6 +295,12 @@ describe('two paths that are the same place', () => {
     choose('Choose files…', [fileOf('Big.bin', 'abcd')]);
     expect(rowOf('Big.bin').textContent).not.toContain('Its path is the same');
     expect(uploadButton().textContent).toBe('Upload 1 file');
+    // And the button does what it says: the file is sent, not held back by the other workspace's.
+    fireEvent.click(uploadButton());
+    await waitFor(() =>
+      expect(rowOf('Big.bin').textContent).toContain('Uploaded: the service checked'),
+    );
+    expect(service.slots.map((slot) => slot.filename)).toEqual(['Big.bin']);
   });
 });
 
