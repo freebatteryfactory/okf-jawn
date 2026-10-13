@@ -6,6 +6,10 @@
 //! reported as [`Frame::TooLong`]. At most `limit + 1` bytes of one line are buffered, beside
 //! the reader's own fixed buffer. Input that ends without a line feed still yields its last
 //! line.
+//!
+//! A read that is given up loses no byte: the part of a line read so far stays with the
+//! [`Frames`], and the next read goes on from it. That is what lets the relay look for the
+//! next line only for as long as it waits for something else.
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
@@ -25,6 +29,8 @@ pub enum Frame {
 pub struct Frames<R> {
     reader: R,
     limit: usize,
+    /// The part read so far of the line that is being read.
+    held: Held,
 }
 
 /// The bytes of the line being read: never more than `room` of them.
@@ -38,20 +44,25 @@ struct Held {
 impl<R: AsyncBufRead + Unpin> Frames<R> {
     /// Frame `reader` into lines of at most `limit` bytes.
     pub fn new(reader: R, limit: usize) -> Self {
-        Self { reader, limit }
+        Self {
+            reader,
+            limit,
+            held: Held::new(room(limit)),
+        }
     }
 
-    /// Read the next frame.
+    /// Read the next frame. Dropping the read before it is done loses no byte: what it read
+    /// of a line is kept here, and the next read goes on from it.
     ///
     /// # Errors
     /// Returns the reader's error.
     pub async fn next(&mut self) -> std::io::Result<Frame> {
-        // One byte over the limit is kept so that a carriage return ending a line of exactly
-        // `limit` bytes can still be told from a line that is too long.
-        let mut held = Held::new(self.limit.saturating_add(1));
         loop {
+            // The only wait. The bytes it yields are in `held` before the reader is told that
+            // they were used, and nothing waits in between.
             let available = self.reader.fill_buf().await?;
             if available.is_empty() {
+                let held = self.whole();
                 return Ok(if !held.over && held.bytes.is_empty() {
                     Frame::End
                 } else {
@@ -60,13 +71,18 @@ impl<R: AsyncBufRead + Unpin> Frames<R> {
             }
             let end = available.iter().position(|byte| *byte == b'\n');
             let part = end.and_then(|at| available.get(..at)).unwrap_or(available);
-            held.take(part);
+            self.held.take(part);
             let used = part.len().saturating_add(usize::from(end.is_some()));
             self.reader.consume(used);
             if end.is_some() {
-                return Ok(held.finish(self.limit));
+                return Ok(self.whole().finish(self.limit));
             }
         }
+    }
+
+    /// The line read so far, leaving an empty one for the next.
+    fn whole(&mut self) -> Held {
+        std::mem::replace(&mut self.held, Held::new(room(self.limit)))
     }
 }
 
@@ -105,9 +121,63 @@ impl Held {
     }
 }
 
+/// The most bytes held of one line of at most `limit` bytes. One byte over the limit is kept
+/// so that a carriage return ending a line of exactly `limit` bytes can still be told from a
+/// line that is too long.
+fn room(limit: usize) -> usize {
+    limit.saturating_add(1)
+}
+
 #[cfg(test)]
 mod mcp_stdio {
-    use super::{Frame, Held};
+    use std::time::Duration;
+
+    use tokio::io::{AsyncWriteExt, BufReader};
+
+    use super::{Frame, Frames, Held};
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// A read that is given up loses no byte. A line arrives in two parts. The read that took
+    /// the first part is dropped while it waits for the second; the next read yields the whole
+    /// line, and the one after it the next line. The same for a line whose first part alone is
+    /// over the limit: it is still one line that is too long, not that and a second line.
+    #[tokio::test]
+    async fn a_read_that_is_given_up_loses_no_byte() -> TestResult {
+        for (first, second, expected) in [
+            (
+                "{\"half\":",
+                "1}\nnext\n",
+                Frame::Line(b"{\"half\":1}".to_vec()),
+            ),
+            ("0123456789abcdefgh", "ij\nnext\n", Frame::TooLong),
+        ] {
+            let (mut client, input) = tokio::io::duplex(64);
+            let mut frames = Frames::new(BufReader::new(input), 16);
+            client.write_all(first.as_bytes()).await?;
+            {
+                let mut reading = Box::pin(frames.next());
+                for _ in 0..50 {
+                    tokio::select! {
+                        biased;
+                        early = &mut reading => {
+                            return Err(format!("a line was read before it ended: {early:?}").into());
+                        }
+                        () = tokio::task::yield_now() => {}
+                    }
+                }
+            }
+            client.write_all(second.as_bytes()).await?;
+            let whole = tokio::time::timeout(Duration::from_secs(10), frames.next()).await??;
+            assert_eq!(whole, expected, "{first}");
+            let next = tokio::time::timeout(Duration::from_secs(10), frames.next()).await??;
+            assert_eq!(next, Frame::Line(b"next".to_vec()), "{first}");
+            drop(client);
+            let end = tokio::time::timeout(Duration::from_secs(10), frames.next()).await??;
+            assert_eq!(end, Frame::End);
+        }
+        Ok(())
+    }
 
     /// However long a line grows and however it arrives, no more than `room` bytes are held.
     #[test]

@@ -7,22 +7,33 @@
 //! input. When the input ends, the messages in flight get a bounded time; when the output
 //! fails, the relay stops whatever it was waiting for.
 
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use okf_jawn_cli::relay::Limits;
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
 use tokio::sync::watch;
 
 use super::{notification, request, response};
-use crate::check::TestResult;
+use crate::check::{TestResult, some};
 use crate::support::Outcome;
 use crate::support::doubles::{
     Body, Broken, FakeTransport, Script, Setup, Stuck, answered, broken, relay, relay_on,
     relay_over, status,
 };
+
+/// An input that hands out its bytes, counts how many were taken, and then stays open.
+struct Counted {
+    bytes: Vec<u8>,
+    taken: Arc<AtomicUsize>,
+}
+
+/// An input that fails every read.
+struct Failing;
 
 /// The length of every line the service's double answers with in the tests of the room.
 const LINE: usize = 200;
@@ -33,6 +44,36 @@ const PATIENCE: Duration = Duration::from_secs(30);
 /// How often a test lets every other task run before it looks at what they did: far more
 /// often than the few steps anything here needs before it has to wait.
 const TURNS: usize = 500;
+
+impl AsyncRead for Counted {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let from = this.taken.load(Ordering::SeqCst);
+        let rest = this.bytes.get(from..).unwrap_or_default();
+        let part = rest.get(..buffer.remaining()).unwrap_or(rest);
+        if part.is_empty() {
+            // Open and silent, as a client is that writes nothing more: nobody is woken.
+            return Poll::Pending;
+        }
+        buffer.put_slice(part);
+        this.taken.fetch_add(part.len(), Ordering::SeqCst);
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncRead for Failing {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+        _buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Err(std::io::ErrorKind::ConnectionReset.into()))
+    }
+}
 
 /// A response to `id`, or a notification without one, that is exactly `LINE` bytes as a line.
 fn sized(id: Option<&Value>) -> Value {
@@ -131,6 +172,93 @@ async fn forwarded_while_the_output_stands_still(room: usize) -> Outcome<usize> 
     assert_eq!(String::from_utf8(written)?.lines().count(), 4);
     assert_eq!(transport.posts()?.len(), 4);
     Ok(forwarded)
+}
+
+/// What the relay says of the lines the output had not taken when it gives up.
+fn unwritten(lines: usize) -> String {
+    format!(
+        "okf-jawn mcp: the input ended and {lines} of the lines for the output had not been \
+         written 300ms later; the relay stops without writing them\n"
+    )
+}
+
+/// What the relay says of the messages it leaves unanswered when it gives up.
+fn unfinished(names: &[&str]) -> String {
+    format!(
+        "okf-jawn mcp: the input ended and {} of its messages had not finished 300ms later; the \
+         relay stops and leaves them unanswered: {}\n",
+        names.len(),
+        names.join(", ")
+    )
+}
+
+/// A relay whose output takes nothing is fed one request for each of `answers`, one at a
+/// time, each only after the answer before it had its room; then `last`; and then its input
+/// ends, or fails when `fails`. The closing time is 300 ms and a line may be 1024 bytes.
+/// Returns the exit code, what the relay said, and how many messages it forwarded.
+async fn stuck_with_its_room_full(
+    room: usize,
+    answers: Vec<String>,
+    last: &str,
+    fails: bool,
+) -> Outcome<(u8, String, usize)> {
+    let fed = answers.len();
+    let answers = Arc::new(answers);
+    let transport = FakeTransport::scripted(move |message| {
+        let nth = message
+            .get("id")
+            .and_then(Value::as_u64)
+            .and_then(|id| usize::try_from(id).ok());
+        match nth.and_then(|nth| answers.get(nth)) {
+            Some(answer) => status(200, Body::Json(answer.clone())),
+            None => broken("the test scripted no answer for this message"),
+        }
+    });
+    let setup = Setup {
+        limits: Limits {
+            line_bytes: 1024,
+            waiting_bytes: room,
+            closing: Duration::from_millis(300),
+            ..Limits::default()
+        },
+        ..Setup::new(&transport)
+    };
+    let (mut client, stdin) = tokio::io::duplex(65_536);
+    let stdin: Box<dyn AsyncRead + Unpin> = if fails {
+        Box::new(stdin.chain(Failing))
+    } else {
+        Box::new(stdin)
+    };
+    let mut stderr = Vec::new();
+    let mut running = Box::pin(relay_on(setup, stdin, Stuck, &mut stderr));
+    // The version makes a notification carry its method in a header, which is how a
+    // notification can be one the relay does not send.
+    let params = json!({"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}});
+    for id in 0..fed {
+        client
+            .write_all(request(&json!(id), "tools/call", &params).as_bytes())
+            .await?;
+        for _ in 0..TURNS {
+            tokio::select! {
+                biased;
+                early = &mut running => {
+                    return Err(format!("the relay returned while its input was open: {early:?}").into());
+                }
+                () = tokio::task::yield_now() => {}
+            }
+        }
+        assert_eq!(
+            transport.handed(),
+            id.saturating_add(1),
+            "every answer had its room"
+        );
+    }
+    client.write_all(last.as_bytes()).await?;
+    drop(client);
+    let code = tokio::time::timeout(PATIENCE, running)
+        .await
+        .map_err(|_| "the relay had not ended long after its closing time of 300 ms")??;
+    Ok((code, String::from_utf8(stderr)?, transport.posts()?.len()))
 }
 
 /// The room is counted in bytes, and from both sides: with a shared part for exactly two
@@ -649,5 +777,218 @@ async fn a_failed_output_is_noticed_whatever_the_relay_waits_for() -> TestResult
         assert_eq!(transport.posts()?.len(), 1, "one message was in flight");
         drop(client);
     }
+    Ok(())
+}
+
+/// The relay ends when its output is stuck, whatever lines came before (the second
+/// re-review's B1). The output takes nothing and the room is full: one answer waits in the
+/// shared part and one in the place beside it. Then comes a line that the relay does not
+/// forward at once but answers or reports itself, which needs room and finds none, and the
+/// input ends. The relay sees the end all the same, because its read loop reads on while it
+/// waits for room: when the closing time is over it returns 1 and names the line among what
+/// it leaves. A read loop that only waited for room would wait for ever.
+///
+/// One case for each such line: one that is not JSON, a request the relay refuses, a
+/// notification it cannot send, a line over the limit, and an `initialize`, which waits for
+/// the same place before it is forwarded, and is not forwarded. Then an input that fails
+/// where the others end, and the control, which has no such line.
+#[tokio::test]
+async fn the_relay_ends_when_its_output_is_stuck_whatever_lines_came_before() -> TestResult {
+    let one = relay(
+        Setup::new(&FakeTransport::echoing()),
+        request(&json!(0), "tools/call", &json!({})).as_bytes(),
+    )
+    .await?;
+    let answer = |id: usize| response(&json!(id), &json!({"method": "tools/call"})).to_string();
+    assert_eq!(format!("{}\n", answer(0)), one.stdout);
+    let room = answer(0).len();
+    let too_long = format!("{}\n", "x".repeat(1025));
+    let initialize = request(&json!(9), "initialize", &json!({}));
+    let refused = Some("a line the relay refused");
+    for (last, fails, left) in [
+        ("this line is not JSON\n", false, refused),
+        (
+            "{\"jsonrpc\":\"1.0\",\"id\":5,\"method\":\"x\"}\n",
+            false,
+            refused,
+        ),
+        (
+            "{\"jsonrpc\":\"2.0\",\"method\":\"n\u{e9}\"}\n",
+            false,
+            refused,
+        ),
+        (too_long.as_str(), false, refused),
+        (initialize.as_str(), false, Some("request 9")),
+        ("", true, None),
+        ("", false, None),
+    ] {
+        let (code, said, forwarded) =
+            stuck_with_its_room_full(room, vec![answer(0), answer(1)], last, fails).await?;
+        let names = left.map(|name| unfinished(&[name])).unwrap_or_default();
+        assert_eq!(
+            (code, said, forwarded),
+            (1, format!("{names}{}", unwritten(2)), 2),
+            "after {last:?}, the input failing: {fails}"
+        );
+    }
+    Ok(())
+}
+
+/// The same with the room of the shipped relay (the reviewer's probe `rr2_q04b`). The first
+/// answer is as long as the shared part less one short answer, the second fills the shared
+/// part to the byte, and the third takes the place beside it. The line that is not JSON then
+/// finds no room, and the relay ends all the same.
+#[tokio::test]
+async fn the_shipped_relay_ends_when_its_output_is_stuck_and_its_room_is_full() -> TestResult {
+    let answer = |id: usize| response(&json!(id), &json!({"method": "tools/call"})).to_string();
+    let short = answer(1).len();
+    let frame = "{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":\"\"}".len();
+    let long = Limits::default().waiting_bytes.saturating_sub(short);
+    let first = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":\"{}\"}}",
+        "a".repeat(long.saturating_sub(frame))
+    );
+    assert_eq!(first.len(), long);
+    let (code, said, forwarded) = tokio::time::timeout(
+        Duration::from_secs(240),
+        stuck_with_its_room_full(
+            Limits::default().waiting_bytes,
+            vec![first, answer(1), answer(2)],
+            "this line is not JSON\n",
+            false,
+        ),
+    )
+    .await
+    .map_err(|_| "the answers of the test had not been taken after four minutes")??;
+    assert_eq!(
+        (code, said, forwarded),
+        (
+            1,
+            format!(
+                "{}{}",
+                unfinished(&["a line the relay refused"]),
+                unwritten(3)
+            ),
+            3
+        )
+    );
+    Ok(())
+}
+
+/// The end of the input is seen while `initialize` is exchanged, and the lines read meanwhile
+/// are counted in what the relay leaves. The service never answers `initialize`, two more
+/// requests follow, and the input ends: the relay reads on while it waits, so the closing time
+/// starts, and when it is over the relay names the request it waited for and says how many
+/// lines it had read and not looked at. Neither of them was forwarded.
+#[tokio::test]
+async fn the_end_of_the_input_is_seen_while_initialize_is_exchanged() -> TestResult {
+    let transport = FakeTransport::new(|_, _| Box::pin(std::future::pending()));
+    let setup = Setup {
+        limits: Limits {
+            closing: Duration::from_millis(300),
+            ..Limits::default()
+        },
+        ..Setup::new(&transport)
+    };
+    let input = format!(
+        "{}{}{}",
+        request(&json!(0), "initialize", &json!({})),
+        request(&json!(1), "tools/list", &json!({})),
+        request(&json!(2), "tools/call", &json!({}))
+    );
+    let ran = tokio::time::timeout(PATIENCE, relay(setup, input.as_bytes()))
+        .await
+        .map_err(|_| "the relay never saw that its input had ended")??;
+    assert_eq!(
+        (ran.code, ran.stdout.as_str(), ran.stderr),
+        (
+            1,
+            "",
+            format!(
+                "{}okf-jawn mcp: the input ended and 2 of its lines had not been looked at \
+                 300ms later; the relay stops and leaves them unanswered\n",
+                unfinished(&["request 0"])
+            )
+        )
+    );
+    assert_eq!(transport.posts()?.len(), 1);
+    Ok(())
+}
+
+/// A line the relay answered itself is done with: when the relay gives up later, it is not
+/// named among what is left. The first line is not JSON and is answered at once; the request
+/// after it is never answered.
+#[tokio::test]
+async fn a_line_the_relay_answered_is_not_named_when_it_gives_up() -> TestResult {
+    let transport = FakeTransport::new(|_, _| Box::pin(std::future::pending()));
+    let setup = Setup {
+        limits: Limits {
+            closing: Duration::from_millis(300),
+            ..Limits::default()
+        },
+        ..Setup::new(&transport)
+    };
+    let input = format!("not json\n{}", request(&json!(1), "tools/call", &json!({})));
+    let ran = tokio::time::timeout(PATIENCE, relay(setup, input.as_bytes())).await??;
+    assert_eq!(
+        (ran.code, ran.stderr.as_str()),
+        (1, unfinished(&["request 1"]).as_str()),
+        "{}",
+        ran.stdout
+    );
+    assert_eq!(
+        some(ran.lines()?.first(), "the relay's answer")?.pointer("/error/code"),
+        Some(&json!(-32700))
+    );
+    Ok(())
+}
+
+/// Reading ahead is bounded by the turns: a line read ahead holds one, and one line more is
+/// read and waits for a turn. With two turns and an `initialize` that is never answered, the
+/// relay takes `initialize` and two of the six long lines after it from its input, and no
+/// more than its reader's buffer of the third. A relay that read ahead without a turn would
+/// take them all.
+#[tokio::test]
+async fn no_more_lines_are_read_ahead_than_there_are_turns() -> TestResult {
+    const LONG: usize = 20_000;
+    let transport = FakeTransport::new(|_, _| Box::pin(std::future::pending()));
+    let setup = Setup {
+        limits: Limits {
+            in_flight: 2,
+            ..Limits::default()
+        },
+        ..Setup::new(&transport)
+    };
+    let first = request(&json!(0), "initialize", &json!({}));
+    let mut input = first.clone();
+    for id in 1..=6 {
+        let line = request(&json!(id), "tools/call", &json!({"pad": "x".repeat(LONG)}));
+        assert!(line.len() > LONG && line.len() < LONG.saturating_add(200));
+        input.push_str(&line);
+    }
+    let taken = Arc::new(AtomicUsize::new(0));
+    let stdin = Counted {
+        bytes: input.into_bytes(),
+        taken: taken.clone(),
+    };
+    let mut stdout = Vec::new();
+    let mut running = Box::pin(relay_over(setup, stdin, &mut stdout));
+    for _ in 0..TURNS {
+        tokio::select! {
+            biased;
+            early = &mut running => {
+                return Err(format!("the relay returned while its input was open: {early:?}").into());
+            }
+            () = tokio::task::yield_now() => {}
+        }
+    }
+    let taken = taken.load(Ordering::SeqCst);
+    let two = first.len().saturating_add(LONG.saturating_mul(2));
+    let three = first.len().saturating_add(LONG.saturating_mul(3));
+    assert!(
+        taken >= two && taken < three,
+        "{taken} bytes were taken from the input; two long lines end after {two}, three after {three}"
+    );
+    assert_eq!(transport.posts()?.len(), 1);
     Ok(())
 }
