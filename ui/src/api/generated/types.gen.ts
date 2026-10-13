@@ -3918,8 +3918,9 @@ export type SandboxOriginConfig = {
 /**
  * Save the caller's draft; always succeeds even when the head has moved.
  *
- * The first save takes the item's head revision as its base. Later saves keep the draft's
- * base unless `base_revision` equals the current head, which is the explicit rebase.
+ * The first save records `base_revision`, the revision the editor saw, as the draft's base;
+ * the item must exist at that revision. Later saves keep the draft's base unless
+ * `base_revision` equals the current head, which is the explicit rebase.
  */
 export type SaveDraftRequest = {
     /**

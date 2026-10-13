@@ -660,9 +660,11 @@ fn unmodelled<'a, T: Send + 'a>(method: &'static str) -> PortFuture<'a, T> {
 #[cfg(test)]
 mod tests {
     use okf_jawn_contract::access::AccessRoute;
-    use okf_jawn_contract::error::ErrorCode;
+    use okf_jawn_contract::error::{ApiError, ErrorCode};
+    use okf_jawn_contract::events::EventKind;
     use okf_jawn_contract::identity::{PurgeId, TenantId};
     use okf_jawn_contract::import::JobState;
+    use okf_jawn_core::events::{EventLog, EventScope, NewEvent};
     use okf_jawn_core::jobs::{JobScope, JobSpec, NewJob};
     use okf_jawn_core::storage::Provenance;
 
@@ -712,13 +714,58 @@ mod tests {
         records.cancel(id)?;
         assert_eq!(records.entry(id)?.job.state, JobState::Cancelled);
         assert_eq!(records.renewals(), 0);
-        let events = FakeEvents::default();
-        events.fail_on(okf_jawn_contract::events::EventKind::Imported, 1)?;
-        assert_eq!(events.appended()?, Vec::new());
         records.set_progress(id, 40)?;
         records.cancel_when_claimed(id)?;
         assert_eq!(records.entry(id)?.job.progress, 40);
         records.purge_workspace_of(id)?;
+        Ok(())
+    }
+
+    /// `fail_on` fails the one append it names, which appends nothing, and only once.
+    #[tokio::test]
+    async fn fail_on_fails_the_append_it_names_once_and_that_append_writes_nothing() -> Checked {
+        let events = FakeEvents::default();
+        let log = EventScope::Tenant(TenantId::try_from("tenant-a".to_owned())?);
+        let event = |kind: EventKind| NewEvent {
+            kind,
+            revision: None,
+            item_id: None,
+            job_id: None,
+            connector_id: None,
+            actor: None,
+            operation: None,
+        };
+        // The second `imported` append; an append of another kind is not counted.
+        events.fail_on(EventKind::Imported, 2)?;
+        let _first = events
+            .append(&log, None, event(EventKind::Imported))
+            .await?;
+        let _other = events.append(&log, None, event(EventKind::Changed)).await?;
+        let failed = events.append(&log, None, event(EventKind::Imported)).await;
+        assert_eq!(
+            failed.map_err(|error| error.code).err(),
+            Some(ErrorCode::Unavailable)
+        );
+        let kinds = |events: &FakeEvents| -> Result<Vec<EventKind>, ApiError> {
+            Ok(events
+                .appended()?
+                .into_iter()
+                .map(|(_, _, event)| event.kind)
+                .collect())
+        };
+        assert_eq!(
+            kinds(&events)?,
+            [EventKind::Imported, EventKind::Changed],
+            "the failed append wrote nothing"
+        );
+        // Once: the same append, tried again, is written.
+        let _retried = events
+            .append(&log, None, event(EventKind::Imported))
+            .await?;
+        assert_eq!(
+            kinds(&events)?,
+            [EventKind::Imported, EventKind::Changed, EventKind::Imported]
+        );
         Ok(())
     }
 }

@@ -15,7 +15,10 @@
 //! refusing workspace target; when no target was evaluated as the refuser (a route refusal, a
 //! handler's own), in the tenant's log if the request has a `Deployment` target, else in the
 //! workspace's log if its targets name exactly one distinct workspace, else in the tenant's
-//! (see `denial_scope`). A grant is used only when it is for the workspace and tenant that were
+//! (see `denial_scope`). A binding that refuses a request itself, before it dispatches (the MCP
+//! server refuses every route but an agent's), records that refusal through `record_refusal`,
+//! which applies the same rule to the request the binding was handed, so one rule decides the
+//! log of every refusal. A grant is used only when it is for the workspace and tenant that were
 //! asked for. The ledger never inspects other stores: a
 //! resumed attempt re-runs the handler under the same `MutationId`, and what the ledger
 //! retains is decided by the request's `ReplayPolicy`. The ledger records the workspace each
@@ -37,8 +40,8 @@ use okf_jawn_contract::identity::{ConnectorId, MutationId, WorkspaceId};
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::scope::{ReplayPolicy, RequestScope, Target};
 use schemars::{JsonSchema, generate::SchemaSettings};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::OnceLock;
 use uuid::Uuid;
@@ -101,6 +104,29 @@ macro_rules! dispatch_operations {
                     }
                 }),*
                 _ => Err(ApiError::new(ErrorCode::NotFound, "Unknown operation")),
+            }
+        }
+    };
+}
+
+macro_rules! refused_scopes {
+    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
+        $operator:literal, $visibility:literal, $permission:ident, $ui:literal, $status:literal,
+        $destructive:literal, $description:literal)),* $(,)?) => {
+        /// The log a refusal of `operation` with the request body `input`, made before any
+        /// target was evaluated, is recorded in: `denial_scope` for the request `input` decodes
+        /// to. An `input` that is not a request of `operation` names no workspace, so its
+        /// refusal is the tenant's.
+        fn refused_scope(
+            principal: &Principal,
+            operation: OperationName,
+            input: &Value,
+        ) -> EventScope {
+            let tenant = || EventScope::Tenant(principal.tenant_id.clone());
+            match operation.as_str() {
+                $(stringify!($id) => <$request as Deserialize>::deserialize(input)
+                    .map_or_else(|_| tenant(), |request| denial_scope(principal, None, &request)),)*
+                _ => tenant(),
             }
         }
     };
@@ -429,6 +455,34 @@ async fn record_denial(
     record_denied(events, principal, operation, &scope, refusal.error).await
 }
 
+/// Record a refusal a binding makes itself, before it dispatches, and return it unchanged.
+///
+/// A binding may refuse a request without dispatching it: the MCP server answers only an agent's
+/// route. Such a refusal comes before any target is evaluated, exactly as dispatch's own route
+/// refusal does, so it is recorded by dispatch's rule for that case (`denial_scope`), applied
+/// to the request `input` decodes to as a request of `operation`: in the tenant's log when the
+/// request has a `Deployment` target; otherwise in the workspace's log when its targets name
+/// exactly one distinct workspace; otherwise (none, or two or more) in the tenant's. An `input`
+/// that does not decode names no workspace, so its refusal is the tenant's. The caller is
+/// refused either way: `input` is read only to find the log, and is never validated for it.
+///
+/// Only a `Forbidden` is recorded, as `permission_denied` naming `principal` and `operation`;
+/// any other error is returned without an event. A failed append does not change the answer, so
+/// a caller cannot learn whether the log is writable from the code it receives.
+pub async fn record_refusal(
+    events: &dyn EventLog,
+    principal: &Principal,
+    operation: OperationName,
+    input: &Value,
+    refusal: ApiError,
+) -> ApiError {
+    if refusal.code != ErrorCode::Forbidden {
+        return refusal;
+    }
+    let scope = refused_scope(principal, operation, input);
+    record_denied(events, principal, operation, &scope, refusal).await
+}
+
 /// Append `permission_denied` for `error` to the log of `scope` and return `error`
 /// unchanged, whether or not the append succeeded.
 async fn record_denied(
@@ -596,6 +650,7 @@ pub fn new_mutation_id() -> MutationId {
 }
 
 okf_jawn_contract::for_each_operation!(dispatch_operations);
+okf_jawn_contract::for_each_operation!(refused_scopes);
 
 #[cfg(test)]
 mod tests {

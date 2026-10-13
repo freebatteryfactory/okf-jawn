@@ -1,5 +1,5 @@
 {
-  "git_sha": "9a8dfa1ca5b80c042efe638fa1dc638dc25fcfad",
+  "git_sha": "6e4b0e0ddd2543b4f2311112c5d926e0711a7b96",
   "inputs": [
     ".bun-version",
     ".cargo/config.toml",
@@ -23,7 +23,7 @@
     "ui/tsconfig.json",
     "ui/vite.config.ts"
   ],
-  "produced_at": "2026-10-13T01:50:25.140Z",
+  "produced_at": "2026-10-13T09:53:03.499Z",
   "component": "mcp-apps-protocol-qualification",
   "gate": "mcp-apps-protocol-qualification",
   "result": "PASS",
@@ -212,7 +212,7 @@
   ],
   "not_judged": [],
   "harness_error_detail": [],
-  "finished_at": "2026-10-13T01:52:20.190Z",
+  "finished_at": "2026-10-13T09:55:23.110Z",
   "scope": {
     "summary": "This run renders the real MCP App bundle in a real MCP Apps host, against a fixture MCP server. It qualifies the App side and the protocol libraries; it does not test the product server.",
     "real": [
@@ -286,7 +286,7 @@
   "harness_binary": {
     "path": "<abs>/release/okf-qualify-mcp-apps.exe",
     "bytes": 5308416,
-    "sha256": "d4d84ff6108624d02f383130278472c5199481f033a08ad08ad7e8b9beabe44b",
+    "sha256": "3b04d7c2708e7bd0cb2d720fbfb7d1f8ec2f2c32068de960cfdbe399e4b1e7db",
     "args": [
       "--http",
       "127.0.0.1:18765"
@@ -545,14 +545,14 @@
       "repository": "https://github.com/modelcontextprotocol/ext-apps",
       "requested_tag": "v2.0.3",
       "commit": "82221c0c8ce7661efa6771c9d461511b1650495f",
-      "commit_resolved_at": "2026-10-12T07:26:17.310Z",
+      "commit_resolved_at": "2026-10-13T09:22:20.361Z",
       "files_verified": 14,
       "files_expected": 14,
       "package": {
         "name": "@modelcontextprotocol/ext-apps-basic-host",
         "version": "2.0.3"
       },
-      "lockfile_sha256": "60b5b4578594f66b3223897f79320f1e320e22c57b900a515def7b7dcee56abd"
+      "lockfile_sha256": "2677a7cf042f4f038ae6d4970e3081ee519fb3acc17859d57a8ad3af73d05f67"
     },
     "browser": {
       "name": "chromium",
