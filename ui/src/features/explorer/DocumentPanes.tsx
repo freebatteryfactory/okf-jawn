@@ -9,9 +9,13 @@
  * keyboard as well as the pointer. The focused pane is the one the URL describes; with several
  * panes its region name ends in ", focused", so assistive technology can tell which one it is.
  *
- * A tab's name carries how the item's draft stands, in brackets after its title: "(draft)",
- * "(unsaved)" or "(not saved)". The mark is the item's, so a tab that shows a cited revision has it
- * too. The tab of an item the person deleted in this page reads "(deleted)" after the title it had.
+ * A tab's name is the item's title at the revision the tab shows: the one it cites, else the head
+ * the workspace shows. So a tab opened from a pinned link has the title its text has, whatever the
+ * item is called, or whether it exists, at the head. The name also carries how the item's draft
+ * stands, in brackets after the title: "(draft)", "(unsaved)" or "(not saved)". The mark is the
+ * item's, read at the head, so a tab that shows a cited revision has it too. The tab of an item the
+ * person deleted in this page reads "(deleted)" after the title it had, and asks nothing at the
+ * head.
  */
 import { Tabs } from '@base-ui/react/tabs';
 import { useQuery } from '@tanstack/react-query';
@@ -206,7 +210,14 @@ function DocumentPane({
                     onClose(pane.id, itemId);
                   }}
                 >
-                  <TabLabel workspaceId={workspaceId} itemId={itemId} head={head} />
+                  <TabLabel
+                    workspaceId={workspaceId}
+                    itemId={itemId}
+                    head={head}
+                    // The focused pane's open tab cites what the URL does; every other tab, what
+                    // its own link last named.
+                    cited={focused && itemId === active ? revision : tabLocation(pane, itemId).rev}
+                  />
                 </Tabs.Tab>
               ))}
             </Tabs.List>
@@ -275,27 +286,35 @@ function DocumentPane({
 }
 
 /**
- * A tab's name is the item's title from the cache (until it is known, a short identity), then how
- * the item's draft stands. Both are read at the head the workspace shows, whatever revision the
- * tab reads.
+ * A tab's name is the item's title (until it is known, a short identity), then how the item's
+ * draft stands. The title is read at the revision the tab shows: `cited` when the tab cites one,
+ * else the head. The draft's mark is read at the head the workspace shows, whatever the tab reads.
+ * For a tab that cites nothing the two are one read.
  */
 function TabLabel({
   workspaceId,
   itemId,
   head,
+  cited,
 }: {
   workspaceId: string;
   itemId: string;
   head: Revision;
+  cited: Revision | undefined;
 }) {
   // An item the person deleted in this page is not at the head: its tab says so, by the title
-  // it had, and nothing is asked.
+  // it had, and nothing is asked at the head. A revision the tab cites is still read (the pane
+  // shows it under the notice).
   const deleted = useDeleted(workspaceId, itemId);
+  const shown = useQuery({
+    ...itemOptions(workspaceId, itemId, cited ?? head),
+    enabled: deleted === undefined || cited !== undefined,
+  });
   const item = useQuery({
     ...itemOptions(workspaceId, itemId, head),
     enabled: deleted === undefined,
   });
-  const summary = item.data?.summary;
+  const summary = shown.data?.summary;
   const name =
     deleted !== undefined
       ? `${deleted} (deleted)`

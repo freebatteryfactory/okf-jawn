@@ -22,6 +22,7 @@ import {
   itemDocument,
   NOTE,
   noteSummary,
+  OLD,
   OTHER,
   otherSummary,
   RECEIPT,
@@ -449,6 +450,24 @@ describe('taking a Snapshot', () => {
     });
   });
 
+  it('sends nothing when no draft is selected, though the dimmed button is pressed', async () => {
+    const { api } = service();
+    renderAt(`/w/${WS}`);
+    await screen.findByRole('region', { name: 'Drafts (2)' });
+    for (const name of ['Meeting notes', 'Plan']) {
+      fireEvent.click(
+        await within(panel()).findByRole('checkbox', { name: `Include ${name} in the Snapshot` }),
+      );
+    }
+    expect(snapshotButton().textContent).toBe('Snapshot 0 drafts');
+    expect(snapshotButton().getAttribute('aria-disabled')).toBe('true');
+    await pressSnapshot('Nothing');
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(api.callsTo(COMMIT)).toHaveLength(0);
+    expect(said()).toBe('');
+    expect(api.violations).toEqual([]);
+  });
+
   it('leaves out a draft whose box is unticked', async () => {
     const { api } = service();
     renderAt(`/w/${WS}`);
@@ -576,6 +595,55 @@ describe('taking a Snapshot', () => {
       base_revision: MADE,
       body: `${DRAFT_BODY} second part`,
     });
+  });
+
+  it('is not undone by a read of an item that began before it and answers after it', async () => {
+    const read: { hold: boolean; answer?: () => void } = { hold: false };
+    const { api, state } = service(
+      {
+        [ITEM]: (body) => {
+          const itemId = String(body.item_id);
+          const document = itemDocument(itemId === NOTE ? noteSummary : otherSummary);
+          const reply = ok(
+            state.drafts.has(itemId)
+              ? {
+                  ...document,
+                  draft: {
+                    body: DRAFT_BODY,
+                    properties: document.properties,
+                    draft: draftOf(itemId, HEAD, LATER),
+                  },
+                }
+              : document,
+          );
+          if (itemId !== NOTE || !read.hold) return reply;
+          read.hold = false;
+          return new Promise<Reply>((resolve) => {
+            read.answer = () => resolve(reply);
+          });
+        },
+      },
+      [NOTE],
+    );
+    // The tab cites the head, so the Snapshot leaves the read of the item at the old head cached.
+    const { queryClient } = renderAt(`/w/${WS}/i/${NOTE}?rev=${HEAD}`);
+    await findTextBox('Text of Meeting notes');
+    await screen.findByRole('region', { name: 'Drafts (1)' });
+    const key = itemOptions(WS, NOTE, HEAD).queryKey;
+    read.hold = true;
+    act(() => {
+      void queryClient.invalidateQueries({ queryKey: key });
+    });
+    await eventuallyReal(() => expect(read.answer).toBeDefined());
+    await pressSnapshot('Tidy');
+    await eventuallyReal(() => expect(said()).toMatch(/^Snapshot “Tidy” taken: 1 item\./));
+    // The old answer arrives now, with the draft that was just committed in it.
+    act(() => read.answer?.());
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(queryClient.getQueryData(key)?.draft ?? null).toBeNull();
+    expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull();
+    expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
+    expect(api.callsTo(SAVE)).toHaveLength(0);
   });
 
   // The same, against a service that holds the draft as the real one does, in each order the
@@ -982,6 +1050,39 @@ describe('taking a Snapshot', () => {
     expect(router.state.location.search).toEqual({ rev: MADE });
   });
 
+  // Only a tab that cited the head the Snapshot replaced follows it.
+  it('leaves alone a tab that cites an older revision on purpose', async () => {
+    service();
+    const { router } = renderAt(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+    await screen.findByRole('region', { name: 'Drafts (2)' });
+    await screen.findByText('Text of Meeting notes');
+    await pressSnapshot('Tidy');
+    await screen.findByRole('region', { name: 'Drafts (0)' });
+    await eventuallyReal(() => expect(headLine()).toContain(MADE.slice(0, 10)));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`);
+    expect(router.state.location.search).toEqual({ rev: OLD });
+  });
+
+  it('leaves alone a background tab that cites an older revision on purpose', async () => {
+    service();
+    const { router } = renderAt(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+    await screen.findByText('Text of Meeting notes');
+    act(() => {
+      void router.navigate({
+        to: '/w/$workspaceId/i/$itemId',
+        params: { workspaceId: WS, itemId: OTHER },
+      });
+    });
+    await findTextBox('Text of Plan');
+    await pressSnapshot('Tidy');
+    await screen.findByRole('region', { name: 'Drafts (0)' });
+    await eventuallyReal(() => expect(headLine()).toContain(MADE.slice(0, 10)));
+    fireEvent.click(screen.getByRole('tab', { name: 'Meeting notes' }));
+    await eventuallyReal(() => expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`));
+    expect(router.state.location.search).toEqual({ rev: OLD });
+  });
+
   it('moves a tab that cited the old head to the revision the Snapshot made', async () => {
     service();
     const { router } = renderAt(`/w/${WS}/i/${NOTE}?rev=${HEAD}`);
@@ -1058,6 +1159,68 @@ describe('a Snapshot that conflicts', () => {
     // The conflicting draft is still there, still to be resolved.
     expect(await screen.findByRole('region', { name: 'Drafts (1)' })).toBeDefined();
     expect(api.violations).toEqual([]);
+  });
+
+  it('conflicts for a draft begun from a view that was already behind, and shows the Conflict flow', async () => {
+    // The service as ruled: a first save records the base the request carries, so a draft begun
+    // from a view that is behind is known to be behind. A later save moves the base only onto
+    // the head.
+    const held = { base: null as string | null };
+    const made = service(
+      {
+        [SAVE]: (body) => {
+          const carried = String(body.base_revision);
+          if (held.base === null || carried === made.state.head) held.base = carried;
+          made.state.drafts.add(NOTE);
+          return ok(draftOf(NOTE, held.base, LATER));
+        },
+        [COMMIT]: () => {
+          if (held.base !== made.state.head) {
+            return conflict([
+              conflictOf(NOTE, { draft_base: held.base, current_revision: made.state.head }),
+            ]);
+          }
+          made.state.drafts.clear();
+          made.state.head = MADE;
+          return committed();
+        },
+      },
+      [],
+    );
+    const { api } = made;
+    renderAt(`/w/${WS}/i/${NOTE}`);
+    const edit = await screen.findByRole('button', { name: 'Edit' });
+    await screen.findByText('Text of Meeting notes');
+    // Someone else changes the note: the service's head moves. The page shows the head it resolved.
+    made.state.head = THEIRS;
+    vi.useFakeTimers();
+    fireEvent.click(edit);
+    await eventually(() => textBox('Text of Meeting notes'));
+    typeInto(textBox('Text of Meeting notes'), ' and mine');
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+    expect(api.callsTo(SAVE).at(0)).toMatchObject({ base_revision: HEAD });
+    await eventually(() =>
+      expect(screen.getByRole('region', { name: 'Drafts (1)' })).toBeDefined(),
+    );
+    await pressSnapshot('Mine');
+    await eventually(() =>
+      expect(
+        screen.getByRole('region', { name: 'Meeting notes changed since your draft was started' }),
+      ).toBeDefined(),
+    );
+    const notice = screen.getByRole('region', {
+      name: 'Meeting notes changed since your draft was started',
+    });
+    expect(notice.textContent).toContain(`Your draft started from revision ${HEAD.slice(0, 10)}.`);
+    expect(notice.textContent).toContain(`The item is now at revision ${THEIRS.slice(0, 10)}.`);
+    expect(within(panel()).getByRole('alert').textContent).toContain('Nothing was snapshotted.');
+    expect(notice.querySelectorAll('ins').length).toBeGreaterThan(0);
+    // Their change is not written over in silence: the person chooses.
+    fireEvent.click(within(notice).getByRole('button', { name: 'Keep mine' }));
+    await eventually(() => expect(said()).toMatch(/^Snapshot “Mine” taken: 1 item\./));
+    expect(api.callsTo(SAVE).at(-1)).toMatchObject({ base_revision: THEIRS });
+    expect(held.base).toBe(THEIRS);
   });
 
   /** Open the note's pane with its conflict on screen. */
@@ -1376,6 +1539,34 @@ describe('a Snapshot that conflicts', () => {
       expect(failed).toMatchObject({ base_revision: HEAD, body: `${DRAFT_BODY} and more` });
       expect(kept).toMatchObject({ base_revision: THEIRS, body: `${DRAFT_BODY} and more` });
       expect(kept?.idempotency_key).not.toBe(failed?.idempotency_key);
+    });
+
+    it('says why a draft whose text is not in the page was not kept, and asks nothing', async () => {
+      // The list of drafts names the note, and the Snapshot of it conflicts; `get_item` carries
+      // no draft of it (it was discarded elsewhere in between), so there is no text here to keep.
+      const { api } = withConflict(
+        {},
+        { [ITEM]: (body) => ok(itemDocument(body.item_id === NOTE ? noteSummary : otherSummary)) },
+      );
+      renderAt(`/w/${WS}`);
+      await screen.findByRole('region', { name: 'Drafts (2)' });
+      await pressSnapshot('Tidy');
+      await within(panel()).findByRole('alert');
+      fireEvent.click(within(panel()).getByRole('button', { name: 'Meeting notes' }));
+      const notice = await screen.findByRole('region', {
+        name: 'Meeting notes changed since your draft was started',
+      });
+      await screen.findByText('Text of Meeting notes');
+      expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull();
+      const before = api.calls.length;
+      fireEvent.click(within(notice).getByRole('button', { name: 'Keep mine' }));
+      const alert = await within(notice).findByRole('alert');
+      expect(alert.textContent).toContain('Your draft was not kept.');
+      expect(alert.textContent).toContain('This page has no draft of this item to keep');
+      expect(alert.textContent).not.toContain('editor below');
+      const asked = api.calls.slice(before).map((call) => call.path);
+      expect(asked.filter((path) => path === SAVE || path === COMMIT)).toEqual([]);
+      expect(within(notice).getByRole('button', { name: 'Take theirs' })).toBeDefined();
     });
 
     it('says why a draft too long to save was not kept, and asks nothing', async () => {

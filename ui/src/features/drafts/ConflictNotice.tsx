@@ -310,7 +310,7 @@ export function ConflictNotice({
           <p>
             {notKept === 'too-long'
               ? 'Its text is too long to save, and a draft has to be saved before it can be kept. Shorten the text, then keep it again.'
-              : 'Its text has not been read in this page yet. Keep it again once this item is shown.'}
+              : 'This page has no draft of this item to keep: it may have been discarded or snapshotted elsewhere. Take theirs to close this notice.'}
           </p>
         </div>
       )}

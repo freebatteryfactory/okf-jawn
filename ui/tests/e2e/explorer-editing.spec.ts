@@ -1,9 +1,9 @@
 /**
  * Editing a document from the keyboard, in Chromium and WebKit: typing with autosave and
  * reopening the draft; a Snapshot that succeeds; a Snapshot that conflicts, resolved once each
- * way; a failed save retried; a property changed in its form. Every journey ends with keyboard
- * focus on a sensible element and zero axe violations, and saves a screenshot of its screen under
- * `.artifacts/ui/` for the owner.
+ * way; a failed save retried; a property changed in its form; properties that do not fit a strict
+ * type; one item in two panes. Every journey ends with keyboard focus on a sensible element and
+ * zero axe violations, and saves a screenshot of its screen under `.artifacts/ui/` for the owner.
  *
  * The service is played by `page.route` (no server exists in this lane): it remembers the drafts
  * it holds and its head, and it checks the CSRF header of every request it is sent.
@@ -91,9 +91,11 @@ interface Service {
 /**
  * A service that remembers. `drafts`: the items the person already has a draft of. `conflictOn`:
  * an item someone else changed, so a Snapshot of it conflicts until its draft is saved on their
- * revision.
+ * revision. `strict`: the note's type allows no property it does not name.
  */
-function service(options: { drafts?: string[]; conflictOn?: string } = {}): Service {
+function service(
+  options: { drafts?: string[]; conflictOn?: string; strict?: boolean } = {},
+): Service {
   const state = {
     head: HEAD,
     drafts: new Map<string, { body: string; properties: Body; base: string }>(),
@@ -117,7 +119,20 @@ function service(options: { drafts?: string[]; conflictOn?: string } = {}): Serv
   const sent: Service['sent'] = [];
   const answers: Answers = {
     '/api/workspaces/open-workspace': () => ok({ ...writableWorkspace, head: state.head }),
-    '/api/types/list-types': () => ok({ items: [meetingNote] }),
+    '/api/types/list-types': () =>
+      ok({
+        items: [
+          options.strict === true
+            ? {
+                ...meetingNote,
+                properties_schema: {
+                  ...meetingNote.properties_schema,
+                  additionalProperties: false,
+                },
+              }
+            : meetingNote,
+        ],
+      }),
     '/api/items/get-item': (body) => {
       const id = String(body.item_id);
       const held = state.drafts.get(id);
@@ -151,9 +166,12 @@ function service(options: { drafts?: string[]; conflictOn?: string } = {}): Serv
         await new Promise<void>((resolve) => state.waiting.push(resolve));
       const id = String(body.item_id);
       const before = state.drafts.get(id);
-      // The service's rule: a first save, and a save on the current head, take the head as base.
+      // The service's rule: a first save records the base the request carries; a later one keeps
+      // the draft's base unless it carries the current head, which is the explicit rebase.
       const base =
-        before !== undefined && body.base_revision !== state.head ? before.base : state.head;
+        before === undefined || body.base_revision === state.head
+          ? String(body.base_revision)
+          : before.base;
       state.drafts.set(id, {
         body: String(body.body),
         properties: (body.properties ?? {}) as Body,
@@ -475,5 +493,63 @@ test.describe('editing a document', () => {
     await expectVisibleFocus(page);
     await expectNoAxeViolations(page, 'the properties form with an error');
     await shot(page, '17-properties-form');
+  });
+
+  test('properties that do not fit a strict type', async ({ page }) => {
+    const played = service({ strict: true });
+    await routeApi(page, played.answers);
+    await page.goto(`${server.origin()}/w/${WS}/i/${NOTE}`);
+    await press(page, 'Edit');
+    // The item holds properties its type does not allow: said above the form, where no field is.
+    const above = page.locator('.form-said');
+    await expect(above).toContainText('These properties do not fit the type meeting-note:');
+    await expect(above).toContainText('“x-okf-review” is not a property this type allows.');
+    await expect(above).not.toContainText('held back');
+    const owner = page.getByLabel(/^Owner/);
+    await owner.focus();
+    await page.keyboard.press('ControlOrMeta+A');
+    await page.keyboard.type('Grace Hopper');
+    await expect(above).toContainText(
+      'What you changed in the properties is held back, and is not saved until the properties fit the type.',
+    );
+    await page.waitForTimeout(1_500);
+    expect(played.sent.filter((request) => request.path === 'save_draft')).toHaveLength(0);
+    await expect(owner).toHaveValue('Grace Hopper');
+    // Said once, above the form: not again under it in the validator's words.
+    await expect(page.locator('.properties')).not.toContainText('must NOT have additional');
+    expect(await focusSettled(page)).toMatch(/^input:/);
+    await expectVisibleFocus(page);
+    await expectNoAxeViolations(page, 'properties that do not fit their type');
+    await shot(page, '18-properties-misfits');
+  });
+
+  test('one item in two panes: one editor, moved with "Edit here"', async ({ page }) => {
+    const played = service();
+    await routeApi(page, played.answers);
+    await page.goto(`${server.origin()}/w/${WS}/i/${NOTE}`);
+    await press(page, 'Edit');
+    await expect(textBox(page)).toBeFocused();
+    await page.keyboard.press('Control+End');
+    await page.keyboard.type(' First words.');
+    await expect(saveState(page)).toContainText('Saved as a draft at');
+    await press(page, 'Split right');
+    const second = page.getByRole('region', { name: /^Documents, pane 2 of 2/ });
+    await expect(
+      second.getByText('This item is being edited in another pane. Below is the committed text.'),
+    ).toBeVisible();
+    await expect(second.getByText('Revenue grew by 12% in 2025.')).toBeVisible();
+    await expect(textBox(page)).toHaveCount(1);
+    await expectNoAxeViolations(page, 'two panes of one item, one editor');
+    await shot(page, '19-edit-here');
+
+    await press(page, 'Edit here');
+    await expect(second.getByRole('textbox', { name: 'Text of Meeting notes' })).toBeFocused();
+    await expect(textBox(page)).toHaveCount(1);
+    await expect(textBox(page)).toContainText('First words.');
+    await expect(saveState(page)).toContainText('Saved as a draft at');
+    expect(await focusSettled(page)).toBe('textbox:Text of Meeting notes');
+    await expectVisibleFocus(page);
+    await expectNoAxeViolations(page, 'after "Edit here"');
+    expect(played.sent.filter((request) => request.path === 'save_draft')).toHaveLength(1);
   });
 });

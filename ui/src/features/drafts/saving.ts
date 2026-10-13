@@ -68,10 +68,10 @@ const discardKeys = new Map<string, string>();
 
 /** Why a draft could not be kept on a newer revision, when no request failed. */
 export class DraftNotKept extends Error {
-  /** Its text is not in this page yet; or it is too long to be saved. */
-  readonly reason: 'not-read' | 'too-long';
+  /** This page holds no draft of the item (get_item carried none); or its text is too long to save. */
+  readonly reason: 'no-draft' | 'too-long';
 
-  constructor(reason: 'not-read' | 'too-long') {
+  constructor(reason: 'no-draft' | 'too-long') {
     super(`The draft was not kept: ${reason}`);
     this.name = 'DraftNotKept';
     this.reason = reason;
@@ -274,7 +274,7 @@ export async function rebaseSession(
   revision: Revision,
 ): Promise<void> {
   const key = sessionKey(workspaceId, itemId);
-  if (sessions().sessions[key] === undefined) throw new DraftNotKept('not-read');
+  if (sessions().sessions[key] === undefined) throw new DraftNotKept('no-draft');
   cancelTimer(key);
   // A save in flight answers with the base it was sent on: the new base is named after it.
   await inFlight.get(key);
