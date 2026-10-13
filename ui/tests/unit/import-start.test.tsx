@@ -582,48 +582,67 @@ describe('starting the import', () => {
   );
 
   it('bases the next import on the revision its own finished import made, until the workspace is refreshed', async () => {
+    const SECOND = '99999999-9999-4999-8999-999999999999';
+    const LATER = 'd'.repeat(40);
     const NEWER = 'e'.repeat(40);
     let head = HEAD;
-    let job: Job = jobOf('running');
+    let first: Job = jobOf('running');
+    let second: Job = jobOf('queued', { id: SECOND });
     const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {
       [OPEN]: () => ok({ ...writableWorkspace, head }),
-      [START]: () => accepted(job),
-      [JOB]: () => ok(job),
+      [START]: () => accepted(api.callsTo(START).length === 1 ? first : second),
+      [JOB]: (body) => ok(body.job_id === SECOND ? second : first),
     });
+    // The stream is open, so a job is read again when the test says it changed: no clock is needed.
+    vi.useRealTimers();
+    const events = mockEvents();
+    const changed = (id: string, jobId: string) =>
+      act(() => events.streams.at(0)?.send(id, eventOf('job_updated', id, { job_id: jobId })));
+    /** Upload one more file and press Import. */
+    const importOneMore = async (name: string, content: string) => {
+      choose([fileOf(name, content)]);
+      fireEvent.click(screen.getByRole('button', { name: /^Upload \d+ files?$/ }));
+      await waitFor(() => expect(importButton().textContent).toBe('Import 1 uploaded file'));
+      const before = api.callsTo(START).length;
+      fireEvent.click(importButton());
+      await waitFor(() => expect(api.callsTo(START)).toHaveLength(before + 1));
+      return api.callsTo(START).at(-1)?.base_revision;
+    };
+    const note = () => screen.queryByText(/The next import is based on it/);
+
     fireEvent.click(importButton());
-    await eventually(() => jobRow());
+    await waitFor(() => jobRow());
     expect(api.callsTo(START).at(0)?.base_revision).toBe(HEAD);
+    await waitFor(() => expect(events.streams).toHaveLength(1));
     // While it runs, the base is still the version shown: nothing says the head moved.
-    expect(screen.queryByText(/The next import is based on it/)).toBeNull();
+    expect(note()).toBeNull();
+
     // The import finishes: it made a revision, and the head is now that one.
-    job = jobOf('succeeded', { item_ids: [], revision: IMPORTED });
-    await pass(JOBS_POLL_MS);
-    await later(() => expect(jobRow().textContent).toContain('Finished.'));
-    const note = screen.getByText(/The next import is based on it/);
-    expect(note.textContent).toBe(
+    first = jobOf('succeeded', { item_ids: [], revision: IMPORTED });
+    changed('1', JOB_ID);
+    await waitFor(() => expect(jobRow().textContent).toContain('Finished.'));
+    expect(note()?.textContent).toBe(
       'An import started here made revision ffffffffff of the workspace. The next import is based on it. The workspace above still shows the version from before: press Refresh to see what was imported.',
     );
-    expect(note.getAttribute('role')).toBe('note');
+    expect(note()?.getAttribute('role')).toBe('note');
     // A second import from the same page, with the version shown still the old one.
-    vi.useRealTimers();
-    choose([fileOf('b.txt', 'abcd')]);
-    fireEvent.click(screen.getByRole('button', { name: /^Upload \d+ files?$/ }));
-    await waitFor(() => expect(importButton().textContent).toBe('Import 1 uploaded file'));
-    job = jobOf('queued', { id: '99999999-9999-4999-8999-999999999999' });
-    fireEvent.click(importButton());
-    await waitFor(() => expect(api.callsTo(START)).toHaveLength(2));
-    expect(api.callsTo(START).at(1)?.base_revision).toBe(IMPORTED);
+    expect(await importOneMore('b.txt', 'abcd')).toBe(IMPORTED);
+
+    // That one finishes too. It was sent on another base than the version shown, and it is still
+    // an import of this page under that version: the next is based on what it made.
+    second = jobOf('succeeded', { id: SECOND, item_ids: [], revision: LATER });
+    changed('2', SECOND);
+    await waitFor(() =>
+      expect(note()?.textContent).toContain('made revision dddddddddd of the workspace'),
+    );
+    expect(await importOneMore('c.txt', 'abcde')).toBe(LATER);
+
     // Refreshed: the version shown is the base again, whatever the page's own imports made.
     head = NEWER;
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await screen.findByText(`Refreshed: now showing revision ${NEWER.slice(0, 10)}.`);
-    await waitFor(() => expect(screen.queryByText(/The next import is based on it/)).toBeNull());
-    choose([fileOf('c.txt', 'abcde')]);
-    fireEvent.click(screen.getByRole('button', { name: /^Upload \d+ files?$/ }));
-    await waitFor(() => expect(importButton().textContent).toBe('Import 1 uploaded file'));
-    fireEvent.click(importButton());
-    await waitFor(() => expect(api.callsTo(START)).toHaveLength(3));
-    expect(api.callsTo(START).at(2)?.base_revision).toBe(NEWER);
+    await waitFor(() => expect(note()).toBeNull());
+    expect(await importOneMore('d.txt', 'abcdef')).toBe(NEWER);
   });
 
   it('reads "not available in this build" where imports are not built, and starts nothing', async () => {
