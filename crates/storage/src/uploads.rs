@@ -4,7 +4,8 @@
 //! call is received completely into a private file before it is appended, so a call that would
 //! pass the limit or the announced size appends nothing. `complete` retains the bytes in the
 //! blob store only when their length and SHA-256 match; `consume` marks a complete upload as the
-//! input of exactly one job.
+//! input of exactly one job, and `consume_batch` marks several for one job in one transaction,
+//! all or none (an import's uploads), refused while a purge names the workspace.
 //!
 //! One transfer writes an upload at a time: a concurrent `put_content` or `complete` on the same
 //! upload is refused as `Conflict`, never interleaved into the same `.incoming` or `.part` file.
@@ -445,6 +446,59 @@ impl UploadStore for SqliteUploads {
                     })
                 }
             }
+        }))
+    }
+
+    /// One immediate transaction: the purge refusal, then every upload read and checked in the
+    /// order given, and only then every one not yet `job`'s marked. A refusal returns before
+    /// the first mark, so a refused batch has written nothing whether or not the transaction is
+    /// rolled back.
+    fn consume_batch<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        uploads: &'a [UploadId],
+        job: JobId,
+    ) -> PortFuture<'a, Vec<UploadRecord>> {
+        let (tenant, workspace) = scope_key(scope);
+        let uploads = uploads.to_vec();
+        Box::pin(self.db.transaction(move |transaction| {
+            // Checked first, so a batch after the purge's rows step is refused naming the
+            // purge and not answered `NotFound` for the rows that step removed.
+            guard::refuse(transaction, &tenant, &workspace)?;
+            let mut records = Vec::with_capacity(uploads.len());
+            for upload in &uploads {
+                let record = read(transaction, &tenant, &workspace, *upload)?
+                    .ok_or_else(|| not_found("upload"))?;
+                if record.object.is_none() {
+                    return Err(ApiError::new(
+                        ErrorCode::InvalidInput,
+                        format!(
+                            "upload {} is not complete; no upload of the batch was taken",
+                            upload.0
+                        ),
+                    ));
+                }
+                if record.consumed_by.is_some_and(|consumer| consumer != job) {
+                    return Err(conflict(format!(
+                        "upload {} was already taken by another job; no upload of the batch \
+                         was taken",
+                        upload.0
+                    )));
+                }
+                records.push(record);
+            }
+            for record in &mut records {
+                if record.consumed_by.is_none() {
+                    transaction
+                        .execute(
+                            "UPDATE uploads SET consumed_by = ?1 WHERE upload_id = ?2",
+                            params![job.0.to_string(), record.id.0.to_string()],
+                        )
+                        .map_err(|error| sql(&error))?;
+                    record.consumed_by = Some(job);
+                }
+            }
+            Ok(records)
         }))
     }
 }

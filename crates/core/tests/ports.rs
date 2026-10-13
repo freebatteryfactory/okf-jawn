@@ -677,9 +677,10 @@ async fn upload_calls(
         .put_content(scope, slot.id, body, slot.expected_size)
         .await?;
     let complete = uploads.complete(scope, slot.id, sha256).await?;
-    uploads
-        .consume(scope, complete.id, JobId(Uuid::from_u128(7)))
-        .await
+    let job = JobId(Uuid::from_u128(7));
+    // An import takes its uploads as one batch; a restore takes its one archive alone.
+    let _batch: Vec<UploadRecord> = uploads.consume_batch(scope, &[complete.id], job).await?;
+    uploads.consume(scope, complete.id, job).await
 }
 
 async fn event_calls(

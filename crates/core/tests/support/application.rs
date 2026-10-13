@@ -2173,6 +2173,14 @@ impl UploadStore for Unused {
     ) -> PortFuture<'a, UploadRecord> {
         unused()
     }
+    fn consume_batch<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _uploads: &'a [UploadId],
+        _job: JobId,
+    ) -> PortFuture<'a, Vec<UploadRecord>> {
+        unused()
+    }
 }
 
 impl CredentialStore for Unused {

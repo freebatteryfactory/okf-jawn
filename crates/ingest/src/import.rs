@@ -3,8 +3,9 @@
 //!
 //! Import:
 //! 1. Each upload must be complete and taken by no other job, and its file name must give a
-//!    card path; only once every upload of the request passes is each consumed by this job,
-//!    so a refused batch consumes none. An upload another job took refuses the job for good.
+//!    card path; only once every upload of the request passes are they consumed by this job, as
+//!    one batch the store takes whole or not at all (`UploadStore::consume_batch`), so a
+//!    refused batch consumes none. An upload another job took refuses the job for good.
 //! 2. Each card is named `conventions::source_card_name` of its file name, with the
 //!    numbered-suffix rule (`report-pdf-2.md`) against the destination folder at the base
 //!    revision and against the other cards of the job.
@@ -401,9 +402,11 @@ fn refused_as(error: ApiError) -> Done {
 /// upload is consumed. An incomplete upload refuses the batch (`InvalidInput`), so does one
 /// another job consumed (`Conflict`), and so does a file name that gives no workspace path
 /// (`InvalidInput` on `/upload_ids`); then no upload of the batch is consumed, so another job
-/// may still take the good ones. Only then is each consumed by this job. The race that remains
-/// is another job consuming an upload between this check and the consume: that is a
-/// concurrent import of the same upload, which `consume` already refuses with `Conflict`.
+/// may still take the good ones. Only then are they consumed by this job, all in one call
+/// (`UploadStore::consume_batch`, one transaction: all of them or none). Another job that
+/// consumed one of them between this check and that call is a concurrent import of the same
+/// upload: the store refuses the whole batch with `Conflict` and marks none, so two imports
+/// that share uploads never hold some of them each (R-I13).
 async fn pending_cards(
     ports: &HandlerPorts,
     claimed: &ClaimedJob,
@@ -435,9 +438,8 @@ async fn pending_cards(
         .iter()
         .map(|(upload, _object)| free_path(request.destination, &upload.filename, &mut taken))
         .collect::<Result<Vec<_>, _>>()?;
-    for (upload, _object) in &sources {
-        let _consumed = ports.uploads.consume(scope, upload.id, job).await?;
-    }
+    let batch: Vec<UploadId> = sources.iter().map(|(upload, _object)| upload.id).collect();
+    let _consumed = ports.uploads.consume_batch(scope, &batch, job).await?;
     let mut cards = Vec::new();
     for ((ordinal, (upload, object)), path) in (0_u32..).zip(&sources).zip(paths) {
         let local = ports.blobs.materialize(scope, &object.digest).await?;

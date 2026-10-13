@@ -95,4 +95,28 @@ pub trait UploadStore: Send + Sync {
         upload: UploadId,
         job: JobId,
     ) -> PortFuture<'a, UploadRecord>;
+    /// Mark the complete uploads of `uploads` as the input of `job` in one transaction: all of
+    /// them, or none.
+    ///
+    /// The uploads are checked in the order given before any is marked, and the first that
+    /// cannot be taken refuses the batch, which then marks none: `NotFound` for one the
+    /// workspace does not hold, `InvalidInput` for an incomplete one, `Conflict` for one another
+    /// job consumed. An upload `job` already consumed stays as it is, so repeating the batch
+    /// changes nothing and returns the same records. An upload listed twice is the same upload
+    /// at each place it is listed. Returns the records in the order given; an empty batch marks
+    /// nothing and returns none.
+    ///
+    /// Two jobs whose batches share uploads, listed in whatever order, do not end holding some
+    /// of them each: one batch takes every upload it lists, and the other is refused with
+    /// `Conflict` having marked none. An import consumes its uploads with this, not with one
+    /// `consume` for each.
+    ///
+    /// Refused with `Conflict` naming the purge, before any upload is read, when a purge names
+    /// the workspace (`storage::Purger`).
+    fn consume_batch<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        uploads: &'a [UploadId],
+        job: JobId,
+    ) -> PortFuture<'a, Vec<UploadRecord>>;
 }

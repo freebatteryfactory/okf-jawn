@@ -1165,9 +1165,27 @@ fn refused<T: std::fmt::Debug>(result: Result<T, ApiError>, what: &str) -> TestR
     Ok(())
 }
 
-/// The upload writes of the refusal test: each refused.
-async fn refuse_uploads(storage: &Storage, target: &StorageScope, slot: UploadId) -> TestResult {
+/// The upload writes of the refusal test: each refused. `slot` is open and `complete` holds a
+/// retained object no job consumed, so only the purge refuses a batch of it, and it stays
+/// unconsumed.
+async fn refuse_uploads(
+    storage: &Storage,
+    target: &StorageScope,
+    slot: UploadId,
+    complete: UploadId,
+) -> TestResult {
     let uploads = storage.uploads();
+    refused(
+        uploads.consume_batch(target, &[complete], uuid!(70)?).await,
+        "an upload batch",
+    )?;
+    let unconsumed: Option<String> = rusqlite::Connection::open(storage.data().records_path())?
+        .query_row(
+            "SELECT consumed_by FROM uploads WHERE upload_id = ?1",
+            [complete.0.to_string()],
+            |row| row.get(0),
+        )?;
+    assert_eq!(unconsumed, None, "the refused batch marked nothing");
     refused(
         uploads
             .create(
@@ -1285,6 +1303,7 @@ async fn purge_refuses_every_write_to_the_workspace_it_names() -> TestResult {
         .await?;
     let claimed = some(records.claim_job(job.id).await?, "the claimed job")?;
     let slot = upload(&storage, &target, 8, b"", false).await?;
+    let complete = upload(&storage, &target, 7, b"an import's source", true).await?;
     let object = put(&storage, &target, b"before the purge").await?;
     let purge: PurgeId = uuid!(60)?;
     record_purge_of(&storage, &target, purge).await?;
@@ -1354,7 +1373,7 @@ async fn purge_refuses_every_write_to_the_workspace_it_names() -> TestResult {
             .await,
         "a draft",
     )?;
-    refuse_uploads(&storage, &target, slot).await?;
+    refuse_uploads(&storage, &target, slot, complete).await?;
     refuse_records(&storage, &target, &head, claimed, &object).await?;
     put(&storage, &survivor, b"the other workspace goes on").await?;
     Ok(())
@@ -2167,6 +2186,30 @@ async fn purge_refuses_an_upload_completion_after_it_completes_naming_the_purge(
             .complete(&target, slot, digest_of(bytes)?)
             .await,
         "an upload completion after the purge",
+    )?;
+    Ok(())
+}
+
+/// R-I13: a batch consumption of the purged workspace's uploads after the purge completed is
+/// refused with `Conflict` naming the purge, not answered `NotFound` for the rows it removed.
+#[tokio::test]
+async fn purge_refuses_an_upload_batch_after_it_completes_naming_the_purge() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let slot = upload(&storage, &target, 8, b"an import's source", true).await?;
+    let purge: PurgeId = uuid!(60)?;
+    record_purge_of(&storage, &target, purge).await?;
+    storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(61)?, purge, target.workspace_id)
+        .await?;
+    refused(
+        storage
+            .uploads()
+            .consume_batch(&target, &[slot], uuid!(70)?)
+            .await,
+        "an upload batch after the purge",
     )?;
     Ok(())
 }

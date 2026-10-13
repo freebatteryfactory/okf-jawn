@@ -89,12 +89,20 @@ pub struct FakeVersions {
 ///
 /// `consume` encodes the port doc: an incomplete upload is `InvalidInput`, one another job
 /// consumed is `Conflict`, and consuming it again for the same job changes nothing.
+/// `consume_batch` encodes its own (the sentences stand above it): all of the batch, or none.
 #[derive(Default)]
 pub struct FakeUploads {
     /// The slots `get` returns.
     pub records: Mutex<Vec<UploadRecord>>,
-    /// Consumptions asked for: upload and job.
+    /// Uploads marked, by either call: upload and job, each pair once.
     pub consumed: Mutex<Vec<(UploadId, JobId)>>,
+    /// Every `consume_batch` call, refused or not: the uploads as listed, and the job.
+    pub batches: Mutex<Vec<(Vec<UploadId>, JobId)>>,
+    /// Every single `consume` call, refused or not: the upload and the job.
+    pub singles: Mutex<Vec<(UploadId, JobId)>>,
+    /// Another job that consumes this upload just before the next `consume_batch` is applied,
+    /// as a concurrent import landing between a handler's check and its batch would (once).
+    pub taken_before_batch: Mutex<Option<(UploadId, JobId)>>,
 }
 
 /// A `BlobStore` in memory; `materialize` writes the object into a temporary directory.
@@ -587,6 +595,86 @@ impl FakeUploads {
             .map(|consumed| consumed.clone())
             .map_err(|_| poisoned())
     }
+
+    /// Every `consume_batch` call so far, refused or not.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn batches(&self) -> Result<Vec<(Vec<UploadId>, JobId)>, ApiError> {
+        self.batches
+            .lock()
+            .map(|batches| batches.clone())
+            .map_err(|_| poisoned())
+    }
+
+    /// Every single `consume` call so far, refused or not.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn singles(&self) -> Result<Vec<(UploadId, JobId)>, ApiError> {
+        self.singles
+            .lock()
+            .map(|singles| singles.clone())
+            .map_err(|_| poisoned())
+    }
+
+    /// The port's rule for `consume_batch`, on the fake's records.
+    fn take_batch(&self, uploads: &[UploadId], job: JobId) -> Result<Vec<UploadRecord>, ApiError> {
+        self.batches
+            .lock()
+            .map_err(|_| poisoned())?
+            .push((uploads.to_vec(), job));
+        let mut records = self.records.lock().map_err(|_| poisoned())?;
+        let mut consumed = self.consumed.lock().map_err(|_| poisoned())?;
+        if let Some((upload, taker)) = self
+            .taken_before_batch
+            .lock()
+            .map_err(|_| poisoned())?
+            .take()
+            && let Some(record) = records.iter_mut().find(|record| record.id == upload)
+        {
+            record.consumed_by = Some(taker);
+            consumed.push((upload, taker));
+        }
+        // "The uploads are checked in the order given before any is marked, and the first that
+        // cannot be taken refuses the batch, which then marks none: `NotFound` for one the
+        // workspace does not hold, `InvalidInput` for an incomplete one, `Conflict` for one
+        // another job consumed."
+        for upload in uploads {
+            let record = records
+                .iter()
+                .find(|record| record.id == *upload)
+                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such upload"))?;
+            if record.object.is_none() {
+                return Err(ApiError::new(
+                    ErrorCode::InvalidInput,
+                    "an upload of the batch is not complete",
+                ));
+            }
+            if record.consumed_by.is_some_and(|consumer| consumer != job) {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "an upload of the batch was consumed by another job",
+                ));
+            }
+        }
+        // "An upload `job` already consumed stays as it is, so repeating the batch changes
+        // nothing and returns the same records. An upload listed twice is the same upload at
+        // each place it is listed. Returns the records in the order given."
+        let mut taken = Vec::with_capacity(uploads.len());
+        for upload in uploads {
+            let record = records
+                .iter_mut()
+                .find(|record| record.id == *upload)
+                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such upload"))?;
+            record.consumed_by = Some(job);
+            if !consumed.contains(&(*upload, job)) {
+                consumed.push((*upload, job));
+            }
+            taken.push(record.clone());
+        }
+        Ok(taken)
+    }
 }
 
 impl FakeBlobs {
@@ -1000,9 +1088,11 @@ impl UploadStore for FakeUploads {
         job: JobId,
     ) -> PortFuture<'a, UploadRecord> {
         let taken = self
-            .records
+            .singles
             .lock()
+            .map(|mut singles| singles.push((upload, job)))
             .map_err(|_| poisoned())
+            .and_then(|()| self.records.lock().map_err(|_| poisoned()))
             .and_then(|mut records| {
                 let record = records
                     .iter_mut()
@@ -1037,6 +1127,15 @@ impl UploadStore for FakeUploads {
             recorded?;
             self.get(scope, upload).await
         })
+    }
+    fn consume_batch<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        uploads: &'a [UploadId],
+        job: JobId,
+    ) -> PortFuture<'a, Vec<UploadRecord>> {
+        let taken = self.take_batch(uploads, job);
+        Box::pin(async move { taken })
     }
 }
 

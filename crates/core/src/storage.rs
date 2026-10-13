@@ -738,7 +738,9 @@ pub trait WorkspaceCatalog: Send + Sync {
 ///   the purge, checked inside the write's own SQLite transaction: new jobs, job retries and
 ///   claims, drafts (save, discard), upload slots, upload content, upload completions (also
 ///   checked before anything is read, so a completion after the purge is refused rather than
-///   answered `NotFound`), artifacts, job completions, derived objects, receipts, reviews,
+///   answered `NotFound`), upload batch consumptions (`UploadStore::consume_batch`, checked
+///   before anything is read as well; a single `consume` is not refused), artifacts, job
+///   completions, derived objects, receipts, reviews,
 ///   proposals (insert, update), comments, confirmations (create, consume), sandbox
 ///   capabilities and catalog changes. Commits, candidates and promotions are refused under the
 ///   workspace's write lock, under which the purge reads the workspace's records and history

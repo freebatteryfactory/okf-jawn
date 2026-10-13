@@ -1321,6 +1321,9 @@ mod job_handler {
         let entry = world.records.entry(id)?;
         assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
         assert_eq!(world.uploads.consumed()?, [(report, id), (notes, id)]);
+        // Taken in one batch, in the request's order, and never one upload at a time (R-I13).
+        assert_eq!(world.uploads.batches()?, [(vec![report, notes], id)]);
+        assert_eq!(world.uploads.singles()?, Vec::new());
 
         // One commit of both pending cards, then one per converted card, each expecting the
         // revision before it, and each under its own identity derived from the job's.
@@ -1480,6 +1483,43 @@ mod job_handler {
         assert!(!retryable);
         assert_eq!(entry.failures.len(), 1);
         assert_eq!(world.uploads.consumed()?, [(complete, taker)]);
+        // Both refusals were the handler's own check: neither refused batch reached the store.
+        assert_eq!(world.uploads.batches()?, [(vec![complete], taker)]);
+        Ok(())
+    }
+
+    /// R-I13: another job takes one upload of the batch after the import checked it and before
+    /// the import consumes. The store refuses the whole batch, so the import holds none of its
+    /// uploads (the other job can still take the rest), and the import is refused for good.
+    #[tokio::test]
+    async fn an_import_whose_upload_another_job_takes_after_its_check_takes_none() -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let first = upload(&world, 160, "first.pdf", b"%PDF first")?;
+        let shared = upload(&world, 161, "shared.pdf", b"%PDF shared")?;
+        let other = job_id(161)?;
+        *world
+            .uploads
+            .taken_before_batch
+            .lock()
+            .map_err(|_| "poisoned")? = Some((shared, other));
+        let id = job(
+            &world,
+            160,
+            workspace_scope()?,
+            import_spec(vec![first, shared], false)?,
+        )?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        let (message, retryable) = some(entry.failures.first(), "the failure")?;
+        assert!(message.contains("another job"), "{message}");
+        assert!(!retryable, "a retry would meet the same refusal");
+        assert_eq!(entry.failures.len(), 1);
+        // One batch was asked for, whole; the import marked neither upload.
+        assert_eq!(world.uploads.batches()?, [(vec![first, shared], id)]);
+        assert_eq!(world.uploads.singles()?, Vec::new());
+        assert_eq!(world.uploads.consumed()?, [(shared, other)]);
+        assert!(world.versions.written()?.is_empty());
         Ok(())
     }
 
