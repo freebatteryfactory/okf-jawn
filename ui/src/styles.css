@@ -576,3 +576,11 @@ main.app-main:has(.explorer) {
 .patch-lines > span {
   padding-left: calc(0.25rem + 3px);
 }
+.kept-text {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0.25rem 0;
+  padding: 0.5rem;
+  border: 1px solid currentColor;
+}
