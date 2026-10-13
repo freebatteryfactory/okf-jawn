@@ -21,7 +21,8 @@
 //!   escape that stands for half a character pass, as they do for the grammar.
 //!
 //! Known limits: there is no limit on how deep a text may be nested. A text nested as deep as
-//! it is long costs one bit for each level, an eighth of its length.
+//! it is long costs one bit for each level, and the buffer of bits grows by doubling, so it
+//! may hold twice that: a quarter of the text's length at most.
 
 /// What is still to come of a number, by what was read last.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -58,7 +58,7 @@
 //! - A buffer that grows may be held twice for a moment, so a growing answer can take half
 //!   as much again as its room; an answer whose length the service announced never grows.
 //! - What the HTTP library holds for a connection, and a bit for each level an answer is
-//!   nested (an eighth of its length at most).
+//!   nested, in a buffer that grows by doubling (a quarter of its length at most).
 //!
 //! The worst case is therefore about 0.9 GiB: 192 MiB for answers (the budget, and half as
 //! much again while buffers grow), 256 MiB for sixteen request lines of 16 MiB, 16 MiB for the
