@@ -956,6 +956,11 @@ describe('rules typed as YAML a moment before a press', () => {
     expect(said()).toBe(NOT_READ);
     await turn();
     expect(api.callsTo(SET)).toEqual([]);
+    // Pressed again while the reading is under way: still nothing, and no second reading.
+    await userEvent.click(button('Save the rules'));
+    await turn();
+    expect(api.callsTo(SET)).toEqual([]);
+    expect(readings).toHaveLength(1);
     answer(readings.at(0));
     await userEvent.click(button('Save the rules'));
     await waitFor(() => expect(api.callsTo(SET)).toHaveLength(1));

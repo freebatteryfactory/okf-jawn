@@ -55,6 +55,8 @@ describe('reading YAML off the page’s thread', () => {
   });
 
   it('ends a reading that takes longer than the limit, and says that the text is too complex', () => {
+    // The page's own limit: one second.
+    expect(YAML_LIMIT_MS).toBe(1_000);
     const { answers, reading } = begin();
     reading.began();
     vi.advanceTimersByTime(YAML_LIMIT_MS - 1);

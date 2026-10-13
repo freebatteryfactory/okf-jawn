@@ -605,10 +605,13 @@ test.describe('changing the tree and the naming rules', () => {
       'The text of the YAML view is still being read. Nothing was sent or changed',
       { timeout: 1_000 },
     );
+    expect(page.workers()).toHaveLength(1);
     // At the limit the reading is ended, and the person is told in plain words.
     await expect(alert).toContainText('This YAML cannot be read. Nothing of it is sent.');
     await expect(alert).toContainText(tooComplex);
     expect(stubbed).toBe(1);
+    // Ended is ended: the worker that would never have come back is gone.
+    await expect.poll(() => page.workers().length).toBe(0);
     // The text stays in the box, and nothing of it is sent at the next press either.
     await expect(rules).toContainText('rules: [] # never read');
     await press(page, 'Preview the renames');
@@ -623,6 +626,14 @@ test.describe('changing the tree and the naming rules', () => {
     await page.unroute(workerScript);
     await paste('schema_version: 1\nrules: []\n');
     await expect(page.getByText('These rules differ from the saved ones.')).toBeVisible();
+    await expect(alert.filter({ hasText: 'This YAML cannot be read' })).toHaveCount(0);
+    // A worker that answered is kept for the next text, and reads it.
+    const [kept] = page.workers();
+    expect(page.workers()).toHaveLength(1);
+    await paste('schema_version: 1\nrules: [\n');
+    await expect(alert).toContainText('This YAML cannot be read. Nothing of it is sent.');
+    expect(page.workers()).toEqual([kept]);
+    await paste('schema_version: 1\nrules: []\n');
     await expect(alert.filter({ hasText: 'This YAML cannot be read' })).toHaveCount(0);
 
     // And the re-review's text, inside the bound on length and on depth. This engine's reader
