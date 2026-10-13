@@ -13,6 +13,7 @@ import {
   MAX_BODY_BYTES,
   resetDraftSessions,
 } from '../../src/features/drafts/saving';
+import { sessionKey, useDraftSessions } from '../../src/features/drafts/sessions';
 import { fail, type Handler, type Json, mockApi, ok, type Reply } from './support/api';
 import { findTextBox, replaceText, textBox, textIn, typeInto } from './support/editor';
 import {
@@ -1268,6 +1269,33 @@ describe('a draft of a Source or a View made elsewhere', () => {
     },
   );
 
+  it('does not count or tick a draft whose item has not been read yet: a Snapshot then never has it', async () => {
+    const release: Array<() => void> = [];
+    const item = summary(SOURCE, 'things/it.md', 'Annual report', 'report', 'source');
+    const { api } = withOther('source', {
+      [ITEM]: (body) => {
+        const itemId = String(body.item_id);
+        if (itemId === NOTE) return ok(itemDocument(noteSummary));
+        // The Source's read is held until the test lets it answer.
+        return new Promise<Reply>((resolve) => release.push(() => resolve(ok(itemDocument(item)))));
+      },
+    });
+    renderAt(`/w/${WS}`);
+    await screen.findByRole('region', { name: 'Drafts (2)' });
+    await eventuallyReal(() => expect(snapshotButton().textContent).toBe('Snapshot 1 draft'));
+    const checking = within(panel()).getByRole('checkbox', {
+      name: 'Include Item 44444444 in the Snapshot',
+    });
+    expect(checking.closest('li')?.textContent).toContain('checking…');
+    expect(checking).toHaveProperty('checked', false);
+    expect(checking.getAttribute('aria-disabled')).toBe('true');
+    await pressSnapshot('Early');
+    await eventuallyReal(() => expect(said()).toMatch(/^Snapshot “Early” taken: 1 item\./));
+    expect(api.callsTo(COMMIT).map((sent) => sent.item_ids)).toEqual([[NOTE]]);
+    for (const answer of release) answer();
+    await eventuallyReal(() => expect(row()).toContain('cannot be snapshotted'));
+  });
+
   it('offers "Discard draft", which asks first; then the draft is gone and focus is on a row', async () => {
     const { api, state } = await listed('source');
     act(() => discardButton().focus());
@@ -1566,6 +1594,37 @@ describe('a Snapshot that conflicts', () => {
     expect(document.activeElement).toBe(await screen.findByRole('button', { name: 'Edit' }));
     expect(headLine()).toContain(MADE.slice(0, 10));
     expect(api.violations).toEqual([]);
+  });
+
+  describe('the question before "Take theirs" removes the draft', () => {
+    const ASKED = 'Discard your draft and take the newer version?';
+    const HELD = 'what you changed in the properties that is not saved';
+
+    it('says that what was changed in the properties and is held back goes too', async () => {
+      const { notice } = await openConflict();
+      act(() =>
+        useDraftSessions.getState().change(sessionKey(WS, NOTE), {
+          heldBack: {
+            form: { owner: 'Grace' },
+            entered: ['owner'],
+            opened: ['owner'],
+            takenOut: [],
+          },
+        }),
+      );
+      fireEvent.click(within(notice).getByRole('button', { name: 'Take theirs' }));
+      expect(within(notice).getByRole('group', { name: ASKED }).textContent).toContain(
+        `Your text here, and ${HELD}, will be removed.`,
+      );
+    });
+
+    it('does not mention the properties when none of their input is held back', async () => {
+      const { notice } = await openConflict();
+      fireEvent.click(within(notice).getByRole('button', { name: 'Take theirs' }));
+      const asked = within(notice).getByRole('group', { name: ASKED }).textContent ?? '';
+      expect(asked).toContain('Your text here will be removed.');
+      expect(asked).not.toContain(HELD);
+    });
   });
 
   it('take theirs: asks first, then discards the draft and commits nothing', async () => {

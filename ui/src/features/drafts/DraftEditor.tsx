@@ -171,7 +171,12 @@ export function DraftEditor({ session, title, onDiscarded }: DraftEditorProps) {
       {confirming ? (
         <fieldset className="confirm">
           <legend>Discard this draft?</legend>
-          <p>Your text here will be removed. The committed text stays as it is.</p>
+          <p>
+            {session.heldBack === null
+              ? 'Your text here will be removed.'
+              : 'Your text here, and what you changed in the properties that is not saved, will be removed.'}{' '}
+            The committed text stays as it is.
+          </p>
           <button
             type="button"
             ref={keepRef}

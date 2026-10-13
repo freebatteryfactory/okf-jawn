@@ -658,3 +658,11 @@ main.app-main:has(.explorer) {
 .attention-row a {
   text-decoration: underline;
 }
+.kept-text {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0.25rem 0;
+  padding: 0.5rem;
+  border: 1px solid currentColor;
+}
