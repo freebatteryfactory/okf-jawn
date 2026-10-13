@@ -8,6 +8,7 @@ import {
   drawnProperties,
   mergeProperties,
   misfits,
+  takenOutBy,
   withoutHeaderField,
 } from '../../src/features/documents/PropertiesForm';
 import { AUTOSAVE_DELAY_MS, resetDraftSessions } from '../../src/features/drafts/saving';
@@ -606,6 +607,206 @@ describe('the properties form', () => {
       expect(added).toEqual({ ...stored, attendees: 9, owner: 'Grace', venue: 'Blue room' });
       // What the form does not hold is the same throughout.
       expect(added['x-okf-review']).toEqual(stored['x-okf-review']);
+    });
+  });
+
+  // A type may offer a choice: the library draws a selector and the fields of the alternative
+  // chosen, and takes the properties of the one before out of its data when another is chosen.
+  describe('a type whose schema offers a choice (oneOf)', () => {
+    const meeting = {
+      type: 'meeting-note',
+      owner: 'Ada',
+      room: 'Blue',
+      floor: 2,
+      'x-okf-review': { by: 'grace' },
+      okf_jawn: { id: NOTE },
+    };
+    const choosing = {
+      type: 'object',
+      properties: { owner: { type: 'string', title: 'Owner' } },
+      oneOf: [
+        {
+          title: 'In a room',
+          properties: {
+            room: { type: 'string', title: 'Room' },
+            floor: { type: 'integer', title: 'Floor' },
+          },
+          required: ['room'],
+        },
+        {
+          title: 'Remote',
+          properties: { link: { type: 'string', title: 'Link', minLength: 8 } },
+          required: ['link'],
+        },
+      ],
+    };
+    const service = () =>
+      typed({
+        [TYPES]: () => ok({ items: [{ ...meetingNote, properties_schema: choosing }] }),
+        [ITEM]: () => ok({ ...itemDocument(noteSummary), properties: meeting }),
+      });
+    const saidAbove = () => document.querySelector('.form-said')?.textContent ?? '';
+    const TAKEN_OUT = 'What you chose takes “room” and “floor” out of this item’s properties.';
+    const choice = () => screen.getByRole('combobox', { name: 'Which of these applies' });
+    const choose = (title: string) => {
+      const option = within(choice()).getByRole('option', { name: title });
+      fireEvent.change(choice(), { target: { value: option.getAttribute('value') } });
+    };
+    const sent = (api: ReturnType<typeof typed>) => Object(api.callsTo(SAVE).at(-1)?.properties);
+
+    it('draws the choice with a name and the fields of the alternative the item fits, and lists none of them as other properties', async () => {
+      service();
+      await editNote();
+      expect(
+        within(choice()).getByRole<HTMLOptionElement>('option', { name: 'In a room' }).selected,
+      ).toBe(true);
+      expect(field('Room')).toHaveProperty('value', 'Blue');
+      expect(field('Floor')).toHaveProperty('value', '2');
+      expect(screen.queryByLabelText(/^Link\*?$/)).toBeNull();
+      // The alternative's properties have fields: they are not "kept exactly as they are".
+      const others = document.querySelector('.properties')?.textContent?.split('Other properties');
+      expect(others).toHaveLength(2);
+      expect(others?.at(1)).toContain('x-okf-review');
+      expect(others?.at(1)).not.toMatch(/room|floor|link/);
+      expect(saidAbove()).toBe('');
+    });
+
+    it('takes what is typed in a field of the chosen alternative into the draft', async () => {
+      const api = service();
+      await editNote();
+      set('Room', 'Green');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      expect(sent(api)).toEqual({ ...meeting, room: 'Green' });
+      expect(Object.keys(sent(api))).toEqual(Object.keys(meeting));
+      expect(saidAbove()).toBe('');
+    });
+
+    it('says which properties another choice takes out, and saves without them once the new one fits', async () => {
+      const api = service();
+      await editNote();
+      choose('Remote');
+      await waitForField('Link');
+      // Said at once, by name: the fields are gone, and so will the properties be.
+      expect(saidAbove()).toContain(TAKEN_OUT);
+      expect(screen.queryByLabelText(/^Room\*?$/)).toBeNull();
+      // The new alternative lacks its required link: nothing is saved yet, and the item says so.
+      await pass(AUTOSAVE_DELAY_MS * 3);
+      expect(api.callsTo(SAVE)).toHaveLength(0);
+      expect(saidAbove()).toContain(
+        'What you changed in the properties is held back, and is not saved until the properties fit the type.',
+      );
+      expect(screen.getByRole('tab', { name: 'Meeting notes (unsaved)' })).toBeDefined();
+      set('Link', 'https://meet.example/weekly');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      expect(sent(api)).toEqual({
+        type: 'meeting-note',
+        owner: 'Ada',
+        'x-okf-review': { by: 'grace' },
+        okf_jawn: { id: NOTE },
+        link: 'https://meet.example/weekly',
+      });
+      // It is still said after the save: the two properties are out of the item now.
+      expect(saidAbove()).toBe(TAKEN_OUT);
+    });
+
+    it('stops naming a property once it is entered again', async () => {
+      const api = service();
+      await editNote();
+      choose('Remote');
+      await waitForField('Link');
+      expect(saidAbove()).toContain(TAKEN_OUT);
+      // Back to the first alternative: its fields are there again, empty. What they held is gone.
+      choose('In a room');
+      await waitForField('Room');
+      expect(field('Room')).toHaveProperty('value', '');
+      expect(saidAbove()).toContain(TAKEN_OUT);
+      set('Room', 'Green');
+      expect(saidAbove()).toContain('What you chose takes “floor” out of this item’s properties.');
+      expect(saidAbove()).not.toContain('“room”');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      expect(sent(api)).toEqual({
+        type: 'meeting-note',
+        owner: 'Ada',
+        room: 'Green',
+        'x-okf-review': { by: 'grace' },
+        okf_jawn: { id: NOTE },
+      });
+    });
+
+    it('does not call a property the person emptied in its own field taken out by a choice', async () => {
+      const api = service();
+      await editNote();
+      set('Floor', '');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      expect(sent(api)).not.toHaveProperty('floor');
+      expect(saidAbove()).toBe('');
+    });
+
+    describe('when the editor is left and opened again with the choice held back', () => {
+      const selected = (title: string) =>
+        within(choice()).getByRole<HTMLOptionElement>('option', { name: title }).selected;
+      async function leaveAndReturn() {
+        fireEvent.click(screen.getByRole('button', { name: 'Read the committed text' }));
+        await eventually(() => expect(screen.queryByLabelText(/^Owner\*?$/)).toBeNull());
+        fireEvent.click(screen.getByRole('button', { name: 'Edit your draft' }));
+        await waitForField('Owner');
+      }
+
+      it('shows the choice again with what was typed in it, and still names what it took out', async () => {
+        const api = service();
+        await editNote();
+        choose('Remote');
+        await waitForField('Link');
+        // Too short for the type: held back, with the choice.
+        set('Link', 'short');
+        await leaveAndReturn();
+        expect(selected('Remote')).toBe(true);
+        expect(field('Link')).toHaveProperty('value', 'short');
+        expect(saidAbove()).toContain(TAKEN_OUT);
+        expect(api.callsTo(SAVE)).toHaveLength(0);
+      });
+
+      // A limit: which alternative is chosen is the form library's own state. A form that opens
+      // shows the alternative its data fits best, so a choice with nothing typed in it yet is not
+      // shown again. What the choice took out is still out, and still named.
+      it('shows the alternative the data fits when nothing was typed in the one chosen', async () => {
+        service();
+        await editNote();
+        choose('Remote');
+        await waitForField('Link');
+        await leaveAndReturn();
+        expect(selected('In a room')).toBe(true);
+        expect(field('Room')).toHaveProperty('value', '');
+        expect(saidAbove()).toContain(TAKEN_OUT);
+      });
+    });
+  });
+
+  describe('what a change takes out of the form’s data', () => {
+    it('names what left at another control, and not what was emptied in its own field', () => {
+      const before = { owner: 'Ada', room: 'Blue', floor: 2, place: { room: 'x' } };
+      expect(takenOutBy('root__oneof_select', before, { owner: 'Ada' })).toEqual([
+        'room',
+        'floor',
+        'place',
+      ]);
+      expect(takenOutBy('root_room', before, { owner: 'Ada', floor: 2, place: {} })).toEqual([]);
+      // A field inside a property is that property's own.
+      expect(
+        takenOutBy('root_place_room', before, { owner: 'Ada', room: 'Blue', floor: 2 }),
+      ).toEqual([]);
+      // A property whose name begins like another's is not that other's field.
+      expect(
+        takenOutBy('root_roommate', before, { owner: 'Ada', floor: 2, place: { room: 'x' } }),
+      ).toEqual(['room']);
+      // What changed and stayed, or was never there, was not taken out.
+      expect(
+        takenOutBy('root__oneof_select', before, { ...before, owner: 'Grace', link: 'x' }),
+      ).toEqual([]);
     });
   });
 

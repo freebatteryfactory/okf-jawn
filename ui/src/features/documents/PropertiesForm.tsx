@@ -9,10 +9,19 @@
  * The form is given every property but the application's own header (`okf_jawn`), which is never
  * a field: it is taken out of the properties the schema names before the form sees the schema. The
  * form draws a field for each property the schema names, at its top or under a rule about the same
- * object (`allOf`, `if`/`then`, `dependencies`). A property it draws no field for (an unknown key,
- * an OKF extension, the header) is listed read-only beside it and goes back into the map exactly
- * as it was, in its place. Inside a property the form does draw, keys its schema does not
- * describe are kept by the form library (it drops none unless told to).
+ * object (`allOf`, `if`/`then`, `dependencies`), and for those of the alternative chosen where a
+ * type offers a choice (`oneOf`, `anyOf`): the library draws a selector, named here "Which of
+ * these applies", and the chosen alternative's fields. Choosing another makes the library take
+ * the properties of the one before out of its data; the form names each property of the item
+ * that a change takes out elsewhere than in its own field, until it is entered again. Limits:
+ * what such a change removes inside a property (a choice within a group) changes that property
+ * and is not named; and which alternative is chosen is the library's own state, so a form that
+ * opens again shows the alternative its data fits best.
+ *
+ * A property the form draws no field for (an unknown key, an OKF extension, the header) is listed
+ * read-only beside it and goes back into the map exactly as it was, in its place. Inside a
+ * property the form does draw, keys its schema does not describe are kept by the form library
+ * (it drops none unless told to).
  *
  * Opening the form is not an edit. A property the item does not hold is shown empty; a default its
  * schema names is not written into the draft unless the person enters it. Only the properties the
@@ -44,10 +53,25 @@
  * still travel with every save.
  */
 import Form from '@rjsf/core';
-import { type ErrorTransformer, type RJSFSchema, retrieveSchema, type UiSchema } from '@rjsf/utils';
+import {
+  type ErrorTransformer,
+  type MultiSchemaFieldTemplateProps,
+  type RJSFSchema,
+  retrieveSchema,
+  type UiSchema,
+} from '@rjsf/utils';
 import { customizeValidator } from '@rjsf/validator-ajv8';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Component, memo, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Component,
+  isValidElement,
+  memo,
+  type ReactNode,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { z } from 'zod';
 import { listTypesOptions } from '../../api/generated/@tanstack/react-query.gen';
 import { keyed } from '../../lib/keys';
@@ -91,6 +115,53 @@ const topProperty = (path: string | undefined) =>
  */
 const ONLY_AT_PROPERTIES: ErrorTransformer<PropertyMap> = (errors) =>
   errors.filter((error) => topProperty(error.property) !== '');
+
+/** The form's ids: a top-level property's field is `root_<property>`, and what is in it below. */
+const ID_PREFIX = 'root';
+const ID_SEPARATOR = '_';
+
+/** A change reported at the control `id` was made in the field of the property `key`. */
+const isFieldOf = (id: string, key: string) => {
+  const field = `${ID_PREFIX}${ID_SEPARATOR}${key}`;
+  return id === field || id.startsWith(`${field}${ID_SEPARATOR}`);
+};
+
+/**
+ * The properties a change took out of the form's data though it was not made in their own field:
+ * the library drops what belongs to an alternative when another is chosen. Emptying a property in
+ * its own field is the person's own doing, and is not among them.
+ */
+export function takenOutBy(id: string, before: PropertyMap, after: PropertyMap): string[] {
+  return Object.keys(before).filter(
+    (key) => before[key] !== undefined && after[key] === undefined && !isFieldOf(id, key),
+  );
+}
+
+const NAMES = new Intl.ListFormat('en', { style: 'long', type: 'conjunction' });
+const zIdentified = z.object({ id: z.string() });
+
+/**
+ * How a choice among a type's alternatives is laid out. The selector the library draws has no
+ * name of its own (its theme draws none for it), so it is given a label here.
+ */
+function ChoiceTemplate({ selector, optionSchemaField }: MultiSchemaFieldTemplateProps) {
+  const identified = isValidElement(selector) ? zIdentified.safeParse(selector.props) : null;
+  return (
+    <div className="choice">
+      {identified?.success ? (
+        <div className="form-group">
+          <label htmlFor={identified.data.id}>Which of these applies</label>
+          {selector}
+        </div>
+      ) : (
+        selector
+      )}
+      {optionSchemaField}
+    </div>
+  );
+}
+
+const TEMPLATES = { MultiSchemaFieldTemplate: ChoiceTemplate };
 
 /** What the form library is given to call with errors that are already shown. */
 const NOTHING_MORE = () => {};
@@ -143,15 +214,32 @@ export function withoutHeaderField(schema: unknown): unknown {
   return next;
 }
 
+/** The keywords that offer a choice among schemas about the same object. */
+const CHOICES = ['oneOf', 'anyOf'] as const;
+
 /**
  * The properties the form draws a field for, with the data it holds: those the schema names at its
  * top, and those its rules bring in (`allOf`, `if`/`then`, `dependencies`), as the form library
- * itself resolves them.
+ * itself resolves them. Where the schema offers a choice (`oneOf`, `anyOf`) the library draws the
+ * fields of the alternative chosen; which one that is, is the library's to know (it keeps the
+ * person's choice), so a property any alternative names counts as the form's to draw.
  */
 export function drawnProperties(schema: PropertyMap, data: PropertyMap): string[] {
-  const resolved = retrieveSchema<PropertyMap>(validator, schema, schema, data);
-  const named = zNaming.safeParse(resolved);
-  return named.success ? Object.keys(named.data.properties) : [];
+  const resolve = (part: PropertyMap) => {
+    const resolved = retrieveSchema<PropertyMap>(validator, part, schema, data);
+    const named = zNaming.safeParse(resolved);
+    return { resolved, names: named.success ? Object.keys(named.data.properties) : [] };
+  };
+  const top = resolve(schema);
+  const names = new Set(top.names);
+  for (const keyword of CHOICES) {
+    const alternatives = z.array(zObject).safeParse(top.resolved[keyword]);
+    if (!alternatives.success) continue;
+    for (const alternative of alternatives.data) {
+      for (const name of resolve(alternative).names) names.add(name);
+    }
+  }
+  return [...names];
 }
 
 /** One way the properties do not fit the type: the property it is about ('' for the whole map). */
@@ -406,6 +494,9 @@ const TypedForm = memo(function TypedForm({
   // The properties the person has changed in a field since the form opened: these, and no other,
   // go from the form into the draft.
   const [entered, setEntered] = useState<readonly string[]>(() => held?.entered ?? []);
+  // The properties a choice took out of the form's data (see `takenOutBy`), named above the form
+  // until they are entered again.
+  const [takenOut, setTakenOut] = useState<readonly string[]>(() => held?.takenOut ?? []);
   // The form library says what is wrong at a field once that form has been changed. So a form is
   // asked to judge what it opens on, once: stored properties that do not fit at a field, and
   // input held back before, have their reason at the field from the start.
@@ -444,6 +535,12 @@ const TypedForm = memo(function TypedForm({
           </ul>
         </div>
       )}
+      {takenOut.length > 0 && (
+        <p className="notice">
+          What you chose takes {NAMES.format(takenOut.map((name) => `“${name}”`))} out of this
+          item’s properties.
+        </p>
+      )}
       {heldBack && (
         <p className="notice">
           What you changed in the properties is held back, and is not saved until the properties fit
@@ -470,6 +567,9 @@ const TypedForm = memo(function TypedForm({
       <Form<PropertyMap>
         ref={formRef}
         className="properties-form"
+        idPrefix={ID_PREFIX}
+        idSeparator={ID_SEPARATOR}
+        templates={TEMPLATES}
         // Asked to judge what it opens on (above), the library reports what it found here; it is
         // on the page already, at the fields and above the form.
         onError={NOTHING_MORE}
@@ -495,6 +595,12 @@ const TypedForm = memo(function TypedForm({
             ]),
           ];
           setEntered(now);
+          // What this change took out elsewhere than in its own field, with what was taken out
+          // before and is still out.
+          const out = [...new Set([...takenOut, ...takenOutBy(id, data, next)])].filter(
+            (key) => next[key] === undefined,
+          );
+          setTakenOut(out);
           const candidate = mergeProperties(properties, now, next, opened);
           // Judged as the service judges it: the whole map, without the application's header.
           if (!validator.isValid(rules, withoutHeader(candidate), rules)) {
@@ -504,7 +610,7 @@ const TypedForm = memo(function TypedForm({
               workspaceId,
               itemId,
               changedKeys(properties, candidate).length > 0
-                ? { form: next, entered: now, opened: [...opened] }
+                ? { form: next, entered: now, opened: [...opened], takenOut: out }
                 : null,
             );
             return;

@@ -43,6 +43,8 @@ export interface HeldProperties {
   entered: string[];
   /** The property map's keys as the form found them: where a property entered again goes back. */
   opened: string[];
+  /** The properties a choice in the form took out, which the form goes on naming. */
+  takenOut: string[];
 }
 
 /** One `save_draft` request: repeated under the same key while it says the same thing. */
