@@ -164,7 +164,7 @@ describe('the identity of a start_import request', () => {
 });
 
 describe('starting the import', () => {
-  it('names the uploaded files, the folder as typed and the version shown, and shows the job at once', async () => {
+  it('names the uploaded files, the folder typed and the version shown, and shows the job at once', async () => {
     const { api, service } = await uploadedFiles(
       [fileOf('a.txt', 'abc'), fileOf('b.txt', 'abcd')],
       { [START]: () => accepted(jobOf('queued')), [JOB]: () => ok(jobOf('queued')) },
@@ -212,6 +212,52 @@ describe('starting the import', () => {
       screen.getByText(
         'Import of 1 file into the top of the workspace was accepted as Import, job 88888888. It is not finished: its state is “running”.',
       ),
+    ).toBeDefined();
+  });
+
+  it('sends the folder without the spaces typed around it, and takes other spaces for the same request', async () => {
+    let answers = 0;
+    const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {
+      [START]: () => {
+        answers += 1;
+        return answers === 1 ? fail(503, 'unavailable', 'busy') : accepted(jobOf('queued'));
+      },
+      [JOB]: () => ok(jobOf('queued')),
+    });
+    fireEvent.change(folder(), { target: { value: '  notes/2025 ' } });
+    fireEvent.click(importButton());
+    await eventually(() =>
+      screen.getByText('Starting the import: The service is temporarily unavailable.'),
+    );
+    expect(api.callsTo(START).at(0)?.destination).toBe('notes/2025');
+    // The field is left as it was typed; only what is sent is trimmed.
+    expect(folder()).toHaveProperty('value', '  notes/2025 ');
+    await eventually(() => expect(importButton().getAttribute('aria-disabled')).toBe('false'));
+    // The same folder with other spaces around it is the same request, key included.
+    fireEvent.change(folder(), { target: { value: 'notes/2025    ' } });
+    fireEvent.click(importButton());
+    await eventually(() => jobRow());
+    const sent = api.callsTo(START);
+    expect(sent).toHaveLength(2);
+    expect(sent.at(1)).toEqual(sent.at(0));
+    expect(
+      screen.getByText(
+        'Import of 1 file into “notes/2025” was accepted as Import, job 88888888. It is not finished: its state is “waiting to start”.',
+      ),
+    ).toBeDefined();
+  });
+
+  it('takes a folder of spaces alone for the top of the workspace', async () => {
+    const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {
+      [START]: () => accepted(jobOf('queued')),
+      [JOB]: () => ok(jobOf('queued')),
+    });
+    fireEvent.change(folder(), { target: { value: '   ' } });
+    fireEvent.click(importButton());
+    await eventually(() => jobRow());
+    expect(api.callsTo(START).at(0)?.destination).toBe('');
+    expect(
+      screen.getByText(/^Import of 1 file into the top of the workspace was accepted/),
     ).toBeDefined();
   });
 

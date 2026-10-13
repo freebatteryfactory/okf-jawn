@@ -368,6 +368,8 @@ describe('choosing files', () => {
     choose('Choose files…', [file]);
     expect(screen.queryByText(/already in the list/)).toBeNull();
     expect(rows()).toHaveLength(1);
+    // Nor is it held back for being at the same place as the other workspace's file.
+    expect(screen.getByRole('button', { name: 'Upload 1 file' })).toBeDefined();
     expect(useUploads.getState().entries.map((entry) => entry.workspaceId)).toEqual([
       WS,
       elsewhere,

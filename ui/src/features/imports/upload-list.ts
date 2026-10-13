@@ -10,13 +10,21 @@
  *
  * A file larger than `MAX_FILE_BYTES` is listed as too large and is never read or sent. A file of
  * a dropped folder that the browser named and could not hand over is listed by its path as not
- * readable: there is no File for it, so nothing of it can be read or sent.
+ * readable: there is no File for it, so nothing of it can be read or sent. A file whose path the
+ * page can see is wrong (`paths.ts`: a `..` step, a root, a drive, a control character, a length
+ * over the contract's) is listed as one that cannot be imported, and is never read or sent.
+ *
+ * Two listed files whose paths are the same place to a person (`collisionKey`: the same path, or
+ * one that differs only in capital and small letters) collide: neither is sent while both are
+ * listed. The one that is still only listed is held back; one whose upload had already begun
+ * goes on, and is marked too. Removing either frees the other.
  *
  * Beside the files: the jobs started from this page, by identity only; their state is read from
  * the service (`features/jobs`).
  */
 import { create } from 'zustand';
 import type { ChosenFile, NamedPath } from './files';
+import { collisionKey, type PathProblem, pathProblem } from './paths';
 
 /**
  * The largest file this page uploads: 512 MiB.
@@ -50,7 +58,9 @@ export type UploadState =
   /** Larger than `MAX_FILE_BYTES`: never read, never sent. */
   | 'too-large'
   /** Named by a drop, and the browser could not hand it over: no File, so never read or sent. */
-  | 'unreadable';
+  | 'unreadable'
+  /** Its path is one the page does not send (`problem` says why): never read, never sent. */
+  | 'unacceptable';
 
 export interface UploadEntry extends NamedPath {
   /** This page's own identity for the entry. */
@@ -61,6 +71,8 @@ export interface UploadEntry extends NamedPath {
   /** The file's length in bytes, as the browser reported it when it was chosen; 0 when unknown. */
   size: number;
   state: UploadState;
+  /** What is wrong with its path, for an `unacceptable` entry; null for every other. */
+  problem: PathProblem | null;
   /** Bytes the service holds or the browser reports gone, for the progress shown. */
   sent: number;
   /** What the last try threw, and where it stood. */
@@ -81,9 +93,40 @@ const UNDER_WAY: ReadonlySet<UploadState> = new Set(['waiting', 'reading', 'send
 export const underWay = (entry: UploadEntry) => UNDER_WAY.has(entry.state);
 
 /** States of an entry that is listed and will never be sent as it is. */
-const NEVER_SENT: ReadonlySet<UploadState> = new Set(['too-large', 'unreadable']);
+const NEVER_SENT: ReadonlySet<UploadState> = new Set(['too-large', 'unreadable', 'unacceptable']);
 
 export const neverSent = (entry: UploadEntry) => NEVER_SENT.has(entry.state);
+
+/**
+ * The listed files that collide, each with the others of its place: files of one workspace that
+ * could be sent and whose paths have one `collisionKey`. A file that is never sent collides with
+ * nothing.
+ */
+export function collisions(entries: readonly UploadEntry[]): Map<string, UploadEntry[]> {
+  const places = new Map<string, UploadEntry[]>();
+  for (const entry of entries) {
+    if (neverSent(entry)) continue;
+    const place = `${entry.workspaceId}\n${collisionKey(entry)}`;
+    places.set(place, [...(places.get(place) ?? []), entry]);
+  }
+  const colliding = new Map<string, UploadEntry[]>();
+  for (const sharing of places.values()) {
+    if (sharing.length < 2) continue;
+    for (const entry of sharing) {
+      colliding.set(
+        entry.id,
+        sharing.filter((other) => other.id !== entry.id),
+      );
+    }
+  }
+  return colliding;
+}
+
+/** A listed file that the Upload button would send: not yet asked for, and not held back. */
+export function toBeSent(entries: readonly UploadEntry[]): UploadEntry[] {
+  const colliding = collisions(entries);
+  return entries.filter((entry) => entry.state === 'chosen' && !colliding.has(entry.id));
+}
 
 interface UploadsState {
   entries: UploadEntry[];
@@ -119,6 +162,7 @@ const fresh = () => ({
   id: crypto.randomUUID(),
   sent: 0,
   failure: null,
+  problem: null,
   slotKey: crypto.randomUUID(),
   finishKey: crypto.randomUUID(),
   sha256: null,
@@ -137,12 +181,19 @@ export const useUploads = create<UploadsState>()((set, get) => ({
       );
       if (listed) continue;
       added += 1;
+      const problem = pathProblem(file);
       entries.push({
         ...fresh(),
         ...file,
         workspaceId,
         size: file.file.size,
-        state: file.file.size > MAX_FILE_BYTES ? 'too-large' : 'chosen',
+        problem,
+        state:
+          problem !== null
+            ? 'unacceptable'
+            : file.file.size > MAX_FILE_BYTES
+              ? 'too-large'
+              : 'chosen',
       });
     }
     let repeated = chosen.length - added;

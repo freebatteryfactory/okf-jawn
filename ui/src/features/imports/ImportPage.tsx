@@ -14,6 +14,13 @@
  * says how many were listed, and what of a drop was not: a file that could not be read, a folder
  * that is empty (nothing is kept of it), a folder that could not be listed in full.
  *
+ * Paths the person did not mean (`paths.ts`). A file whose path the page can see is wrong is
+ * listed as one that cannot be imported, with the reason, and is never sent. Two files whose paths
+ * are the same place (the same, or different only in capital and small letters) are both marked,
+ * and the Upload button sends neither until one is removed. A name is drawn with every character
+ * that is not drawn itself shown as a mark of its code point (`shownName`), so a right-to-left
+ * override cannot make a name read as another; what is sent is the name itself.
+ *
  * Uploading starts when the person asks. Each file shows how it stands, in words: its own percent
  * while it is sent, and "uploaded" only once the service has verified its length and hash. A file
  * that failed keeps its place, with its failure in plain words and its retry (`useRetry`); the
@@ -42,9 +49,12 @@ import {
   pathOf,
 } from './files';
 import { ImportStart, StartedJobs } from './ImportStart';
+import { describeProblem, shownName } from './paths';
 import {
+  collisions,
   MAX_FILE_BYTES,
   neverSent,
+  toBeSent,
   type UploadEntry,
   underWay,
   useUploads,
@@ -67,7 +77,7 @@ const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : 
 const NAMED_FOLDERS = 3;
 
 function folders(paths: readonly string[]): string {
-  const named = paths.slice(0, NAMED_FOLDERS).map((path) => `“${path}”`);
+  const named = paths.slice(0, NAMED_FOLDERS).map((path) => `“${shownName(path)}”`);
   const rest = paths.length - named.length;
   return rest > 0 ? `${named.join(', ')} and ${rest} more` : named.join(', ');
 }
@@ -173,7 +183,8 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
     (next ?? chooseRef.current)?.focus();
   });
 
-  const toUpload = entries.filter((entry) => entry.state === 'chosen').length;
+  const colliding = collisions(entries);
+  const toUpload = toBeSent(entries).length;
 
   if (!canWrite) {
     return (
@@ -255,6 +266,7 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
             <UploadRow
               key={entry.id}
               entry={entry}
+              collidesWith={colliding.get(entry.id) ?? NONE}
               held={held}
               onRemove={() => {
                 removedAt.current = index;
@@ -285,6 +297,8 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
   );
 }
 
+const NONE: readonly UploadEntry[] = [];
+
 /** How one file stands, in words; never by color. */
 function Standing({ entry }: { entry: UploadEntry }) {
   switch (entry.state) {
@@ -311,21 +325,49 @@ function Standing({ entry }: { entry: UploadEntry }) {
       );
     case 'unreadable':
       return <>Not readable: the browser could not open this file. It will not be sent.</>;
+    case 'unacceptable':
+      return (
+        <>
+          Cannot be imported:{' '}
+          {entry.problem === null ? 'its path is not one to send.' : describeProblem(entry.problem)}{' '}
+          It will not be sent.
+        </>
+      );
   }
+}
+
+/** That a file's path is the same place as another listed file's, and what follows from it. */
+function Collision({ entry, others }: { entry: UploadEntry; others: readonly UploadEntry[] }) {
+  if (others.length === 0) return null;
+  const named = others.map((other) => `“${shownName(pathOf(other))}”`).join(', ');
+  return (
+    <span className="upload-state">
+      {' '}
+      Its path is the same as that of {named} in this list, or differs only in capital and small
+      letters: both cannot be imported to one place.{' '}
+      {entry.state === 'chosen'
+        ? 'It is not sent while both are listed: remove one of them.'
+        : 'Remove one of them before you import.'}
+    </span>
+  );
 }
 
 function UploadRow({
   entry,
+  collidesWith,
   held,
   onRemove,
 }: {
   entry: UploadEntry;
+  /** The other listed files whose path is the same place as this one's. */
+  collidesWith: readonly UploadEntry[];
   held: RefObject<HTMLElement | null>;
   onRemove: () => void;
 }) {
   const [, rowRef] = useWatchedPart<HTMLLIElement>(held);
   const removeRef = useRef<HTMLButtonElement | null>(null);
-  const path = pathOf(entry);
+  // The path as it is drawn and named to a screen reader; what is sent is the entry's own.
+  const path = shownName(pathOf(entry));
   const failure = useRetry({
     request: entry.id,
     failed: entry.state === 'failed',
@@ -335,7 +377,8 @@ function UploadRow({
   });
   return (
     <li ref={rowRef} className="upload-row">
-      <span className="upload-path">{path}</span>{' '}
+      {/* Isolated, so a name written right to left does not reorder the words beside it. */}
+      <bdi className="upload-path">{path}</bdi>{' '}
       {/* A file that could not be read has no known size. */}
       {entry.file !== null && (
         <>
@@ -346,7 +389,8 @@ function UploadRow({
       )}
       <span className="upload-state">
         <Standing entry={entry} />
-      </span>{' '}
+      </span>
+      <Collision entry={entry} others={collidesWith} />{' '}
       {entry.state === 'sending' && (
         <progress max={entry.size} value={entry.sent} aria-label={`${path}: bytes sent`} />
       )}{' '}

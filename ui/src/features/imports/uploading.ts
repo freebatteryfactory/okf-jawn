@@ -41,7 +41,7 @@ import { completeUpload, createUpload, uploadContent } from '../../api/generated
 import { bytesSender } from '../../app/upload-transport';
 import { classifyFailure } from '../errors/failure';
 import { sha256Hex } from './hash';
-import { type UploadEntry, type UploadStep, underWay, useUploads } from './upload-list';
+import { toBeSent, type UploadEntry, type UploadStep, underWay, useUploads } from './upload-list';
 
 /**
  * How many files are under way at once: three.
@@ -210,12 +210,13 @@ function pump() {
   }
 }
 
-/** Upload every file of the workspace that is listed and not yet asked for. */
+/**
+ * Upload every file of the workspace that is listed and not yet asked for, except those held back
+ * because their path collides with another listed file's (`upload-list.ts`).
+ */
 export function uploadChosen(workspaceId: string) {
-  for (const entry of uploads().entries) {
-    if (entry.workspaceId === workspaceId && entry.state === 'chosen') {
-      uploads().change(entry.id, { state: 'waiting' });
-    }
+  for (const entry of toBeSent(uploads().entries)) {
+    if (entry.workspaceId === workspaceId) uploads().change(entry.id, { state: 'waiting' });
   }
   pump();
 }

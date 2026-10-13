@@ -1,8 +1,9 @@
 /**
  * Starting the import of the uploaded files (`start_import`) into the folder the person chose.
  *
- * The request names the completed upload slots, the destination folder exactly as it was typed
- * (empty for the top of the workspace), and the revision the workspace shows as its base: the
+ * The request names the completed upload slots, the destination folder as it was typed, less the
+ * spaces around it (empty for the top of the workspace), and the revision the workspace shows as
+ * its base: the
  * service refuses a stale base as a `conflict`, and the page then says to refresh. Converter
  * settings are left out, which means the deployment's own. Naming rules are not applied
  * (`apply_naming_rules: false`): the wire applies them "after preview acceptance", and no preview

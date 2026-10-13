@@ -26,8 +26,12 @@
  * the first file it cannot read and then lists the folder itself as a file, so it is not used any
  * more.
  *
- * The name is the file's own, exactly; the folder is exactly the path the browser gave, with `/`
- * between its parts. Nothing is read from a file here.
+ * The path is the one the browser gave, with one change: a backslash is a path separator
+ * (`tidyPath`). A drop on Windows, and a path a browser took from a Windows program, can name a
+ * path with backslashes; left as they came they would be sent as part of one long file name. So
+ * the name is what follows the last separator, and the folder what is before it, with `/` between
+ * its parts. Nothing else is changed, and nothing is read from a file here. What the page does
+ * with a path it can see is wrong is in `paths.ts`.
  */
 
 /** A file's place: its own name, and the folder it came in. */
@@ -47,18 +51,21 @@ export function pathOf(chosen: NamedPath): string {
   return chosen.folder === '' ? chosen.filename : `${chosen.folder}/${chosen.filename}`;
 }
 
-/** The folder of a relative path that ends in the file's name; empty when it names no folder. */
-function folderOf(relativePath: string): string {
-  const cut = relativePath.lastIndexOf('/');
-  return cut < 0 ? '' : relativePath.slice(0, cut);
+/** A path with `/` between its parts (a backslash is a separator), cut into folder and name. */
+export function tidyPath(path: string): NamedPath {
+  const parts = path.split('\\').join('/');
+  const cut = parts.lastIndexOf('/');
+  return cut < 0
+    ? { folder: '', filename: parts }
+    : { folder: parts.slice(0, cut), filename: parts.slice(cut + 1) };
 }
 
 /** The files of a picker (`<input type="file">`), with the folders a folder picker names. */
 export function chosenFromPicker(files: Iterable<File>): ChosenFile[] {
   return Array.from(files, (file) => ({
     file,
-    filename: file.name,
-    folder: folderOf(file.webkitRelativePath),
+    // A folder picker names the path from the chosen folder down, the file's name at its end.
+    ...tidyPath(file.webkitRelativePath === '' ? file.name : file.webkitRelativePath),
   }));
 }
 
@@ -112,6 +119,9 @@ async function entriesOf(
   }
 }
 
+/** The path of `name` in `folder`; a thing dropped by itself is in no folder. */
+const within = (folder: string, name: string) => (folder === '' ? name : `${folder}/${name}`);
+
 /**
  * Walk one entry of a drop into `found`. `offered` is the File the browser offers for a thing
  * dropped by itself: used when the entry is a file that cannot be handed over as an entry (a link
@@ -126,15 +136,15 @@ async function walk(
   if (isFileEntry(entry)) {
     try {
       const file = await fileOfEntry(entry);
-      found.files.push({ file, filename: file.name, folder });
+      found.files.push({ file, ...tidyPath(within(folder, file.name)) });
     } catch {
-      if (offered !== null) found.files.push({ file: offered, filename: offered.name, folder });
-      else found.unreadable.push({ filename: entry.name, folder });
+      if (offered !== null) found.files.push({ file: offered, ...tidyPath(offered.name) });
+      else found.unreadable.push(tidyPath(within(folder, entry.name)));
     }
     return;
   }
   if (!isFolderEntry(entry)) return;
-  const path = folder === '' ? entry.name : `${folder}/${entry.name}`;
+  const path = within(folder, entry.name);
   const { entries, complete } = await entriesOf(entry);
   if (!complete) found.unlistedFolders.push(path);
   else if (entries.length === 0) found.emptyFolders.push(path);
@@ -156,7 +166,7 @@ export async function chosenFromDrop(transfer: DataTransfer): Promise<Dropped> {
     if (entry !== null) await walk(entry, '', found, offered);
     // No entry: the browser knows the thing only as a File (a drag a page made, an older browser).
     else if (offered !== null) {
-      found.files.push({ file: offered, filename: offered.name, folder: '' });
+      found.files.push({ file: offered, ...tidyPath(offered.name) });
     }
   }
   return found;

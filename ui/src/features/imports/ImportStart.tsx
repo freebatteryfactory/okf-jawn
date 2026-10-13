@@ -1,8 +1,9 @@
 /**
  * Starting the import of the uploaded files, and the jobs started from this page.
  *
- * The person names the folder to import into: a path inside the workspace, sent exactly as typed,
- * empty for the top. The folders the tree has listed are offered as suggestions; the service
+ * The person names the folder to import into: a path inside the workspace, sent as typed without
+ * the spaces before and after it (a space left at the end of the field is not part of a folder's
+ * name), empty for the top. The folders the tree has listed are offered as suggestions; the service
  * decides whether a path is acceptable, and its refusal is shown at the field's form. Only files
  * whose upload the service verified are imported; the button says how many. It is always there
  * (`aria-disabled` with nothing to import, and while it works), so it keeps keyboard focus.
@@ -91,7 +92,7 @@ export function ImportStart({ workspaceId, head, entries }: ImportStartProps) {
   });
   const begin = () => {
     if (start.isPending || ready.length === 0) return;
-    const attempt = importAttempt(last.current, ready, destination, head);
+    const attempt = importAttempt(last.current, ready, destination.trim(), head);
     last.current = attempt;
     start.mutate(attempt);
   };
