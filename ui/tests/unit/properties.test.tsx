@@ -285,6 +285,15 @@ describe('the properties form', () => {
     expect(api.violations).toEqual([]);
   });
 
+  it('has no button to submit it: a change is saved with the draft', async () => {
+    typed();
+    await editNote();
+    const form = document.querySelector('.properties-form');
+    if (!(form instanceof HTMLElement)) throw new Error('the form is not on the page');
+    expect(within(form).queryAllByRole('button')).toEqual([]);
+    expect(form.querySelector('[type="submit"]')).toBeNull();
+  });
+
   it('saves a change with the draft, and every other property unchanged', async () => {
     const api = typed();
     await editNote();

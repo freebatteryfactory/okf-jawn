@@ -22,6 +22,7 @@ import {
   itemDocument,
   NOTE,
   noteSummary,
+  OLD,
   OTHER,
   otherSummary,
   RECEIPT,
@@ -447,6 +448,24 @@ describe('taking a Snapshot', () => {
       await eventuallyReal(() => expect(row.isConnected).toBe(false));
       expect(document.activeElement).toBe(within(panel()).getByRole('heading'));
     });
+  });
+
+  it('sends nothing when no draft is selected, though the dimmed button is pressed', async () => {
+    const { api } = service();
+    renderAt(`/w/${WS}`);
+    await screen.findByRole('region', { name: 'Drafts (2)' });
+    for (const name of ['Meeting notes', 'Plan']) {
+      fireEvent.click(
+        await within(panel()).findByRole('checkbox', { name: `Include ${name} in the Snapshot` }),
+      );
+    }
+    expect(snapshotButton().textContent).toBe('Snapshot 0 drafts');
+    expect(snapshotButton().getAttribute('aria-disabled')).toBe('true');
+    await pressSnapshot('Nothing');
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(api.callsTo(COMMIT)).toHaveLength(0);
+    expect(said()).toBe('');
+    expect(api.violations).toEqual([]);
   });
 
   it('leaves out a draft whose box is unticked', async () => {
@@ -1029,6 +1048,39 @@ describe('taking a Snapshot', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Meeting notes' }));
     await eventuallyReal(() => expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`));
     expect(router.state.location.search).toEqual({ rev: MADE });
+  });
+
+  // Only a tab that cited the head the Snapshot replaced follows it.
+  it('leaves alone a tab that cites an older revision on purpose', async () => {
+    service();
+    const { router } = renderAt(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+    await screen.findByRole('region', { name: 'Drafts (2)' });
+    await screen.findByText('Text of Meeting notes');
+    await pressSnapshot('Tidy');
+    await screen.findByRole('region', { name: 'Drafts (0)' });
+    await eventuallyReal(() => expect(headLine()).toContain(MADE.slice(0, 10)));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`);
+    expect(router.state.location.search).toEqual({ rev: OLD });
+  });
+
+  it('leaves alone a background tab that cites an older revision on purpose', async () => {
+    service();
+    const { router } = renderAt(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+    await screen.findByText('Text of Meeting notes');
+    act(() => {
+      void router.navigate({
+        to: '/w/$workspaceId/i/$itemId',
+        params: { workspaceId: WS, itemId: OTHER },
+      });
+    });
+    await findTextBox('Text of Plan');
+    await pressSnapshot('Tidy');
+    await screen.findByRole('region', { name: 'Drafts (0)' });
+    await eventuallyReal(() => expect(headLine()).toContain(MADE.slice(0, 10)));
+    fireEvent.click(screen.getByRole('tab', { name: 'Meeting notes' }));
+    await eventuallyReal(() => expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`));
+    expect(router.state.location.search).toEqual({ rev: OLD });
   });
 
   it('moves a tab that cited the old head to the revision the Snapshot made', async () => {

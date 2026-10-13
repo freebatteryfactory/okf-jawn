@@ -309,6 +309,36 @@ describe('autosave', () => {
     await eventually(() => expect(api.callsTo(DRAFTS)).toHaveLength(2));
   });
 
+  it('tells the cache about the item that was saved, and no other', async () => {
+    const api = writable();
+    // Two tabs: the plan, then the note. Each tab keeps its item's `get_item` in the cache.
+    const { queryClient, router } = renderAt(`/w/${WS}/i/${OTHER}`);
+    await screen.findByText('Text of Plan');
+    act(() => {
+      void router.navigate({
+        to: '/w/$workspaceId/i/$itemId',
+        params: { workspaceId: WS, itemId: NOTE },
+      });
+    });
+    // The note's own switch: the plan's is gone once the note's text is on screen.
+    await screen.findByText('Text of Meeting notes');
+    const edit = await screen.findByRole('button', { name: 'Edit' });
+    vi.useFakeTimers();
+    fireEvent.click(edit);
+    await eventually(() => textBox('Text of Meeting notes'));
+    typeInto(textBox('Text of Meeting notes'), ' one');
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+    const cachedDraft = (itemId: string) =>
+      queryClient.getQueryData(itemOptions(WS, itemId, HEAD).queryKey)?.draft ?? null;
+    await eventually(() => expect(cachedDraft(NOTE)?.body).toBe(`${COMMITTED} one`));
+    expect(queryClient.getQueryData(itemOptions(WS, OTHER, HEAD).queryKey)).toBeDefined();
+    expect(cachedDraft(OTHER)).toBeNull();
+    // The other item's tab is not marked, and it opens on its own committed text.
+    expect(screen.getByRole('tab', { name: 'Plan' })).toBeDefined();
+    expect(screen.getByRole('tab', { name: 'Meeting notes (draft)' })).toBeDefined();
+  });
+
   it('takes a later save of a listed draft into the list in place', async () => {
     let savedAt = NOW;
     const api = writable({
@@ -1138,6 +1168,45 @@ describe('discarding a draft', () => {
     const [first, second] = api.callsTo(DISCARD);
     expect({ ...second, idempotency_key: null }).toEqual({ ...first, idempotency_key: null });
     expect(second?.idempotency_key).not.toBe(first?.idempotency_key);
+  });
+
+  it('waits for a first save still in flight, then discards the draft that save made', async () => {
+    let held = false;
+    const saves: Array<() => void> = [];
+    const api = writable({
+      [SAVE]: (body) =>
+        new Promise<Reply>((resolve) => {
+          saves.push(() => {
+            held = true;
+            resolve(saved(body));
+          });
+        }),
+      [DISCARD]: (body) => {
+        held = false;
+        return ok(draftOf(String(body.item_id), HEAD, LATER));
+      },
+    });
+    const { box, queryClient } = await startEditing();
+    typeInto(box, ' unwanted');
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(saveState()).toBe('Saving…'));
+    // The save has no answer yet: whether the service holds a draft is not known.
+    fireEvent.click(screen.getByRole('button', { name: 'Discard draft' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Discard the draft' }));
+    await pass(50);
+    expect(api.callsTo(DISCARD)).toHaveLength(0);
+    expect(textIn(textBox('Text of Meeting notes'))).toBe(`${COMMITTED} unwanted`);
+    // It lands: the service holds the draft, and the discard asks for it to go.
+    act(() => saves.shift()?.());
+    await eventually(() => expect(api.callsTo(DISCARD)).toHaveLength(1));
+    await eventually(() =>
+      expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull(),
+    );
+    expect(held).toBe(false);
+    expect(
+      queryClient.getQueryData(itemOptions(WS, NOTE, HEAD).queryKey)?.draft ?? null,
+    ).toBeNull();
+    expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
   });
 
   it('asks nothing of the service for text that was never saved', async () => {
