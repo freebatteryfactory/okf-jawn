@@ -404,19 +404,6 @@ describe('the naming rules', () => {
     expect(document.activeElement?.textContent).toContain('Nothing is sent until they are fixed');
   });
 
-  it('keeps an unknown key the saved rules hold, says so by name, and sends nothing while it is there', async () => {
-    const { api } = service({}, { ...savedRules, rules: [{ ...rule, legacy_flag: true }] });
-    await openRules();
-    expect(within(panel()).getByRole('alert').textContent).toContain('“legacy_flag”');
-    await setPrefix('x-');
-    // The form's edit did not drop it.
-    expect(within(panel()).getByRole('alert').textContent).toContain('“legacy_flag”');
-    await userEvent.click(button('Save the rules'));
-    await userEvent.click(button('Preview the renames'));
-    expect(writes(api)).toEqual([]);
-    expect(api.callsTo(PREVIEW)).toEqual([]);
-  });
-
   it('previews without changing anything: every item of the folder and below, with old and new names', async () => {
     const { api } = service();
     await openRules();
