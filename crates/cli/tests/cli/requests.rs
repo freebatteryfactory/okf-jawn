@@ -220,7 +220,7 @@ async fn a_refusal_with_what_this_cli_does_not_know_keeps_its_code_and_message()
 /// from its detail, which is JSON and spells both with an escape.
 #[tokio::test]
 async fn a_credential_that_needs_escaping_is_removed_from_a_refusal_and_its_detail() -> TestResult {
-    let token = "ab\"cd\\ef-9912";
+    let token = "ab\"cd\\ef-9912-k7m2x";
     let refusal = json!({
         "code": "unauthenticated",
         "message": format!("Bearer {token} is not known"),

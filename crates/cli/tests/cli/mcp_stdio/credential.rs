@@ -75,7 +75,7 @@ async fn the_credential_comes_from_the_environment() -> TestResult {
 #[tokio::test]
 async fn the_credential_comes_from_the_first_line_of_the_token_file() -> TestResult {
     let listener = Answering::with(service()).await?;
-    let path = file("token", b"  file-token-81c4\r\nnot-the-credential\n")?;
+    let path = file("token", b"  file-token-81c4-9a2e\r\nnot-the-credential\n")?;
     let ran = cli(
         &[
             "mcp",
@@ -97,7 +97,7 @@ async fn the_credential_comes_from_the_first_line_of_the_token_file() -> TestRes
     let sent = some(heard.get(1), "the POST")?;
     assert_eq!(
         sent.header("authorization").as_deref(),
-        Some("Bearer file-token-81c4")
+        Some("Bearer file-token-81c4-9a2e")
     );
     std::fs::remove_file(path)?;
     Ok(())
@@ -269,7 +269,7 @@ async fn a_line_the_service_wrote_never_carries_the_credential() -> TestResult {
 /// and only the bytes that spell the credential change.
 #[test]
 fn mcp_stdio_credential_is_found_under_every_json_spelling() -> TestResult {
-    let awkward = "ab\"cd\\ef/9912";
+    let awkward = "ab\"cd\\ef/9912-k7m2x";
     let credential = some(Credential::parse(awkward, "the test")?, "a credential")?;
     // A `\u` escape of one UTF-16 code unit, with its hexadecimal digits in either case.
     let unit = |code: u32, upper: bool| {
@@ -292,12 +292,12 @@ fn mcp_stdio_credential_is_found_under_every_json_spelling() -> TestResult {
     let cases = [
         // As serde writes it.
         (
-            r#"{"a":"x ab\"cd\\ef/9912 y"}"#.to_owned(),
+            r#"{"a":"x ab\"cd\\ef/9912-k7m2x y"}"#.to_owned(),
             r#"{"a":"x [credential] y"}"#.to_owned(),
         ),
         // The slash escaped, as other encoders write it.
         (
-            r#"{"a":"ab\"cd\\ef\/9912"}"#.to_owned(),
+            r#"{"a":"ab\"cd\\ef\/9912-k7m2x"}"#.to_owned(),
             r#"{"a":"[credential]"}"#.to_owned(),
         ),
         // Every character as a `\u` escape.
@@ -307,18 +307,20 @@ fn mcp_stdio_credential_is_found_under_every_json_spelling() -> TestResult {
         ),
         // A key, twice in one string, and beside escapes that are not part of it.
         (
-            format!(r#"{{"ab\"cd\\ef/9912":"\n{pair}ab\"cd\\ef/9912{letter}ab\"cd\\ef\/9912\t"}}"#),
+            format!(
+                r#"{{"ab\"cd\\ef/9912-k7m2x":"\n{pair}ab\"cd\\ef/9912-k7m2x{letter}ab\"cd\\ef\/9912-k7m2x\t"}}"#
+            ),
             format!(r#"{{"[credential]":"\n{pair}[credential]{letter}[credential]\t"}}"#),
         ),
         // A start that is taken back: the search resumes inside what it had matched.
         (
-            r#"{"a":"abab\"cd\\ef/9912"}"#.to_owned(),
+            r#"{"a":"abab\"cd\\ef/9912-k7m2x"}"#.to_owned(),
             r#"{"a":"ab[credential]"}"#.to_owned(),
         ),
         // Nothing to find: the line comes back as it went in, white space included.
         (
-            r#"{ "a" : "ab\"cd\\ef/991" , "b":1e400}"#.to_owned(),
-            r#"{ "a" : "ab\"cd\\ef/991" , "b":1e400}"#.to_owned(),
+            r#"{ "a" : "ab\"cd\\ef/9912-k7m2" , "b":1e400}"#.to_owned(),
+            r#"{ "a" : "ab\"cd\\ef/9912-k7m2" , "b":1e400}"#.to_owned(),
         ),
     ];
     assert!(all_escaped.len() == awkward.len().saturating_mul(6) && !all_escaped.contains("9912"));
@@ -337,19 +339,36 @@ fn mcp_stdio_credential_is_found_under_every_json_spelling() -> TestResult {
 /// cannot be replaced and leave JSON: the line is refused whole.
 #[test]
 fn mcp_stdio_credential_outside_a_string_refuses_the_line() -> TestResult {
-    let digits = some(Credential::parse("8675309112", "the test")?, "a credential")?;
-    assert_eq!(digits.redact_line(r#"{"n":8675309112}"#.to_owned()), None);
-    assert_eq!(digits.redact_line(r#"{"n":18675309112}"#.to_owned()), None);
+    let digits = some(
+        Credential::parse("8675309112345678", "the test")?,
+        "a credential",
+    )?;
+    assert_eq!(
+        digits.redact_line(r#"{"n":8675309112345678}"#.to_owned()),
+        None
+    );
+    assert_eq!(
+        digits.redact_line(r#"{"n":18675309112345678}"#.to_owned()),
+        None
+    );
     assert_eq!(
         digits
-            .redact_line(r#"{"n":"8675309112"}"#.to_owned())
+            .redact_line(r#"{"n":"8675309112345678"}"#.to_owned())
             .as_deref(),
         Some(r#"{"n":"[credential]"}"#)
     );
-    let across = some(Credential::parse("a\",\"b", "the test")?, "a credential")?;
-    assert_eq!(across.redact_line(r#"["a","b"]"#.to_owned()), None);
+    let across = some(
+        Credential::parse("left-half\",\"right-half", "the test")?,
+        "a credential",
+    )?;
     assert_eq!(
-        across.redact_line(r#"["a\",\"b"]"#.to_owned()).as_deref(),
+        across.redact_line(r#"["left-half","right-half"]"#.to_owned()),
+        None
+    );
+    assert_eq!(
+        across
+            .redact_line(r#"["left-half\",\"right-half"]"#.to_owned())
+            .as_deref(),
         Some(r#"["[credential]"]"#)
     );
     Ok(())
@@ -361,19 +380,18 @@ fn mcp_stdio_credential_outside_a_string_refuses_the_line() -> TestResult {
 #[tokio::test]
 async fn a_line_that_cannot_be_cleaned_is_withheld_and_the_request_is_still_answered() -> TestResult
 {
-    const DIGITS: &str = "8675309112";
+    const DIGITS: &str = "8675309112345678";
     let harmless =
         json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"n": 1}});
     for (streamed, refused) in [(false, false), (true, false), (false, true)] {
         let passed = harmless.clone();
         let transport = FakeTransport::scripted(move |message| {
-            let leaking = json!({"jsonrpc": "2.0", "id": message.get("id"), "result": {"n": 8_675_309_112_u64}});
-            let leaking_error =
-                json!({"jsonrpc": "2.0", "error": {"code": 8_675_309_112_u64, "message": "no"}});
+            let leaking = json!({"jsonrpc": "2.0", "id": message.get("id"), "result": {"n": 8_675_309_112_345_678_u64}});
+            let leaking_error = json!({"jsonrpc": "2.0", "error": {"code": 8_675_309_112_345_678_u64, "message": "no"}});
             if streamed {
                 Script {
                     events: vec![
-                        json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"n": 8_675_309_112_u64}}).to_string(),
+                        json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"n": 8_675_309_112_345_678_u64}}).to_string(),
                         passed.to_string(),
                         leaking.to_string(),
                     ],
@@ -425,7 +443,7 @@ async fn a_line_that_cannot_be_cleaned_is_withheld_and_the_request_is_still_answ
 /// holds a quote and a backslash, which the relay's own JSON encoder escapes.
 #[tokio::test]
 async fn the_relay_s_own_lines_are_cleaned_when_the_credential_needs_escaping() -> TestResult {
-    const AWKWARD: &str = "ab\"cd\\ef-9912";
+    const AWKWARD: &str = "ab\"cd\\ef-9912-k7m2x";
     let transport = FakeTransport::scripted(|message| match message.get("id") {
         Some(_) => broken(&format!(
             "header Authorization: Bearer {AWKWARD} was rejected"
@@ -447,5 +465,82 @@ async fn the_relay_s_own_lines_are_cleaned_when_the_credential_needs_escaping() 
         assert!(!written.contains("ef-9912"), "{written}");
         assert_eq!(written.matches("[credential]").count(), 1, "{written}");
     }
+    Ok(())
+}
+
+/// A text shorter than 16 characters is no credential (the re-review's note N1): it is
+/// refused in plain words that do not repeat it, from the environment and from the token
+/// file alike, before the relay reads a line or anything is sent. From both sides: fifteen
+/// characters are refused and sixteen are taken.
+#[tokio::test]
+async fn mcp_stdio_credential_shorter_than_sixteen_characters_is_refused() -> TestResult {
+    let (short, least) = ("fifteen-chars-x", "sixteen-chars-xy");
+    assert_eq!((short.len(), least.len()), (15, 16));
+    let refused = err_of(Credential::parse(short, "OKF_JAWN_TOKEN"))?;
+    assert!(
+        refused.message.contains("OKF_JAWN_TOKEN")
+            && refused.message.contains("shorter than 16 characters"),
+        "{}",
+        refused.message
+    );
+    assert!(!refused.message.contains(short), "{}", refused.message);
+    assert!(Credential::parse(least, "OKF_JAWN_TOKEN")?.is_some());
+    // One letter, which would be in every answer.
+    err_of(Credential::parse("a", "the test"))?;
+    for (content, taken) in [
+        (format!("{short}\n"), false),
+        (format!("  {short}  \r\nsecond line\n"), false),
+        (format!("\u{feff}{short}"), false),
+        (format!("{least}\r\n"), true),
+        (format!("\u{feff}{least}"), true),
+    ] {
+        let path = file("short-token", content.as_bytes())?;
+        let read = Credential::from_file(&path);
+        std::fs::remove_file(&path)?;
+        assert_eq!(read.is_ok(), taken, "{content:?}");
+        if let Err(error) = read {
+            assert!(
+                error.message.contains("--token-file")
+                    && error.message.contains("shorter than 16 characters"),
+                "{}",
+                error.message
+            );
+            assert!(!error.message.contains(short), "{}", error.message);
+        }
+    }
+    // Through the shipped entry point: the relay reads nothing and asks the service nothing,
+    // and an operation is not sent.
+    let listener = Answering::with(Vec::new()).await?;
+    let touched = Arc::new(AtomicBool::new(false));
+    let relayed = cli_reading(
+        &["mcp", "--stdio", "--server", &listener.origin()],
+        Some(short),
+        Untouched(touched.clone()),
+    )
+    .await?;
+    assert_eq!((relayed.code, relayed.stdout.as_str()), (1, ""));
+    assert!(
+        relayed.stderr.starts_with(
+            "okf-jawn: invalid_input: The credential in OKF_JAWN_TOKEN is not usable: it is \
+             shorter than 16 characters"
+        ),
+        "{}",
+        relayed.stderr
+    );
+    assert!(!relayed.stderr.contains(short), "{}", relayed.stderr);
+    assert!(!touched.load(Ordering::SeqCst), "standard input was read");
+    let operated = cli(
+        &["get_session", "--server", &listener.origin()],
+        Some(short),
+        b"",
+    )
+    .await?;
+    assert_eq!((operated.code, operated.stdout.as_str()), (1, ""));
+    assert!(
+        operated.stderr.contains("shorter than 16 characters") && !operated.stderr.contains(short),
+        "{}",
+        operated.stderr
+    );
+    assert!(listener.heard()?.is_empty());
     Ok(())
 }

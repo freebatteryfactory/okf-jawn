@@ -422,10 +422,13 @@ fn mcp_stdio_token_file_is_read_within_its_bound() -> TestResult {
 #[test]
 fn mcp_stdio_token_file_encodings() -> TestResult {
     assert_eq!(
-        read_token(b"\xEF\xBB\xBFzq7-with-mark\r\n")?,
-        Ok("Bearer zq7-with-mark".len())
+        read_token(b"\xEF\xBB\xBFzq7-with-mark-5d1c\r\n")?,
+        Ok("Bearer zq7-with-mark-5d1c".len())
     );
-    assert_eq!(read_token(b"zq7-plain\n")?, Ok("Bearer zq7-plain".len()));
+    assert_eq!(
+        read_token(b"zq7-plain-8f3a2b6c\n")?,
+        Ok("Bearer zq7-plain-8f3a2b6c".len())
+    );
     let little: Vec<u8> = "zq7-wide\r\n"
         .encode_utf16()
         .flat_map(u16::to_le_bytes)

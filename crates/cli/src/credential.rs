@@ -2,7 +2,8 @@
 //!
 //! A credential comes from the environment or, for the relay, from the first line of a file
 //! (UTF-8 or ASCII, with or without a byte order mark; at most 8192 bytes, and a longer line
-//! is refused, not cut).
+//! is refused, not cut). From either place it is printable ASCII without spaces and at least
+//! 16 characters long; anything else is refused before the CLI does anything with it.
 //! It is never an argument. The type has no `Display` and its `Debug` prints no secret.
 //!
 //! Two functions keep the secret out of what the CLI writes:
@@ -59,6 +60,12 @@ const MAX_CREDENTIAL_BYTES: u64 = 8192;
 /// Most bytes ever read of a credential file: the longest line, a byte order mark, a carriage
 /// return and a line feed, and one byte more, which tells a longer line from the longest.
 const MAX_FIRST_LINE_BYTES: u64 = MAX_CREDENTIAL_BYTES + 6;
+
+/// The shortest text that is taken as a credential, in characters. A credential the service
+/// issues is far longer. A shorter one would be a wrong setting, and keeping it out of what
+/// the CLI writes would then rewrite ordinary text, or withhold every line: a credential of
+/// one letter is in every answer.
+const MIN_CREDENTIAL_BYTES: usize = 16;
 
 /// A byte no credential holds and no UTF-8 text contains: what an escape decodes to when it
 /// stands for a character a credential cannot hold.
@@ -158,7 +165,8 @@ impl Credential {
     ///
     /// # Errors
     /// Returns `InvalidInput` when the text holds a byte that an HTTP header value cannot
-    /// carry or a space; the text itself is never repeated.
+    /// carry or a space, and when it is shorter than 16 characters; the text itself is never
+    /// repeated.
     pub fn parse(raw: &str, source: &str) -> Result<Option<Self>, ApiError> {
         let secret = raw.trim();
         if secret.is_empty() {
@@ -170,6 +178,16 @@ impl Credential {
                 format!(
                     "The credential in {source} is not usable: it must be printable ASCII \
                      without spaces"
+                ),
+            ));
+        }
+        if secret.len() < MIN_CREDENTIAL_BYTES {
+            return Err(ApiError::new(
+                ErrorCode::InvalidInput,
+                format!(
+                    "The credential in {source} is not usable: it is shorter than \
+                     {MIN_CREDENTIAL_BYTES} characters, and a credential the okf-jawn service \
+                     issues is far longer. Copy the whole credential"
                 ),
             ));
         }
