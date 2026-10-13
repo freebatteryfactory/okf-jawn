@@ -880,6 +880,10 @@ Findings that were judged not load-bearing at merge, each with its home. They ar
 - **The CSRF cookie name in the UI (workspace-ui M2).** The generated client sends `x-okf-csrf`. workspace-ui reads the `okf-csrf` cookie name from generated output, or from one constant whose test checks it against the OpenAPI document.
 - **Screen readers on the tree (the Wave 3 accessibility check).** The tree's scrolling list is an unnamed `group` tab stop that forwards focus to the active row. Check how NVDA and VoiceOver announce it.
 - **R-I11 (core M1.4, with the cancel operation).** A point-of-no-return seal on `RecordStore`: `cancel_job` refuses with `Conflict` once a restore has called `restore_import`. Until M1.4, no production path cancels a running job.
+- **The MCP server's image blocks and refusal events (mcp-execution follow-up review).**
+  - An image is shown when its bytes begin with the signature of its served type. That is a check of the first bytes, not proof that the whole file is that image.
+  - The first sixteen characters of the base64 text are decoded by hand, because `crates/mcp` has no base64 dependency. The dependency joins the next manifest batch (with server M2's), and the hand decoder goes then.
+  - A caller in a workspace's tenant can add `permission_denied` events to that workspace's log by naming it in a request its route refuses. Nothing bounds how fast, here or in core's dispatch, which does the same for HTTP. The bound belongs with the ingress limits of server M2.
 - **The mutation ledger after a purge (carry-over sweep, part 2).** A purge empties the ledger rows of its workspace (PR #20). Still open, each stated in the storage and core headers:
   - a live row completed before records schema 2 records no workspace and keeps its response until it expires;
   - a row whose `complete` lands after the purge's last pass over the rows keeps its response;

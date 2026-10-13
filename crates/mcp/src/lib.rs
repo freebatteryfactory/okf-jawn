@@ -6,7 +6,8 @@
 //! A successful result always carries text a host can show without reading
 //! `structuredContent`: the document Markdown for a read, the serialized response otherwise.
 //! A read's selected images follow its text as image blocks; an image the server did not
-//! inline is named in the text with its source location, its digest and the reason. A read's
+//! inline (its bytes are not the type they were served as, for one) is named in the text with
+//! its source location, its digest and the reason. A read's
 //! whole text block, its notes included, stays within the read's text budget.
 //! A failed call is reported as text with `isError` set and no structured content: a tool's
 //! declared output schema describes its success response only.
@@ -32,7 +33,10 @@ pub enum ReadImage<'a> {
     Inline {
         /// The image's bytes in base64, exactly as `read_object` returned them.
         data_base64: String,
-        /// The raster MIME type the bytes were served with, one of the inline image types.
+        /// The raster MIME type of the block: the canonical essence of the type the bytes were
+        /// served with (trimmed, lower case, no parameters), exactly one of `image/png`,
+        /// `image/jpeg`, `image/gif` and `image/webp`. The server inlines an image only when
+        /// its bytes begin with that type's signature.
         mime_type: String,
     },
     /// Not inlined: one line of the text block names the image and gives the reason.
@@ -51,6 +55,12 @@ pub enum NotInlined {
     /// raster types inlined (PNG, JPEG, GIF, WebP): SVG and any other type are never inlined.
     NotInlineType {
         /// The media type.
+        media_type: String,
+    },
+    /// Its bytes do not begin with the signature of the raster type they were served as, so it
+    /// is not shown as that type, nor as any other type the bytes might be.
+    NotItsType {
+        /// The media type the bytes were served as.
         media_type: String,
     },
     /// The whole image does not fit what is left of the image budget.
@@ -84,6 +94,9 @@ impl Display for NotInlined {
         match self {
             Self::NotInlineType { media_type } => {
                 write!(f, "not an inline image type ({media_type})")
+            }
+            Self::NotItsType { media_type } => {
+                write!(f, "the content is not the type it claims ({media_type})")
             }
             Self::TooLarge {
                 size: Some(size),
