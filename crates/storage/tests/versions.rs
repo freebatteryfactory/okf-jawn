@@ -2612,5 +2612,173 @@ async fn a_row_kept_for_another_commit_is_not_answered() -> TestResult {
     Ok(())
 }
 
+/// R-I10: the row is read by its tenant as well as its workspace and mutation. The commit's
+/// own row is moved to another tenant behind the store (same workspace identity, same
+/// mutation), so this tenant holds none, and the commit is answered as having none kept.
+/// (Reviewer probe PV1, adopted.)
+#[tokio::test]
+async fn a_row_of_another_tenant_is_not_answered() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    versions
+        .commit(
+            &scope,
+            changes(20, &initial, vec![note(uuid!(10)?, "a.md", "A")?])?,
+            Arc::new(Warns::of(vec![finding("lint_a", "a.md")])),
+        )
+        .await?;
+    let moved = rusqlite::Connection::open(storage.data().records_path())?.execute(
+        "UPDATE commit_warnings SET tenant_id = 'elsewhere' WHERE mutation_id = ?1",
+        [uuid_text(20)],
+    )?;
+    assert_eq!(moved, 1, "the row now belongs to another tenant");
+    let answer = versions.find_commit(&scope, uuid!(20)?, None).await?;
+    assert_unavailable(&some(answer, "the commit")?, "kept none")?;
+    Ok(())
+}
+
+/// R-I10: the row is written before the commit lands, so a row that cannot be written stops
+/// the commit. The table is dropped behind the store: the commit answers `Internal`, and the
+/// head does not move. (Reviewer probe PV2, adopted.)
+#[tokio::test]
+async fn a_commit_whose_warnings_cannot_be_kept_does_not_land() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    rusqlite::Connection::open(storage.data().records_path())?
+        .execute_batch("DROP TABLE commit_warnings;")?;
+    let refused = err_of(
+        versions
+            .commit(
+                &scope,
+                changes(20, &initial, vec![note(uuid!(10)?, "a.md", "A")?])?,
+                Arc::new(Warns::of(vec![finding("lint_a", "a.md")])),
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Internal, "{}", refused.message);
+    assert_eq!(
+        versions.head(&scope).await?,
+        initial,
+        "the head did not move"
+    );
+    assert_eq!(
+        found(versions.find_commit(&scope, uuid!(20)?, None).await?),
+        None,
+        "no commit carries the mutation"
+    );
+    Ok(())
+}
+
+/// R-I10: the same for a promotion, whose empty answer is kept before its reference moves.
+/// (Reviewer probe PV3, adopted.)
+#[tokio::test]
+async fn a_promotion_whose_answer_cannot_be_kept_does_not_land() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let proposal = uuid!(50)?;
+    let candidate = versions
+        .create_candidate(
+            &scope,
+            proposal,
+            CandidateChanges {
+                mutation_id: uuid!(51)?,
+                base: initial.clone(),
+                author: person("agent"),
+                message: "Propose a note".to_owned(),
+                edits: vec![note(uuid!(10)?, "proposed.md", "Proposed.")?],
+            },
+            Arc::new(Counting::default()),
+        )
+        .await?;
+    rusqlite::Connection::open(storage.data().records_path())?
+        .execute_batch("DROP TABLE commit_warnings;")?;
+    let refused = err_of(
+        versions
+            .promote_candidate(
+                &scope,
+                Promotion {
+                    mutation_id: uuid!(52)?,
+                    proposal_id: proposal,
+                    expected_head: initial.clone(),
+                    candidate,
+                    approver: person("ana"),
+                    message: "Accept the note".to_owned(),
+                },
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Internal, "{}", refused.message);
+    assert_eq!(
+        versions.head(&scope).await?,
+        initial,
+        "the head did not move"
+    );
+    Ok(())
+}
+
+/// R-I10: two attempts of one mutation at once, each with a check that would warn of something
+/// else, 60 rounds. One writes, the other replays it, both answer the writer's warnings, and
+/// the row holds them. The two calls are serial under the workspace's write lock, so this
+/// shows that their answers agree whichever goes first; it does not interleave them.
+/// (Reviewer probe PV4, adopted.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_attempts_of_one_mutation_at_once_answer_one_commit_and_its_warnings() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let mut head = initial;
+    for round in 0..60_u32 {
+        let mutation = 1000_u32.saturating_add(round);
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut calls = Vec::new();
+        for code in ["first", "second"] {
+            let versions = storage.versions();
+            let (scope, barrier) = (scope.clone(), barrier.clone());
+            let given = vec![finding(code, "r.md")];
+            let item: ItemId = uuid!(2000_u32.saturating_add(round))?;
+            let change = changes(
+                mutation,
+                &head,
+                vec![note(item, &format!("r{round}.md"), "R")?],
+            )?;
+            calls.push(tokio::spawn(async move {
+                barrier.wait().await;
+                versions
+                    .commit(&scope, change, Arc::new(Warns::of(given)))
+                    .await
+            }));
+        }
+        let mut answers = Vec::new();
+        for call in calls {
+            answers.push(call.await??);
+        }
+        let writers: Vec<&Committed> = answers.iter().filter(|answer| !answer.replayed).collect();
+        assert_eq!(writers.len(), 1, "round {round}: one attempt wrote");
+        let writer = some(writers.first().copied(), "the writer")?;
+        let first = some(answers.first(), "an answer")?;
+        let second = some(answers.get(1), "an answer")?;
+        assert_eq!(first.revision, second.revision, "round {round}: one commit");
+        assert_eq!(
+            wire(&first.warnings)?,
+            wire(&second.warnings)?,
+            "round {round}: both attempts answer the same warnings"
+        );
+        assert_eq!(
+            kept_row(&storage, &scope, mutation)?,
+            Some(wire(&writer.warnings)?),
+            "round {round}: the row is the writer's"
+        );
+        assert_eq!(
+            kept_commit(&storage, &scope, mutation)?.as_deref(),
+            Some(writer.revision.as_str()),
+            "round {round}: and names the writer's commit"
+        );
+        head = first.revision.clone();
+    }
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;

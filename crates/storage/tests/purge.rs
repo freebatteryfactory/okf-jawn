@@ -851,6 +851,89 @@ async fn purge_removes_the_warnings_kept_for_its_workspaces_commits() -> TestRes
     Ok(())
 }
 
+/// R-I10: a pre-migration records copy that holds nothing of the target but one kept warning,
+/// which quotes the marker. The purge's "does this copy hold the workspace" reads the table as
+/// its removal does, so the copy is rewritten and the marker is gone from every file.
+/// (Reviewer probe PP1, adopted.)
+#[tokio::test]
+async fn purge_rewrites_a_copy_that_holds_only_a_kept_warning_of_its_workspace() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    // A records database of another, empty installation at this build's schema.
+    let elsewhere = tempfile::tempdir()?;
+    drop(Storage::open(elsewhere.path())?);
+    pre_migration_copy(elsewhere.path(), "records.sqlite", "empty.sqlite")?;
+    let copies = directory.path().join("backups").join("pre-migration");
+    std::fs::create_dir_all(&copies)?;
+    let copy = copies.join("records-v3-9.sqlite");
+    std::fs::copy(
+        elsewhere
+            .path()
+            .join("backups")
+            .join("pre-migration")
+            .join("empty.sqlite"),
+        &copy,
+    )?;
+    let marker = String::from_utf8_lossy(MARKER).into_owned();
+    rusqlite::Connection::open(&copy)?.execute(
+        "INSERT INTO commit_warnings (tenant_id, workspace_id, mutation_id, commit_id, warnings)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        [
+            fixture.target.tenant_id.as_str().to_owned(),
+            fixture.target.workspace_id.0.to_string(),
+            uuid_text(999),
+            "c".repeat(40),
+            format!("[{{\"code\":\"lint\",\"message\":\"{marker} trip.md has no heading\"}}]"),
+        ],
+    )?;
+    assert_eq!(kept_warnings(&copy, &fixture.target)?.len(), 1);
+    assert!(
+        marked_files(directory.path())?.contains(&copy.display().to_string()),
+        "the copy holds the marker before the purge"
+    );
+    purge_target(&fixture).await?;
+    assert_eq!(
+        kept_warnings(&copy, &fixture.target)?,
+        Vec::<String>::new(),
+        "the copy's one row of the workspace is removed"
+    );
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    Ok(())
+}
+
+/// R-I10: a pre-migration records copy as records schema 2 left it, with no `commit_warnings`
+/// table. The purge completes, no file keeps the marker, and the copy is still at schema 2.
+/// (Reviewer probe PP2, adopted.)
+#[tokio::test]
+async fn purge_reaches_a_schema_2_copy_that_has_no_table_of_kept_warnings() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    pre_migration_copy(directory.path(), "records.sqlite", "records-v2-1.sqlite")?;
+    let copy = directory
+        .path()
+        .join("backups")
+        .join("pre-migration")
+        .join("records-v2-1.sqlite");
+    rusqlite::Connection::open(&copy)?
+        .execute_batch("DROP TABLE commit_warnings; PRAGMA user_version = 2;")?;
+    assert!(
+        marked_files(directory.path())?.contains(&copy.display().to_string()),
+        "the copy holds the marker before the purge"
+    );
+    purge_target(&fixture).await?;
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    let connection = rusqlite::Connection::open(&copy)?;
+    let tables: i64 = connection.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE name = 'commit_warnings'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(tables, 0, "the purge added no table to the copy");
+    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    assert_eq!(version, 2, "the copy is still at schema 2");
+    Ok(())
+}
+
 /// Review probe R1: the backup handler failed (or its job was abandoned) after the archive was
 /// written, so only `backup_archives` knows it.
 #[tokio::test]
