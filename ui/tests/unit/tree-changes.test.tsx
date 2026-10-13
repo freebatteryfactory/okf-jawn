@@ -1849,6 +1849,30 @@ describe('a draft whose item is ahead of the page, or whose own save is in the w
     ]);
   }, 20000);
 
+  it('says a move as done when the service has answered it, before the draft has followed', async () => {
+    const { api, held, gate } = holdingSaves();
+    await editing();
+    gate.holding = true;
+    await typeMore('\nslow words');
+    await waitFor(() => expect(held).toHaveLength(1), { timeout: 4000 });
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Rename or move' }));
+    await type('File name', 'minutes.md');
+    await userEvent.keyboard('{Enter}');
+    // Done and said, with the form closed, though the draft's save has not answered.
+    await waitFor(() => expect(statusLine()).toContain('is now at notes/minutes.md'));
+    expect(screen.queryByRole('group', { name: /^Rename or move/ })).toBeNull();
+    expect(statusLine()).not.toContain('Your draft');
+    expect(api.callsTo(MOVE)).toHaveLength(1);
+    gate.holding = false;
+    await act(async () => {
+      held.at(0)?.answer();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(statusLine()).toContain(FOLLOWS));
+    expect(statusLine()).toContain('is now at notes/minutes.md');
+    expect(api.callsTo(SAVE).at(-1)).toMatchObject({ base_revision: FIRST });
+  }, 20000);
+
   it('says the draft’s follow only of the change last made', async () => {
     const { held, gate } = holdingSaves();
     await editing();
@@ -1870,6 +1894,39 @@ describe('a draft whose item is ahead of the page, or whose own save is in the w
     expect(statusLine()).toContain('Unarchived.');
     expect(statusLine()).not.toContain('Archived. It no longer shows');
     expect(statusLine().split(FOLLOWS)).toHaveLength(2);
+  }, 20000);
+
+  it('says nothing of a draft’s follow once something else was said in its place', async () => {
+    const held: Array<() => void> = [];
+    service(
+      {
+        [SAVE]: (body) =>
+          new Promise<Reply>((resolve) => {
+            held.push(() => resolve(ok(draftOf(NOTE, text(body, 'base_revision')))));
+          }),
+      },
+      [NOTE],
+    );
+    const line = () => document.querySelector('.tree-said')?.textContent ?? '';
+    await openTree();
+    const note = await row(/Meeting notes/);
+    act(() => note.focus());
+    await userEvent.keyboard('{F2}');
+    await type('File name', 'minutes.md');
+    await userEvent.keyboard('{Enter}');
+    await waitFor(() => expect(line()).toContain('is now at notes/minutes.md.'));
+    // The person's draft of the note follows the move: its save is under way.
+    await waitFor(() => expect(held).toHaveLength(1));
+    // Another form is opened meanwhile, which clears what was said.
+    await userEvent.click(button('New folder'));
+    expect(line()).toBe('');
+    await act(async () => {
+      held.at(0)?.();
+      await Promise.resolve();
+    });
+    await act(() => new Promise<void>((resolve) => setTimeout(resolve, 50)));
+    // The move's words do not come back with the draft's sentence.
+    expect(line()).toBe('');
   }, 20000);
 
   it('sends nothing for the draft after "Stop" when the person changes the item, and says where the retry is', async () => {
