@@ -823,11 +823,10 @@
     },
     {
       "name": "yaml",
-      "use_sites": [],
-      "planned_use_sites": [
-        "ui/src/features/conventions",
-        "ui/src/features/documents"
+      "use_sites": [
+        "ui/src/lib/yaml.ts"
       ],
+      "planned_use_sites": [],
       "official_sources": [
         "https://eemeli.org/yaml/",
         "https://github.com/eemeli/yaml"
