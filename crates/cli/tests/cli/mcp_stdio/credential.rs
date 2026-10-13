@@ -635,3 +635,53 @@ async fn a_credential_that_follows_a_part_of_itself_is_still_removed() -> TestRe
     }
     Ok(())
 }
+
+/// The search finds the credential wherever it starts, and nothing that is not it (the second
+/// re-review's B3), over a generated set that is the same on every run. The credentials are
+/// all 1,024 texts of ten letters over `a` and `b`, each followed by `bbabab`, so that every
+/// way a credential over two letters can repeat its own beginning is among them. Each line
+/// holds a start of the credential, one letter, and an end of the credential: a search that
+/// goes on from a failed match in the wrong place either misses the credential that follows
+/// or takes for it what is none. What must come out is what replacing the text gives, which
+/// needs no search state at all.
+#[test]
+fn mcp_stdio_credential_is_found_wherever_it_starts() -> TestResult {
+    let (mut held, mut free) = (0_usize, 0_usize);
+    for number in 0..1024_u32 {
+        let start: String = (0..10)
+            .map(|bit| if (number >> bit) & 1 == 0 { 'a' } else { 'b' })
+            .collect();
+        let secret = format!("{start}bbabab");
+        let credential = some(Credential::parse(&secret, "the test")?, "a credential")?;
+        for before in 1..=12_usize {
+            for from in 0..=8_usize {
+                for letter in ['a', 'b'] {
+                    let body = format!(
+                        "{}{letter}{}",
+                        some(secret.get(..before), "a start of the credential")?,
+                        some(secret.get(from..), "an end of the credential")?
+                    );
+                    let clean = body.replace(&secret, "[credential]");
+                    if clean == body {
+                        free = free.saturating_add(1);
+                    } else {
+                        held = held.saturating_add(1);
+                    }
+                    assert_eq!(
+                        credential
+                            .redact_line(format!("{{\"s\":\"{body}\"}}"))
+                            .as_deref(),
+                        Some(format!("{{\"s\":\"{clean}\"}}").as_str()),
+                        "the credential {secret} in {body}"
+                    );
+                }
+            }
+        }
+    }
+    // The lines are of both kinds, so the test says something about each.
+    assert!(
+        held > 20_000 && free > 20_000,
+        "{held} held it, {free} did not"
+    );
+    Ok(())
+}
