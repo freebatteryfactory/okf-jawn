@@ -16,10 +16,12 @@ use okf_jawn_core::sandbox::{SandboxCapabilityStore, SandboxMint, SandboxResolve
 use okf_jawn_core::storage::{
     BlobStore, ByteReader, LocalSource, ObjectInfo, ObjectRead, StorageScope,
 };
-use okf_jawn_server::sandbox::{SANDBOX_MAX_BYTES, SandboxParts, service};
+use okf_jawn_server::sandbox::{
+    SANDBOX_MAX_BYTES, SandboxParts, isolated, isolation_headers, service,
+};
 use tower::ServiceExt;
 
-use check::{TestResult, some};
+use check::{TestResult, err_of, some};
 use fixtures::{tenant, workspace};
 
 /// Capabilities by token hash.
@@ -110,6 +112,16 @@ fn digest(fill: char) -> Result<Digest, Box<dyn std::error::Error>> {
 
 /// The sandbox service with one capability bound to an HTML object of `size` reported bytes.
 fn sandbox(size: u64) -> Result<Router, Box<dyn std::error::Error>> {
+    sandbox_of(HTML.as_bytes().to_vec(), size, APP_ORIGIN)
+}
+
+/// The sandbox service, framed by `app_origin`, with one capability bound to `body`, whose size
+/// the store reports as `size` (which a test may make wrong).
+fn sandbox_of(
+    body: Vec<u8>,
+    size: u64,
+    app_origin: &str,
+) -> Result<Router, Box<dyn std::error::Error>> {
     let object = digest('d')?;
     let capabilities = Capabilities::default();
     capabilities.0.lock().map_err(|_| "poisoned")?.insert(
@@ -132,13 +144,13 @@ fn sandbox(size: u64) -> Result<Router, Box<dyn std::error::Error>> {
         .0
         .lock()
         .map_err(|_| "poisoned")?
-        .insert(object.as_str().to_owned(), (HTML.as_bytes().to_vec(), size));
+        .insert(object.as_str().to_owned(), (body, size));
     Ok(service(SandboxParts {
         capabilities: Arc::new(capabilities),
         blobs: Arc::new(blobs),
         host: SANDBOX_HOST.to_owned(),
-        app_origin: APP_ORIGIN.to_owned(),
-    }))
+        app_origin: app_origin.to_owned(),
+    })?)
 }
 
 fn get(path: &str, host: &str) -> Result<Request<Body>, axum::http::Error> {
@@ -157,15 +169,36 @@ fn assert_isolated(response: &Response) -> TestResult {
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned)
     };
+    // The whole policy, directive by directive: nothing may be added, widened or dropped.
     let policy = some(header("content-security-policy"), "the CSP")?;
-    assert!(policy.starts_with("sandbox;"));
-    assert!(!policy.contains("allow-"));
-    assert!(policy.contains("default-src 'none'"));
-    assert!(policy.contains(&format!("frame-ancestors {APP_ORIGIN}")));
+    let directives: Vec<&str> = policy.split("; ").collect();
+    assert_eq!(
+        directives,
+        vec![
+            "sandbox",
+            "default-src 'none'",
+            "img-src data:",
+            "style-src 'unsafe-inline'",
+            "font-src data:",
+            "media-src data:",
+            "form-action 'none'",
+            "base-uri 'none'",
+            "frame-ancestors http://127.0.0.1:7711",
+        ]
+    );
     assert_eq!(header("cache-control").as_deref(), Some("no-store"));
     assert_eq!(header("referrer-policy").as_deref(), Some("no-referrer"));
     assert_eq!(header("x-content-type-options").as_deref(), Some("nosniff"));
-    assert!(header("permissions-policy").is_some());
+    assert_eq!(
+        header("permissions-policy").as_deref(),
+        Some(
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=(), clipboard-read=(), clipboard-write=()"
+        )
+    );
+    assert_eq!(
+        header("cross-origin-resource-policy").as_deref(),
+        Some("same-site")
+    );
     assert!(header("set-cookie").is_none());
     Ok(())
 }
@@ -226,6 +259,77 @@ async fn a_representation_over_the_limit_is_refused() -> TestResult {
         .await?;
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert_isolated(&response)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_cookie_set_inside_the_sandbox_never_leaves_it() -> TestResult {
+    // A route double that sets a cookie: only the isolation layer can remove it.
+    let inner = Router::new().route(
+        "/sets-a-cookie",
+        axum::routing::get(|| async { ([("set-cookie", "tracker=1; Path=/")], "page") }),
+    );
+    let response = isolated(inner, APP_ORIGIN)?
+        .oneshot(get("/sets-a-cookie", SANDBOX_HOST)?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_isolated(&response)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_body_longer_than_the_store_reported_is_refused_at_the_limit() -> TestResult {
+    let limit = usize::try_from(SANDBOX_MAX_BYTES)?;
+    // Exactly the limit, honestly reported, is served whole.
+    let response = sandbox_of(vec![b'a'; limit], SANDBOX_MAX_BYTES, APP_ORIGIN)?
+        .oneshot(get(&format!("/sandbox/{TOKEN}"), SANDBOX_HOST)?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        to_bytes(response.into_body(), usize::MAX).await?.len(),
+        limit
+    );
+    // One byte more, while the store reports ten bytes: refused, not cut and served.
+    let response = sandbox_of(vec![b'a'; limit.saturating_add(1)], 10, APP_ORIGIN)?
+        .oneshot(get(&format!("/sandbox/{TOKEN}"), SANDBOX_HOST)?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_isolated(&response)?;
+    Ok(())
+}
+
+#[test]
+fn the_service_does_not_start_with_an_application_origin_that_is_not_an_origin() -> TestResult {
+    for origin in [
+        "http://127.0.0.1:7711\r",
+        "http://127.0.0.1:7711\n",
+        "http://127.0.0.1:7711 ",
+        "http://b\u{fc}cher.example.test",
+        "http://127.0.0.1:7711/",
+        "http://127.0.0.1:7711/path",
+        "http://127.0.0.1:7711?q=1",
+        "http://user@127.0.0.1:7711",
+        "http://127.0.0.1:0",
+        "http://:7711",
+        "http://127.0.0.1:7711; script-src *",
+        "ftp://127.0.0.1:7711",
+        "127.0.0.1:7711",
+        "*",
+        "",
+    ] {
+        let refused = err_of(isolation_headers(origin))?;
+        assert_eq!(refused.code, ErrorCode::InvalidInput, "{origin:?}");
+        assert_eq!(refused.field.as_deref(), Some("app_origin"));
+        assert!(sandbox_of(Vec::new(), 0, origin).is_err(), "{origin:?}");
+    }
+    for origin in [
+        "http://127.0.0.1:7711",
+        "https://okf.example.test",
+        "http://[::1]:7711",
+    ] {
+        let headers = isolation_headers(origin)?;
+        assert_eq!(headers.len(), 6, "{origin}");
+    }
     Ok(())
 }
 

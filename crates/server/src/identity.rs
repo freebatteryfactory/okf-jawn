@@ -202,16 +202,21 @@ impl Identity {
 
     /// The 401 a request without a usable bearer receives on the MCP route.
     fn challenge(&self, error: ApiError) -> Response {
-        let mut response = error_response(error);
         let value = match &self.inner.bearer {
             BearerAuth::Local => "Bearer".to_owned(),
             BearerAuth::Hosted {
                 resource_metadata, ..
             } => format!("Bearer resource_metadata=\"{resource_metadata}\""),
         };
-        if let Ok(value) = HeaderValue::from_str(&value) {
-            response.headers_mut().insert(WWW_AUTHENTICATE, value);
-        }
+        // A challenge that cannot be written is this service's fault, never a 401 without one.
+        let Ok(value) = HeaderValue::from_str(&value) else {
+            return error_response(ApiError::new(
+                ErrorCode::Internal,
+                "The authentication challenge cannot be sent",
+            ));
+        };
+        let mut response = error_response(error);
+        response.headers_mut().insert(WWW_AUTHENTICATE, value);
         response
     }
 

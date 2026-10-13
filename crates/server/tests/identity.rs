@@ -89,6 +89,11 @@ impl Harness {
     }
 
     fn hosted(&self) -> Result<Router, Box<dyn std::error::Error>> {
+        self.hosted_naming("https://okf.example.test/.well-known/oauth-protected-resource")
+    }
+
+    /// The hosted service whose 401 challenge names `resource_metadata`.
+    fn hosted_naming(&self, resource_metadata: &str) -> Result<Router, Box<dyn std::error::Error>> {
         self.service(BearerAuth::Hosted {
             connect: Arc::new(OneToken {
                 token: "connect-token".to_owned(),
@@ -98,8 +103,7 @@ impl Harness {
                     client_id: "client_mcp".to_owned(),
                 },
             }),
-            resource_metadata: "https://okf.example.test/.well-known/oauth-protected-resource"
-                .to_owned(),
+            resource_metadata: resource_metadata.to_owned(),
         })
     }
 
@@ -288,6 +292,21 @@ async fn a_request_for_another_host_is_refused_before_identity() -> TestResult {
     let response = harness.local()?.oneshot(request).await?;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert_eq!(harness.counting.call_count("list_items")?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_challenge_that_cannot_be_written_is_a_500_never_a_401_without_one() -> TestResult {
+    let harness = Harness::new()?;
+    // A metadata URL no header can carry (a line break from a badly read setting).
+    let app = harness.hosted_naming("https://okf.example.test/metadata\r\n")?;
+    let request = Request::post("/mcp")
+        .header("host", HOST)
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))?;
+    let response = app.oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(api_error(response).await?.code, ErrorCode::Internal);
     Ok(())
 }
 
