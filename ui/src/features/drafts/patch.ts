@@ -6,14 +6,25 @@
  * opened by `@@ -old,count +new,count @@` and followed by lines whose first character says what
  * they are (a space: unchanged; `-`: removed; `+`: added; `\`: a remark about the line above). The
  * header is Git's vocabulary and is not shown; the file's paths come from the `FileChange` itself.
- * Nothing is interpreted beyond that first character: the text of each line is shown as it is.
+ * Nothing is interpreted beyond that first character: the text of each line is shown as it is,
+ * without the carriage return of a file with Windows line ends.
+ *
+ * What is read is bounded, because a patch is not: at most `room` lines are kept and the rest are
+ * counted, and a line longer than `MAX_LINE_CHARS` is cut and marked as cut.
  *
  * A patch numbers the lines of the whole item file, its properties header included.
  */
 
+/** The most lines of one conflict's diff put on the page. */
+export const MAX_DIFF_LINES = 2_000;
+/** The most characters of one line put on the page. */
+export const MAX_LINE_CHARS = 2_000;
+
 export interface PatchLine {
   kind: 'added' | 'removed' | 'same';
   text: string;
+  /** The line was longer than `MAX_LINE_CHARS`; `text` is its beginning. */
+  cut?: true;
 }
 
 export interface PatchHunk {
@@ -24,29 +35,53 @@ export interface PatchHunk {
   lines: PatchLine[];
 }
 
-const HUNK = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+export interface ReadPatch {
+  hunks: PatchHunk[];
+  /** How many lines are in `hunks`. */
+  shown: number;
+  /** How many further lines the patch holds that were not kept. */
+  more: number;
+}
 
-export function readPatch(patch: string): PatchHunk[] {
+const HUNK = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+const KIND = { '+': 'added', '-': 'removed' } as const;
+
+export function readPatch(patch: string, room: number = MAX_DIFF_LINES): ReadPatch {
   const hunks: PatchHunk[] = [];
   let hunk: PatchHunk | null = null;
+  let inHunk = false;
+  let shown = 0;
+  let more = 0;
   const rows = patch.split('\n');
   // A patch ends with a line break: the piece after it is no line.
   if (rows.at(-1) === '') rows.pop();
-  for (const row of rows) {
+  for (const raw of rows) {
+    const row = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
     const opened = HUNK.exec(row);
     if (opened !== null) {
-      hunk = { oldStart: Number(opened[1]), newStart: Number(opened[2]), lines: [] };
-      hunks.push(hunk);
+      inHunk = true;
+      hunk = null;
+      if (shown < room) {
+        hunk = { oldStart: Number(opened[1]), newStart: Number(opened[2]), lines: [] };
+        hunks.push(hunk);
+      }
       continue;
     }
-    // Everything before the first hunk is the header.
-    if (hunk === null) continue;
+    // Everything before the first hunk is the header; a remark is about the line above.
     const mark = row.charAt(0);
+    if (!inHunk || mark === '\\') continue;
+    if (hunk === null || shown >= room) {
+      more += 1;
+      continue;
+    }
+    const kind = mark === '+' || mark === '-' ? KIND[mark] : 'same';
     const text = row.slice(1);
-    if (mark === '+') hunk.lines.push({ kind: 'added', text });
-    else if (mark === '-') hunk.lines.push({ kind: 'removed', text });
-    else if (mark === '\\') continue;
-    else hunk.lines.push({ kind: 'same', text });
+    hunk.lines.push(
+      text.length > MAX_LINE_CHARS
+        ? { kind, text: text.slice(0, MAX_LINE_CHARS), cut: true }
+        : { kind, text },
+    );
+    shown += 1;
   }
-  return hunks;
+  return { hunks, shown, more };
 }

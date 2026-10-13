@@ -242,6 +242,182 @@ describe('the properties form', () => {
     expect(api.callsTo(SAVE).at(0)?.properties).toEqual({ ...stored, owner: 'Grace' });
   });
 
+  // Opening the editor is not an edit, whatever the type's schema would fill in.
+  describe('a type whose schema names defaults', () => {
+    const withDefaults = {
+      ...meetingNote,
+      properties_schema: {
+        type: 'object',
+        required: ['owner'],
+        properties: {
+          owner: { type: 'string', title: 'Owner', minLength: 1 },
+          priority: { type: 'string', title: 'Priority', default: 'normal' },
+          tags: { type: 'array', title: 'Tags', items: { type: 'string' } },
+          place: {
+            type: 'object',
+            title: 'Place',
+            properties: { room: { type: 'string', title: 'Room', default: 'Hall' } },
+          },
+        },
+      },
+    };
+    const held = { type: 'meeting-note', owner: 'Ada', okf_jawn: { id: NOTE } };
+    const service = () =>
+      typed({
+        [TYPES]: () => ok({ items: [withDefaults] }),
+        [ITEM]: () => ok({ ...itemDocument(noteSummary), properties: held }),
+      });
+
+    it('pressing "Edit" sends nothing and marks nothing', async () => {
+      const api = service();
+      await editNote();
+      // A property the item does not hold is shown empty, not as its default.
+      expect(field('Priority')).toHaveProperty('value', '');
+      expect(field('Room')).toHaveProperty('value', '');
+      expect(document.querySelector('.save-state')?.textContent).toBe('No changes to save.');
+      await pass(AUTOSAVE_DELAY_MS * 3);
+      expect(api.callsTo(SAVE)).toHaveLength(0);
+      expect(document.querySelector('.save-state')?.textContent).toBe('No changes to save.');
+      expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
+      expect(screen.getByRole('region', { name: 'Drafts (0)' })).toBeDefined();
+    });
+
+    it('a value the schema fixes is not written by the form itself, with or without an edit', async () => {
+      const fixed = {
+        ...meetingNote,
+        properties_schema: {
+          type: 'object',
+          properties: {
+            owner: { type: 'string', title: 'Owner' },
+            format: { type: 'string', title: 'Format', const: 'minutes' },
+          },
+        },
+      };
+      const api = typed({
+        [TYPES]: () => ok({ items: [fixed] }),
+        [ITEM]: () => ok({ ...itemDocument(noteSummary), properties: held }),
+      });
+      await editNote();
+      await pass(AUTOSAVE_DELAY_MS * 3);
+      expect(api.callsTo(SAVE)).toHaveLength(0);
+      expect(document.querySelector('.save-state')?.textContent).toBe('No changes to save.');
+      set('Owner', 'Grace');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      expect(api.callsTo(SAVE).at(0)?.properties).toEqual({ ...held, owner: 'Grace' });
+    });
+
+    it('a change of one property sends that change, and no default beside it', async () => {
+      const api = service();
+      await editNote();
+      set('Owner', 'Grace');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      expect(api.callsTo(SAVE).at(0)?.properties).toEqual({ ...held, owner: 'Grace' });
+      // A default the person enters is theirs, and is sent.
+      set('Priority', 'normal');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+      expect(api.callsTo(SAVE).at(1)?.properties).toEqual({
+        ...held,
+        owner: 'Grace',
+        priority: 'normal',
+      });
+    });
+  });
+
+  // A type's schema and UI schema are the service's data: the page never falls to them.
+  describe('a type whose definition the form library cannot draw', () => {
+    const undrawable = {
+      ...meetingNote,
+      ui_schema: { owner: { 'ui:widget': 'no-such-widget' } },
+    };
+
+    it('keeps the Explorer, shows the properties as they are, and saves them with the text', async () => {
+      const api = typed({ [TYPES]: () => ok({ items: [undrawable] }) });
+      await pressEdit();
+      expect(await screen.findByText(/cannot be shown here: its definition asks/)).toBeDefined();
+      // The page is still the Explorer, with the editor in it.
+      expect(screen.getByRole('tree', { name: 'Folders' })).toBeDefined();
+      const box = textBox('Text of Meeting notes');
+      const properties = screen.getByText('Properties (7)').closest('details');
+      expect(properties?.textContent).toContain('owner');
+      expect(properties?.textContent).toContain('Ada');
+      expect(properties?.textContent).toContain('x-okf-review');
+      vi.useFakeTimers();
+      typeInto(box, ' more');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      expect(api.callsTo(SAVE).at(0)?.properties).toEqual(stored);
+    });
+
+    it('opens an item of that type that already has a draft', async () => {
+      typed({
+        [TYPES]: () => ok({ items: [undrawable] }),
+        [ITEM]: () =>
+          ok({
+            ...itemDocument(noteSummary),
+            properties: stored,
+            draft: {
+              body: '# Meeting notes\n\nMy draft',
+              properties: stored,
+              draft: draftOf(NOTE, HEAD, LATER),
+            },
+          }),
+      });
+      renderAt(`/w/${WS}/i/${NOTE}`);
+      const box = await screen.findByRole('textbox', { name: 'Text of Meeting notes' });
+      expect(box.textContent).toContain('My draft');
+      expect(await screen.findByText(/cannot be shown here: its definition asks/)).toBeDefined();
+      expect(screen.getByRole('tab', { name: 'Meeting notes (draft)' })).toBeDefined();
+    });
+  });
+
+  it('shows a type’s description and help as text: no image, no link, whatever its UI schema asks', async () => {
+    const described = {
+      ...meetingNote,
+      properties_schema: {
+        type: 'object',
+        properties: {
+          owner: {
+            type: 'string',
+            title: 'Owner',
+            description:
+              'see <img src=x onerror=alert(1)> [link](javascript:alert(3)) ![pix](https://elsewhere.example/p.png) [out](https://elsewhere.example/)',
+          },
+          place: {
+            type: 'object',
+            title: 'Place',
+            properties: {
+              room: {
+                type: 'string',
+                title: 'Room',
+                description: '![in](https://elsewhere.example/r.png)',
+              },
+            },
+          },
+        },
+      },
+      ui_schema: {
+        owner: {
+          'ui:enableMarkdownInDescription': true,
+          'ui:help': '[help](https://elsewhere.example/h)',
+          'ui:options': { enableMarkdownInHelp: true },
+        },
+        place: { room: { 'ui:enableMarkdownInDescription': true } },
+        'ui:globalOptions': { enableMarkdownInDescription: true, enableMarkdownInHelp: true },
+      },
+    };
+    typed({ [TYPES]: () => ok({ items: [described] }) });
+    await editNote();
+    const form = document.querySelector('.properties-form');
+    expect(form?.querySelectorAll('img, a, script')).toHaveLength(0);
+    // The words are there, as the text they are.
+    expect(form?.textContent).toContain('![pix](https://elsewhere.example/p.png)');
+    expect(form?.textContent).toContain('[help](https://elsewhere.example/h)');
+    expect(form?.textContent).toContain('![in](https://elsewhere.example/r.png)');
+  });
+
   it('does not send a required property emptied', async () => {
     const api = typed();
     await editNote();

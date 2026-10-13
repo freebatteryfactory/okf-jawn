@@ -10,16 +10,21 @@
  * The two names are held here once; `tests/unit/api-client.test.ts` fails when either differs from
  * its security scheme in `api/openapi.json`.
  *
- * Bounded wait. A request that has not answered after `REQUEST_TIMEOUT_MS` is aborted and fails as
+ * Bounded wait. A request that has not answered after its wait (`REQUEST_TIMEOUT_MS`, more for a
+ * large body: see below) is aborted and fails as
  * `RequestTimedOut`, which reads in plain words and can be retried like any other failure
  * (`features/errors/failure.ts`). For a JSON answer the wait covers the body too; for any other
  * answer (an event stream, a download) it covers the time until the answer begins, so a stream is
  * not cut short. A caller's own abort (a cancelled query) is not a timeout. A request that timed
  * out may still have been carried out: a write is repeated with the idempotency key it had.
  *
- * Limit: the wait is one value for every request sent here, whatever the size of its body. A
- * file's bytes are not sent here: `upload-transport.ts` sends them, bounded by progress instead of
- * by a total time, under the same CSRF rule (`csrfHeaderFor`).
+ * The wait allows for what is sent: one more second for each full 64 KiB of a JSON body
+ * (`UPLOAD_BYTES_PER_SECOND`), so a large draft on a slow uplink is not cut every time.
+ *
+ * Limit: a body that is not JSON (an upload's bytes) gets no allowance here; its size cannot be
+ * read without holding all of it. A file's bytes are not sent here: `upload-transport.ts` sends
+ * them, bounded by progress instead of by a total time, under the same CSRF rule
+ * (`csrfHeaderFor`).
  */
 import { client } from '../api/generated/client.gen';
 
@@ -39,6 +44,14 @@ export const CSRF_HEADER = 'x-okf-csrf';
  * minute.
  */
 export const REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * The slowest upload the wait allows for: 64 KiB a second, about half a megabit, which is what a
+ * weak mobile link or an old DSL line sends. A request gets one more second of wait for each full
+ * 64 KiB of its body, so the largest draft (8 MiB) may take 30 + 128 seconds instead of being cut
+ * at 30 every time, while an ordinary request (a few kilobytes) waits exactly 30 seconds.
+ */
+export const UPLOAD_BYTES_PER_SECOND = 64 * 1024;
 
 /** Methods the server accepts from a cookie session without the CSRF header. */
 const SAFE_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -77,9 +90,18 @@ export function csrfHeaderFor(method: string, url: string): string | null {
   return csrfToken();
 }
 
-function isJson(response: Response): boolean {
-  const type = response.headers.get('Content-Type')?.split(';').at(0)?.trim() ?? '';
+function isJson(message: Request | Response): boolean {
+  const type = message.headers.get('Content-Type')?.split(';').at(0)?.trim() ?? '';
   return type === 'application/json' || type.endsWith('+json');
+}
+
+/**
+ * How long a request that sends a JSON body may go unanswered: the bounded wait, plus one second
+ * for each full `UPLOAD_BYTES_PER_SECOND` of that body.
+ */
+async function waitWithBody(request: Request): Promise<number> {
+  const bytes = (await request.clone().arrayBuffer()).byteLength;
+  return REQUEST_TIMEOUT_MS + Math.floor(bytes / UPLOAD_BYTES_PER_SECOND) * 1000;
 }
 
 /** `fetch` for the generated client: the CSRF header, then the bounded wait. */
@@ -88,14 +110,17 @@ export async function sendRequest(input: RequestInfo | URL, init?: RequestInit):
   const token = csrfHeaderFor(request.method, request.url);
   if (token !== null) request.headers.set(CSRF_HEADER, token);
 
+  // A request with no JSON body is sent in this same turn, as before; measuring one takes a turn.
+  const wait =
+    isJson(request) && request.body !== null ? await waitWithBody(request) : REQUEST_TIMEOUT_MS;
   const deadline = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timedOut = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
       // Rejected before the abort, so the wait ends as a timeout and not as the abort it causes.
-      reject(new RequestTimedOut(REQUEST_TIMEOUT_MS));
+      reject(new RequestTimedOut(wait));
       deadline.abort();
-    }, REQUEST_TIMEOUT_MS);
+    }, wait);
   });
   try {
     const signal = AbortSignal.any([request.signal, deadline.signal]);

@@ -26,8 +26,10 @@ import {
   OLD,
   OTHER,
   otherSummary,
+  readResponse,
   renderAt,
   SOURCE,
+  summary,
   WS,
   workspace,
   writableWorkspace,
@@ -133,6 +135,33 @@ describe('who may edit, and where', () => {
     expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`);
   });
 
+  // A Source's text is changed through corrections and a View has its own editor.
+  it.each([
+    ['a Source', 'source', 'Annual report'],
+    ['a View', 'view', 'Quarterly'],
+  ] as const)('offers no editing for %s, even one that has a draft', async (_what, kind, title) => {
+    const item = summary(SOURCE, 'things/it.md', title, 'thing', kind);
+    const api = writable({
+      [ITEM]: () =>
+        ok({
+          ...itemDocument(item),
+          draft: {
+            body: 'a draft made elsewhere',
+            properties: { type: 'thing', okf_jawn: { id: SOURCE } },
+            draft: draftOf(SOURCE, HEAD, LATER),
+          },
+        }),
+      '/api/reads/read-item': () => ok(readResponse(item, `# ${title}\n\nCommitted text`)),
+    });
+    renderAt(`/w/${WS}/i/${SOURCE}`);
+    await screen.findByText('Committed text');
+    await screen.findByRole('tab', { name: `${title} (draft)` });
+    expect(screen.queryByRole('button', { name: /Edit/ })).toBeNull();
+    expect(screen.queryByRole('textbox', { name: `Text of ${title}` })).toBeNull();
+    expect(screen.queryByText(/Editing starts from/)).toBeNull();
+    expect(api.callsTo(SAVE)).toHaveLength(0);
+  });
+
   it('lets a tab that cites the shown version be edited', async () => {
     writable();
     renderAt(`/w/${WS}/i/${NOTE}?rev=${HEAD}`);
@@ -165,6 +194,28 @@ describe('autosave', () => {
     await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at .+\.$/));
     expect(document.querySelector('.save-state time')?.getAttribute('datetime')).toBe(LATER);
     expect(api.violations).toEqual([]);
+  });
+
+  it('saves at the latest ten seconds after the first unsaved change, however fast the typing', async () => {
+    const api = writable();
+    const { box } = await startEditing();
+    // A key every half second: the one-second pause never comes.
+    for (let typed = 0; typed < 20; typed += 1) {
+      typeInto(box, 'a');
+      await pass(typed < 19 ? 500 : 499);
+    }
+    // 9,999 ms after the first change: nothing sent yet.
+    expect(api.callsTo(SAVE)).toHaveLength(0);
+    await pass(1);
+    expect(api.callsTo(SAVE)).toHaveLength(1);
+    expect(api.callsTo(SAVE).at(0)?.body).toBe(`${COMMITTED}${'a'.repeat(20)}`);
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+    // The next change starts its own wait: one second after it, not ten after the first.
+    typeInto(box, 'b');
+    await pass(AUTOSAVE_DELAY_MS - 1);
+    expect(api.callsTo(SAVE)).toHaveLength(1);
+    await pass(1);
+    expect(api.callsTo(SAVE)).toHaveLength(2);
   });
 
   it('says "Saving…" while the save is in flight', async () => {
@@ -359,6 +410,82 @@ describe('a save that fails', () => {
     expect(saveState()).toBe('Not saved. Your text is kept here.');
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
     expect(textIn(box)).toBe(`${COMMITTED} one`);
+  });
+});
+
+// A save that failed or timed out may have been applied: what the service holds is then unknown.
+describe('a save with no answer is not forgotten', () => {
+  it('saves the text again when it is put back, and is never called clean before that answers', async () => {
+    let holds: string | null = null;
+    let mode: 'lost' | 'held' | 'ok' = 'lost';
+    const answers: Array<() => void> = [];
+    const api = writable({
+      [SAVE]: (body) => {
+        // The service applies the save whether or not its answer arrives.
+        holds = String(body.body);
+        if (mode === 'lost') return new Promise<never>(() => {});
+        if (mode === 'ok') return saved(body);
+        return new Promise<Reply>((resolve) => answers.push(() => resolve(saved(body))));
+      },
+    });
+    const { box } = await startEditing();
+    typeInto(box, ' one');
+    await pass(AUTOSAVE_DELAY_MS);
+    await pass(REQUEST_TIMEOUT_MS);
+    await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+    expect(holds).toBe(`${COMMITTED} one`);
+
+    mode = 'held';
+    replaceText(box, COMMITTED);
+    // The text is what it was, and it is still not called clean: the service may hold " one".
+    expect(saveState()).toBe('Not saved. Your text is kept here.');
+    expect(screen.getByRole('tab', { name: 'Meeting notes (not saved)' })).toBeDefined();
+    await pass(AUTOSAVE_DELAY_MS);
+    expect(api.callsTo(SAVE)).toHaveLength(2);
+    expect(api.callsTo(SAVE).at(1)?.body).toBe(COMMITTED);
+    expect(saveState()).toBe('Saving…');
+    answers.at(0)?.();
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+    expect(holds).toBe(textIn(box));
+  });
+
+  it('saves the text again when the save in flight fails after the text was put back', async () => {
+    const answers: Array<(reply: Reply) => void> = [];
+    const api = writable({
+      [SAVE]: () => new Promise<Reply>((resolve) => answers.push(resolve)),
+    });
+    const { box } = await startEditing();
+    typeInto(box, ' one');
+    await pass(AUTOSAVE_DELAY_MS);
+    expect(api.callsTo(SAVE)).toHaveLength(1);
+    replaceText(box, COMMITTED);
+    await pass(AUTOSAVE_DELAY_MS);
+    answers.at(0)?.(fail(503, 'unavailable', 'the store is busy'));
+    // It failed, so it may have been applied: the text on screen is saved, not taken as clean.
+    await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+    expect(api.callsTo(SAVE).at(1)?.body).toBe(COMMITTED);
+    expect(saveState()).not.toBe('No changes to save.');
+    answers.at(1)?.(ok(draftOf(NOTE, HEAD, LATER)));
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+  });
+
+  it('keeps the failure through a text that is too long to send', async () => {
+    let failing = true;
+    const api = writable({
+      [SAVE]: (body) => (failing ? fail(503, 'unavailable', 'busy') : saved(body)),
+    });
+    const { box } = await startEditing();
+    typeInto(box, ' one');
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+    replaceText(box, 'x'.repeat(MAX_BODY_BYTES + 1));
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(saveState()).toBe('Not saved: the text is too long.'));
+    failing = false;
+    replaceText(box, COMMITTED);
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+    expect(api.callsTo(SAVE).at(-1)?.body).toBe(COMMITTED);
   });
 });
 

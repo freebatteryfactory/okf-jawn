@@ -7,7 +7,10 @@
  * unmounted (another tab, another item, a closed tab) and is never lost silently. A draft the
  * server holds is server state and lives in the Query cache (`get_item`'s `draft`, `list_drafts`);
  * a session keeps the content the server last confirmed only to tell whether the editor differs
- * from it. Nothing here is called saved unless `save_draft` answered for exactly that content.
+ * from it. A session is called saved only when `save_draft` answered for exactly the content it
+ * holds and no save has failed since. A save that failed or timed out may still have been
+ * applied, so what the service holds is then unknown: the session stays "not saved" and needs a
+ * save, whatever its text, until one has answered.
  *
  * Beside the sessions: the items of a Snapshot that conflicted, each until the person resolves it
  * (the answer of `commit_items`, kept only to show it), and what the last Snapshot did, as words.
@@ -41,7 +44,10 @@ export interface DraftSession extends DraftText {
   confirmed: (DraftText & { draft: Draft }) | null;
   /** A save is in flight. */
   saving: boolean;
-  /** What the last save threw; null once a save has answered. */
+  /**
+   * What the last save threw; null once a save has answered. While it is set, what the service
+   * holds is unknown.
+   */
   failure: unknown;
   /** The request in flight or failed. */
   attempt: SaveAttempt | null;
@@ -156,9 +162,12 @@ export function sameText(a: DraftText, b: DraftText): boolean {
   );
 }
 
-/** The editor holds content the server has not confirmed as the draft. */
+/**
+ * The session has something to save: content the service has not confirmed as the draft, or a
+ * save that failed, after which the service may hold another text than the one last confirmed.
+ */
 export function needsSave(session: DraftSession): boolean {
-  return !sameText(session, session.confirmed ?? session.committed);
+  return session.failure !== null || !sameText(session, session.confirmed ?? session.committed);
 }
 
 export function saveStateOf(session: DraftSession): SaveState {
