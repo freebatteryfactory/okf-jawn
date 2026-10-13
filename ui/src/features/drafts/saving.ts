@@ -64,8 +64,8 @@
  *   back) is ended, not refused: there is nothing to keep, and nothing to discard.
  * - When a later read says the item is a Note, the refusal is lifted: the editor is drawn again
  *   with the text the session kept, and the save it owes is sent a moment later, as after a
- *   change. A session whose last save failed or was stopped is not sent by itself, here as
- *   anywhere: its notice has the retry.
+ *   change. The lift does not send again a save that had failed or was stopped: its notice,
+ *   back with the editor, has the retry.
  * Limits. The refusal is per item, whichever pane read it: a pane that reads the item at another
  * revision, where it is a Note, lifts what another pane set. And with no pane of the item open
  * nothing reads its kind for the session: a save sent then (the page is hidden) is the service's
