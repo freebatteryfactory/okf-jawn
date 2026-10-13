@@ -249,6 +249,23 @@ describe('a long list', () => {
     ).toBeDefined();
   });
 
+  it('asks once for a further page that fails, not again and again by itself', async () => {
+    const api = setup((body) =>
+      (body.page as Json).cursor === 'next'
+        ? fail(500, 'internal', 'the checks stopped')
+        : answer(THREE, 'next'),
+    );
+    await openAttention();
+    await waitFor(() => expect(api.callsTo(ATTENTION)).toHaveLength(2));
+    await screen.findByText(/Something went wrong in the service\./);
+    // Left alone, the page asks no more: the failure has its own retry.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(api.callsTo(ATTENTION)).toHaveLength(2);
+    // The warnings that were read stay, and the link still says that more exist.
+    expect(rows()).toHaveLength(3);
+    expect(screen.getByRole('link', { name: 'Attention (3+)' })).toBeDefined();
+  });
+
   it('brings more rows with "Show more warnings", then a further page, with focus on the first it brought', async () => {
     const api = setup(paged);
     await openAttention();

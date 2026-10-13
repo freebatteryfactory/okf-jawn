@@ -60,8 +60,13 @@ export const SHA_EMPTY = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca49599
  * A file as a picker hands it over. `relativePath` is what a folder picker names
  * (`webkitRelativePath`): the path from the chosen folder down, ending in the file's name.
  */
-export function fileOf(name: string, content: string, relativePath = ''): File {
-  const file = new File([content], name, { lastModified: 1_700_000_000_000 });
+export function fileOf(
+  name: string,
+  content: string,
+  relativePath = '',
+  lastModified = 1_700_000_000_000,
+): File {
+  const file = new File([content], name, { lastModified });
   Object.defineProperty(file, 'webkitRelativePath', { value: relativePath });
   return file;
 }

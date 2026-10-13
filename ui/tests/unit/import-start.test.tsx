@@ -13,6 +13,7 @@ import {
 } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Job } from '../../src/api/generated/types.gen';
+import { importAttempt } from '../../src/features/imports/import-start';
 import { resetUploads } from '../../src/features/imports/uploading';
 import { JOBS_POLL_MS, JOBS_SAFETY_POLL_MS } from '../../src/features/jobs/jobs';
 import { fail, type Handler, mockApi, ok } from './support/api';
@@ -31,7 +32,15 @@ import {
   uploadService,
 } from './support/imports';
 import { mockTransfers } from './support/transfers';
-import { explorerHandlers, HEAD, NOTE, renderAt, WS, writableWorkspace } from './support/workspace';
+import {
+  explorerHandlers,
+  HEAD,
+  NOTE,
+  OLD,
+  renderAt,
+  WS,
+  writableWorkspace,
+} from './support/workspace';
 
 const OPEN = '/api/workspaces/open-workspace';
 
@@ -122,6 +131,37 @@ const jobRow = () => {
   if (row === null) throw new Error('no job row');
   return row;
 };
+
+describe('the identity of a start_import request', () => {
+  const last = {
+    key: 'the-first-key',
+    uploadIds: ['u1', 'u2'],
+    destination: 'notes',
+    baseRevision: HEAD,
+  };
+
+  it('is the one before while the request names the same uploads, folder and base', () => {
+    expect(importAttempt(last, ['u1', 'u2'], 'notes', HEAD)).toBe(last);
+  });
+
+  it.each([
+    ['another base revision', ['u1', 'u2'], 'notes', OLD],
+    ['another folder', ['u1', 'u2'], 'elsewhere', HEAD],
+    ['one upload more', ['u1', 'u2', 'u3'], 'notes', HEAD],
+    ['one upload fewer', ['u1'], 'notes', HEAD],
+    ['another upload in the same place', ['u1', 'u9'], 'notes', HEAD],
+    ['the same uploads in another order', ['u2', 'u1'], 'notes', HEAD],
+  ])('is a new one, under a new key, for %s', (_what, uploadIds, destination, baseRevision) => {
+    const next = importAttempt(last, uploadIds, destination, baseRevision);
+    expect(next.key).not.toBe(last.key);
+    expect(next.key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(next).toMatchObject({ uploadIds, destination, baseRevision });
+  });
+
+  it('is a new one when nothing was asked before', () => {
+    expect(importAttempt(null, ['u1'], '', HEAD).key).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
 
 describe('starting the import', () => {
   it('names the uploaded files, the folder as typed and the version shown, and shows the job at once', async () => {
@@ -333,6 +373,56 @@ describe('starting the import', () => {
     expect(sent).toHaveLength(4);
     expect(sent.at(3)?.destination).toBe('elsewhere');
     expect(sent.at(3)?.idempotency_key).not.toBe(sent.at(0)?.idempotency_key);
+  });
+
+  it('sends an import of other uploads as a new request, after one that failed', async () => {
+    let answers = 0;
+    const { api, service } = await uploadedFiles([fileOf('a.txt', 'abc')], {
+      [START]: () => {
+        answers += 1;
+        return answers === 1 ? fail(503, 'unavailable', 'busy') : accepted(jobOf('queued'));
+      },
+      [JOB]: () => ok(jobOf('queued')),
+    });
+    fireEvent.click(importButton());
+    await eventually(() =>
+      screen.getByText('Starting the import: The service is temporarily unavailable.'),
+    );
+    // One more file is uploaded before the next press: the request is no longer the same.
+    vi.useRealTimers();
+    choose([fileOf('b.txt', 'abcd')]);
+    fireEvent.click(screen.getByRole('button', { name: /^Upload \d+ files?$/ }));
+    await waitFor(() => expect(importButton().textContent).toBe('Import 2 uploaded files'));
+    fireEvent.click(importButton());
+    await waitFor(() => expect(api.callsTo(START)).toHaveLength(2));
+    const [first, second] = api.callsTo(START);
+    expect(second?.upload_ids).toEqual(service.slots.map((slot) => slot.id));
+    expect(second?.idempotency_key).not.toBe(first?.idempotency_key);
+  });
+
+  it('lists a job it started when the Jobs page is next shown, although that list was just read', async () => {
+    let started = false;
+    const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {
+      [START]: () => {
+        started = true;
+        return accepted(jobOf('queued'));
+      },
+      [JOB]: () => ok(jobOf('queued')),
+      [JOBS]: () => ok({ items: started ? [jobOf('queued')] : [], next_cursor: null }),
+    });
+    // The Jobs page is looked at first: its list is read, and holds nothing.
+    fireEvent.click(screen.getByRole('link', { name: 'Jobs' }));
+    await eventually(() => screen.getByText(/This workspace has no jobs yet\./));
+    fireEvent.click(screen.getByRole('link', { name: 'Import' }));
+    await eventually(() => screen.getByRole('heading', { name: 'Import files' }));
+    fireEvent.click(importButton());
+    await eventually(() => jobRow());
+    // Back on the Jobs page at once, well inside the time its list counts as fresh.
+    fireEvent.click(screen.getByRole('link', { name: 'All jobs of this workspace' }));
+    await eventually(() => screen.getByRole('heading', { name: 'Jobs' }));
+    await later(() => jobRow());
+    expect(screen.queryByText(/This workspace has no jobs yet\./)).toBeNull();
+    expect(api.callsTo(JOBS)).toHaveLength(2);
   });
 
   it('says to refresh when the version shown is not the one to import onto, with no retry of its own', async () => {

@@ -27,6 +27,7 @@ import {
   itemDocument,
   NOTE,
   noteSummary,
+  OLD,
   renderAt,
   SOURCE,
   sourceSummary,
@@ -214,6 +215,23 @@ describe('what a job’s row says', () => {
     // The link went with its page: focus is on the workspace's name, not on the page body.
     expect(document.activeElement).toBe(
       screen.getByRole('heading', { name: 'Workshop notes', level: 1 }),
+    );
+  });
+
+  it('leads back, by "Documents", to the item at the revision its pane cites', async () => {
+    mockApi(
+      explorerHandlers({
+        [OPEN]: () => ok(writableWorkspace),
+        [JOBS]: () => listOf([jobOf('succeeded')]),
+      }),
+    );
+    // An item opened at an older revision than the workspace shows.
+    renderAt(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+    await screen.findByRole('tab', { name: 'Meeting notes', selected: true });
+    fireEvent.click(screen.getByRole('link', { name: 'Jobs' }));
+    await screen.findByRole('heading', { name: 'Jobs' });
+    expect(screen.getByRole('link', { name: 'Documents' }).getAttribute('href')).toBe(
+      `/w/${WS}/i/${NOTE}?rev=${OLD}`,
     );
   });
 
@@ -587,6 +605,52 @@ describe('how the list stays current with the event stream', () => {
     await pass(RECONNECT_MS);
     await eventually(() => expect(events.streams).toHaveLength(1));
     expect(events.state.requests).toBe(2);
+  });
+
+  it('waits longer before each new try of the stream, up to a bound, and starts over after an event', async () => {
+    vi.useFakeTimers();
+    mockApi(
+      explorerHandlers({
+        [OPEN]: () => ok(writableWorkspace),
+        [JOBS]: () => listOf([jobOf('succeeded')]),
+      }),
+    );
+    const events = mockEvents(fail(503, 'unavailable', 'starting'));
+    await showJobs();
+    await listed();
+    await eventually(() => expect(events.state.requests).toBe(1));
+    // Each wait is twice the one before, and never more than the bound.
+    const waits = [
+      RECONNECT_MS,
+      2 * RECONNECT_MS,
+      4 * RECONNECT_MS,
+      8 * RECONNECT_MS,
+      MAX_RECONNECT_MS,
+      MAX_RECONNECT_MS,
+    ];
+    expect(8 * RECONNECT_MS).toBeLessThan(MAX_RECONNECT_MS);
+    expect(16 * RECONNECT_MS).toBeGreaterThan(MAX_RECONNECT_MS);
+    let requests = 1;
+    for (const wait of waits) {
+      await pass(wait - 250);
+      expect(events.state.requests).toBe(requests);
+      requests += 1;
+      await pass(250);
+      await later(() => expect(events.state.requests).toBe(requests));
+    }
+    // The stream opens at last, says something, and ends: the next try comes after the first
+    // wait again, not after the longest.
+    events.state.refusal = null;
+    await pass(MAX_RECONNECT_MS);
+    await later(() => expect(events.streams).toHaveLength(1));
+    act(() => events.streams.at(0)?.send('5', eventOf('reviewed', '5')));
+    await pass(0);
+    act(() => events.streams.at(0)?.end());
+    await pass(RECONNECT_MS - 250);
+    expect(events.streams).toHaveLength(1);
+    await pass(250);
+    await later(() => expect(events.streams).toHaveLength(2));
+    expect(events.streams.at(1)?.lastEventId).toBe('5');
   });
 
   it('holds no stream while the page is hidden, and opens it again when the page is shown', async () => {

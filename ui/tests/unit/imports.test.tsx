@@ -341,6 +341,39 @@ describe('choosing files', () => {
     expect(rows()).toHaveLength(4);
   });
 
+  it('lists a file again when it changed since it was listed, although its path and length are the same', async () => {
+    setup();
+    await openImport();
+    choose('Choose files…', [fileOf('a.txt', 'abc')]);
+    // Saved again since: the same name and length, a later modification time.
+    choose('Choose files…', [fileOf('a.txt', 'xyz', '', 1_700_000_060_000)]);
+    expect(screen.getByText('1 file added.')).toBeDefined();
+    expect(screen.queryByText(/already in the list/)).toBeNull();
+    expect(rows()).toHaveLength(2);
+  });
+
+  it('lists a file for another workspace although this one lists it', async () => {
+    const elsewhere = '12121212-1212-4212-8212-121212121212';
+    setup(uploadService(), {
+      [OPEN]: (body) => ok({ ...writableWorkspace, id: body.workspace_id }),
+    });
+    const { router } = await openImport();
+    const file = fileOf('a.txt', 'abc');
+    choose('Choose files…', [file]);
+    expect(rows()).toHaveLength(1);
+    await act(() =>
+      router.navigate({ to: '/w/$workspaceId/import', params: { workspaceId: elsewhere } }),
+    );
+    await screen.findByText('No files are listed yet.');
+    choose('Choose files…', [file]);
+    expect(screen.queryByText(/already in the list/)).toBeNull();
+    expect(rows()).toHaveLength(1);
+    expect(useUploads.getState().entries.map((entry) => entry.workspaceId)).toEqual([
+      WS,
+      elsewhere,
+    ]);
+  });
+
   it('removes an entry, and keeps keyboard focus in the list, then on "Choose files…"', async () => {
     const { api } = setup();
     await openImport();
@@ -512,6 +545,78 @@ describe('uploading', () => {
     expect(service.slots).toHaveLength(1);
     expect(await sent.transfers.at(1)?.bytes.text()).toBe('c');
     expect(await service.held(service.slots.at(0))).toBe('abc');
+  });
+
+  it('keeps the slot when the service cannot take the bytes now, and goes on with it on "Try again"', async () => {
+    const service = uploadService();
+    // What the real store answers while another transfer to the same slot is under way.
+    service.script.put.push(() =>
+      fail(409, 'conflict', 'another transfer to this upload is in progress'),
+    );
+    const { api } = setup(service);
+    await openImport();
+    choose('Choose files…', [fileOf('a.txt', 'abc')]);
+    upload();
+    await notUploaded('a.txt');
+    const row = rowOf('a.txt');
+    expect(row.textContent).toContain(
+      'Uploading a.txt: The service could not take this file’s bytes now.',
+    );
+    expect(row.textContent).toContain(
+      'Try again: the upload goes on from what the service already holds.',
+    );
+    // It is not worded as a file the service refused, and no new slot is offered.
+    expect(row.textContent).not.toContain('The service did not accept this file.');
+    expect(within(row).queryByRole('button', { name: 'Send it again' })).toBeNull();
+    fireEvent.click(within(row).getByRole('button', { name: 'Try again' }));
+    await uploaded('a.txt');
+    const creates = api.callsTo(CREATE);
+    expect(creates).toHaveLength(2);
+    expect(creates.at(1)).toEqual(creates.at(0));
+    expect(service.slots).toHaveLength(1);
+  });
+
+  it('opens a new slot when the service no longer holds the upload', async () => {
+    const service = uploadService();
+    service.script.put.push(() => fail(404, 'not_found', 'no such upload'));
+    const { api } = setup(service);
+    await openImport();
+    choose('Choose files…', [fileOf('a.txt', 'abc')]);
+    upload();
+    await notUploaded('a.txt');
+    const row = rowOf('a.txt');
+    expect(row.textContent).toContain('Uploading a.txt: The service no longer holds this upload.');
+    expect(row.textContent).toContain('Send the file again.');
+    // No way out to the workspace list is offered here: the file is still the person's to send.
+    expect(within(row).queryByRole('link')).toBeNull();
+    fireEvent.click(within(row).getByRole('button', { name: 'Send it again' }));
+    await uploaded('a.txt');
+    const creates = api.callsTo(CREATE);
+    expect(creates).toHaveLength(2);
+    expect(creates.at(1)?.idempotency_key).not.toBe(creates.at(0)?.idempotency_key);
+    expect(service.slots).toHaveLength(2);
+    expect(service.slots.map((slot) => slot.complete)).toEqual([false, true]);
+  });
+
+  it('says the page cannot check a file where the browser gives it no hash, and sends nothing', async () => {
+    const { api, sent } = setup();
+    await openImport();
+    choose('Choose files…', [fileOf('a.txt', 'abc')]);
+    // A page that is not secure: the browser gives it no `crypto.subtle`.
+    const real = globalThis.crypto;
+    vi.stubGlobal('crypto', { randomUUID: () => real.randomUUID() });
+    upload();
+    await notUploaded('a.txt');
+    const row = rowOf('a.txt');
+    expect(row.textContent).toContain(
+      'Uploading a.txt: This page cannot check a file before sending it.',
+    );
+    expect(row.textContent).toContain('only on a secure page');
+    expect(row.textContent).not.toContain('could not be reached');
+    // Trying the same page again cannot help: no retry is offered.
+    expect(within(row).queryByRole('button', { name: /again/i })).toBeNull();
+    expect(api.callsTo(CREATE)).toEqual([]);
+    expect(sent.transfers).toEqual([]);
   });
 
   it('keeps a failed file in its place with a retry, while the others go on', async () => {
