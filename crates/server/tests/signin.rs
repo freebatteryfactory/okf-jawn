@@ -34,6 +34,8 @@ use support::{HOST, LocalApp};
 struct Provider {
     exchanges: AtomicUsize,
     used: AtomicBool,
+    /// While set, every exchange fails as `Unavailable`: the provider is down.
+    down: AtomicBool,
 }
 
 /// A secret source with one fixed secret, so the test knows the session it opens.
@@ -66,6 +68,12 @@ impl HostedLogin for Provider {
     fn complete<'a>(&'a self, code: &'a str, verifier: &'a str) -> PortFuture<'a, HostedUser> {
         Box::pin(async move {
             self.exchanges.fetch_add(1, Ordering::SeqCst);
+            if self.down.load(Ordering::SeqCst) {
+                return Err(ApiError::new(
+                    ErrorCode::Unavailable,
+                    "the provider is down",
+                ));
+            }
             // The code is bound to the challenge of one verifier, and is single use.
             if code == CODE && verifier == VERIFIER && !self.used.swap(true, Ordering::SeqCst) {
                 Ok(HostedUser {
@@ -472,6 +480,31 @@ async fn a_sign_in_begun_in_a_second_tab_still_completes_after_the_first_tabs_ca
     assert_login_cookie_cleared(&second)?;
     assert!(hosted.signed_in().await?);
     assert_eq!(hosted.exchanges(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_matching_callback_clears_the_cookie_when_the_provider_or_the_store_faults() -> TestResult
+{
+    let cookie = pending(STATE, VERIFIER);
+    // The provider is down: a fault, not a refusal.
+    let hosted = Hosted::new()?;
+    hosted.provider.down.store(true, Ordering::SeqCst);
+    let response = hosted.callback(STATE, CODE, Some(&cookie)).await?;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_login_cookie_cleared(&response)?;
+    assert_eq!(set_cookies(&response, "okf-session"), Vec::<String>::new());
+    assert_eq!(hosted.exchanges(), 1);
+    // The provider answers, and the store cannot take the session.
+    let hosted = Hosted::new()?;
+    hosted.base.credentials.set_down(true);
+    let response = hosted.callback(STATE, CODE, Some(&cookie)).await?;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_login_cookie_cleared(&response)?;
+    assert_eq!(set_cookies(&response, "okf-session"), Vec::<String>::new());
+    assert_eq!(hosted.exchanges(), 1);
+    hosted.base.credentials.set_down(false);
+    assert!(!hosted.signed_in().await?);
     Ok(())
 }
 

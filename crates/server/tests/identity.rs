@@ -679,9 +679,9 @@ async fn a_credential_the_store_cannot_confirm_does_not_authenticate() -> TestRe
     for credential in [&session, &connector] {
         assert!(identity.still_authenticates(credential).await);
         // The store is down: the credential cannot be confirmed, so the answer is no.
-        harness.credentials.fail_lookups(true);
+        harness.credentials.set_down(true);
         assert!(!identity.still_authenticates(credential).await);
-        harness.credentials.fail_lookups(false);
+        harness.credentials.set_down(false);
         assert!(identity.still_authenticates(credential).await);
     }
     Ok(())
