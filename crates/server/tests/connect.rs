@@ -714,5 +714,50 @@ async fn an_older_fetch_that_answers_last_never_replaces_a_newer_set() -> TestRe
     Ok(())
 }
 
+#[tokio::test]
+async fn a_set_is_as_old_as_the_instant_its_fetch_began() -> TestResult {
+    let setup = Setup::new(Some(KEY_SET))?;
+    let token = sign(&with("exp", json!(now()?.saturating_add(7200)))?, Some(KID))?;
+    setup.verifier.verify(&token).await?;
+    // Ten minutes on a fetch begins, and takes five seconds to answer.
+    setup.clock.advance(Duration::from_secs(600))?;
+    let gate = setup.issuer.hold_next()?;
+    let waiting = setup.verifying(token.clone());
+    setup.issuer.held().await?;
+    setup.clock.advance(Duration::from_secs(5))?;
+    gate.notify_one();
+    assert_eq!(waiting.await?, None);
+    assert_eq!(setup.issuer.fetches(), 2);
+    // The set is ten minutes old ten minutes after its fetch began (at 1,200 s), not ten
+    // minutes after it ended (1,205 s): one millisecond short it answers, then it is fetched.
+    setup.clock.advance(Duration::from_millis(594_999))?;
+    setup.verifier.verify(&token).await?;
+    assert_eq!(setup.issuer.fetches(), 2);
+    setup.clock.advance(Duration::from_millis(1))?;
+    setup.verifier.verify(&token).await?;
+    assert_eq!(setup.issuer.fetches(), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_request_that_fetched_is_judged_at_the_instant_after_its_fetch() -> TestResult {
+    let setup = Setup::new(Some(KEY_SET))?;
+    let token = sign(&with("exp", json!(now()?.saturating_add(7200)))?, Some(KID))?;
+    setup.verifier.verify(&token).await?;
+    // The issuer goes down. One second short of the hour a request takes the attempt; its
+    // fetch fails two seconds later, one second past the hour.
+    setup.issuer.publish(None)?;
+    setup.clock.advance(Duration::from_secs(3599))?;
+    let gate = setup.issuer.hold_next()?;
+    let waiting = setup.verifying(token.clone());
+    setup.issuer.held().await?;
+    setup.clock.advance(Duration::from_secs(2))?;
+    gate.notify_one();
+    // The set is older than the hour when the request is answered: it is not accepted from it.
+    assert_eq!(waiting.await?, Some(ErrorCode::Unavailable));
+    assert_eq!(setup.issuer.fetches(), 2);
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
