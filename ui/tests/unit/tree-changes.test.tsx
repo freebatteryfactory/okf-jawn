@@ -277,7 +277,7 @@ describe('the rules of a name', () => {
       expect(segmentProblem(device), device).toMatch(/Windows keeps for a device/);
     }
     // Only the letters a to z are folded, as the service folds them.
-    expect(segmentProblem('ｃｏｎ')).toBeNull();
+    expect(segmentProblem('con\u0131n$')).toBeNull();
   });
 
   it('checks every segment of a folder, joins in NFC, and bounds the whole path', () => {
