@@ -1,10 +1,16 @@
-//! Archives written by an earlier build, kept as fixtures, and the writer that makes them
-//! (SPEC section 12: a backup is independently recoverable).
+//! Archives written by an earlier build, kept as fixtures: the restore of them on this build,
+//! and the writer that makes them (SPEC section 12: a backup is independently recoverable).
 //!
 //! `tests/fixtures/archives/records-schema-<n>/` holds one workspace archive and one
 //! installation archive that the build at records schema `n` wrote; its `README.md` says which
 //! commit wrote them and what they hold. They are never written again: a later build has to
 //! restore the bytes an earlier build wrote.
+//!
+//! The tests here restore them on this build, by replacement into an empty data directory and
+//! by import into a blank workspace, and read back what the README says they hold. Every later
+//! change to the records schema, or to anything else an archive stores, has to keep them green.
+//! What the content is, is in this file's constants: the writer stores them and the tests
+//! expect them, so a later schema's fixtures are checked by the same assertions.
 //!
 //! # Writing the fixtures of a schema
 //!
@@ -36,26 +42,31 @@ use okf_jawn_contract::access::{AccessRoute, Principal};
 use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::events::EventKind;
-use okf_jawn_contract::identity::{Digest, Revision, TenantId, WorkspacePath};
+use okf_jawn_contract::identity::{Digest, ItemId, Revision, TenantId, WorkspacePath};
+use okf_jawn_contract::import::{JobKind, JobState};
 use okf_jawn_contract::item::ItemKind;
+use okf_jawn_contract::proposal::ProposalStatus;
+use okf_jawn_contract::search::LinkDirection;
 use okf_jawn_contract::workspace::ArtifactKind;
 use okf_jawn_core::access::AccessControl;
 use okf_jawn_core::credentials::{CredentialStore, NewConnector};
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
-use okf_jawn_core::events::{EventLog, EventScope, NewEvent};
+use okf_jawn_core::events::{EventLog, EventQuery, EventScope, NewEvent};
 use okf_jawn_core::jobs::{
     DerivedKind, DerivedObject, JobCompletion, JobScope, JobSpec, NewArtifact, NewJob, RecordStore,
 };
 use okf_jawn_core::proposals::ProposalStore;
+use okf_jawn_core::search::{LinkQuery, SearchIndex};
 use okf_jawn_core::storage::{
-    Backups, BlobStore, CandidateChanges, CandidateCheck, CommitChanges, NewWorkspace, Provenance,
-    SourceCard, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
+    Backups, BlobStore, CandidateChanges, CandidateCheck, CommitChanges, NewWorkspace, Page,
+    Provenance, REPLAY_WARNINGS_UNAVAILABLE, SourceCard, StorageScope, TreeEdit, VersionStore,
+    WorkspaceCatalog,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadStore};
 use okf_jawn_storage::Storage;
 use serde_json::json;
 
-use check::{TestResult, some};
+use check::{TestResult, err_of, some};
 
 /// The identity numbered `n`, of the type the context names.
 macro_rules! uuid {
@@ -82,8 +93,26 @@ struct Seeded {
     candidate: Revision,
 }
 
+/// The fixture archives of one schema and what they say about themselves.
+struct Archived {
+    /// The workspace archive's file.
+    workspace: PathBuf,
+    /// The installation archive's file.
+    installation: PathBuf,
+    /// The tenant and workspace the workspace archive's manifest names.
+    scope: StorageScope,
+    /// The commit its manifest gives for the accepted line.
+    head: Revision,
+    /// The installation identity the installation archive holds.
+    identity: String,
+}
+
 /// The environment variable naming the directory the writer writes under.
 const OUT: &str = "OKF_JAWN_FIXTURE_OUT";
+/// The directory of the fixtures the last build at records schema 2 wrote.
+const SCHEMA_2: &str = "records-schema-2";
+/// The tenant whose blank workspace the import test fills.
+const IMPORT_TENANT: &str = "import-tenant";
 /// The tenant of everything in the fixtures.
 const TENANT: &str = "fixture-tenant";
 /// The subject that created, wrote and reviewed everything.
@@ -294,14 +323,16 @@ async fn put(storage: &Storage, scope: &StorageScope, bytes: &[u8]) -> Fallible<
 
 async fn create(
     storage: &Storage,
+    tenant: &str,
     mutation: u32,
     name: &str,
     description: &str,
 ) -> Fallible<(StorageScope, Revision)> {
+    let tenant = TenantId::try_from(tenant.to_owned())?;
     let created = storage
         .catalog()
         .create(
-            &tenant()?,
+            &tenant,
             uuid!(mutation)?,
             NewWorkspace {
                 name: name.to_owned(),
@@ -312,7 +343,7 @@ async fn create(
         .await?;
     Ok((
         StorageScope {
-            tenant_id: tenant()?,
+            tenant_id: tenant,
             workspace_id: created.id,
         },
         created.head,
@@ -362,8 +393,8 @@ fn entry(path: &Path, name: &str) -> Fallible<Vec<u8>> {
 /// candidate.
 async fn seed_history(directory: &Path) -> Fallible<Seeded> {
     let storage = Storage::open(directory)?;
-    let (workspace, created) = create(&storage, 1, WORKSPACE.0, WORKSPACE.1).await?;
-    let (second, second_head) = create(&storage, 2, SECOND, "").await?;
+    let (workspace, created) = create(&storage, TENANT, 1, WORKSPACE.0, WORKSPACE.1).await?;
+    let (second, second_head) = create(&storage, TENANT, 2, SECOND, "").await?;
     let original = put(&storage, &workspace, ORIGINAL).await?;
     let structured = put(&storage, &workspace, DERIVATIVES.0).await?;
     let asset = put(&storage, &workspace, DERIVATIVES.1).await?;
@@ -771,6 +802,497 @@ async fn write_archive_fixtures() -> TestResult {
         "the workspace archive holds nothing of the second workspace"
     );
     describe(directory.path(), schema, &paths)
+}
+
+/// The path of the fixture `name` in the fixture directory `schema`.
+///
+/// A fixture cannot be made again (the build that wrote it is gone from the tree), so a missing
+/// one is reported by name, with what to do about it.
+fn fixture(schema: &str, name: &str) -> Fallible<PathBuf> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/archives")
+        .join(schema)
+        .join(name);
+    if path.is_file() {
+        return Ok(path);
+    }
+    Err(format!(
+        "the archive fixture {schema}/{name} is missing (looked for {}): an earlier build \
+         wrote it and it cannot be written again, so restore the file from Git",
+        path.display()
+    )
+    .into())
+}
+
+/// The two fixture archives of `schema` and what they say about themselves.
+fn archived(schema: &str) -> Fallible<Archived> {
+    let workspace = fixture(schema, "workspace.zip")?;
+    let installation = fixture(schema, "installation.zip")?;
+    let manifest: serde_json::Value = serde_json::from_slice(&entry(&workspace, "manifest.json")?)?;
+    let field = |name: &str| some(manifest.get(name), name).cloned();
+    let references: Vec<(String, String)> = serde_json::from_value(field("references")?)?;
+    let head = some(
+        references
+            .iter()
+            .find(|(name, _)| name == "refs/heads/main"),
+        "the archive's head",
+    )?;
+    let level: serde_json::Value =
+        serde_json::from_slice(&entry(&installation, "installation.json")?)?;
+    let identity = some(
+        level
+            .pointer("/identity/0")
+            .and_then(serde_json::Value::as_str),
+        "the installation identity",
+    )?;
+    Ok(Archived {
+        scope: StorageScope {
+            tenant_id: serde_json::from_value(field("tenant_id")?)?,
+            workspace_id: serde_json::from_value(field("workspace_id")?)?,
+        },
+        head: serde_json::from_value(json!(head.1))?,
+        identity: identity.to_owned(),
+        workspace,
+        installation,
+    })
+}
+
+/// The records `user_version` of the workspace archive at `path`, and how many tables named
+/// `commit_warnings` its records hold.
+fn archived_schema(path: &Path) -> Fallible<(i64, i64)> {
+    let scratch = tempfile::tempdir()?;
+    let records = scratch.path().join("records.sqlite");
+    std::fs::write(&records, entry(path, "records.sqlite")?)?;
+    Ok((
+        count(&records, "PRAGMA user_version")?,
+        count(
+            &records,
+            "SELECT count(*) FROM sqlite_schema WHERE name = 'commit_warnings'",
+        )?,
+    ))
+}
+
+/// The lower-case hexadecimal SHA-256 of `bytes`.
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    use std::fmt::Write as _;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .fold(String::new(), |mut text, byte| {
+            let _ = write!(text, "{byte:02x}");
+            text
+        })
+}
+
+/// The digest at the JSON Pointer `pointer` of `value`.
+fn digest_at(value: &serde_json::Value, pointer: &str) -> Fallible<Digest> {
+    let text = some(
+        value.pointer(pointer).and_then(serde_json::Value::as_str),
+        pointer,
+    )?;
+    Ok(Digest::try_from(text.to_owned())?)
+}
+
+/// The codes of `warnings`, in order.
+fn codes(warnings: &[Warning]) -> Vec<&str> {
+    warnings
+        .iter()
+        .map(|warning| warning.code.as_str())
+        .collect()
+}
+
+/// A page of up to twenty, from the start.
+const fn page() -> Page {
+    Page {
+        cursor: None,
+        limit: 20,
+    }
+}
+
+/// Every byte of the object `digest` of `scope`.
+async fn read(storage: &Storage, scope: &StorageScope, digest: &Digest) -> Fallible<Vec<u8>> {
+    let mut opened = storage.blobs().open(scope, digest, 0, u64::MAX).await?;
+    let mut bytes = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut opened.body, &mut bytes).await?;
+    Ok(bytes)
+}
+
+/// The notes as the archive's head holds them, the harbor note's two links, and the naming
+/// rules.
+async fn assert_notes(storage: &Storage, scope: &StorageScope, head: &Revision) -> TestResult {
+    let versions = storage.versions();
+    for (item, path, body) in NOTES {
+        let shown = versions.show(scope, head, uuid!(item)?).await?;
+        assert_eq!(shown.body, body, "the body of {path} at the head");
+        assert_eq!(
+            shown.summary.path,
+            WorkspacePath::try_from(path.to_owned())?
+        );
+    }
+    let search = storage.search();
+    search.index_revision(scope, head.clone()).await?;
+    let outgoing = search
+        .links(
+            scope,
+            LinkQuery {
+                revision: head.clone(),
+                item_id: uuid!(10)?,
+                direction: LinkDirection::Outgoing,
+                page: page(),
+            },
+        )
+        .await?;
+    let targets: Vec<Option<ItemId>> = outgoing.links.iter().map(|link| link.to).collect();
+    let (budget, schedule): (ItemId, ItemId) = (uuid!(11)?, uuid!(12)?);
+    assert_eq!(targets.len(), 2, "the harbor note's two links: {targets:?}");
+    assert!(
+        targets.contains(&Some(budget)),
+        "the link to the budget note in its own folder"
+    );
+    assert!(
+        targets.contains(&Some(schedule)),
+        "the link to the schedule in the other folder"
+    );
+    let rules = some(versions.rules(scope, head).await?, "the naming rules")?;
+    assert_eq!(serde_json::to_value(rules)?, naming_rules());
+    Ok(())
+}
+
+/// The source card, its original's bytes, what its conversion record names, and the dataset
+/// derived from it.
+async fn assert_card(storage: &Storage, scope: &StorageScope, head: &Revision) -> TestResult {
+    let (item, _, title, body) = CARD;
+    let shown = storage.versions().show(scope, head, uuid!(item)?).await?;
+    assert_eq!(
+        (shown.summary.title.as_str(), shown.body.as_str()),
+        (title, body)
+    );
+    let appearance = serde_json::to_value(some(shown.source, "the card's appearance")?)?;
+    let original = digest_at(&appearance, "/object")?;
+    assert_eq!(original.as_str(), sha256(ORIGINAL));
+    assert_eq!(
+        read(storage, scope, &original).await?,
+        ORIGINAL,
+        "the original object reads with its bytes"
+    );
+    let record = digest_at(&appearance, "/extraction/digest")?;
+    let record: serde_json::Value = serde_json::from_slice(&read(storage, scope, &record).await?)?;
+    let structured = digest_at(&record, "/structured/0/digest")?;
+    assert_eq!(read(storage, scope, &structured).await?, DERIVATIVES.0);
+    let asset = digest_at(&record, "/assets/0/digest")?;
+    assert_eq!(read(storage, scope, &asset).await?, DERIVATIVES.1);
+    let dataset = Digest::try_from(sha256(DATASET))?;
+    let derived = storage
+        .records()
+        .derived_object(scope, uuid!(item)?, head, &dataset)
+        .await?;
+    assert_eq!(
+        some(derived, "the derived dataset's record")?.media_type,
+        "text/csv"
+    );
+    assert_eq!(read(storage, scope, &dataset).await?, DATASET);
+    Ok(())
+}
+
+/// The owner's draft, the review, the receipt, and the proposal with its candidate and its
+/// comment, each naming the workspace it is now in.
+async fn assert_discussion(storage: &Storage, scope: &StorageScope, head: &Revision) -> TestResult {
+    let draft = storage.drafts().get(scope, uuid!(10)?, OWNER).await?;
+    let draft = some(draft, "the owner's draft")?;
+    assert_eq!(draft.body, DRAFTS.0);
+    assert_eq!(&draft.draft.base_revision, head);
+    let records = storage.records();
+    let reviews = records.list_reviews(scope, uuid!(10)?).await?;
+    let review = some(reviews.first(), "the review")?;
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(
+        serde_json::to_value(review.id)?,
+        json!(uuid_text(REVIEW)),
+        "the review keeps its identity"
+    );
+    assert_eq!(review.reviewer_subject, OWNER);
+    assert_eq!(review.source.workspace_id, scope.workspace_id);
+    assert_eq!(&review.source.revision, head);
+    let receipt = records.get_receipt(scope, uuid!(RECEIPT)?).await?;
+    assert_eq!(receipt.principal_subject, OWNER);
+    assert_eq!(receipt.workspace_id, scope.workspace_id);
+    let (number, title, description) = PROPOSAL;
+    let proposals = storage.proposals();
+    let proposal = proposals.get(scope, uuid!(number)?).await?;
+    assert_eq!(
+        (proposal.title.as_str(), proposal.description.as_str()),
+        (title, description)
+    );
+    assert_eq!(proposal.status, ProposalStatus::Open);
+    assert_eq!(proposal.created_by, EDITOR);
+    assert_eq!(proposal.workspace_id, scope.workspace_id);
+    assert_eq!(&proposal.base_revision, head);
+    let (item, _, body) = PROPOSED;
+    let proposed = storage
+        .versions()
+        .show(scope, &proposal.proposal_revision, uuid!(item)?)
+        .await?;
+    assert_eq!(proposed.body, body, "the proposal's candidate is kept");
+    let comments = proposals.list_comments(scope, proposal.id, page()).await?;
+    let comment = some(comments.items.first(), "the proposal's comment")?;
+    assert_eq!(comments.items.len(), 1);
+    assert_eq!(
+        (
+            comment.id.as_str(),
+            comment.author.as_str(),
+            comment.text.as_str()
+        ),
+        (COMMENT.0, OWNER, COMMENT.1)
+    );
+    Ok(())
+}
+
+/// A commit the archive brought replays with the one warning that says its check's warnings are
+/// not available: no archive carries the kept warnings (and this one was written before the
+/// store kept any). The earlier revision still reads as it was.
+async fn assert_history(storage: &Storage, scope: &StorageScope) -> TestResult {
+    let [seed, _, _] = COMMITS;
+    let versions = storage.versions();
+    let found = versions.find_commit(scope, uuid!(seed)?, None).await?;
+    let found = some(found, "the archive's first content commit")?;
+    assert!(found.replayed);
+    assert_eq!(codes(&found.warnings), [REPLAY_WARNINGS_UNAVAILABLE]);
+    let before = versions.show(scope, &found.revision, uuid!(11)?).await?;
+    assert_eq!(before.body, BUDGET_FIRST, "the budget note before its edit");
+    Ok(())
+}
+
+/// What both restores bring back, read at the archive's head, which each of them keeps.
+async fn assert_content(storage: &Storage, scope: &StorageScope, head: &Revision) -> TestResult {
+    assert_notes(storage, scope, head).await?;
+    assert_card(storage, scope, head).await?;
+    assert_discussion(storage, scope, head).await?;
+    assert_history(storage, scope).await
+}
+
+/// What only a replacement restore brings back: the finished job with its retained export, the
+/// completed upload, the second editor's draft and grant, and the workspace's event.
+async fn assert_replaced_records(storage: &Storage, scope: &StorageScope) -> TestResult {
+    let jobs = storage
+        .records()
+        .list_jobs(&JobScope::Workspace(scope.clone()), page())
+        .await?;
+    let job = some(jobs.items.first(), "the job")?;
+    assert_eq!(jobs.items.len(), 1);
+    assert_eq!(
+        (job.kind, &job.state),
+        (JobKind::ExportWorkspace, &JobState::Succeeded)
+    );
+    let artifact = some(job.artifact.as_ref(), "the job's artifact")?;
+    assert_eq!(artifact.sha256.as_str(), sha256(EXPORT));
+    assert_eq!(read(storage, scope, &artifact.sha256).await?, EXPORT);
+    let (bytes, filename) = UPLOAD;
+    let uploaded = Digest::try_from(sha256(bytes))?;
+    assert_eq!(read(storage, scope, &uploaded).await?, bytes);
+    let live = storage.data().records_path();
+    assert_eq!(
+        count(
+            &live,
+            &format!(
+                "SELECT count(*) FROM uploads WHERE object_digest = '{}' \
+                 AND filename = '{filename}'",
+                uploaded.as_str()
+            )
+        )?,
+        1,
+        "the completed upload's slot"
+    );
+    let draft = storage.drafts().get(scope, uuid!(10)?, EDITOR).await?;
+    assert_eq!(some(draft, "the editor's draft")?.body, DRAFTS.1);
+    let editors = storage.access().editors(scope).await?;
+    assert!(
+        editors.iter().any(|subject| subject == EDITOR),
+        "the editor's grant: {editors:?}"
+    );
+    let harbor: ItemId = uuid!(10)?;
+    let events = storage
+        .events()
+        .list(
+            &EventScope::Workspace(scope.clone()),
+            EventQuery {
+                after: None,
+                page: page(),
+            },
+        )
+        .await?;
+    assert!(
+        events
+            .events
+            .iter()
+            .any(|event| event.kind == EventKind::Changed && event.item_id == Some(harbor)),
+        "the workspace's event"
+    );
+    Ok(())
+}
+
+/// What the installation archive brings back: the installation's identity, the connector
+/// (revoked, since no secret is kept) and the tenant's event.
+async fn assert_installation(storage: &Storage, archived: &Archived) -> TestResult {
+    let credentials = storage.credentials();
+    let identity = credentials.installation_identity().await?;
+    assert_eq!(identity.subject, archived.identity);
+    let connectors = credentials.list_connectors(true).await?;
+    let connector = some(connectors.first(), "the connector")?;
+    assert_eq!((connectors.len(), connector.label.as_str()), (1, CONNECTOR));
+    assert!(
+        connector
+            .workspace_ids
+            .contains(&archived.scope.workspace_id),
+        "the connector's metadata names the workspace"
+    );
+    assert!(
+        connector.revoked_at.is_some(),
+        "a connector comes back revoked"
+    );
+    assert!(credentials.list_connectors(false).await?.is_empty());
+    let events = storage
+        .events()
+        .list(
+            &EventScope::Tenant(archived.scope.tenant_id.clone()),
+            EventQuery {
+                after: None,
+                page: page(),
+            },
+        )
+        .await?;
+    assert!(
+        events
+            .events
+            .iter()
+            .any(|event| event.kind == EventKind::SignedIn),
+        "the tenant's event"
+    );
+    Ok(())
+}
+
+/// The fixture of the last build at records schema 2 is what its README says: records at
+/// `user_version` 2, with no table of kept warnings.
+#[test]
+fn the_schema_2_workspace_archive_holds_records_at_schema_2() -> TestResult {
+    let archived = archived(SCHEMA_2)?;
+    assert_eq!(archived_schema(&archived.workspace)?, (2, 0));
+    Ok(())
+}
+
+/// A fixture that is not there is reported by name, with what to do.
+#[test]
+fn a_missing_archive_fixture_is_reported_by_name() -> TestResult {
+    let error = err_of(fixture(SCHEMA_2, "absent.zip"))?.to_string();
+    assert!(
+        error.starts_with("the archive fixture records-schema-2/absent.zip is missing"),
+        "{error}"
+    );
+    assert!(error.contains("restore the file from Git"), "{error}");
+    Ok(())
+}
+
+/// The archives the build at records schema 2 wrote restore by replacement into an empty data
+/// directory on this build: the installation archive, then the workspace archive of its
+/// tenant, with everything they hold.
+#[tokio::test]
+async fn the_schema_2_archives_restore_by_replacement_into_an_empty_directory() -> TestResult {
+    let archived = archived(SCHEMA_2)?;
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let reports = storage
+        .backups()
+        .restore_replacement(
+            &archived.installation,
+            std::slice::from_ref(&archived.workspace),
+        )
+        .await?;
+    let report = some(reports.first(), "the restore report")?;
+    assert_eq!(
+        (
+            report.items,
+            report.drafts_restored,
+            report.drafts_unassigned
+        ),
+        (4, 2, 0)
+    );
+    let scope = &archived.scope;
+    let listed = storage.catalog().list(&scope.tenant_id, true).await?;
+    let shown = some(listed.first(), "the restored workspace")?;
+    assert_eq!(listed.len(), 1, "the one workspace the archives hold");
+    assert_eq!(
+        (shown.id, shown.name.as_str(), shown.description.as_str()),
+        (scope.workspace_id, WORKSPACE.0, WORKSPACE.1)
+    );
+    assert_eq!(shown.head, archived.head, "the head is the archive's");
+    assert_content(&storage, scope, &archived.head).await?;
+    assert_replaced_records(&storage, scope).await?;
+    assert_installation(&storage, &archived).await?;
+    let live = storage.data().records_path();
+    assert!(
+        count(&live, "PRAGMA user_version")? >= 3,
+        "the restored records are at this build's schema, past the archive's 2"
+    );
+    assert_eq!(
+        count(&live, "SELECT count(*) FROM commit_warnings")?,
+        0,
+        "an archive brings no kept warnings"
+    );
+    Ok(())
+}
+
+/// The workspace archive the build at records schema 2 wrote restores by import into a blank
+/// workspace of another tenant, in another data directory, on this build. An import carries
+/// the content and the records about it; it gives a draft back only to an editor it is told
+/// of, and carries no job.
+#[tokio::test]
+async fn the_schema_2_workspace_archive_restores_by_import_into_a_blank_workspace() -> TestResult {
+    let archived = archived(SCHEMA_2)?;
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, IMPORT_TENANT, 80, "Imported", "").await?;
+    let uploaded = storage
+        .blobs()
+        .put(
+            &target,
+            Box::pin(std::io::Cursor::new(std::fs::read(&archived.workspace)?)),
+            1 << 30,
+            None,
+        )
+        .await?;
+    let report = storage
+        .backups()
+        .restore_import(&target, uploaded.digest, uuid!(84)?, vec![OWNER.to_owned()])
+        .await?;
+    assert_eq!(
+        (
+            report.items,
+            report.drafts_restored,
+            report.drafts_unassigned
+        ),
+        (4, 1, 1)
+    );
+    let versions = storage.versions();
+    let head = versions.head(&target).await?;
+    let written = versions.find_commit(&target, uuid!(84)?, None).await?;
+    assert_eq!(some(written, "the import's commit")?.revision, head);
+    assert_ne!(head, archived.head, "the import's commit is on top");
+    for (item, path, body) in NOTES {
+        let shown = versions.show(&target, &head, uuid!(item)?).await?;
+        assert_eq!(shown.body, body, "the body of {path} at the new head");
+    }
+    assert_content(&storage, &target, &archived.head).await?;
+    let unassigned = storage.drafts().get(&target, uuid!(10)?, EDITOR).await?;
+    assert!(
+        unassigned.is_none(),
+        "a draft of an editor the import was not told of stays in the archive"
+    );
+    let jobs = storage
+        .records()
+        .list_jobs(&JobScope::Workspace(target.clone()), page())
+        .await?;
+    assert!(jobs.items.is_empty(), "an import carries no job");
+    assert!(count(&storage.data().records_path(), "PRAGMA user_version")? >= 3);
+    Ok(())
 }
 
 #[path = "../../../tests/support/check.rs"]
