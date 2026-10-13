@@ -152,7 +152,7 @@ describe('a drag that carries no file', () => {
     expect(screen.queryByText(/added to the list|added\./)).toBeNull();
   });
 
-  it('while a drag of files over the box is cancelled by the box and marks it', async () => {
+  it('while a drag of files over the box is cancelled, marks the box and sets the pointer to copy', async () => {
     serve(EMPTY_TREE);
     renderAt(`/w/${WS}/import`);
     await screen.findByRole('heading', { name: 'Import files' });
