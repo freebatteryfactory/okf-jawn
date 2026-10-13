@@ -73,31 +73,75 @@ export function fileOfSize(name: string, size: number): File {
   return file;
 }
 
+/** One thing of a drop, as the browser's entry API names it. */
+export interface DroppedEntry {
+  isFile: boolean;
+  isDirectory: boolean;
+  name: string;
+  /**
+   * What the browser offers for the thing as a File (`DataTransferItem.getAsFile`) when it is
+   * dropped by itself: the file; for a folder, a File of the folder's name with nothing in it,
+   * which is what Chromium and Firefox answer; null for a thing it cannot offer at all.
+   */
+  offered: File | null;
+  file?: (found: (file: File) => void, failed: (error: Error) => void) => void;
+  createReader?: () => {
+    readEntries: (found: (entries: unknown[]) => void, failed: (error: Error) => void) => void;
+  };
+}
+
 /** A dropped file, as the browser's entry API names it. */
-export function droppedFile(file: File) {
+export function droppedFile(file: File): DroppedEntry {
   return {
     isFile: true,
     isDirectory: false,
     name: file.name,
-    file: (found: (file: File) => void) => found(file),
+    offered: file,
+    file: (found) => found(file),
   };
 }
 
 /**
- * A dropped folder. Its reader gives its entries in batches, as browsers do, and an empty batch at
- * the end; `unreadable` makes it fail instead.
+ * A file the browser names and cannot hand over through its entry: a link that leads nowhere, a
+ * file that is gone. `offered` is the File the browser offers for it all the same when it is
+ * dropped by itself (Chromium does for a link to a file); none by default.
  */
-export function droppedFolder(name: string, children: unknown[], unreadable = false) {
+export function unreadableFile(name: string, offered: File | null = null): DroppedEntry {
+  return {
+    isFile: true,
+    isDirectory: false,
+    name,
+    offered,
+    file: (_found, failed) => failed(new Error('A requested file or directory could not be found')),
+  };
+}
+
+/**
+ * A dropped folder. Its reader gives its entries in batches, as browsers do (here the first entry,
+ * then the rest), and an empty batch at the end. `unreadable` makes its listing fail: `true` at
+ * once, `'part-way'` after the first batch was given.
+ */
+export function droppedFolder(
+  name: string,
+  children: DroppedEntry[],
+  unreadable: boolean | 'part-way' = false,
+): DroppedEntry {
   return {
     isFile: false,
     isDirectory: true,
     name,
+    offered: new File([], name),
     createReader: () => {
       const batches = [children.slice(0, 1), children.slice(1)].filter((batch) => batch.length > 0);
+      let given = 0;
       return {
-        readEntries: (found: (entries: unknown[]) => void, failed: (error: Error) => void) => {
-          if (unreadable) failed(new Error('The folder could not be read'));
-          else found(batches.shift() ?? []);
+        readEntries: (found, failed) => {
+          if (unreadable === true || (unreadable === 'part-way' && given > 0)) {
+            failed(new Error('The folder could not be read'));
+            return;
+          }
+          given += 1;
+          found(batches.shift() ?? []);
         },
       };
     },
@@ -106,15 +150,16 @@ export function droppedFolder(name: string, children: unknown[], unreadable = fa
 
 /**
  * What a drag of files from the computer carries: one item for each thing dragged, and "Files"
- * among its types, which is how a page (and the tree's own drag-and-drop) knows it for one.
+ * among its types, which is how a page (and the tree's own drag-and-drop) knows it for one. Each
+ * item answers its entry, and also a File, as a browser's does for an item of kind "file".
  */
-export function dropOf(entries: unknown[]) {
+export function dropOf(entries: DroppedEntry[]) {
   return {
     types: ['Files'],
     items: entries.map((entry) => ({
       kind: 'file',
       webkitGetAsEntry: () => entry,
-      getAsFile: () => null,
+      getAsFile: () => entry.offered,
     })),
     files: [],
     dropEffect: 'none',

@@ -27,6 +27,7 @@ import {
   SHA_ABC,
   SHA_EMPTY,
   type UploadService,
+  unreadableFile,
   uploadService,
 } from './support/imports';
 import { mockTransfers } from './support/transfers';
@@ -191,16 +192,125 @@ describe('choosing files', () => {
     ]);
   });
 
-  it('says how many dropped entries could not be read, and lists the rest', async () => {
+  it('lists a file of a dropped folder that cannot be read as not readable, and every other file of the folder', async () => {
+    const { api } = setup();
+    await openImport();
+    await dropOn(
+      dropOf([
+        droppedFolder('docs', [
+          droppedFile(fileOf('a.txt', 'abc')),
+          unreadableFile('dangling-link'),
+          droppedFile(fileOf('c.txt', 'abc')),
+          droppedFolder('sub', [droppedFile(fileOf('d.txt', 'abc'))]),
+        ]),
+      ]),
+    );
+    await screen.findByText(
+      '3 files added. 1 file could not be read: it is listed as not readable and will not be sent.',
+    );
+    // The files after the one that could not be read are there, and the folder is not a file.
+    expect(rows().map((row) => row.textContent?.split(' ').at(0))).toEqual([
+      'docs/a.txt',
+      'docs/c.txt',
+      'docs/sub/d.txt',
+      'docs/dangling-link',
+    ]);
+    // No size is claimed for it: nothing of it was read.
+    expect(rowOf('docs/dangling-link').textContent?.replace(/\s+/g, ' ')).toBe(
+      'docs/dangling-link Not readable: the browser could not open this file. It will not be sent. Remove',
+    );
+    // It is not counted among the files to upload, and nothing is asked for it.
+    expect(screen.getByRole('button', { name: 'Upload 3 files' })).toBeDefined();
+    upload();
+    await uploaded('docs/sub/d.txt');
+    await screen.findByText('All 3 files are uploaded and checked.');
+    expect(api.callsTo(CREATE).map((body) => `${body.relative_path}/${body.filename}`)).toEqual([
+      'docs/a.txt',
+      'docs/c.txt',
+      'docs/sub/d.txt',
+    ]);
+    expect(rowOf('docs/dangling-link').textContent).toContain('Not readable');
+    // It is not listed twice when the folder is dropped again, and it can be taken off the list.
+    await dropOn(dropOf([droppedFolder('docs', [unreadableFile('dangling-link')])]));
+    await screen.findByText('No file was added to the list. 1 was already in the list.');
+    fireEvent.click(screen.getByRole('button', { name: 'Remove docs/dangling-link' }));
+    expect(rows()).toHaveLength(3);
+  });
+
+  it('lists a file dropped by itself that the browser offers although its entry cannot hand it over', async () => {
     setup();
     await openImport();
-    const drop = dropOf([
-      droppedFile(fileOf('x.txt', 'abc')),
-      droppedFolder('locked', [droppedFile(fileOf('a.txt', 'abc'))], true),
+    // Chromium, for a link to a file: the entry fails, the item still answers a File.
+    await dropOn(
+      dropOf([unreadableFile('link.txt', fileOf('link.txt', 'abc')), unreadableFile('gone.txt')]),
+    );
+    await screen.findByText(
+      '1 file added. 1 file could not be read: it is listed as not readable and will not be sent.',
+    );
+    expect(rows().map((row) => row.textContent?.split(' ').at(0))).toEqual([
+      'link.txt',
+      'gone.txt',
     ]);
-    await dropOn(drop);
-    await screen.findByText('1 file added. 1 dropped entry could not be read and is not listed.');
-    expect(rows()).toHaveLength(1);
+    upload();
+    await uploaded('link.txt');
+  });
+
+  it('never lists a folder as a file: not one it could not list, and not an empty one', async () => {
+    const { api } = setup();
+    await openImport();
+    // A browser offers each dropped folder as a File of its name too; that File is not a file.
+    await dropOn(
+      dropOf([
+        droppedFile(fileOf('x.txt', 'abc')),
+        droppedFolder('locked', [droppedFile(fileOf('a.txt', 'abc'))], true),
+        droppedFolder('empty', []),
+        droppedFolder('docs', [
+          droppedFile(fileOf('b.txt', 'abc')),
+          droppedFolder('old', []),
+          droppedFolder('older', []),
+        ]),
+      ]),
+    );
+    await screen.findByText(
+      '2 files added. The folders “empty”, “docs/old”, “docs/older” are empty: an empty folder is not kept. The folder “locked” could not be read in full: only what was read of it is listed.',
+    );
+    expect(rows().map((row) => row.textContent?.split(' ').at(0))).toEqual(['x.txt', 'docs/b.txt']);
+    upload();
+    await uploaded('docs/b.txt');
+    expect(api.callsTo(CREATE).map((body) => body.filename)).toEqual(['x.txt', 'b.txt']);
+  });
+
+  it('says that a dropped folder is empty and not kept, and lists nothing for it', async () => {
+    setup();
+    await openImport();
+    await dropOn(dropOf([droppedFolder('empty', [])]));
+    await screen.findByText(
+      'No file was added to the list. The folder “empty” is empty: an empty folder is not kept.',
+    );
+    expect(screen.getByText('No files are listed yet.')).toBeDefined();
+    // More than a few are counted, not all named.
+    await dropOn(dropOf(['a', 'b', 'c', 'd', 'e'].map((name) => droppedFolder(name, []))));
+    await screen.findByText(
+      'No file was added to the list. The folders “a”, “b”, “c” and 2 more are empty: an empty folder is not kept.',
+    );
+  });
+
+  it('keeps what was read of a folder whose listing fails part-way, and says so', async () => {
+    setup();
+    await openImport();
+    await dropOn(
+      dropOf([
+        droppedFolder(
+          'docs',
+          [droppedFile(fileOf('a.txt', 'abc')), droppedFile(fileOf('b.txt', 'abc'))],
+          'part-way',
+        ),
+      ]),
+    );
+    await screen.findByText(
+      '1 file added. The folder “docs” could not be read in full: only what was read of it is listed.',
+    );
+    expect(rows().map((row) => row.textContent?.split(' ').at(0))).toEqual(['docs/a.txt']);
   });
 
   it('does not list the same file twice, and says so', async () => {

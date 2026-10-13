@@ -121,6 +121,8 @@ async function run(id: string): Promise<void> {
     const entry = entryOf(id);
     if (entry === undefined) return;
     const { file, size, workspaceId } = entry;
+    // For the type: only an entry that is `chosen` or `failed` is given a turn, and each has a File.
+    if (file === null) return;
     uploads().change(id, { state: 'reading', sent: 0 });
     const sha256 = entry.sha256 ?? (await readInTurn(file, signal));
     // Removed while it was read: nothing is asked for it.

@@ -9,7 +9,10 @@
  * drop, and anywhere else it keeps the file from opening in place of the app. The buttons are the
  * keyboard's way; the drop is the pointer's. Each file is listed with the path it came in and its size before anything is sent,
  * and can be removed. A file larger than this page uploads is listed as too large and never sent.
- * A polite status says how many were listed.
+ * A file of a dropped folder that the browser could not hand over is listed by its path as not
+ * readable, and never sent; the other files of the folder are listed as usual. A polite status
+ * says how many were listed, and what of a drop was not: a file that could not be read, a folder
+ * that is empty (nothing is kept of it), a folder that could not be listed in full.
  *
  * Uploading starts when the person asks. Each file shows how it stands, in words: its own percent
  * while it is sent, and "uploaded" only once the service has verified its length and hash. A file
@@ -34,12 +37,14 @@ import {
   carriesFiles,
   chosenFromDrop,
   chosenFromPicker,
+  type Dropped,
   describeSize,
   pathOf,
 } from './files';
 import { ImportStart, StartedJobs } from './ImportStart';
 import {
   MAX_FILE_BYTES,
+  neverSent,
   type UploadEntry,
   underWay,
   useUploads,
@@ -58,8 +63,28 @@ export interface ImportPageProps {
 
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
-/** What choosing did, for the polite status. */
-function describeChoice(added: number, repeated: number, unreadable: number): string {
+/** Folders named in a status: the first few by name, the rest counted. */
+const NAMED_FOLDERS = 3;
+
+function folders(paths: readonly string[]): string {
+  const named = paths.slice(0, NAMED_FOLDERS).map((path) => `“${path}”`);
+  const rest = paths.length - named.length;
+  return rest > 0 ? `${named.join(', ')} and ${rest} more` : named.join(', ');
+}
+
+/** What of a drop is not a file to send. */
+type DropRemainder = Pick<Dropped, 'unreadable' | 'emptyFolders' | 'unlistedFolders'>;
+
+const NOTHING_LEFT: DropRemainder = { unreadable: [], emptyFolders: [], unlistedFolders: [] };
+
+/**
+ * What choosing did, for the polite status. `unreadable`: how many files that could not be read
+ * were newly listed as such.
+ */
+function describeChoice(
+  { added, repeated, unreadable }: { added: number; repeated: number; unreadable: number },
+  rest: Pick<Dropped, 'emptyFolders' | 'unlistedFolders'>,
+): string {
   const parts = [
     added === 0 ? 'No file was added to the list.' : `${count(added, 'file', 'files')} added.`,
   ];
@@ -67,8 +92,21 @@ function describeChoice(added: number, repeated: number, unreadable: number): st
     parts.push(`${count(repeated, 'was', 'were')} already in the list.`);
   }
   if (unreadable > 0) {
+    const n = unreadable;
     parts.push(
-      `${count(unreadable, 'dropped entry', 'dropped entries')} could not be read and ${unreadable === 1 ? 'is' : 'are'} not listed.`,
+      `${count(n, 'file', 'files')} could not be read: ${n === 1 ? 'it is' : 'they are'} listed as not readable and will not be sent.`,
+    );
+  }
+  if (rest.emptyFolders.length > 0) {
+    const n = rest.emptyFolders.length;
+    parts.push(
+      `The ${n === 1 ? 'folder' : 'folders'} ${folders(rest.emptyFolders)} ${n === 1 ? 'is' : 'are'} empty: an empty folder is not kept.`,
+    );
+  }
+  if (rest.unlistedFolders.length > 0) {
+    const n = rest.unlistedFolders.length;
+    parts.push(
+      `The ${n === 1 ? 'folder' : 'folders'} ${folders(rest.unlistedFolders)} could not be read in full: only what was read of ${n === 1 ? 'it' : 'them'} is listed.`,
     );
   }
   return parts.join(' ');
@@ -76,7 +114,7 @@ function describeChoice(added: number, repeated: number, unreadable: number): st
 
 /** How the whole upload stands, in words that change rarely. */
 export function describeUploads(entries: readonly UploadEntry[]): string {
-  const asked = entries.filter((entry) => entry.state !== 'chosen' && entry.state !== 'too-large');
+  const asked = entries.filter((entry) => entry.state !== 'chosen' && !neverSent(entry));
   if (asked.length === 0) return '';
   const done = asked.filter((entry) => entry.state === 'uploaded').length;
   const failed = asked.filter((entry) => entry.state === 'failed').length;
@@ -109,9 +147,8 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
   const chooseRef = useRef<HTMLButtonElement | null>(null);
   const listRef = useRef<HTMLUListElement | null>(null);
 
-  const list = (chosen: readonly ChosenFile[], unreadable = 0) => {
-    const { added, repeated } = add(workspaceId, chosen);
-    setChoiceNote(describeChoice(added, repeated, unreadable));
+  const list = (chosen: readonly ChosenFile[], rest: DropRemainder = NOTHING_LEFT) => {
+    setChoiceNote(describeChoice(add(workspaceId, chosen, rest.unreadable), rest));
   };
   const picked = (input: HTMLInputElement) => {
     list(chosenFromPicker(input.files ?? []));
@@ -123,9 +160,7 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
     // The application's root cancels the drop itself (`drop-guard.ts`); this box reads it.
     if (!carriesFiles(event.dataTransfer)) return;
     setOver(false);
-    void chosenFromDrop(event.dataTransfer).then(({ files, unreadable }) =>
-      list(files, unreadable),
-    );
+    void chosenFromDrop(event.dataTransfer).then((found) => list(found.files, found));
   };
 
   // A row that left with keyboard focus in it: focus goes to the row now in its place.
@@ -274,6 +309,8 @@ function Standing({ entry }: { entry: UploadEntry }) {
           sent.
         </>
       );
+    case 'unreadable':
+      return <>Not readable: the browser could not open this file. It will not be sent.</>;
   }
 }
 
@@ -299,9 +336,14 @@ function UploadRow({
   return (
     <li ref={rowRef} className="upload-row">
       <span className="upload-path">{path}</span>{' '}
-      <span className="meta" title={`${entry.size} bytes`}>
-        {describeSize(entry.size)}
-      </span>{' '}
+      {/* A file that could not be read has no known size. */}
+      {entry.file !== null && (
+        <>
+          <span className="meta" title={`${entry.size} bytes`}>
+            {describeSize(entry.size)}
+          </span>{' '}
+        </>
+      )}
       <span className="upload-state">
         <Standing entry={entry} />
       </span>{' '}
