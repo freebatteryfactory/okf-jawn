@@ -2,7 +2,9 @@
  * Editing a document from the keyboard, in Chromium and WebKit: typing with autosave and
  * reopening the draft; a Snapshot that succeeds; a Snapshot that conflicts, resolved once each
  * way; a failed save retried; a property changed in its form; properties that do not fit a strict
- * type; one item in two panes. Every journey ends with keyboard focus on a sensible element and
+ * type, held back and still there after the editor was left; one item in two panes; a type that
+ * offers a choice; a draft of a Source in the Drafts panel. Every journey ends with keyboard focus
+ * on a sensible element and
  * zero axe violations, and saves a screenshot of its screen under `.artifacts/ui/` for the owner.
  *
  * The service is played by `page.route` (no server exists in this lane): it remembers the drafts
@@ -25,6 +27,8 @@ import {
   PLAN,
   plan,
   type Reply,
+  SOURCE,
+  source,
   routeApi,
   shot,
   useExplorerServer,
@@ -91,10 +95,11 @@ interface Service {
 /**
  * A service that remembers. `drafts`: the items the person already has a draft of. `conflictOn`:
  * an item someone else changed, so a Snapshot of it conflicts until its draft is saved on their
- * revision. `strict`: the note's type allows no property it does not name.
+ * revision. `strict`: the note's type allows no property it does not name. `choice`: the
+ * note's type offers a choice between two alternatives, and the note fits the first.
  */
 function service(
-  options: { drafts?: string[]; conflictOn?: string; strict?: boolean } = {},
+  options: { drafts?: string[]; conflictOn?: string; strict?: boolean; choice?: boolean } = {},
 ): Service {
   const state = {
     head: HEAD,
@@ -106,6 +111,7 @@ function service(
     type: id === NOTE ? 'meeting-note' : 'plan',
     owner: 'Ada Lovelace',
     meeting_date: '2025-10-03',
+    ...(options.choice === true && id === NOTE ? { room: 'Blue' } : {}),
     'x-okf-review': { by: 'grace' },
     okf_jawn: { id },
   });
@@ -130,14 +136,33 @@ function service(
                   additionalProperties: false,
                 },
               }
-            : meetingNote,
+            : options.choice === true
+              ? {
+                  ...meetingNote,
+                  properties_schema: {
+                    ...meetingNote.properties_schema,
+                    oneOf: [
+                      {
+                        title: 'In a room',
+                        properties: { room: { type: 'string', title: 'Room' } },
+                        required: ['room'],
+                      },
+                      {
+                        title: 'Remote',
+                        properties: { link: { type: 'string', title: 'Link' } },
+                        required: ['link'],
+                      },
+                    ],
+                  },
+                }
+              : meetingNote,
         ],
       }),
     '/api/items/get-item': (body) => {
       const id = String(body.item_id);
       const held = state.drafts.get(id);
       return ok({
-        summary: id === NOTE ? note : plan,
+        summary: id === NOTE ? note : id === SOURCE ? source : plan,
         body: markdown,
         content_digest: 'c'.repeat(64),
         properties: properties(id),
@@ -517,6 +542,19 @@ test.describe('editing a document', () => {
     await expect(owner).toHaveValue('Grace Hopper');
     // Said once, above the form: not again under it in the validator's words.
     await expect(page.locator('.properties')).not.toContainText('must NOT have additional');
+    // What is held back is in no save: the item is unsaved, and says so.
+    await expect(page.getByRole('tab', { name: 'Meeting notes (unsaved)' })).toBeVisible();
+    await expect(saveState(page)).toHaveText(
+      'Not saved: what you changed in the properties is held back.',
+    );
+    // It is kept through leaving the editor: the committed text is read, and the input is back.
+    await press(page, 'Read the committed text');
+    await expect(page.getByText('Revenue grew by 12% in 2025.')).toBeVisible();
+    await press(page, 'Edit your draft');
+    await expect(page.getByLabel(/^Owner/)).toHaveValue('Grace Hopper');
+    await expect(above).toContainText('held back');
+    expect(played.sent.filter((request) => request.path === 'save_draft')).toHaveLength(0);
+    await page.getByLabel(/^Owner/).focus();
     expect(await focusSettled(page)).toMatch(/^input:/);
     await expectVisibleFocus(page);
     await expectNoAxeViolations(page, 'properties that do not fit their type');
@@ -551,5 +589,75 @@ test.describe('editing a document', () => {
     await expectVisibleFocus(page);
     await expectNoAxeViolations(page, 'after "Edit here"');
     expect(played.sent.filter((request) => request.path === 'save_draft')).toHaveLength(1);
+  });
+
+  test('a type that offers a choice: the choice has a name, and what it takes out is said', async ({
+    page,
+  }) => {
+    const played = service({ choice: true });
+    await routeApi(page, played.answers);
+    await page.goto(`${server.origin()}/w/${WS}/i/${NOTE}`);
+    await press(page, 'Edit');
+    const choice = page.getByRole('combobox', { name: 'Which of these applies' });
+    await expect(choice).toBeVisible();
+    await expect(page.getByLabel(/^Room/)).toHaveValue('Blue');
+    await expectNoAxeViolations(page, 'a type that offers a choice');
+    await choice.focus();
+    await choice.selectOption({ label: 'Remote' });
+    const above = page.locator('.form-said');
+    await expect(above).toContainText('What you chose takes “room” out of this item’s properties.');
+    await expect(above).toContainText('held back');
+    await expect(page.getByLabel(/^Room/)).toHaveCount(0);
+    await shot(page, '20-choice');
+    const link = page.getByLabel(/^Link/);
+    await link.focus();
+    await page.keyboard.type('https://meet.example/weekly');
+    await expect(saveState(page)).toContainText('Saved as a draft at');
+    expect(played.sent.at(-1)?.body.properties).toEqual({
+      type: 'meeting-note',
+      owner: 'Ada Lovelace',
+      meeting_date: '2025-10-03',
+      'x-okf-review': { by: 'grace' },
+      okf_jawn: { id: NOTE },
+      link: 'https://meet.example/weekly',
+    });
+    await expect(above).toContainText('What you chose takes “room” out of this item’s properties.');
+    expect(await focusSettled(page)).toMatch(/^input:/);
+    await expectVisibleFocus(page);
+    await expectNoAxeViolations(page, 'after another choice');
+  });
+
+  test('a draft of a Source: listed with its kind, not ticked, discarded from the panel', async ({
+    page,
+  }) => {
+    const played = service({ drafts: [NOTE, SOURCE] });
+    await routeApi(page, played.answers);
+    await page.goto(`${server.origin()}/w/${WS}`);
+    await expect(drafts(page)).toHaveAccessibleName('Drafts (2)');
+    const row = drafts(page).getByRole('listitem').filter({ hasText: 'Annual report 2025' });
+    await expect(row).toContainText('Source · saved');
+    await expect(row).toContainText(
+      'A draft of a Source cannot be snapshotted: only a Note is edited as a draft.',
+    );
+    const box = drafts(page).getByRole('checkbox', {
+      name: 'Include Annual report 2025 in the Snapshot',
+    });
+    await expect(box).not.toBeChecked();
+    await expect(box).toHaveAttribute('aria-disabled', 'true');
+    await expect(drafts(page).getByRole('button', { name: 'Snapshot 1 draft' })).toBeVisible();
+    await expectNoAxeViolations(page, 'a draft of a Source in the Drafts panel');
+    await shot(page, '21-source-draft');
+
+    await press(page, 'Discard draft of Annual report 2025');
+    expect(await focusSettled(page)).toBe('button:Keep the draft');
+    await expectNoAxeViolations(page, 'the question before a draft is discarded from the panel');
+    await press(page, 'Discard the draft');
+    await expect(drafts(page)).toHaveAccessibleName('Drafts (1)');
+    await expect(said(page)).toHaveText('Your draft of Annual report 2025 was discarded.');
+    // The row left with focus in it: focus is on the row that remains, not on the page.
+    expect(await focusSettled(page)).toBe('button:Meeting notes');
+    await expectVisibleFocus(page);
+    await expectNoAxeViolations(page, 'after the discard from the panel');
+    expect(played.sent.filter((request) => request.path === 'commit_items')).toHaveLength(0);
   });
 });
