@@ -281,6 +281,7 @@ describe('the list of rules in the form', () => {
       rules: [
         { ...rule, glob: 'first/*' },
         { ...rule, glob: 'second/*' },
+        { ...rule, glob: 'third/*' },
       ],
     });
     return (
@@ -304,9 +305,9 @@ describe('the list of rules in the form', () => {
 
   it('names each action in words, and keeps focus off the page body when a rule is removed', () => {
     render(<Held />);
-    expect(screen.getAllByRole('button', { name: 'Remove this rule' })).toHaveLength(2);
-    press('Remove this rule', 1);
-    expect(globs()).toEqual(['first/*']);
+    expect(screen.getAllByRole('button', { name: 'Remove this rule' })).toHaveLength(3);
+    press('Remove this rule', 2);
+    expect(globs()).toEqual(['first/*', 'second/*']);
     // The pressed button left with its rule: focus is on the button that is always there.
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Add a rule' }));
   });
@@ -314,7 +315,7 @@ describe('the list of rules in the form', () => {
   it('keeps focus on a rule’s button when the rule moves, and ignores one that is unavailable', () => {
     render(<Held />);
     const up = press('Move this rule up', 1);
-    expect(globs()).toEqual(['second/*', 'first/*']);
+    expect(globs()).toEqual(['second/*', 'first/*', 'third/*']);
     expect(document.activeElement).not.toBe(document.body);
     expect(document.activeElement?.textContent).toBe('Move this rule up');
     expect(up).toBeDefined();
@@ -323,7 +324,7 @@ describe('the list of rules in the form', () => {
     expect(first?.getAttribute('aria-disabled')).toBe('true');
     expect(first).toHaveProperty('disabled', false);
     press('Move this rule up', 0);
-    expect(globs()).toEqual(['second/*', 'first/*']);
+    expect(globs()).toEqual(['second/*', 'first/*', 'third/*']);
   });
 });
 
