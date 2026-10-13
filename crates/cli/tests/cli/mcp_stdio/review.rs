@@ -1,0 +1,354 @@
+//! The rules the independent review found without a test (its findings B1 and B3 to B7), each
+//! through the shipped entry point or the built executable where only that shows the rule.
+//!
+//! A remote address is never started; what a started server prints reaches no stream of the
+//! relay; one liveness check is bounded; the process ends when its output fails while its
+//! input stays open; an answer that was written and then cut off is not answered twice; and
+//! the bounds of the shipped relay and CLI are the stated ones, each from both sides.
+
+use std::io::{Read, Write};
+use std::net::{TcpListener, UdpSocket};
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use okf_jawn_cli::Credential;
+use okf_jawn_cli::relay::Limits;
+use okf_jawn_contract::transport::MAX_REQUEST_BODY_BYTES;
+use serde_json::json;
+
+use super::{request, response};
+use crate::check::{TestResult, some};
+use crate::support::doubles::{FakeTransport, Setup, broken, relay};
+use crate::support::http::{Answering, json as json_answer};
+use crate::support::{
+    EXECUTABLE, Outcome, STAND_IN_SAYS, StandIn, TOKEN, Untouched, cli, cli_reading, file,
+};
+
+/// How long a test waits for what a correct relay does within a few seconds.
+const PATIENCE: Duration = Duration::from_secs(30);
+
+/// A loopback port on which nothing listens: one that was free a moment ago.
+fn closed_port() -> Outcome<u16> {
+    Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
+}
+
+/// An address of this machine that is not loopback: the one it would send from. No packet is
+/// sent to find it, and a connection to a closed port there is refused by this machine.
+fn own_address() -> Outcome<std::net::IpAddr> {
+    let socket = UdpSocket::bind("0.0.0.0:0")?;
+    socket.connect("192.0.2.1:9")?;
+    Ok(socket.local_addr()?.ip())
+}
+
+/// Start the built relay as a process of its own, its three standard streams piped.
+fn relay_process(server: &str, server_bin: Option<&Path>) -> Outcome<Child> {
+    let mut command = Command::new(EXECUTABLE);
+    command.args(["mcp", "--stdio", "--server", server]);
+    if let Some(program) = server_bin {
+        command.arg("--server-bin").arg(program);
+    }
+    Ok(command
+        .env("OKF_JAWN_TOKEN", TOKEN)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?)
+}
+
+/// Stop a relay process this test started and collect what it wrote.
+fn stopped(mut child: Child) -> Outcome<(String, String)> {
+    // The process may have ended already; then there is nothing to stop.
+    let _ = child.kill();
+    child.wait()?;
+    let (mut out, mut err) = (String::new(), String::new());
+    some(child.stdout.take(), "stdout")?.read_to_string(&mut out)?;
+    some(child.stderr.take(), "stderr")?.read_to_string(&mut err)?;
+    Ok((out, err))
+}
+
+/// B1: the shipped entry point never starts a server for a remote address. The address is
+/// this machine's own, on a closed port, so the connection is refused without a network; the
+/// server executable named does not exist, so a start would be reported as such.
+#[tokio::test]
+async fn a_remote_address_is_never_started_by_the_shipped_entry_point() -> TestResult {
+    let address = own_address()?;
+    assert!(
+        !address.is_loopback() && !address.is_unspecified(),
+        "{address}"
+    );
+    let missing = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-such-okf-jawn-server");
+    let read = Arc::new(AtomicBool::new(false));
+    let ran = cli_reading(
+        &[
+            "mcp",
+            "--stdio",
+            "--server",
+            &format!("https://{address}:{}", closed_port()?),
+            "--server-bin",
+            &missing.display().to_string(),
+        ],
+        Some(TOKEN),
+        Untouched(read.clone()),
+    )
+    .await?;
+    assert_eq!((ran.code, ran.stdout.as_str()), (1, ""));
+    assert!(
+        ran.stderr.contains("never starts a remote service"),
+        "{}",
+        ran.stderr
+    );
+    assert!(!read.load(Ordering::SeqCst), "stdin was read");
+    Ok(())
+}
+
+/// B3: the server the relay starts has no stream of the relay's, so nothing it prints, its
+/// single-use launch URL included, reaches the MCP client. The stand-in prints on both its
+/// streams before it records that it ran.
+#[test]
+fn mcp_stdio_what_a_started_server_prints_reaches_no_stream_of_the_relay() -> TestResult {
+    let stand_in = StandIn::new()?;
+    let port = closed_port()?;
+    let child = relay_process(&format!("http://127.0.0.1:{port}"), Some(&stand_in.program))?;
+    let recorded = stand_in.recorded(PATIENCE);
+    stand_in.stop();
+    let (out, err) = stopped(child)?;
+    let recorded = recorded?;
+    // What the started process was given: where to listen, and not the relay's credential.
+    assert_eq!(
+        (
+            StandIn::value(&recorded, "bind"),
+            StandIn::value(&recorded, "token")
+        ),
+        (Some(format!("127.0.0.1:{port}")), Some(String::new())),
+        "{recorded}"
+    );
+    assert_eq!(out, "", "the relay's stdout");
+    assert!(!err.contains(STAND_IN_SAYS), "{err}");
+    assert!(
+        err.lines().all(|line| line.starts_with("okf-jawn mcp: ")),
+        "{err}"
+    );
+    Ok(())
+}
+
+/// B4: one liveness check is bounded. Something accepts the connection and never answers; the
+/// relay gives up on the check and says so, and starts nothing.
+#[tokio::test]
+async fn a_service_that_accepts_and_never_answers_ends_the_liveness_check() -> TestResult {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let origin = format!("http://{}", listener.local_addr()?);
+    let holding = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+    let started = Instant::now();
+    let ran = tokio::time::timeout(
+        PATIENCE,
+        cli(&["mcp", "--stdio", "--server", &origin], Some(TOKEN), b""),
+    )
+    .await;
+    holding.abort();
+    let ran = ran.map_err(|_| "the relay was still waiting for one liveness check")??;
+    assert_eq!((ran.code, ran.stdout.as_str()), (1, ""));
+    assert!(
+        ran.stderr
+            .contains("The liveness check of the server address failed"),
+        "{}",
+        ran.stderr
+    );
+    assert!(
+        started.elapsed() >= Duration::from_secs(4),
+        "it gave up early"
+    );
+    Ok(())
+}
+
+/// B5: the process ends when its output fails while its input stays open. Only the built
+/// executable shows it: a read of standard input that is still pending must not hold the
+/// process open after the run has ended.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_process_ends_when_stdout_fails_while_stdin_stays_open() -> TestResult {
+    let listener = Answering::routed(|heard| {
+        if heard.line().starts_with("GET ") {
+            json_answer("200 OK", "{}")
+        } else {
+            json_answer("200 OK", "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}")
+        }
+    })
+    .await?;
+    let origin = listener.origin();
+    let outcome = tokio::task::spawn_blocking(move || -> Result<Option<i32>, String> {
+        let mut child = relay_process(&origin, None).map_err(|error| error.to_string())?;
+        drop(child.stdout.take());
+        let mut stdin = child.stdin.take().ok_or("no stdin")?;
+        let written = stdin
+            .write_all(request(&json!(1), "ping", &json!({})).as_bytes())
+            .and_then(|()| stdin.flush());
+        let started = Instant::now();
+        let mut ended = None;
+        while ended.is_none() && started.elapsed() < PATIENCE {
+            ended = child.try_wait().map_err(|error| error.to_string())?;
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if ended.is_none() {
+            // The stand-in for a hung relay is stopped by the test that started it.
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        // Stdin stayed open until here.
+        drop(stdin);
+        written.map_err(|error| error.to_string())?;
+        Ok(ended.and_then(|status| status.code()))
+    })
+    .await??;
+    assert_eq!(outcome, Some(1), "None: the process never ended");
+    Ok(())
+}
+
+/// B6: an answer that was written and then cut off is not answered a second time. The failure
+/// after the answer goes to stderr.
+#[tokio::test]
+async fn a_failure_after_the_answer_writes_no_second_answer() -> TestResult {
+    let transport = FakeTransport::new(|_, events| {
+        Box::pin(async move {
+            let _ = events
+                .send(response(&json!(1), &json!({})).to_string())
+                .await;
+            broken("the stream was cut off").reply
+        })
+    });
+    let ran = relay(
+        Setup::new(&transport),
+        request(&json!(1), "tools/call", &json!({})).as_bytes(),
+    )
+    .await?;
+    assert_eq!(ran.lines()?, [response(&json!(1), &json!({}))]);
+    assert!(
+        ran.stderr.contains("after a request was answered")
+            && ran.stderr.contains("the stream was cut off"),
+        "{}",
+        ran.stderr
+    );
+    Ok(())
+}
+
+/// B7: the bounds the shipped relay runs with are the stated ones, no larger and no smaller.
+/// What each bound does at its edge is tested where the bound is applied: the line and the
+/// answer in `framing` and `wire`, the messages in flight in `forwarding`.
+#[test]
+fn mcp_stdio_default_bounds_are_the_stated_ones() {
+    let limits = Limits::default();
+    assert_eq!(limits.line_bytes, 16_777_216);
+    assert_eq!(limits.line_bytes, MAX_REQUEST_BODY_BYTES);
+    assert_eq!(limits.answer_bytes, 67_108_864);
+    assert_eq!(limits.in_flight, 16);
+}
+
+/// B7: the token file is read up to its bound and no further. A first line of exactly the
+/// bound is the credential; whatever its length, no more than the bound is ever taken from a
+/// file, so a file without a line feed costs a few kilobytes, not its size.
+#[test]
+fn mcp_stdio_token_file_is_read_within_its_bound() -> TestResult {
+    const BOUND: usize = 8192;
+    let bearer = |content: &[u8]| -> Outcome<Result<usize, String>> {
+        let path = file("bounded-token", content)?;
+        let read = Credential::from_file(&path);
+        std::fs::remove_file(path)?;
+        Ok(match read {
+            Ok(credential) => Ok(credential.bearer()?.len()),
+            Err(error) => Err(error.message),
+        })
+    };
+    let mut exact = vec![b'b'; BOUND];
+    exact.push(b'\n');
+    assert_eq!(bearer(&exact)?, Ok("Bearer ".len().saturating_add(BOUND)));
+    let mut with_return = vec![b'c'; BOUND.saturating_sub(1)];
+    with_return.extend_from_slice(b"\r\nsecond line\n");
+    assert_eq!(
+        bearer(&with_return)?,
+        Ok("Bearer ".len().saturating_add(BOUND).saturating_sub(1))
+    );
+    for length in [BOUND.saturating_add(1), 10_000, 1_000_000] {
+        if let Ok(taken) = bearer(&vec![b'a'; length])? {
+            assert!(
+                taken <= "Bearer ".len().saturating_add(BOUND),
+                "{taken} bytes of a {length}-byte line were taken"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// B7: a refusal's body is read up to the request-body limit and explained; one byte more and
+/// it is not held: the refusal is then reported by its status alone.
+#[tokio::test]
+async fn a_refusal_body_is_read_up_to_the_request_body_limit_and_no_further() -> TestResult {
+    let refusal = |length: usize| {
+        let empty =
+            json!({"code": "conflict", "message": "the item moved", "request_id": ""}).to_string();
+        let pad = "x".repeat(length.saturating_sub(empty.len()));
+        json!({"code": "conflict", "message": "the item moved", "request_id": pad}).to_string()
+    };
+    let at_limit = refusal(MAX_REQUEST_BODY_BYTES);
+    let over = refusal(MAX_REQUEST_BODY_BYTES.saturating_add(1));
+    assert_eq!(
+        (at_limit.len(), over.len()),
+        (
+            MAX_REQUEST_BODY_BYTES,
+            MAX_REQUEST_BODY_BYTES.saturating_add(1)
+        )
+    );
+    let listener = Answering::with(vec![
+        json_answer("409 Conflict", &at_limit),
+        json_answer("409 Conflict", &over),
+    ])
+    .await?;
+    let explained = cli(&["get_health", "--server", &listener.origin()], None, b"").await?;
+    assert_eq!(explained.code, 1);
+    assert!(
+        explained
+            .stderr
+            .starts_with("okf-jawn: conflict: the item moved\n  request: xxx"),
+        "{}",
+        explained.stderr.chars().take(200).collect::<String>()
+    );
+    let unexplained = cli(&["get_health", "--server", &listener.origin()], None, b"").await?;
+    assert_eq!(
+        (unexplained.code, unexplained.stderr.as_str()),
+        (
+            1,
+            "okf-jawn: conflict: The service answered HTTP 409 without an error it could explain\n"
+        )
+    );
+    Ok(())
+}
+
+/// The process's exit code for a failure is 1: tested on the executable, where the code is
+/// made, beside the 0 and 2 that `requests` tests there.
+#[test]
+fn mcp_stdio_executable_exits_1_when_no_service_can_be_reached() -> TestResult {
+    let missing = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-such-okf-jawn-server");
+    let output = Command::new(EXECUTABLE)
+        .args([
+            "mcp",
+            "--stdio",
+            "--server",
+            &format!("http://127.0.0.1:{}", closed_port()?),
+            "--server-bin",
+        ])
+        .arg(&missing)
+        .env("OKF_JAWN_TOKEN", TOKEN)
+        .stdin(Stdio::null())
+        .output()?;
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout, b"");
+    let said = String::from_utf8(output.stderr)?;
+    assert!(said.starts_with("okf-jawn mcp: "), "{said}");
+    assert!(!said.contains(TOKEN), "{said}");
+    Ok(())
+}

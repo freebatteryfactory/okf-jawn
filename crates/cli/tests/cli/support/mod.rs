@@ -22,6 +22,18 @@ pub struct Ran {
     pub stderr: String,
 }
 
+/// A stand-in for the server executable: a script the relay can start.
+///
+/// It says [`STAND_IN_SAYS`] on both its standard streams, records what it was given, and
+/// then lives until the test stops it, or about thirty seconds, whichever comes first.
+/// Dropping it stops it.
+pub struct StandIn {
+    /// The script, as a `--server-bin` value.
+    pub program: PathBuf,
+    record: PathBuf,
+    stop: PathBuf,
+}
+
 /// A standard input that records whether anything tried to read it, and is otherwise empty.
 pub struct Untouched(pub Arc<AtomicBool>);
 
@@ -29,10 +41,101 @@ pub struct Untouched(pub Arc<AtomicBool>);
 /// implements is `okf-jawn`.
 pub const EXECUTABLE: &str = env!("CARGO_BIN_EXE_okf-jawn-cli");
 
+/// What a [`StandIn`] writes to its standard output and to its standard error.
+pub const STAND_IN_SAYS: &str = "stand-in-output";
+
 /// The token every test that needs one uses; no test expects to see it in any output.
 pub const TOKEN: &str = "tok-5f1c2a9e";
 
 static FILES: AtomicUsize = AtomicUsize::new(0);
+
+impl Drop for StandIn {
+    fn drop(&mut self) {
+        self.stop();
+        // The record is the test's own; the script may still be running for a moment, and
+        // the stop file must outlive it, so both stay in the target's temporary directory.
+        let _ = std::fs::remove_file(&self.record);
+    }
+}
+
+impl StandIn {
+    /// Write the script for this platform.
+    pub fn new() -> Outcome<Self> {
+        let record = file("stand-in-record.txt", b"")?;
+        std::fs::remove_file(&record)?;
+        let stop = file("stand-in-stop", b"")?;
+        std::fs::remove_file(&stop)?;
+        let (suffix, script) = if cfg!(windows) {
+            (
+                "stand-in.cmd",
+                format!(
+                    "@echo off\r\necho {STAND_IN_SAYS}\r\necho {STAND_IN_SAYS} 1>&2\r\n\
+                     > \"{record}\" echo token=%OKF_JAWN_TOKEN%\r\n\
+                     >> \"{record}\" echo bind=%OKF_BIND%\r\n\
+                     >> \"{record}\" echo ready\r\n\
+                     set /a n=0\r\n:wait\r\nif exist \"{stop}\" exit /b 0\r\nset /a n+=1\r\n\
+                     if %n% geq 30 exit /b 0\r\nping -n 2 127.0.0.1 > nul\r\ngoto wait\r\n",
+                    record = record.display(),
+                    stop = stop.display()
+                ),
+            )
+        } else {
+            (
+                "stand-in.sh",
+                format!(
+                    "#!/bin/sh\necho {STAND_IN_SAYS}\necho {STAND_IN_SAYS} >&2\n\
+                     {{ echo \"token=$OKF_JAWN_TOKEN\"; echo \"bind=$OKF_BIND\"; echo \"pid=$$\"; \
+                     echo \"group=$(ps -o pgid= -p $$ | tr -d ' ')\"; echo ready; }} > \"{record}\"\n\
+                     n=0\nwhile [ ! -e \"{stop}\" ] && [ \"$n\" -lt 30 ]; do sleep 1; n=$((n+1)); done\n",
+                    record = record.display(),
+                    stop = stop.display()
+                ),
+            )
+        };
+        let program = file(suffix, script.as_bytes())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))?;
+        }
+        Ok(Self {
+            program,
+            record,
+            stop,
+        })
+    }
+
+    /// What the script recorded once it had run, one `name=value` per line; waits up to
+    /// `patience` for it.
+    pub fn recorded(&self, patience: std::time::Duration) -> Outcome<String> {
+        let started = std::time::Instant::now();
+        loop {
+            let text = std::fs::read_to_string(&self.record).unwrap_or_default();
+            if text.lines().any(|line| line.trim() == "ready") {
+                return Ok(text);
+            }
+            if started.elapsed() > patience {
+                return Err(
+                    format!("the stand-in did not run within {patience:?}: {text:?}").into(),
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// Ask the script to end; it does within about a second.
+    pub fn stop(&self) {
+        let _ = std::fs::write(&self.stop, b"stop");
+    }
+
+    /// The value the script recorded under `name`.
+    pub fn value(recorded: &str, name: &str) -> Option<String> {
+        recorded.lines().find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (key == name).then(|| value.trim().to_owned())
+        })
+    }
+}
 
 impl Ran {
     /// The output as JSON values, one per line; fails when a line is not JSON or the last
