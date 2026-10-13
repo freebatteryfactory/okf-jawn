@@ -18,6 +18,7 @@ use okf_jawn_server::identity::ConnectVerifier;
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
+use tokio::time::error::Elapsed;
 use tokio::time::timeout;
 
 use check::{TestResult, err_of};
@@ -100,9 +101,10 @@ impl Issuer {
         Ok(gate)
     }
 
-    /// Wait until a fetch is held at the gate.
-    async fn held(&self) {
-        self.waiting.notified().await;
+    /// Wait until a fetch is held at the gate. When none starts within ten seconds this is an
+    /// error, so a test whose fetch never begins fails instead of waiting for ever.
+    async fn held(&self) -> Result<(), Elapsed> {
+        timeout(Duration::from_secs(10), self.waiting.notified()).await
     }
 
     /// Wait until `count` fetches have given their answer.
@@ -521,7 +523,7 @@ async fn a_hanging_fetch_holds_up_no_token_whose_key_is_cached() -> TestResult {
     // A token naming an unknown key takes the minute's attempt, and the issuer never answers.
     let _never = setup.issuer.hold_next()?;
     let stuck = setup.verifying(sign(&claims()?, Some("unknown-key"))?);
-    setup.issuer.held().await;
+    setup.issuer.held().await?;
     assert_eq!(setup.issuer.fetches(), 2);
     // The valid token's key is in the cached set, 61 seconds old: it is verified at once.
     let identity = timeout(AT_ONCE, setup.verifier.verify(&valid)).await??;
@@ -542,7 +544,7 @@ async fn two_unknown_key_ids_at_the_same_moment_cause_one_fetch() -> TestResult 
     setup.clock.advance(Duration::from_secs(60))?;
     let gate = setup.issuer.hold_next()?;
     let first = setup.verifying(sign(&claims()?, Some("unknown-a"))?);
-    setup.issuer.held().await;
+    setup.issuer.held().await?;
     // The second arrives while the first's fetch is under way: answered from the cached set,
     // without waiting and without a fetch of its own.
     let second = sign(&claims()?, Some("unknown-b"))?;
@@ -590,7 +592,7 @@ async fn a_fetch_outlives_the_request_that_began_it() -> TestResult {
     let rotated = sign_with(&claims()?, Some(SECOND_KID), SECOND_PRIVATE_KEY)?;
     let gate = setup.issuer.hold_next()?;
     let gone = setup.verifying(rotated.clone());
-    setup.issuer.held().await;
+    setup.issuer.held().await?;
     // The caller that took the minute's attempt goes away while the issuer is still answering.
     gone.abort();
     assert!(gone.await.is_err(), "the request was dropped");

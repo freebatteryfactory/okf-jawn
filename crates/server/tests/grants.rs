@@ -15,6 +15,8 @@ use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::StorageScope;
 use okf_jawn_server::grants::Clock;
 use tokio::sync::Notify;
+use tokio::time::error::Elapsed;
+use tokio::time::timeout;
 
 use fixtures::{tenant, workspace};
 
@@ -92,9 +94,10 @@ impl Roles {
         Ok(gate)
     }
 
-    /// Wait until a lookup is held at the gate.
-    async fn held(&self) {
-        self.waiting.notified().await;
+    /// Wait until a lookup is held at the gate. When none begins within ten seconds this is an
+    /// error, so a test whose lookup never starts fails instead of waiting for ever.
+    async fn held(&self) -> Result<(), Elapsed> {
+        timeout(Duration::from_secs(10), self.waiting.notified()).await
     }
 
     /// What a lookup does between reading the roles and answering: fail, wait, or take time.
@@ -471,7 +474,7 @@ mod grant_cache_ttl {
                     .map_err(|error| error.to_string())
             })
         };
-        roles.held().await;
+        roles.held().await?;
         // Meanwhile the role is revoked and a later lookup caches the newer answer.
         roles.set(&[Permission::Admin])?;
         clock.advance(Duration::from_secs(5))?;
@@ -522,7 +525,7 @@ mod grant_cache_ttl {
                 tenant_allows(cache.as_ref(), &principal, Permission::Admin).await
             })
         };
-        roles.held().await;
+        roles.held().await?;
         // Meanwhile read is revoked and a later lookup caches the newer answer.
         roles.set(&[Permission::Admin])?;
         clock.advance(Duration::from_secs(5))?;
