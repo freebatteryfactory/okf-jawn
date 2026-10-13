@@ -765,6 +765,19 @@ describe('a save that takes long', () => {
     expect(api.violations).toEqual([]);
   });
 
+  it('sends nothing by itself after Stop, for a change still inside the autosave delay', async () => {
+    const { api, box } = await sending(() => new Promise<never>(() => {}));
+    await pass(1);
+    // A change made while the save is in flight, its autosave still pending when Stop is pressed.
+    typeInto(box, ' and more');
+    await pass(100);
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+    await pass(AUTOSAVE_DELAY_MS * 5);
+    expect(api.callsTo(SAVE)).toHaveLength(1);
+    expect(textIn(box)).toBe(`${LARGE} and more`);
+  });
+
   it('repeats a stopped save under its key when the text is the same, and starts it as "Saving…"', async () => {
     const { api } = await sending(() => new Promise<never>(() => {}));
     await pass(1);
