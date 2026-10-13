@@ -14,6 +14,8 @@
  * others go on. One polite status says how the whole upload stands. Its words change when a file
  * ends and at each tenth of the bytes, not at every report of progress.
  *
+ * Starting the import of the uploaded files, and the jobs started here, are `ImportStart.tsx`.
+ *
  * Keyboard focus. The pickers' buttons, "Upload" and each "Remove" are always there or are
  * followed: a row that leaves with focus in it (its file was removed) hands focus to the row now
  * in its place, else the last row, else "Choose files…". "Upload" never leaves; with nothing to
@@ -25,6 +27,7 @@ import { type HeldFocus, takeHeld, useWatchedPart } from '../../lib/focus';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
 import { type ChosenFile, chosenFromDrop, chosenFromPicker, describeSize, pathOf } from './files';
+import { ImportStart, StartedJobs } from './ImportStart';
 import {
   MAX_FILE_BYTES,
   type UploadEntry,
@@ -84,7 +87,7 @@ export function describeUploads(entries: readonly UploadEntry[]): string {
   return `${done} of ${count(asked.length, 'file', 'files')} uploaded; ${failed} not uploaded. Each of those has its own notice and retry.`;
 }
 
-export function ImportPage({ workspaceId, canWrite }: ImportPageProps) {
+export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
   const heading = useId();
   const listHeading = useId();
   const entries = useWorkspaceUploads(workspaceId);
@@ -226,6 +229,8 @@ export function ImportPage({ workspaceId, canWrite }: ImportPageProps) {
       <p role="status" className="meta">
         {describeUploads(entries)}
       </p>
+      <ImportStart workspaceId={workspaceId} head={head} entries={entries} />
+      <StartedJobs workspaceId={workspaceId} canWrite={canWrite} />
     </section>
   );
 }
