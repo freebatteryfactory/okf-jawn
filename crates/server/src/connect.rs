@@ -9,12 +9,12 @@
 //! neither choose a weaker algorithm nor cause a fetch. The issuer must be the configured AuthKit
 //! issuer and the audience the configured MCP resource; `exp`, `iss`, `aud` and `sub` are
 //! required, `exp` and `nbf` are checked with 30 seconds of leeway, and `sub`, `org_id` and
-//! `client_id` must be present and not empty. A refused token is `Unauthenticated`, in the same
-//! words whatever the reason, and no token or claim is echoed.
+//! `client_id` must be present and not empty. A token that is false is `Unauthenticated`, in the
+//! same words whatever the reason, and no token or claim is echoed.
 //!
 //! The key set is cached here, and its timing is this module's, read from an injected clock:
 //! - the issuer is asked at most once per [`REFRESH_INTERVAL`] (60 seconds), whatever arrives: an
-//!   unknown `kid` inside that interval is refused from the cached set with no fetch, so a flood
+//!   unknown `kid` inside that interval is answered from the cached set with no fetch, so a flood
 //!   of forged tokens costs the issuer one request a minute;
 //! - a set older than [`KEY_SET_MAX_AGE`] (10 minutes) is refreshed at its next use, so a key the
 //!   issuer withdrew stops being trusted;
@@ -31,6 +31,18 @@
 //! limit whatever the transport's is; a fetch that exceeds it is a failed fetch. It runs in a
 //! task of its own, so a caller that goes away after taking the minute's attempt does not take
 //! the refresh with it.
+//!
+//! A token the server cannot judge yet is not called false. When a token's `kid` is not in the
+//! cached set and the issuer may not be asked (inside the minute after an attempt, or while one
+//! is under way), and when there is no usable set at all, the answer is `Unavailable` with the
+//! whole seconds, rounded up, until the issuer may be asked again (`Unverified::retry_after`,
+//! sent as `Retry-After`): after a key rotation a good token would otherwise be refused as bad
+//! for up to a minute and send its client back to sign in for nothing. Only the request whose
+//! own fetch just succeeded without bringing the `kid` is told the token is false; a fetch that
+//! failed or ran out of time judged nothing. A token that fails for any other reason
+//! (algorithm, signature, claims) is `Unauthenticated` as before. An attacker gains nothing by
+//! this answer: it says only that a key id is not in a key set the issuer publishes to
+//! everyone, it carries no secret, and it causes no fetch.
 //!
 //! Known limit: the fetch follows whatever redirect policy the transport it is given has.
 //! [`IssuerKeys`] cannot see or refuse a redirect through the `workos` transport interface; the
@@ -60,7 +72,7 @@ use workos::transport::{HttpRequest, SharedTransport};
 
 use crate::config::HostedConfig;
 use crate::grants::Clock;
-use crate::identity::{ConnectIdentity, ConnectVerifier};
+use crate::identity::{ConnectIdentity, ConnectVerifier, Unverified, Verifying};
 
 /// Where verification keys come from; caching and its timing are [`ConnectTokens`]'s.
 pub trait KeySource: Send + Sync {
@@ -130,12 +142,31 @@ impl KeyCache {
         may_refresh && (stale || !known)
     }
 
-    /// The verification key `kid` names in the cached set as it stands at `now`.
-    fn key(&self, kid: &str, now: Instant) -> Result<DecodingKey, ApiError> {
+    /// The verification key `kid` names in the cached set as it stands at `now`. `fetched` says
+    /// the set was fetched for this very request: only then is a `kid` it lacks known to be
+    /// false. Any other unknown `kid`, and any request with no usable set, cannot be judged yet.
+    fn key(&self, kid: &str, now: Instant, fetched: bool) -> Result<DecodingKey, Unverified> {
         let kept = since(self.fetched_at, now).is_some_and(|age| age < KEY_SET_KEPT);
-        let set = self.set.as_ref().filter(|_| kept).ok_or_else(unavailable)?;
-        let jwk = set.find(kid).ok_or_else(refused)?;
-        DecodingKey::from_jwk(jwk).map_err(|_| refused())
+        let Some(set) = self.set.as_ref().filter(|_| kept) else {
+            return Err(self.not_yet(now));
+        };
+        match set.find(kid) {
+            Some(jwk) => DecodingKey::from_jwk(jwk).map_err(|_| refused().into()),
+            None if fetched => Err(refused().into()),
+            None => Err(self.not_yet(now)),
+        }
+    }
+
+    /// The refusal of a token that cannot be judged at `now`: `Unavailable`, with the whole
+    /// seconds, rounded up, until the issuer may be asked again.
+    fn not_yet(&self, now: Instant) -> Unverified {
+        let waited = since(self.attempted_at, now).unwrap_or_default();
+        let left = REFRESH_INTERVAL.saturating_sub(waited);
+        let seconds = left.as_nanos().div_ceil(1_000_000_000);
+        Unverified {
+            error: unavailable(),
+            retry_after: Some(u32::try_from(seconds).unwrap_or(u32::MAX)),
+        }
     }
 }
 
@@ -193,30 +224,31 @@ impl ConnectTokens {
     }
 
     /// The verification key `kid` names, by the timing rules of the module header.
-    async fn key(&self, kid: &str) -> Result<DecodingKey, ApiError> {
-        let now = self.clock.now();
+    async fn key(&self, kid: &str) -> Result<DecodingKey, Unverified> {
+        let began = self.clock.now();
         {
             let mut cache = self.cache.lock().await;
-            if !cache.needs_fetch(kid, now) {
-                return cache.key(kid, now);
+            if !cache.needs_fetch(kid, began) {
+                return cache.key(kid, began, false);
             }
             // Taken under the lock, before the issuer is asked: every other request of this
             // minute, also one that arrives while the fetch runs, answers from the cache.
-            cache.attempted_at = Some(now);
+            cache.attempted_at = Some(began);
         }
         // The lock is released. The fetch runs in a task of its own, so it and what it brings
         // outlive this request if its caller goes away.
-        let fetching = tokio::spawn(refresh(self.keys.clone(), self.cache.clone(), now));
-        // A task that did not finish is a failed fetch, tolerated like any other below.
-        let _finished = fetching.await;
-        self.cache.lock().await.key(kid, now)
+        let fetching = tokio::spawn(refresh(self.keys.clone(), self.cache.clone(), began));
+        // A task that did not finish is a failed fetch, tolerated like any other.
+        let fetched = fetching.await.unwrap_or(false);
+        let cache = self.cache.lock().await;
+        cache.key(kid, self.clock.now(), fetched)
     }
 
-    async fn identity(&self, token: &str) -> Result<ConnectIdentity, ApiError> {
+    async fn identity(&self, token: &str) -> Result<ConnectIdentity, Unverified> {
         let header = decode_header(token).map_err(|_| refused())?;
         // Before any key lookup: a token of another algorithm never causes a fetch.
         if header.alg != Algorithm::RS256 {
-            return Err(refused());
+            return Err(refused().into());
         }
         let kid = header.kid.ok_or_else(refused)?;
         let key = self.key(&kid).await?;
@@ -232,7 +264,7 @@ impl ConnectTokens {
             .map_err(|_| refused())?
             .claims;
         if claims.sub.is_empty() || claims.org_id.is_empty() || claims.client_id.is_empty() {
-            return Err(refused());
+            return Err(refused().into());
         }
         Ok(ConnectIdentity {
             subject: claims.sub,
@@ -244,7 +276,7 @@ impl ConnectTokens {
 }
 
 impl ConnectVerifier for ConnectTokens {
-    fn verify<'a>(&'a self, token: &'a str) -> PortFuture<'a, ConnectIdentity> {
+    fn verify<'a>(&'a self, token: &'a str) -> Verifying<'a> {
         Box::pin(self.identity(token))
     }
 }
@@ -269,15 +301,17 @@ pub fn install_crypto() -> Result<(), ApiError> {
 }
 
 /// Ask the issuer once, within [`FETCH_TIME_LIMIT`], and keep what it answers, stamped with
-/// `began`, the instant the attempt was taken.
-async fn refresh(keys: Arc<dyn KeySource>, cache: Arc<Mutex<KeyCache>>, began: Instant) {
+/// `began`, the instant the attempt was taken. Whether a set was fetched and kept.
+async fn refresh(keys: Arc<dyn KeySource>, cache: Arc<Mutex<KeyCache>>, began: Instant) -> bool {
     // The one error tolerated here: a fetch that fails, or that exceeds the time limit, leaves
     // the cached set in use, for as long as `KEY_SET_KEPT` allows.
-    if let Ok(Ok(set)) = timeout(FETCH_TIME_LIMIT, keys.fetch()).await {
-        let mut cache = cache.lock().await;
-        cache.set = Some(set);
-        cache.fetched_at = Some(began);
-    }
+    let Ok(Ok(set)) = timeout(FETCH_TIME_LIMIT, keys.fetch()).await else {
+        return false;
+    };
+    let mut cache = cache.lock().await;
+    cache.set = Some(set);
+    cache.fetched_at = Some(began);
+    true
 }
 
 /// How long before `now` the instant `at` was, when there is one and it is not later.

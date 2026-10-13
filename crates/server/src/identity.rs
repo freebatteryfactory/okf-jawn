@@ -10,7 +10,9 @@
 //!   `CredentialStore::lookup_connector` by `secret_hash`; hosted a WorkOS Connect access token
 //!   (`ConnectVerifier`). Either becomes route `McpDelegation`, with the subject and the client
 //!   kept separately. A bearer that does not authenticate is 401: it never falls back to the
-//!   cookie. The CLI, a connector and every other non-browser client arrive this way.
+//!   cookie. A hosted token the verifier cannot judge yet (`Unverified::retry_after`) is 503
+//!   `Unavailable` with `Retry-After`, never a 401 that would send a good client back to sign
+//!   in. The CLI, a connector and every other non-browser client arrive this way.
 //! - **Browser session cookie** (`okf-session`): resolved through `CredentialStore::get_session`
 //!   by the SHA-256 of its secret. Only this path may carry `BrowserSession` or `LocalOwner`
 //!   (core lets those two routes reach drafts and decides by route alone, SPEC section 8), and a
@@ -25,6 +27,8 @@
 //! without a bearer is answered 401 here, with the `WWW-Authenticate` challenge MCP clients read.
 //! Loopback is never trust and there is no guest owner.
 
+use std::fmt;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -41,18 +45,34 @@ use okf_jawn_contract::identity::TenantId;
 use okf_jawn_contract::metadata::{OperationName, operations};
 use okf_jawn_core::credentials::{CredentialStore, secret_hash};
 use okf_jawn_core::events::{EventLog, EventScope, NewEvent};
-use okf_jawn_core::ports::PortFuture;
 
 use crate::SessionId;
-use crate::errors::error_response;
+use crate::errors::{error_response, retry_response};
 
 /// Verifies a WorkOS Connect access token: JWKS signature, issuer, audience and expiry.
 ///
 /// The production verifier is the `jsonwebtoken` adapter over WorkOS's key set (Batch C); the
 /// middleware is bound against this trait.
 pub trait ConnectVerifier: Send + Sync {
-    /// The identity a valid token carries; `Unauthenticated` for any token that is not valid.
-    fn verify<'a>(&'a self, token: &'a str) -> PortFuture<'a, ConnectIdentity>;
+    /// The identity a valid token carries. A token that is false is refused as
+    /// `Unauthenticated`; a token that cannot be judged now is refused as `Unavailable`, with
+    /// the seconds after which it can be.
+    fn verify<'a>(&'a self, token: &'a str) -> Verifying<'a>;
+}
+
+/// A token verification under way.
+pub type Verifying<'a> =
+    Pin<Box<dyn Future<Output = Result<ConnectIdentity, Unverified>> + Send + 'a>>;
+
+/// Why a bearer token was not accepted.
+#[derive(Debug)]
+pub struct Unverified {
+    /// The refusal: `Unauthenticated` for a token that is false, `Unavailable` for one that
+    /// cannot be judged now, or the fault that stopped the check.
+    pub error: ApiError,
+    /// Whole seconds after which the same token can be judged, when it could not be judged
+    /// now; the middleware sends it as `Retry-After`.
+    pub retry_after: Option<u32>,
 }
 
 /// Reads one cookie's value from request headers.
@@ -156,6 +176,23 @@ pub const SESSION_COOKIE: &str = "okf-session";
 
 /// The MCP endpoint path (`api/transports.json` `mcp_request`).
 pub const MCP_PATH: &str = "/mcp";
+
+impl From<ApiError> for Unverified {
+    fn from(error: ApiError) -> Self {
+        Self {
+            error,
+            retry_after: None,
+        }
+    }
+}
+
+impl fmt::Display for Unverified {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.error, formatter)
+    }
+}
+
+impl std::error::Error for Unverified {}
 
 impl WallClock for SystemWallClock {
     fn unix_millis(&self) -> u128 {
@@ -263,7 +300,7 @@ impl Identity {
     }
 
     /// The `Principal` a bearer token authenticates, and the credential it authenticated with.
-    async fn bearer_principal(&self, token: &str) -> Result<(Principal, Credential), ApiError> {
+    async fn bearer_principal(&self, token: &str) -> Result<(Principal, Credential), Unverified> {
         match &self.inner.bearer {
             BearerAuth::Local => {
                 let hash = secret_hash(token);
@@ -392,8 +429,15 @@ pub async fn identify(
                 request.extensions_mut().insert(credential);
                 next.run(request).await
             }
-            Err(error) if error.code == ErrorCode::Unauthenticated => identity.challenge(error),
-            Err(error) => error_response(error),
+            Err(refusal) if refusal.error.code == ErrorCode::Unauthenticated => {
+                identity.challenge(refusal.error)
+            }
+            // A token that cannot be judged yet: try again, not sign in again.
+            Err(Unverified {
+                error,
+                retry_after: Some(seconds),
+            }) => retry_response(error, seconds),
+            Err(refusal) => error_response(refusal.error),
         };
     }
     if on_mcp {

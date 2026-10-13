@@ -76,6 +76,17 @@ pub fn error_response(error: ApiError) -> Response {
     response
 }
 
+/// Render `error` as its JSON body with `Retry-After: seconds`: the refusal of a request that
+/// cannot be judged yet and may be sent again after that long.
+#[must_use]
+pub fn retry_response(error: ApiError, seconds: u32) -> Response {
+    let mut response = error_response(error);
+    response
+        .headers_mut()
+        .insert(RETRY_AFTER, HeaderValue::from(seconds));
+    response
+}
+
 /// Describe a body that could not be read as JSON, in fixed words that quote none of it.
 ///
 /// An over-limit body is `too_large` (413). Everything else, including a missing or wrong

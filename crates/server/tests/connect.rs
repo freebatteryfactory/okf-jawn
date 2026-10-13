@@ -162,13 +162,25 @@ impl Setup {
     }
 
     async fn code_of(&self, token: &str) -> Result<ErrorCode, String> {
-        Ok(err_of(self.verifier.verify(token).await)?.code)
+        Ok(err_of(self.verifier.verify(token).await)?.error.code)
+    }
+
+    /// The refusal of `token`: its code, and the seconds after which it may be tried again.
+    async fn refusal_of(&self, token: &str) -> Result<(ErrorCode, Option<u32>), String> {
+        let refusal = err_of(self.verifier.verify(token).await)?;
+        Ok((refusal.error.code, refusal.retry_after))
     }
 
     /// Verify `token` in a task of its own; the task answers the refusal's code, if any.
     fn verifying(&self, token: String) -> JoinHandle<Option<ErrorCode>> {
         let verifier = self.verifier.clone();
-        tokio::spawn(async move { verifier.verify(&token).await.err().map(|error| error.code) })
+        tokio::spawn(async move {
+            verifier
+                .verify(&token)
+                .await
+                .err()
+                .map(|refusal| refusal.error.code)
+        })
     }
 }
 
@@ -350,10 +362,10 @@ async fn unknown_key_ids_cause_at_most_one_fetch_a_minute() -> TestResult {
     let setup = Setup::new(Some(KEY_SET))?;
     setup.verifier.verify(&sign(&claims()?, Some(KID))?).await?;
     assert_eq!(setup.issuer.fetches(), 1);
-    // Twenty-five forged tokens, each naming a key nobody published: refused from the cache.
+    // Twenty-five forged tokens, each naming a key nobody published: answered from the cache.
     for forged in 0..25 {
         let token = sign(&claims()?, Some(&format!("forged-{forged}")))?;
-        assert_eq!(setup.code_of(&token).await?, ErrorCode::Unauthenticated);
+        assert_eq!(setup.code_of(&token).await?, ErrorCode::Unavailable);
     }
     assert_eq!(setup.issuer.fetches(), 1);
     // A token with no key id at all asks the issuer nothing.
@@ -368,9 +380,12 @@ async fn unknown_key_ids_cause_at_most_one_fetch_a_minute() -> TestResult {
     assert_eq!(setup.issuer.fetches(), 1);
     // At sixty seconds the issuer may be asked again, once.
     setup.clock.advance(Duration::from_secs(1))?;
-    setup.code_of(&sign(&claims()?, Some("forged-a"))?).await?;
-    setup.code_of(&sign(&claims()?, Some("forged-b"))?).await?;
+    let asked = setup.code_of(&sign(&claims()?, Some("forged-a"))?).await?;
+    let after = setup.code_of(&sign(&claims()?, Some("forged-b"))?).await?;
     assert_eq!(setup.issuer.fetches(), 2);
+    // The one whose own fetch did not bring its key is false; the next cannot be judged yet.
+    assert_eq!(asked, ErrorCode::Unauthenticated);
+    assert_eq!(after, ErrorCode::Unavailable);
     Ok(())
 }
 
@@ -381,7 +396,7 @@ async fn a_rotated_key_is_accepted_after_one_refresh() -> TestResult {
     setup.issuer.publish(Some(SECOND_KEY_SET))?;
     let rotated = sign_with(&claims()?, Some(SECOND_KID), SECOND_PRIVATE_KEY)?;
     // Inside the interval the new key is unknown and the issuer is not asked.
-    assert_eq!(setup.code_of(&rotated).await?, ErrorCode::Unauthenticated);
+    assert_eq!(setup.code_of(&rotated).await?, ErrorCode::Unavailable);
     assert_eq!(setup.issuer.fetches(), 1);
     setup.clock.advance(Duration::from_secs(60))?;
     let identity = setup.verifier.verify(&rotated).await?;
@@ -389,7 +404,11 @@ async fn a_rotated_key_is_accepted_after_one_refresh() -> TestResult {
     assert_eq!(setup.issuer.fetches(), 2);
     // The withdrawn key is no longer trusted.
     let old = sign(&claims()?, Some(KID))?;
+    // It cannot be called false inside the minute; the next fetch settles it.
+    assert_eq!(setup.code_of(&old).await?, ErrorCode::Unavailable);
+    setup.clock.advance(Duration::from_secs(60))?;
     assert_eq!(setup.code_of(&old).await?, ErrorCode::Unauthenticated);
+    assert_eq!(setup.issuer.fetches(), 3);
     Ok(())
 }
 
@@ -447,6 +466,53 @@ async fn with_no_key_set_and_the_issuer_down_the_answer_is_unavailable() -> Test
 }
 
 #[tokio::test]
+async fn a_token_that_cannot_be_judged_yet_is_unavailable_with_the_seconds_left() -> TestResult {
+    let setup = Setup::new(Some(KEY_SET))?;
+    setup.verifier.verify(&sign(&claims()?, Some(KID))?).await?;
+    let unknown = sign(&claims()?, Some("not-in-the-set"))?;
+    let not_yet = |seconds: u32| (ErrorCode::Unavailable, Some(seconds));
+    // The issuer was asked this instant: a whole minute is left, then less, rounded up.
+    assert_eq!(setup.refusal_of(&unknown).await?, not_yet(60));
+    setup.clock.advance(Duration::from_millis(30_500))?;
+    assert_eq!(setup.refusal_of(&unknown).await?, not_yet(30));
+    setup.clock.advance(Duration::from_millis(29_499))?;
+    assert_eq!(setup.refusal_of(&unknown).await?, not_yet(1));
+    assert_eq!(setup.issuer.fetches(), 1);
+    // A token that fails for another reason is false, inside the minute as outside it.
+    let impostor = sign_with(&claims()?, Some(KID), SECOND_PRIVATE_KEY)?;
+    let expired = sign(&with("exp", json!(now()?.saturating_sub(3600)))?, Some(KID))?;
+    let keyless = sign(&claims()?, None)?;
+    for token in [&impostor, &expired, &keyless] {
+        assert_eq!(
+            setup.refusal_of(token).await?,
+            (ErrorCode::Unauthenticated, None)
+        );
+    }
+    // At sixty seconds the issuer is asked, and does not bring the key: now the token is false.
+    setup.clock.advance(Duration::from_millis(1))?;
+    assert_eq!(
+        setup.refusal_of(&unknown).await?,
+        (ErrorCode::Unauthenticated, None)
+    );
+    assert_eq!(setup.issuer.fetches(), 2);
+    // The next one, a moment later, cannot be judged again for a minute.
+    assert_eq!(setup.refusal_of(&unknown).await?, not_yet(60));
+
+    // A fetch that fails judges nothing: the request that made it is told to come back too.
+    setup.issuer.publish(None)?;
+    setup.clock.advance(Duration::from_secs(60))?;
+    assert_eq!(setup.refusal_of(&unknown).await?, not_yet(60));
+    assert_eq!(setup.issuer.fetches(), 3);
+    // With no key set at all, a token whose key would be known is told the same.
+    let down = Setup::new(None)?;
+    let valid = sign(&claims()?, Some(KID))?;
+    assert_eq!(down.refusal_of(&valid).await?, not_yet(60));
+    down.clock.advance(Duration::from_secs(45))?;
+    assert_eq!(down.refusal_of(&valid).await?, not_yet(15));
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_hanging_fetch_holds_up_no_token_whose_key_is_cached() -> TestResult {
     let setup = Setup::new(Some(KEY_SET))?;
     let valid = sign(&claims()?, Some(KID))?;
@@ -481,7 +547,7 @@ async fn two_unknown_key_ids_at_the_same_moment_cause_one_fetch() -> TestResult 
     // without waiting and without a fetch of its own.
     let second = sign(&claims()?, Some("unknown-b"))?;
     let code = timeout(AT_ONCE, setup.code_of(&second)).await??;
-    assert_eq!(code, ErrorCode::Unauthenticated);
+    assert_eq!(code, ErrorCode::Unavailable);
     assert_eq!(setup.issuer.fetches(), 2);
     gate.notify_one();
     assert_eq!(first.await?, Some(ErrorCode::Unauthenticated));

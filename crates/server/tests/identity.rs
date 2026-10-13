@@ -18,8 +18,8 @@ use okf_jawn_server::BoundApplication;
 use okf_jawn_server::app::{ServiceParts, service};
 use okf_jawn_server::cookies::CrateCookies;
 use okf_jawn_server::identity::{
-    BearerAuth, ConnectIdentity, Credential, Identity, IdentityPorts, WallClock, csrf_token_of,
-    session_id_of,
+    BearerAuth, ConnectIdentity, ConnectVerifier, Credential, Identity, IdentityPorts, Unverified,
+    Verifying, WallClock, csrf_token_of, session_id_of,
 };
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -31,6 +31,9 @@ use support::{FakeCredentials, INSTANT, OWNER, OneToken};
 
 /// A wall clock a test sets, in milliseconds since the Unix epoch.
 struct WallAt(AtomicU64);
+
+/// A Connect verifier that can judge no token now; it may say after how many seconds it can.
+struct NotYet(Option<u32>);
 
 /// What one test service is built over.
 struct Harness {
@@ -46,6 +49,17 @@ const SECRET: &str = "connector-secret-of-the-test";
 const LIST_ITEMS: &str = "/api/items/list-items";
 const LIST_DRAFTS: &str = "/api/items/list-drafts";
 const FAR_FUTURE: &str = "2999-01-01T00:00:00.000Z";
+
+impl ConnectVerifier for NotYet {
+    fn verify<'a>(&'a self, _token: &'a str) -> Verifying<'a> {
+        Box::pin(async move {
+            Err(Unverified {
+                error: ApiError::new(ErrorCode::Unavailable, "the issuer's keys are unavailable"),
+                retry_after: self.0,
+            })
+        })
+    }
+}
 
 impl WallClock for WallAt {
     fn unix_millis(&self) -> u128 {
@@ -309,6 +323,37 @@ async fn an_unknown_or_revoked_bearer_is_401_and_runs_nothing() -> TestResult {
     )?;
     let response = harness.hosted()?.oneshot(request).await?;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(harness.counting.call_count("list_items")?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_token_that_cannot_be_judged_yet_is_a_503_with_retry_after_and_no_challenge() -> TestResult
+{
+    let harness = Harness::new()?;
+    let hosted = |seconds: Option<u32>| BearerAuth::Hosted {
+        connect: Arc::new(NotYet(seconds)),
+        resource_metadata: "https://okf.example.test/.well-known/oauth-protected-resource"
+            .to_owned(),
+    };
+    for (path, body) in [(LIST_ITEMS, list_items_body()), ("/mcp", json!({}))] {
+        let request = post(path, &body, Some("a-token-of-a-rotated-key"))?;
+        let response = harness.service(hosted(Some(37)))?.oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+        let wait = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok());
+        assert_eq!(wait, Some("37"), "{path}");
+        // Not a challenge: the client is to try again, not to sign in again.
+        assert!(!response.headers().contains_key("www-authenticate"));
+        assert_eq!(api_error(response).await?.code, ErrorCode::Unavailable);
+    }
+    // An `Unavailable` that names no time carries no `Retry-After`.
+    let request = post(LIST_ITEMS, &list_items_body(), Some("any-token"))?;
+    let response = harness.service(hosted(None))?.oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!response.headers().contains_key("retry-after"));
     assert_eq!(harness.counting.call_count("list_items")?, 0);
     Ok(())
 }

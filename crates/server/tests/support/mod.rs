@@ -18,7 +18,7 @@ use okf_jawn_server::BoundApplication;
 use okf_jawn_server::app::{ServiceParts, service};
 use okf_jawn_server::cookies::CrateCookies;
 use okf_jawn_server::identity::{
-    BearerAuth, ConnectIdentity, ConnectVerifier, Identity, IdentityPorts,
+    BearerAuth, ConnectIdentity, ConnectVerifier, Identity, IdentityPorts, Verifying,
 };
 
 use crate::fixtures::counting::CountingApplication;
@@ -216,12 +216,12 @@ impl CredentialStore for FakeCredentials {
 }
 
 impl ConnectVerifier for OneToken {
-    fn verify<'a>(&'a self, token: &'a str) -> PortFuture<'a, ConnectIdentity> {
+    fn verify<'a>(&'a self, token: &'a str) -> Verifying<'a> {
         Box::pin(async move {
             if token == self.token {
                 Ok(self.identity.clone())
             } else {
-                Err(ApiError::new(ErrorCode::Unauthenticated, "invalid token"))
+                Err(ApiError::new(ErrorCode::Unauthenticated, "invalid token").into())
             }
         })
     }
