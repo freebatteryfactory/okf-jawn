@@ -255,6 +255,21 @@ describe('choosing files', () => {
     await uploaded('link.txt');
   });
 
+  it('lists a dropped thing the browser knows only as a File, and nothing for one that is no file', async () => {
+    setup();
+    await openImport();
+    const drop = dropOf([]);
+    drop.items.push(
+      // No entry: a drag another page made, or a browser without the entry API for it.
+      { kind: 'file', webkitGetAsEntry: () => null, getAsFile: () => fileOf('plain.txt', 'abc') },
+      // Dragged text beside the files: neither an entry nor a File.
+      { kind: 'string', webkitGetAsEntry: () => null, getAsFile: () => null },
+    );
+    await dropOn(drop);
+    await screen.findByText('1 file added.');
+    expect(rows().map((row) => row.textContent?.split(' ').at(0))).toEqual(['plain.txt']);
+  });
+
   it('never lists a folder as a file: not one it could not list, and not an empty one', async () => {
     const { api } = setup();
     await openImport();

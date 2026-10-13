@@ -154,13 +154,18 @@ export function droppedFolder(
  * item answers its entry, and also a File, as a browser's does for an item of kind "file".
  */
 export function dropOf(entries: DroppedEntry[]) {
+  const items: Array<{
+    kind: string;
+    webkitGetAsEntry: () => DroppedEntry | null;
+    getAsFile: () => File | null;
+  }> = entries.map((entry) => ({
+    kind: 'file',
+    webkitGetAsEntry: () => entry,
+    getAsFile: () => entry.offered,
+  }));
   return {
     types: ['Files'],
-    items: entries.map((entry) => ({
-      kind: 'file',
-      webkitGetAsEntry: () => entry,
-      getAsFile: () => entry.offered,
-    })),
+    items,
     files: [],
     dropEffect: 'none',
     effectAllowed: 'all',
