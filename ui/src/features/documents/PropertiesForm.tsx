@@ -44,15 +44,15 @@
  * still travel with every save.
  */
 import Form from '@rjsf/core';
-import { type RJSFSchema, retrieveSchema, type UiSchema } from '@rjsf/utils';
+import { type ErrorTransformer, type RJSFSchema, retrieveSchema, type UiSchema } from '@rjsf/utils';
 import { customizeValidator } from '@rjsf/validator-ajv8';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Component, type ReactNode, useEffect, useRef, useState } from 'react';
+import { Component, memo, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { z } from 'zod';
 import { listTypesOptions } from '../../api/generated/@tanstack/react-query.gen';
 import { keyed } from '../../lib/keys';
 import { editSession, holdProperties } from '../drafts/saving';
-import type { DraftSession } from '../drafts/sessions';
+import type { DraftSession, HeldProperties } from '../drafts/sessions';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
 import { PropertyList } from './Properties';
@@ -79,6 +79,18 @@ const NO_DEFAULTS = {
 } as const;
 /** No submit button: a change is saved with the draft, not submitted. */
 const NO_SUBMIT: UiSchema<PropertyMap> = { 'ui:submitButtonOptions': { norender: true } };
+
+/** The top-level property a validation error's path is in; '' for the map as a whole. */
+const topProperty = (path: string | undefined) =>
+  (path ?? '').replace(/^\./, '').split('.').at(0) ?? '';
+
+/**
+ * The form library draws an error about the map as a whole under the form, in the validator's
+ * words. Such a misfit is said above the form already, once and in plain words, so the library is
+ * left the errors that are about a property: it draws those of its own fields.
+ */
+const ONLY_AT_PROPERTIES: ErrorTransformer<PropertyMap> = (errors) =>
+  errors.filter((error) => topProperty(error.property) !== '');
 
 /** What the form library is given to call with errors that are already shown. */
 const NOTHING_MORE = () => {};
@@ -141,10 +153,6 @@ export function drawnProperties(schema: PropertyMap, data: PropertyMap): string[
   const named = zNaming.safeParse(resolved);
   return named.success ? Object.keys(named.data.properties) : [];
 }
-
-/** The top-level property a validation error's path is in; '' for the map as a whole. */
-const topProperty = (path: string | undefined) =>
-  (path ?? '').replace(/^\./, '').split('.').at(0) ?? '';
 
 /** One way the properties do not fit the type: the property it is about ('' for the whole map). */
 export interface Misfit {
@@ -279,8 +287,19 @@ export function PropertiesForm({ session, typeName }: PropertiesFormProps) {
     loaded: () => summaryRef.current,
   });
   const definition = types.data?.items.find((type) => type.name === typeName);
-  const schema = zObject.safeParse(definition?.properties_schema);
-  const uiSchema = zObject.safeParse(definition?.ui_schema);
+  // The schema and the UI schema as the form is given them are made once for a definition, not
+  // at each drawing: the form below is drawn again, and its properties judged again, only when
+  // what it is given changes, and a keystroke in the text changes none of it.
+  const typeSchema = definition?.properties_schema;
+  const schema = useMemo(() => {
+    const read = zObject.safeParse(typeSchema);
+    return read.success ? withoutHeaderField(read.data) : null;
+  }, [typeSchema]);
+  const typeUiSchema = definition?.ui_schema;
+  const uiSchema = useMemo(() => {
+    const read = zObject.safeParse(typeUiSchema);
+    return { ...(read.success ? plainText(read.data) : {}), ...NO_SUBMIT };
+  }, [typeUiSchema]);
   const count = Object.keys(session.properties).length;
   const asTheyAre = <PropertyList properties={session.properties} />;
 
@@ -311,7 +330,7 @@ export function PropertiesForm({ session, typeName }: PropertiesFormProps) {
           </p>
           {asTheyAre}
         </>
-      ) : !schema.success ? (
+      ) : schema === null ? (
         <>
           <p role="note" className="notice">
             The type <span className="type-name">{typeName}</span> names no properties to edit. The
@@ -335,10 +354,13 @@ export function PropertiesForm({ session, typeName }: PropertiesFormProps) {
         >
           <TypedForm
             key={`${session.workspaceId}/${session.itemId}`}
-            session={session}
+            workspaceId={session.workspaceId}
+            itemId={session.itemId}
+            properties={session.properties}
+            heldBack={session.heldBack}
             typeName={typeName}
-            schema={withoutHeaderField(schema.data)}
-            uiSchema={uiSchema.success ? plainText(uiSchema.data) : {}}
+            schema={schema}
+            uiSchema={uiSchema}
           />
         </FormBoundary>
       )}
@@ -346,29 +368,41 @@ export function PropertiesForm({ session, typeName }: PropertiesFormProps) {
   );
 }
 
-function TypedForm({
-  session,
+/**
+ * The form of one item's properties. It is given the session's property map and its held-back
+ * input, not the session: a session changes at every keystroke in the text, and those two do
+ * not. So the form is drawn, and the properties judged against the type, when the properties,
+ * the held-back input or the type change, and not when the text does (`memo`).
+ */
+const TypedForm = memo(function TypedForm({
+  workspaceId,
+  itemId,
+  properties,
+  heldBack: heldBefore,
   typeName,
   schema,
   uiSchema,
 }: {
-  session: DraftSession;
+  workspaceId: string;
+  itemId: string;
+  /** The draft's complete property map. */
+  properties: PropertyMap;
+  /** What a form before this one held back, if anything. */
+  heldBack: HeldProperties | null;
   typeName: string;
   schema: PropertyMap;
-  uiSchema: PropertyMap;
+  uiSchema: UiSchema<PropertyMap>;
 }) {
   const client = useQueryClient();
   // Input the draft has not taken is kept with the session, so a form that opens finds what the
   // one before it held back (the editor was left, or moved to another pane).
-  const [held] = useState(() => session.heldBack);
+  const [held] = useState(() => heldBefore);
   // The property map as it was when the form opened: where a property emptied and entered again
   // goes back to.
-  const [opened] = useState(() => held?.opened ?? Object.keys(session.properties));
+  const [opened] = useState(() => held?.opened ?? Object.keys(properties));
   // The form's own data: every property but the application's header. It also holds what is typed
   // and not valid, which the draft never gets.
-  const [data, setData] = useState<PropertyMap>(
-    () => held?.form ?? withoutHeader(session.properties),
-  );
+  const [data, setData] = useState<PropertyMap>(() => held?.form ?? withoutHeader(properties));
   // The properties the person has changed in a field since the form opened: these, and no other,
   // go from the form into the draft.
   const [entered, setEntered] = useState<readonly string[]>(() => held?.entered ?? []);
@@ -383,8 +417,8 @@ function TypedForm({
   const drawn = drawnProperties(schema, data);
   // What a save would carry if the form's input went into the draft now: it is this, without the
   // application's header, that the service judges against the type, so it is this that is judged.
-  const wanted = mergeProperties(session.properties, entered, data, opened);
-  const heldBack = changedKeys(session.properties, wanted).length > 0;
+  const wanted = mergeProperties(properties, entered, data, opened);
+  const heldBack = changedKeys(properties, wanted).length > 0;
   // What the form shows at a field of its own needs no second place.
   const atFields = misfits(schema, data).filter((misfit) => drawn.includes(misfit.property));
   const unplaced = misfits(schema, withoutHeader(wanted)).filter(
@@ -392,7 +426,7 @@ function TypedForm({
       !atFields.some((at) => at.property === misfit.property && at.words === misfit.words),
   );
   const others = Object.fromEntries(
-    Object.entries(session.properties).filter(([key]) => !drawn.includes(key)),
+    Object.entries(properties).filter(([key]) => !drawn.includes(key)),
   );
   // Always there, so what it comes to say is announced: the misfits no field shows, and that input
   // is held back.
@@ -426,7 +460,7 @@ function TypedForm({
           ones below are kept as they are.
         </p>
         {said}
-        <PropertyList properties={session.properties} />
+        <PropertyList properties={properties} />
       </>
     );
   }
@@ -440,14 +474,11 @@ function TypedForm({
         // on the page already, at the fields and above the form.
         onError={NOTHING_MORE}
         schema={rules}
-        uiSchema={{ ...uiSchema, ...NO_SUBMIT }}
+        uiSchema={uiSchema}
         formData={data}
         validator={validator}
         liveValidate="onChange"
-        // The library draws an error about the map as a whole under the form, in the validator's
-        // words. Such a misfit is said above the form already, once and in plain words, so the
-        // library is left the errors that are about a property: it draws those of its own fields.
-        transformErrors={(errors) => errors.filter((error) => topProperty(error.property) !== '')}
+        transformErrors={ONLY_AT_PROPERTIES}
         showErrorList={false}
         noHtml5Validate
         experimental_defaultFormStateBehavior={NO_DEFAULTS}
@@ -464,21 +495,21 @@ function TypedForm({
             ]),
           ];
           setEntered(now);
-          const candidate = mergeProperties(session.properties, now, next, opened);
+          const candidate = mergeProperties(properties, now, next, opened);
           // Judged as the service judges it: the whole map, without the application's header.
           if (!validator.isValid(rules, withoutHeader(candidate), rules)) {
             // None of it goes into the draft. It is kept with the session, not only in this
             // form, unless the input is back to what the draft has.
             holdProperties(
-              session.workspaceId,
-              session.itemId,
-              changedKeys(session.properties, candidate).length > 0
+              workspaceId,
+              itemId,
+              changedKeys(properties, candidate).length > 0
                 ? { form: next, entered: now, opened: [...opened] }
                 : null,
             );
             return;
           }
-          editSession(client, session.workspaceId, session.itemId, { properties: candidate });
+          editSession(client, workspaceId, itemId, { properties: candidate });
         }}
       />
       {Object.keys(others).length > 0 && (
@@ -489,4 +520,4 @@ function TypedForm({
       )}
     </>
   );
-}
+});
