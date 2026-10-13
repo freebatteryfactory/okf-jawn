@@ -13,6 +13,13 @@
  * already placed in the same change (a layout effect: `useRetry`), is left where it is. The router
  * says a navigation has rendered once React has committed it (`onRendered`), which is after the
  * page's layout effects and before its passive ones.
+ *
+ * Limits. Navigate from event handlers. A navigation begun in a layout effect or a ref callback of
+ * the page another navigation has just rendered is noted with focus still on the body, and the
+ * first navigation's focus then stays there. A page that places focus itself after a navigation
+ * does it in a layout effect; in a passive one, focus passes through the heading first. A page
+ * with no level-one heading that takes focus (the router's own pages for a path that matches no
+ * route, or for a route that throws) leaves focus on the body.
  */
 import type { QueryClient } from '@tanstack/react-query';
 import { QueryClientProvider } from '@tanstack/react-query';
