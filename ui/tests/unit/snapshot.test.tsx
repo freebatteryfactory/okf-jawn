@@ -578,6 +578,55 @@ describe('taking a Snapshot', () => {
     });
   });
 
+  it('is not undone by a read of an item that began before it and answers after it', async () => {
+    const read: { hold: boolean; answer?: () => void } = { hold: false };
+    const { api, state } = service(
+      {
+        [ITEM]: (body) => {
+          const itemId = String(body.item_id);
+          const document = itemDocument(itemId === NOTE ? noteSummary : otherSummary);
+          const reply = ok(
+            state.drafts.has(itemId)
+              ? {
+                  ...document,
+                  draft: {
+                    body: DRAFT_BODY,
+                    properties: document.properties,
+                    draft: draftOf(itemId, HEAD, LATER),
+                  },
+                }
+              : document,
+          );
+          if (itemId !== NOTE || !read.hold) return reply;
+          read.hold = false;
+          return new Promise<Reply>((resolve) => {
+            read.answer = () => resolve(reply);
+          });
+        },
+      },
+      [NOTE],
+    );
+    // The tab cites the head, so the Snapshot leaves the read of the item at the old head cached.
+    const { queryClient } = renderAt(`/w/${WS}/i/${NOTE}?rev=${HEAD}`);
+    await findTextBox('Text of Meeting notes');
+    await screen.findByRole('region', { name: 'Drafts (1)' });
+    const key = itemOptions(WS, NOTE, HEAD).queryKey;
+    read.hold = true;
+    act(() => {
+      void queryClient.invalidateQueries({ queryKey: key });
+    });
+    await eventuallyReal(() => expect(read.answer).toBeDefined());
+    await pressSnapshot('Tidy');
+    await eventuallyReal(() => expect(said()).toMatch(/^Snapshot “Tidy” taken: 1 item\./));
+    // The old answer arrives now, with the draft that was just committed in it.
+    act(() => read.answer?.());
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(queryClient.getQueryData(key)?.draft ?? null).toBeNull();
+    expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull();
+    expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
+    expect(api.callsTo(SAVE)).toHaveLength(0);
+  });
+
   // The same, against a service that holds the draft as the real one does, in each order the
   // save and the commit can answer.
   describe('text that went on while the Snapshot was taken', () => {

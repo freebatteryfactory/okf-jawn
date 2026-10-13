@@ -1017,6 +1017,51 @@ describe('discarding a draft', () => {
     expect(second).toEqual(first);
   });
 
+  it('is not undone by a read of the item that began before it and answers after it', async () => {
+    let held = true;
+    const read: { hold: boolean; answer?: () => void } = { hold: false };
+    const api = writable({
+      [ITEM]: (body) => {
+        if (body.item_id !== NOTE) return ok(itemDocument(otherSummary));
+        const reply = held ? ok(withDraft()) : ok(itemDocument(noteSummary));
+        if (!read.hold) return reply;
+        read.hold = false;
+        return new Promise<Reply>((resolve) => {
+          read.answer = () => resolve(reply);
+        });
+      },
+      [DRAFTS]: () => ok({ items: held ? [draftOf(NOTE, HEAD, LATER)] : [], next_cursor: null }),
+      [DISCARD]: (body) => {
+        held = false;
+        return ok(draftOf(String(body.item_id), HEAD, LATER));
+      },
+    });
+    const { queryClient } = renderAt(`/w/${WS}/i/${NOTE}`);
+    await findTextBox('Text of Meeting notes');
+    const key = itemOptions(WS, NOTE, HEAD).queryKey;
+    // A read of the item begins while the draft is still there, and has no answer yet.
+    read.hold = true;
+    act(() => {
+      void queryClient.invalidateQueries({ queryKey: key });
+    });
+    await waitFor(() => expect(read.answer).toBeDefined());
+    const reads = api.callsTo(ITEM).length;
+    fireEvent.click(screen.getByRole('button', { name: 'Discard draft' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Discard the draft' }));
+    await waitFor(() =>
+      expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull(),
+    );
+    // The old answer arrives now, with the draft in it.
+    act(() => read.answer?.());
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull();
+    expect(queryClient.getQueryData(key)?.draft ?? null).toBeNull();
+    expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
+    expect(await screen.findByRole('button', { name: 'Edit' })).toBeDefined();
+    // The item was read again after the discard: that answer has the discard in it.
+    expect(api.callsTo(ITEM).length).toBeGreaterThan(reads);
+  });
+
   // A discard's key belongs to the item's draft, not to the editor that asked.
   it('repeats a discard under the same key after the editor was left and opened again', async () => {
     let failing = true;
