@@ -14,8 +14,8 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use okf_jawn_cli::relay::{
-    Body, ChildState, Launcher, Limits, Post, Probe, Relay, Reply, StartPolicy, Transport,
-    TransportError, serve,
+    Body, ChildState, Clock, Launcher, Limits, Post, Probe, Progress, Relay, Reply, StartPolicy,
+    Transport, TransportError, serve,
 };
 use okf_jawn_cli::{Credential, Streams};
 use serde_json::{Value, json};
@@ -27,6 +27,43 @@ use crate::check::some;
 
 /// An output stream that fails every write.
 pub struct Broken;
+
+/// A clock that tests move: time passes only when something waits on it.
+///
+/// A sleep moves the clock straight to its end, unless work that costs time ([`FakeClock::spend`])
+/// ends sooner: then the clock moves to that end first, so the work is seen to finish before
+/// the sleep does, and a tie goes to the work. Nothing here waits in real time.
+#[derive(Clone, Default)]
+pub struct FakeClock {
+    state: Arc<Mutex<Times>>,
+}
+
+/// What a relay said while it waited for a server, with the clock's time at each word.
+pub struct Reports {
+    clock: FakeClock,
+    pub said: Vec<(Duration, String)>,
+}
+
+/// A wait on a [`FakeClock`]: a sleep, or work that costs time.
+pub struct Passing {
+    clock: FakeClock,
+    length: Duration,
+    /// Whether this is work, which never moves the clock itself.
+    work: bool,
+    /// The registration of the work's end with the clock, once polled.
+    key: Option<u64>,
+    until: Option<Duration>,
+}
+
+/// The state of a [`FakeClock`]: its time, and when each piece of work in progress ends.
+#[derive(Default)]
+struct Times {
+    now: Duration,
+    ends: Vec<(u64, Duration)>,
+    keys: u64,
+    /// How many waits of no time were asked for in a row.
+    idle: u32,
+}
 
 /// A launcher that counts its launches.
 #[derive(Clone)]
@@ -43,6 +80,10 @@ pub struct FakeTransport {
     probes: Mutex<VecDeque<Probe>>,
     otherwise: Probe,
     probed: AtomicUsize,
+    /// What each liveness check costs on the clock, in order; then `cost`.
+    costs: Mutex<VecDeque<Duration>>,
+    cost: Duration,
+    clock: Option<FakeClock>,
 }
 
 /// An output stream that hands each write to a channel, so a test can watch it mid-run.
@@ -60,6 +101,8 @@ pub struct Setup {
     pub launcher: FakeLauncher,
     pub loopback: bool,
     pub start: StartPolicy,
+    /// The clock the wait for a started server runs on; its sleeps take no real time.
+    pub clock: FakeClock,
     pub limits: Limits,
     /// The connector credential the relay holds.
     pub token: &'static str,
@@ -69,6 +112,112 @@ type Handler = Box<dyn Fn(Post, mpsc::Sender<String>) -> Sending + Send + Sync>;
 
 /// The future of one scripted send.
 pub type Sending = Pin<Box<dyn Future<Output = Result<Reply, TransportError>> + Send>>;
+
+impl Clock for FakeClock {
+    fn now(&self) -> Duration {
+        self.state.lock().map_or(Duration::ZERO, |times| times.now)
+    }
+
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> {
+        self.passing(duration, false)
+    }
+}
+
+impl FakeClock {
+    fn passing(&self, length: Duration, work: bool) -> Passing {
+        Passing {
+            clock: self.clone(),
+            length,
+            work,
+            key: None,
+            until: None,
+        }
+    }
+
+    /// Work that takes `cost` on this clock, such as a liveness check that is slow to answer.
+    pub fn spend(&self, cost: Duration) -> Passing {
+        self.passing(cost, true)
+    }
+}
+
+impl Drop for Passing {
+    fn drop(&mut self) {
+        if let (Some(key), Ok(mut times)) = (self.key, self.clock.state.lock()) {
+            times.ends.retain(|(other, _)| *other != key);
+        }
+    }
+}
+
+impl Future for Passing {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
+        let this = self.get_mut();
+        let Ok(mut times) = this.clock.state.lock() else {
+            return Poll::Ready(());
+        };
+        let until = *this
+            .until
+            .get_or_insert_with(|| times.now.saturating_add(this.length));
+        if this.work && this.key.is_none() {
+            times.keys = times.keys.saturating_add(1);
+            let key = times.keys;
+            times.ends.push((key, until));
+            this.key = Some(key);
+        }
+        if this.length.is_zero() && !this.work {
+            // A wait of no time moves nothing. A relay that asks for it without end, while
+            // the clock stands still, would spin without ever yielding: that is a failed
+            // test, not one that never ends.
+            times.idle = times.idle.saturating_add(1);
+            assert!(
+                times.idle < 100_000,
+                "the clock was asked 100,000 times to wait for no time while it stood still"
+            );
+        }
+        if times.now >= until {
+            return Poll::Ready(());
+        }
+        if !this.work {
+            // A sleep moves the clock: to the end of the work that ends first, or to its own.
+            let first = times.ends.iter().map(|(_, end)| *end).min();
+            let (to, over) = match first {
+                Some(end) if end <= until => (times.now.max(end), false),
+                _ => (until, true),
+            };
+            if to > times.now {
+                times.idle = 0;
+            }
+            times.now = to;
+            // No wait a test asks for comes near a day. A relay that waits without end would
+            // move the clock for ever without yielding: a failed test, not an endless one.
+            assert!(
+                to < Duration::from_hours(24),
+                "the clock was moved past a day: the wait has no end"
+            );
+            if over {
+                return Poll::Ready(());
+            }
+        }
+        context.waker().wake_by_ref();
+        Poll::Pending
+    }
+}
+
+impl Progress for Reports {
+    async fn say(&mut self, text: &str) {
+        self.said.push((self.clock.now(), text.to_owned()));
+    }
+}
+
+impl Reports {
+    pub fn on(clock: &FakeClock) -> Self {
+        Self {
+            clock: clock.clone(),
+            said: Vec::new(),
+        }
+    }
+}
 
 impl AsyncWrite for Broken {
     fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<std::io::Result<()>> {
@@ -151,6 +300,27 @@ impl FakeTransport {
         self.probed.load(Ordering::SeqCst)
     }
 
+    /// A transport whose liveness checks answer `probes` in order and then `otherwise`, and
+    /// take time on `clock`: `costs` in order, then `cost` each.
+    pub fn costing(
+        probes: Vec<Probe>,
+        otherwise: Probe,
+        clock: &FakeClock,
+        costs: Vec<Duration>,
+        cost: Duration,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            handler: Box::new(|_, _| Box::pin(async { accepted().reply })),
+            posts: Mutex::new(Vec::new()),
+            probes: Mutex::new(probes.into()),
+            otherwise,
+            probed: AtomicUsize::new(0),
+            costs: Mutex::new(costs.into()),
+            cost,
+            clock: Some(clock.clone()),
+        })
+    }
+
     /// A transport whose liveness checks answer `probes` in order and then `otherwise`.
     pub fn probing(
         handler: impl Fn(Post, mpsc::Sender<String>) -> Sending + Send + Sync + 'static,
@@ -163,6 +333,9 @@ impl FakeTransport {
             probes: Mutex::new(probes.into()),
             otherwise,
             probed: AtomicUsize::new(0),
+            costs: Mutex::new(VecDeque::new()),
+            cost: Duration::ZERO,
+            clock: None,
         })
     }
 
@@ -187,13 +360,25 @@ impl FakeTransport {
 impl Transport for FakeTransport {
     fn probe(&self) -> impl Future<Output = Probe> + Send {
         self.probed.fetch_add(1, Ordering::SeqCst);
-        std::future::ready(
-            self.probes
-                .lock()
-                .ok()
-                .and_then(|mut probes| probes.pop_front())
-                .unwrap_or_else(|| self.otherwise.clone()),
-        )
+        let answer = self
+            .probes
+            .lock()
+            .ok()
+            .and_then(|mut probes| probes.pop_front())
+            .unwrap_or_else(|| self.otherwise.clone());
+        let cost = self
+            .costs
+            .lock()
+            .ok()
+            .and_then(|mut costs| costs.pop_front())
+            .unwrap_or(self.cost);
+        let spent = self.clock.as_ref().map(|clock| clock.spend(cost));
+        async move {
+            if let Some(spent) = spent {
+                spent.await;
+            }
+            answer
+        }
     }
 
     async fn send(
@@ -235,17 +420,15 @@ impl AsyncWrite for Piped {
 }
 
 impl Setup {
-    /// A relay over `transport`: a loopback address, three checks without a pause after a
-    /// launch, and the production limits.
+    /// A relay over `transport`: a loopback address, the production wait for a started
+    /// server on a clock whose sleeps take no real time, and the production limits.
     pub fn new(transport: &Arc<FakeTransport>) -> Self {
         Self {
             transport: transport.clone(),
             launcher: FakeLauncher::default(),
             loopback: true,
-            start: StartPolicy {
-                checks: 3,
-                pause: Duration::ZERO,
-            },
+            start: StartPolicy::default(),
+            clock: FakeClock::default(),
             limits: Limits::default(),
             token: TOKEN,
         }
@@ -315,6 +498,7 @@ pub async fn relay_on<I: AsyncRead + Unpin, O: AsyncWrite + Unpin, E: AsyncWrite
             launcher: setup.launcher,
             loopback: setup.loopback,
             start: setup.start,
+            clock: setup.clock,
             limits: setup.limits,
             secret,
         },

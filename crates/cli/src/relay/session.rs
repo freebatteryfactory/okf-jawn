@@ -62,7 +62,7 @@ use tokio::task::{Id, JoinError, JoinSet};
 
 use super::frame::{Frame, Frames};
 use super::json::one_line;
-use super::launch::{Arrival, Launcher, StartPolicy, start_or_connect};
+use super::launch::{Arrival, Clock, Launcher, Progress, StartPolicy, start_or_connect};
 use super::message::{
     Envelope, INTERNAL_ERROR, INVALID_REQUEST, Kind, Lifecycle, Outgoing, Refusal, error_line,
     prepare,
@@ -118,7 +118,7 @@ struct Outcome {
 type Queued = (String, Option<OwnedSemaphorePermit>);
 /// Everything one relay run needs.
 #[derive(Debug)]
-pub struct Relay<T, L> {
+pub struct Relay<T, L, C> {
     /// Sends messages and asks whether the service is up.
     pub transport: Arc<T>,
     /// Starts the local server.
@@ -127,10 +127,18 @@ pub struct Relay<T, L> {
     pub loopback: bool,
     /// How long to wait for a server the relay started.
     pub start: StartPolicy,
+    /// The clock that wait runs on.
+    pub clock: C,
     /// The relay's bounds.
     pub limits: Limits,
     /// The connector credential, kept here only to keep it out of everything written.
     pub secret: Credential,
+}
+
+/// The error stream as the place where the wait for a started server is reported.
+struct Saying<'run, E> {
+    stderr: &'run mut E,
+    secret: &'run Credential,
 }
 
 /// What the answers relayed so far say about one exchange.
@@ -209,6 +217,12 @@ impl Flight {
     fn start(&mut self, name: String, work: impl Future<Output = ()> + Send + 'static) {
         let id = self.tasks.spawn(work).id();
         self.names.insert(id, name);
+    }
+}
+
+impl<E: AsyncWrite + Unpin> Progress for Saying<'_, E> {
+    async fn say(&mut self, text: &str) {
+        say(self.stderr, self.secret, text).await;
     }
 }
 
@@ -493,10 +507,11 @@ async fn vacancy(desk: &Desk) {
 ///
 /// Returns the exit code: 0 when the input ended, 1 when no service could be reached or
 /// started, or when a standard stream failed.
-pub async fn serve<T, L, I, O, E>(relay: Relay<T, L>, streams: Streams<I, O, E>) -> u8
+pub async fn serve<T, L, C, I, O, E>(relay: Relay<T, L, C>, streams: Streams<I, O, E>) -> u8
 where
     T: Transport,
     L: Launcher,
+    C: Clock,
     I: AsyncRead + Unpin,
     O: AsyncWrite + Unpin,
     E: AsyncWrite + Unpin,
@@ -506,6 +521,7 @@ where
         mut launcher,
         loopback,
         start,
+        clock,
         limits,
         secret,
     } = relay;
@@ -515,13 +531,27 @@ where
         mut stderr,
     } = streams;
     let secret = Arc::new(secret);
-    match start_or_connect(transport.as_ref(), &mut launcher, loopback, start).await {
+    let mut progress = Saying {
+        stderr: &mut stderr,
+        secret: &secret,
+    };
+    let arrival = start_or_connect(
+        transport.as_ref(),
+        &mut launcher,
+        loopback,
+        start,
+        &clock,
+        &mut progress,
+    )
+    .await;
+    match arrival {
         Ok(Arrival::Connected) => {}
         Ok(Arrival::Started) => {
             say(
                 &mut stderr,
                 &secret,
-                "started the okf-jawn service; it is left running",
+                "the okf-jawn server the relay started answers; it is left running when the \
+                 relay ends",
             )
             .await;
         }

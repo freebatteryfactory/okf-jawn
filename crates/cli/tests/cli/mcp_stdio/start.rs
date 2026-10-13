@@ -9,24 +9,31 @@ use std::time::Duration;
 
 use okf_jawn_cli::Endpoint;
 use okf_jawn_cli::relay::{
-    Arrival, ChildState, Detachment, Launcher, Probe, ProcessLauncher, StartPolicy, server_beside,
-    start_or_connect,
+    Arrival, ChildState, Clock, Detachment, Launcher, Probe, ProcessLauncher, StartPolicy,
+    server_beside, start_or_connect,
 };
 use serde_json::json;
 
 use super::request;
 use crate::check::{TestResult, err_of, some};
-use crate::support::doubles::{FakeLauncher, FakeTransport, Setup, accepted, relay, relay_over};
+use crate::support::doubles::{
+    FakeClock, FakeLauncher, FakeTransport, Reports, Setup, accepted, relay, relay_over,
+};
 use crate::support::{EXECUTABLE, Untouched};
 
-/// How long a test waits for a wait that must end by itself.
-const PATIENCE: Duration = Duration::from_secs(20);
+/// What one run of `start_or_connect` on a clock the test moves came to.
+struct Waited {
+    arrival: Result<Arrival, String>,
+    /// How long the clock ran after the launch.
+    took: Duration,
+    /// What the relay said meanwhile, with the seconds since the launch.
+    said: Vec<(u64, String)>,
+    launched: usize,
+    probed: usize,
+}
 
-/// Three checks after a launch, with no pause between them.
-const THREE_CHECKS: StartPolicy = StartPolicy {
-    checks: 3,
-    pause: Duration::ZERO,
-};
+/// How long, in real time, a test lets a wait run that a correct relay ends at once.
+const PATIENCE: Duration = Duration::from_secs(20);
 
 /// A transport whose liveness checks answer `probes` in order and then `otherwise`.
 fn probing(probes: Vec<Probe>, otherwise: Probe) -> Arc<FakeTransport> {
@@ -37,11 +44,68 @@ fn probing(probes: Vec<Probe>, otherwise: Probe) -> Arc<FakeTransport> {
     )
 }
 
+/// Run `start_or_connect` with the default policy against checks that answer `probes` and
+/// then `otherwise`. The check before the launch costs nothing; each one after it costs
+/// `cost` on the clock.
+async fn wait(probes: Vec<Probe>, otherwise: Probe, cost: Duration, state: ChildState) -> Waited {
+    let clock = FakeClock::default();
+    let transport = FakeTransport::costing(probes, otherwise, &clock, vec![Duration::ZERO], cost);
+    let mut launcher = FakeLauncher {
+        state,
+        ..FakeLauncher::default()
+    };
+    let mut reports = Reports::on(&clock);
+    // The clock is the test's own, so a correct wait takes no real time; a wait that never
+    // ends is a failure of the test, not a test that never ends.
+    let arrival = tokio::time::timeout(
+        PATIENCE,
+        start_or_connect(
+            transport.as_ref(),
+            &mut launcher,
+            true,
+            StartPolicy::default(),
+            &clock,
+            &mut reports,
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| Err("the wait did not end in real time".to_owned()));
+    Waited {
+        arrival,
+        took: clock.now(),
+        said: reports
+            .said
+            .into_iter()
+            .map(|(at, text)| (at.as_secs(), text))
+            .collect(),
+        launched: launcher.launched(),
+        probed: transport.probed(),
+    }
+}
+
+/// Run `start_or_connect` once on a clock nothing costs anything on.
+async fn arrive(
+    transport: &FakeTransport,
+    launcher: &mut FakeLauncher,
+    loopback: bool,
+) -> Result<Arrival, String> {
+    let clock = FakeClock::default();
+    start_or_connect(
+        transport,
+        launcher,
+        loopback,
+        StartPolicy::default(),
+        &clock,
+        &mut Reports::on(&clock),
+    )
+    .await
+}
+
 #[tokio::test]
 async fn a_running_service_is_connected_to_and_nothing_is_started() -> TestResult {
     let transport = probing(Vec::new(), Probe::Up);
     let mut launcher = FakeLauncher::default();
-    let arrival = start_or_connect(transport.as_ref(), &mut launcher, true, THREE_CHECKS).await?;
+    let arrival = arrive(transport.as_ref(), &mut launcher, true).await?;
     assert_eq!(arrival, Arrival::Connected);
     assert_eq!((launcher.launched(), transport.probed()), (0, 1));
     Ok(())
@@ -61,11 +125,7 @@ async fn a_refusing_loopback_address_starts_the_server_once_and_waits_for_it() -
         Probe::Up,
     );
     let mut launcher = FakeLauncher::default();
-    let policy = StartPolicy {
-        checks: 4,
-        pause: Duration::ZERO,
-    };
-    let arrival = start_or_connect(transport.as_ref(), &mut launcher, true, policy).await?;
+    let arrival = arrive(transport.as_ref(), &mut launcher, true).await?;
     assert_eq!(arrival, Arrival::Started);
     assert_eq!((launcher.launched(), transport.probed()), (1, 5));
     Ok(())
@@ -75,8 +135,7 @@ async fn a_refusing_loopback_address_starts_the_server_once_and_waits_for_it() -
 async fn a_remote_address_is_never_started() -> TestResult {
     let transport = probing(Vec::new(), Probe::Refused);
     let mut launcher = FakeLauncher::default();
-    let why =
-        err_of(start_or_connect(transport.as_ref(), &mut launcher, false, THREE_CHECKS).await)?;
+    let why = err_of(arrive(transport.as_ref(), &mut launcher, false).await)?;
     assert!(why.contains("never starts a remote service"), "{why}");
     assert_eq!((launcher.launched(), transport.probed()), (0, 1));
     Ok(())
@@ -96,9 +155,7 @@ async fn an_address_that_answers_or_fails_otherwise_starts_nothing() -> TestResu
         for loopback in [true, false] {
             let transport = probing(vec![probe.clone()], Probe::Up);
             let mut launcher = FakeLauncher::default();
-            let why = err_of(
-                start_or_connect(transport.as_ref(), &mut launcher, loopback, THREE_CHECKS).await,
-            )?;
+            let why = err_of(arrive(transport.as_ref(), &mut launcher, loopback).await)?;
             assert!(why.contains(said), "{why}");
             assert_eq!(
                 (launcher.launched(), transport.probed()),
@@ -115,31 +172,37 @@ async fn an_address_that_answers_or_fails_otherwise_starts_nothing() -> TestResu
 /// more.
 #[tokio::test]
 async fn after_its_server_ends_the_relay_keeps_waiting_and_never_starts_another() -> TestResult {
-    let transport = probing(
-        vec![Probe::Refused, Probe::Refused, Probe::Refused],
+    let waited = wait(
+        vec![Probe::Refused; 4],
         Probe::Up,
-    );
-    let mut launcher = FakeLauncher {
-        state: ChildState::Exited(Some(1)),
-        ..FakeLauncher::default()
-    };
-    let arrival = start_or_connect(transport.as_ref(), &mut launcher, true, THREE_CHECKS).await?;
-    assert_eq!(arrival, Arrival::Started);
-    assert_eq!((launcher.launched(), transport.probed()), (1, 4));
+        Duration::from_secs(1),
+        ChildState::Exited(Some(1)),
+    )
+    .await;
+    assert_eq!(waited.arrival, Ok(Arrival::Started));
+    assert_eq!((waited.launched, waited.probed), (1, 5));
     Ok(())
 }
 
-/// The wait is exactly `checks` liveness checks after the launch: an answer on the last one
-/// is taken, and one check later is too late.
+/// The wait is bounded by the clock, whatever each check costs, and from both sides. Each
+/// check after the launch costs 7 s and follows a pause of half a second, so the sixth ends
+/// exactly 45 s after the launch: an answer there is taken. A seventh check would end at
+/// 52.5 s: it is never started, and the relay gives up at 45 s by the clock.
 #[tokio::test]
-async fn the_wait_for_a_started_server_is_bounded() -> TestResult {
-    let in_time = probing(vec![Probe::Refused; 3], Probe::Up);
-    let mut launcher = FakeLauncher::default();
+async fn the_wait_for_a_started_server_is_bounded_by_the_clock() -> TestResult {
+    let seven = Duration::from_secs(7);
+    let in_time = wait(
+        vec![Probe::Refused; 6],
+        Probe::Up,
+        seven,
+        ChildState::Running,
+    )
+    .await;
+    assert_eq!(in_time.arrival, Ok(Arrival::Started));
     assert_eq!(
-        start_or_connect(in_time.as_ref(), &mut launcher, true, THREE_CHECKS).await?,
-        Arrival::Started
+        (in_time.took, in_time.launched, in_time.probed),
+        (Duration::from_secs(45), 1, 7)
     );
-    assert_eq!(in_time.probed(), 4);
 
     for (state, said) in [
         (ChildState::Running, "left running"),
@@ -150,21 +213,95 @@ async fn the_wait_for_a_started_server_is_bounded() -> TestResult {
             "no such process",
         ),
     ] {
-        let too_late = probing(vec![Probe::Refused; 4], Probe::Up);
-        let mut launcher = FakeLauncher {
-            state,
-            ..FakeLauncher::default()
-        };
-        let waited = tokio::time::timeout(
-            PATIENCE,
-            start_or_connect(too_late.as_ref(), &mut launcher, true, THREE_CHECKS),
-        )
-        .await?;
-        let why = err_of(waited)?;
-        assert!(why.contains("3 checks") && why.contains(said), "{why}");
-        assert_eq!((launcher.launched(), too_late.probed()), (1, 4));
+        let too_late = wait(vec![Probe::Refused; 7], Probe::Up, seven, state).await;
+        let why = err_of(too_late.arrival)?;
+        assert!(
+            why.contains("within 45 seconds") && why.contains(said),
+            "{why}"
+        );
+        assert_eq!(
+            (too_late.took, too_late.launched, too_late.probed),
+            (Duration::from_secs(45), 1, 7)
+        );
     }
+
+    // A check that costs more than what is left is given up when the time is up: the sixth
+    // one after the launch takes 8 s, is started at 43 s, and would have answered at 51 s.
+    let cut_off = wait(
+        vec![Probe::Refused; 6],
+        Probe::Up,
+        Duration::from_secs(8),
+        ChildState::Running,
+    )
+    .await;
+    err_of(cut_off.arrival)?;
+    assert_eq!((cut_off.took, cut_off.probed), (Duration::from_secs(45), 7));
+
+    // A check that never answers does not hold the relay either.
+    let hanging = wait(
+        vec![Probe::Refused],
+        Probe::Up,
+        Duration::from_secs(1_000_000),
+        ChildState::Running,
+    )
+    .await;
+    err_of(hanging.arrival)?;
+    assert_eq!((hanging.took, hanging.probed), (Duration::from_secs(45), 2));
     Ok(())
+}
+
+/// While it waits the relay says what it is doing: at the launch, and then every ten seconds
+/// by the clock, whether the checks are quick, slow or never answer. It says nothing when it
+/// only connects.
+#[tokio::test]
+async fn a_relay_that_waits_for_its_server_says_so_at_least_every_ten_seconds() -> TestResult {
+    for cost in [
+        Duration::ZERO,
+        Duration::from_secs(7),
+        Duration::from_secs(1_000_000),
+    ] {
+        let waited = wait(Vec::new(), Probe::Refused, cost, ChildState::Running).await;
+        err_of(waited.arrival)?;
+        let times: Vec<u64> = waited.said.iter().map(|(at, _)| *at).collect();
+        assert_eq!(times, [0, 10, 20, 30, 40], "{cost:?}: {:?}", waited.said);
+        let first = some(waited.said.first(), "the first word")?;
+        assert!(
+            first.1.contains("started the okf-jawn server") && first.1.contains("up to 45 seconds"),
+            "{}",
+            first.1
+        );
+        let last = some(waited.said.last(), "the last word")?;
+        assert_eq!(
+            last.1,
+            "still waiting for the okf-jawn server to answer (40 of 45 seconds)"
+        );
+    }
+    let connected = wait(
+        Vec::new(),
+        Probe::Up,
+        Duration::ZERO,
+        ChildState::NotStarted,
+    )
+    .await;
+    assert_eq!(
+        (connected.arrival, connected.said, connected.launched),
+        (Ok(Arrival::Connected), Vec::new(), 0)
+    );
+    Ok(())
+}
+
+/// The default wait is the stated one: 45 seconds in all, a check every half second, and a
+/// word at least every ten seconds.
+#[test]
+fn mcp_stdio_default_start_wait_is_the_stated_one() {
+    assert_eq!(
+        StartPolicy::default(),
+        StartPolicy {
+            wait: Duration::from_secs(45),
+            pause: Duration::from_millis(500),
+            report_every: Duration::from_secs(10),
+        }
+    );
 }
 
 /// The service is not running and cannot be started: stderr says why, the exit code is 1,
@@ -193,7 +330,8 @@ async fn a_service_that_cannot_be_started_is_explained_and_the_relay_exits_1() -
     Ok(())
 }
 
-/// A relay that started the server says so on stderr, then relays as usual.
+/// A relay that started the server says so on stderr, when it starts it and when it answers,
+/// then relays as usual.
 #[tokio::test]
 async fn a_started_service_is_announced_on_stderr_and_then_used() -> TestResult {
     let transport = FakeTransport::probing(
@@ -206,11 +344,12 @@ async fn a_started_service_is_announced_on_stderr_and_then_used() -> TestResult 
     let ran = relay(setup, request(&json!(1), "ping", &json!({})).as_bytes()).await?;
     assert_eq!(ran.code, 0);
     assert_eq!(launcher.launched(), 1);
-    assert!(
-        ran.stderr
-            .starts_with("okf-jawn mcp: started the okf-jawn service; it is left running\n"),
-        "{}",
-        ran.stderr
+    assert_eq!(
+        ran.stderr,
+        "okf-jawn mcp: no service answers at the server address; started the okf-jawn server \
+         and waiting up to 45 seconds for it to answer\n\
+         okf-jawn mcp: the okf-jawn server the relay started answers; it is left running when \
+         the relay ends\n"
     );
     assert_eq!(transport.posts()?.len(), 1);
     Ok(())

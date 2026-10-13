@@ -8,12 +8,13 @@
 //! service: the one it started is left running, because another client or the browser may be
 //! using it.
 //!
-//! The wait is bounded by [`StartPolicy`]: `checks` liveness checks, `pause` apart, each of
-//! which the transport bounds itself.
+//! The wait is bounded by [`StartPolicy`]: its whole time is counted on a [`Clock`] from the
+//! launch, whatever one liveness check costs, and the relay says through [`Progress`] that it
+//! is waiting.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::transport::{Probe, Transport};
 
@@ -78,10 +79,40 @@ pub struct ProcessLauncher {
 /// How long the relay waits for a service it started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StartPolicy {
-    /// How many liveness checks follow the launch.
-    pub checks: u32,
-    /// The pause before each of them.
+    /// The whole wait, counted on the clock from the launch.
+    pub wait: Duration,
+    /// The pause before each liveness check.
     pub pause: Duration,
+    /// How often, at least, the relay says that it is still waiting.
+    pub report_every: Duration,
+}
+
+/// The process's own clock.
+#[derive(Debug, Clone, Copy)]
+pub struct SystemClock {
+    started: Instant,
+}
+
+/// The wait for a started server: its clock, where it reports, and its times.
+struct Watch<'wait, C, P> {
+    clock: &'wait C,
+    progress: &'wait mut P,
+    /// When the server was launched.
+    started: Duration,
+    /// When the wait is over.
+    deadline: Duration,
+    /// When the relay is next due to say that it still waits.
+    report_at: Duration,
+    policy: StartPolicy,
+}
+
+/// The clock the wait for a started server runs on. Tests pass one that they move themselves.
+pub trait Clock {
+    /// The time since a fixed moment.
+    fn now(&self) -> Duration;
+
+    /// Complete once `duration` has passed.
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()>;
 }
 
 /// Starts the service process and reports whether it is still running.
@@ -96,6 +127,11 @@ pub trait Launcher {
     fn state(&mut self) -> ChildState;
 }
 
+/// Where the relay says what it is doing while it waits for a server it started.
+pub trait Progress {
+    /// Say one line.
+    fn say(&mut self, text: &str) -> impl Future<Output = ()>;
+}
 /// The service's bind setting, as `deploy/.env.example` names it.
 const BIND_VARIABLE: &str = "OKF_BIND";
 
@@ -115,17 +151,67 @@ const OWN_GROUP: i32 = 0;
 const SERVER_PROGRAM: &str = "okf-jawn-server";
 
 impl Default for StartPolicy {
-    /// Sixty checks, half a second apart: about thirty seconds where a refused connection is
-    /// reported at once, and about two minutes on Windows, which takes about two seconds to
-    /// report one.
+    /// Forty-five seconds in all, under the sixty that MCP hosts commonly give `initialize`;
+    /// a check every half second; and a word at least every ten seconds.
     fn default() -> Self {
         Self {
-            checks: 60,
+            wait: Duration::from_secs(45),
             pause: Duration::from_millis(500),
+            report_every: Duration::from_secs(10),
         }
     }
 }
 
+impl Clock for SystemClock {
+    fn now(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> {
+        tokio::time::sleep(duration)
+    }
+}
+
+impl Default for SystemClock {
+    fn default() -> Self {
+        Self {
+            started: Instant::now(),
+        }
+    }
+}
+
+impl<C: Clock, P: Progress> Watch<'_, C, P> {
+    /// Wait for `work`, saying on the way that the relay still waits.
+    ///
+    /// Returns `None` when the wait's time is up first: `work` is then dropped, however far
+    /// it had come, and nothing is started once the time is up. Work that ends exactly when
+    /// the time is up still counts.
+    async fn until<F: Future>(&mut self, work: F) -> Option<F::Output> {
+        let mut work = std::pin::pin!(work);
+        loop {
+            let now = self.clock.now();
+            if now >= self.deadline {
+                return None;
+            }
+            if now >= self.report_at {
+                self.report_at = self.report_at.saturating_add(self.policy.report_every);
+                self.progress
+                    .say(&format!(
+                        "still waiting for the okf-jawn server to answer ({} of {} seconds)",
+                        now.saturating_sub(self.started).as_secs(),
+                        self.policy.wait.as_secs()
+                    ))
+                    .await;
+            }
+            let next = self.report_at.min(self.deadline);
+            tokio::select! {
+                biased;
+                output = &mut work => return Some(output),
+                () = self.clock.sleep(next.saturating_sub(now)) => {}
+            }
+        }
+    }
+}
 impl ProcessLauncher {
     /// The command that starts the server and how it is cut loose from the relay's terminal,
     /// or `None` when no executable is known.
@@ -217,13 +303,21 @@ pub fn server_beside(cli: &Path) -> PathBuf {
 
 /// Connect to the running service, or start the local one and wait for it.
 ///
+/// The wait for a started server is `policy.wait` on `clock`, counted from the launch,
+/// whatever one liveness check costs: a check still running when the time is up is given up.
+/// (The one check before the launch is bounded by the transport alone.) While it waits the
+/// relay says so through `progress`: once at the launch, and then every
+/// `policy.report_every` at the latest.
+///
 /// # Errors
 /// Returns, in plain words, why no service is running and none could be started.
-pub async fn start_or_connect<T: Transport, L: Launcher>(
+pub async fn start_or_connect<T: Transport, L: Launcher, C: Clock, P: Progress>(
     transport: &T,
     launcher: &mut L,
     loopback: bool,
     policy: StartPolicy,
+    clock: &C,
+    progress: &mut P,
 ) -> Result<Arrival, String> {
     match transport.probe().await {
         Probe::Up => return Ok(Arrival::Connected),
@@ -253,30 +347,44 @@ pub async fn start_or_connect<T: Transport, L: Launcher>(
              okf-jawn-server executable with --server-bin or OKF_JAWN_SERVER_BIN"
         )
     })?;
-    for _ in 0..policy.checks {
-        tokio::time::sleep(policy.pause).await;
-        if transport.probe().await == Probe::Up {
-            return Ok(Arrival::Started);
+    let seconds = policy.wait.as_secs();
+    let started = clock.now();
+    progress
+        .say(&format!(
+            "no service answers at the server address; started the okf-jawn server and waiting \
+             up to {seconds} seconds for it to answer"
+        ))
+        .await;
+    let mut watch = Watch {
+        clock,
+        progress,
+        started,
+        deadline: started.saturating_add(policy.wait),
+        report_at: started.saturating_add(policy.report_every),
+        policy,
+    };
+    while watch.until(clock.sleep(policy.pause)).await.is_some() {
+        match watch.until(transport.probe()).await {
+            Some(Probe::Up) => return Ok(Arrival::Started),
+            Some(_) => {}
+            None => break,
         }
     }
     Err(match launcher.state() {
         ChildState::Exited(code) => format!(
-            "The server process the relay started ended{} and no service answered after {} \
-             checks. If another process owns the data directory, it is not answering at the \
-             server address",
+            "The server process the relay started ended{} and no service answered within \
+             {seconds} seconds. If another process owns the data directory, it is not answering \
+             at the server address",
             code.map(|code| format!(" with exit code {code}"))
-                .unwrap_or_default(),
-            policy.checks
+                .unwrap_or_default()
         ),
         ChildState::Unknown(why) => format!(
-            "The relay started the server, but no service answered after {} checks, and the \
-             server process's state could not be read: {why}",
-            policy.checks
+            "The relay started the server, but no service answered within {seconds} seconds, \
+             and the server process's state could not be read: {why}"
         ),
         ChildState::Running | ChildState::NotStarted => format!(
-            "The relay started the server, but no service answered after {} checks; the \
-             server process is left running",
-            policy.checks
+            "The relay started the server, but no service answered within {seconds} seconds; \
+             the server process is left running"
         ),
     })
 }

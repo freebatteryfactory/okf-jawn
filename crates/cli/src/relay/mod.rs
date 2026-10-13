@@ -24,8 +24,8 @@
 pub use self::frame::{Frame, Frames};
 pub use self::http::HttpTransport;
 pub use self::launch::{
-    Arrival, ChildState, Detachment, Launcher, ProcessLauncher, StartPolicy, server_beside,
-    start_or_connect,
+    Arrival, ChildState, Clock, Detachment, Launcher, ProcessLauncher, Progress, StartPolicy,
+    SystemClock, server_beside, start_or_connect,
 };
 pub use self::session::{Limits, Relay, serve};
 pub use self::sse::EventParser;

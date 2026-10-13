@@ -322,12 +322,14 @@ async fn nothing_but_protocol_messages_reaches_stdout() -> TestResult {
         assert_eq!(answer.get("jsonrpc"), Some(&json!("2.0")));
     }
     let notes: Vec<&str> = ran.stderr.lines().collect();
-    assert_eq!(notes.len(), 4, "{}", ran.stderr);
+    // Two of the five are what the relay says of the server it started: that it waits for it,
+    // and that it answers.
+    assert_eq!(notes.len(), 5, "{}", ran.stderr);
     for note in &notes {
         assert!(note.starts_with("okf-jawn mcp: "), "{note}");
     }
     assert!(
-        ran.stderr.contains("started the okf-jawn service"),
+        ran.stderr.contains("started the okf-jawn server"),
         "{}",
         ran.stderr
     );

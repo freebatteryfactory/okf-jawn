@@ -17,7 +17,9 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::credential::Credential;
 use crate::endpoint::Endpoint;
-use crate::relay::{HttpTransport, Limits, ProcessLauncher, Relay, StartPolicy, server_beside};
+use crate::relay::{
+    HttpTransport, Limits, ProcessLauncher, Relay, StartPolicy, SystemClock, server_beside,
+};
 use crate::{RELAY_COMMAND, TOKEN_VARIABLE};
 
 /// The standard streams of one run; tests pass in-memory ones.
@@ -179,7 +181,7 @@ fn endpoint(selected: &ArgMatches) -> Result<Endpoint, ApiError> {
 fn relay(
     selected: &ArgMatches,
     environment: &dyn Fn(&str) -> Option<String>,
-) -> Result<Relay<HttpTransport, ProcessLauncher>, ApiError> {
+) -> Result<Relay<HttpTransport, ProcessLauncher, SystemClock>, ApiError> {
     let secret = match selected.get_one::<PathBuf>("token-file") {
         Some(path) => Credential::from_file(path)?,
         None => Credential::from_environment(environment, TOKEN_VARIABLE)?.ok_or_else(|| {
@@ -205,6 +207,7 @@ fn relay(
         launcher: ProcessLauncher::new(program, endpoint.bind_address()),
         loopback: endpoint.is_loopback(),
         start: StartPolicy::default(),
+        clock: SystemClock::default(),
         limits,
         secret,
     })
