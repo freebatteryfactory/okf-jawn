@@ -126,6 +126,11 @@ pub async fn closed() -> Outcome<SocketAddr> {
     Ok(listener.local_addr()?)
 }
 
+/// An event-stream answer whose body ends when the connection closes.
+pub fn events(body: &str) -> String {
+    format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}")
+}
+
 /// A JSON answer.
 pub fn json(status: &str, body: &str) -> String {
     answer(status, &[("content-type", "application/json")], body)

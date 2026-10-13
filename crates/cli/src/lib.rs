@@ -1,13 +1,15 @@
-//! The `okf-jawn` command line: one subcommand per canonical operation.
+//! The `okf-jawn` command line: one subcommand per canonical operation, and the `mcp --stdio` relay.
 //!
 //! The executable is a client of the running service. It opens no store and holds no data
-//! directory: an operation is one authenticated HTTP request. Subcommands are built from the
-//! canonical operation table, so a new operation is a new command without a second schema.
+//! directory: an operation is one authenticated HTTP request, and the relay forwards MCP
+//! messages to the service's MCP endpoint. Subcommands are built from the canonical operation
+//! table, so a new operation is a new command without a second schema.
 //!
-//! No credential is an argument. The bearer token of an operation is read from the
-//! environment ([`TOKEN_VARIABLE`]).
+//! No credential is an argument. The bearer token of an operation and the connector credential
+//! of the relay are read from the environment ([`TOKEN_VARIABLE`]); the relay also accepts a
+//! file named by `--token-file`.
 
-use clap::{Arg, Command};
+use clap::{Arg, ArgAction, ArgGroup, Command, value_parser};
 use okf_jawn_contract::metadata::operations;
 
 pub use crate::credential::Credential;
@@ -17,7 +19,13 @@ pub use crate::run::{Streams, report, run};
 /// The local service address the CLI, the workspace UI and the examples share (SPEC section 2).
 pub const DEFAULT_SERVER: &str = "http://127.0.0.1:7711";
 
-/// The environment variable that carries the bearer token.
+/// The subcommand that runs the stdio relay.
+pub const RELAY_COMMAND: &str = "mcp";
+
+/// The environment variable that names the server executable the relay starts.
+pub const SERVER_BIN_VARIABLE: &str = "OKF_JAWN_SERVER_BIN";
+
+/// The environment variable that carries the bearer token or connector credential.
 pub const TOKEN_VARIABLE: &str = "OKF_JAWN_TOKEN";
 
 /// Construct command parsing and help without contacting a server.
@@ -57,10 +65,50 @@ pub fn command() -> Command {
         }
         command = command.subcommand(child);
     }
-    command
+    command.subcommand(relay_command())
+}
+
+/// The `mcp` subcommand: the stdio relay of SPEC section 11.
+fn relay_command() -> Command {
+    Command::new(RELAY_COMMAND)
+        .about(
+            "Relay MCP messages between a local client's standard streams and the running \
+             service, starting the local service when none is running",
+        )
+        .after_help(
+            "The connector credential is read from the OKF_JAWN_TOKEN environment variable, \
+             or from the first line of the file named by --token-file. It is never an argument.",
+        )
+        .arg(
+            Arg::new("stdio")
+                .long("stdio")
+                .action(ArgAction::SetTrue)
+                .help("Speak MCP over standard input and output, one JSON-RPC message per line"),
+        )
+        // The relay speaks over exactly one transport, and stdio is the only one.
+        .group(ArgGroup::new("transport").arg("stdio").required(true))
+        .arg(
+            Arg::new("token-file")
+                .long("token-file")
+                .value_name("PATH")
+                .value_parser(value_parser!(std::path::PathBuf))
+                .help("Read the connector credential from the first line of this file"),
+        )
+        .arg(
+            Arg::new("server-bin")
+                .long("server-bin")
+                .env(SERVER_BIN_VARIABLE)
+                .value_name("PATH")
+                .value_parser(value_parser!(std::path::PathBuf))
+                .help(
+                    "The server executable to start when no local service is running \
+                     (default: okf-jawn-server beside this executable)",
+                ),
+        )
 }
 
 mod credential;
 mod endpoint;
+pub mod relay;
 mod request;
 mod run;

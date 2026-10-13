@@ -1,4 +1,4 @@
-//! The one entry point: parse the arguments, then run an operation.
+//! The one entry point: parse the arguments, then run an operation or the relay.
 //!
 //! Exit codes: 0 for success, help and version; 2 for a usage error, as clap reports it; 1 for
 //! every other failure, which is written to the error stream in plain words with its error
@@ -7,22 +7,25 @@
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::ArgMatches;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::metadata::operations;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
-use crate::TOKEN_VARIABLE;
 use crate::credential::Credential;
 use crate::endpoint::Endpoint;
+use crate::relay::{HttpTransport, Limits, ProcessLauncher, Relay, StartPolicy, server_beside};
+use crate::{RELAY_COMMAND, TOKEN_VARIABLE};
 
 /// The standard streams of one run; tests pass in-memory ones.
 #[derive(Debug)]
 pub struct Streams<I, O, E> {
-    /// Where an operation's `-` input is read from.
+    /// Where an operation's `-` input and the relay's messages are read from.
     pub stdin: I,
-    /// Where a response body is written.
+    /// Where a response body or the relay's protocol messages are written.
     pub stdout: O,
     /// Where failures and diagnostics are written.
     pub stderr: E,
@@ -33,8 +36,8 @@ const FAILURE: u8 = 1;
 
 /// Run the command line `arguments` (the program name first) and return the exit code.
 ///
-/// `environment` looks up one environment variable; the bearer token is read through it and
-/// from nowhere in the arguments.
+/// `environment` looks up one environment variable; the bearer token and the connector
+/// credential are read through it and from nowhere else in the arguments.
 pub async fn run<A, I, O, E>(
     arguments: A,
     environment: &dyn Fn(&str) -> Option<String>,
@@ -73,6 +76,22 @@ where
         )
         .await;
     };
+    if name == RELAY_COMMAND {
+        return match relay(selected, environment) {
+            Ok(relay) => {
+                crate::relay::serve(
+                    relay,
+                    Streams {
+                        stdin,
+                        stdout,
+                        stderr,
+                    },
+                )
+                .await
+            }
+            Err(error) => fail(&mut stderr, None, &error).await,
+        };
+    }
     let credential = match Credential::from_environment(environment, TOKEN_VARIABLE) {
         Ok(credential) => credential,
         Err(error) => return fail(&mut stderr, None, &error).await,
@@ -151,4 +170,42 @@ fn endpoint(selected: &ArgMatches) -> Result<Endpoint, ApiError> {
             .get_one::<String>("server")
             .map_or(crate::DEFAULT_SERVER, String::as_str),
     )
+}
+
+/// Assemble the production relay from the `mcp` command's arguments and the environment.
+///
+/// The credential is resolved here, before anything is read from standard input and before
+/// the service is asked whether it is running.
+fn relay(
+    selected: &ArgMatches,
+    environment: &dyn Fn(&str) -> Option<String>,
+) -> Result<Relay<HttpTransport, ProcessLauncher>, ApiError> {
+    let secret = match selected.get_one::<PathBuf>("token-file") {
+        Some(path) => Credential::from_file(path)?,
+        None => Credential::from_environment(environment, TOKEN_VARIABLE)?.ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::Unauthenticated,
+                "No connector credential: set OKF_JAWN_TOKEN, or name a file with --token-file",
+            )
+        })?,
+    };
+    let endpoint = endpoint(selected)?;
+    let limits = Limits::default();
+    let transport = HttpTransport::new(&endpoint, &secret, limits.answer_bytes)?;
+    let program = selected
+        .get_one::<PathBuf>("server-bin")
+        .cloned()
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .map(|executable| server_beside(&executable))
+        });
+    Ok(Relay {
+        transport: Arc::new(transport),
+        launcher: ProcessLauncher::new(program, endpoint.bind_address()),
+        loopback: endpoint.is_loopback(),
+        start: StartPolicy::default(),
+        limits,
+        secret,
+    })
 }

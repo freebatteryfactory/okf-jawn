@@ -1,0 +1,27 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-mcp 1  "mcp " 
+.SH NAME
+okf\-jawn\-mcp \- Relay MCP messages between a local client\*(Aqs standard streams and the running service, starting the local service when none is running
+.SH SYNOPSIS
+\fBokf\-jawn mcp\fR [\fB\-\-server\fR] [\fB\-\-token\-file\fR] [\fB\-\-server\-bin\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fB\-\-stdio\fR> 
+.SH DESCRIPTION
+Relay MCP messages between a local client\*(Aqs standard streams and the running service, starting the local service when none is running
+.SH OPTIONS
+.TP
+\fB\-\-server\fR \fI<URL>\fR [default: http://127.0.0.1:7711]
+The service address: HTTPS, or HTTP for a loopback address
+.TP
+\fB\-\-stdio\fR
+Speak MCP over standard input and output, one JSON\-RPC message per line
+.TP
+\fB\-\-token\-file\fR \fI<PATH>\fR
+Read the connector credential from the first line of this file
+.TP
+\fB\-\-server\-bin\fR \fI<PATH>\fR
+The server executable to start when no local service is running (default: okf\-jawn\-server beside this executable)
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.SH EXTRA
+The connector credential is read from the OKF_JAWN_TOKEN environment variable, or from the first line of the file named by \-\-token\-file. It is never an argument.

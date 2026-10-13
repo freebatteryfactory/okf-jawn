@@ -1,13 +1,13 @@
 //! The command surface against the canonical operation table.
 //!
 //! Every operation is a command under its canonical id with its agent alias and its operator
-//! alias; nothing else is a command; no two names collide; and no command takes a credential
-//! as an argument.
+//! alias; nothing else is a command but the relay; no two names collide; and no command takes
+//! a credential as an argument.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use clap::Command;
-use okf_jawn_cli::command;
+use okf_jawn_cli::{RELAY_COMMAND, command};
 use okf_jawn_contract::metadata::operations;
 
 use crate::check::{TestResult, some};
@@ -24,6 +24,9 @@ const SECRET_WORDS: [&str; 8] = [
     "auth",
     "key",
 ];
+
+/// The one argument that may name a secret word: it takes a path, not the credential.
+const TOKEN_FILE: &str = "token-file";
 
 /// Every name a subcommand answers to: its own and its aliases.
 fn names(child: &Command) -> Vec<String> {
@@ -72,7 +75,7 @@ fn every_operation_is_a_command_under_its_canonical_id_with_its_aliases() -> Tes
 }
 
 #[test]
-fn every_command_is_an_operation() {
+fn every_command_is_an_operation_or_the_relay() {
     let commands: BTreeSet<String> = command()
         .get_subcommands()
         .map(|child| child.get_name().to_owned())
@@ -80,6 +83,7 @@ fn every_command_is_an_operation() {
     let expected: BTreeSet<String> = operations()
         .into_iter()
         .map(|operation| operation.id.to_owned())
+        .chain([RELAY_COMMAND.to_owned()])
         .collect();
     assert_eq!(commands, expected);
 }
@@ -113,6 +117,15 @@ fn no_command_takes_a_credential_as_an_argument() {
         for argument in owner.get_arguments() {
             seen = seen.saturating_add(1);
             let id = argument.get_id().as_str();
+            if id == TOKEN_FILE {
+                assert_eq!(argument.get_long(), Some(TOKEN_FILE));
+                assert_eq!(
+                    argument.get_env(),
+                    None,
+                    "a credential path, not a credential"
+                );
+                continue;
+            }
             let mut spellings = vec![id.to_owned()];
             spellings.extend(argument.get_long().map(str::to_owned));
             spellings.extend(
@@ -147,4 +160,16 @@ fn no_command_takes_a_credential_as_an_argument() {
         }
     }
     assert!(seen > operations().len(), "walked {seen} arguments");
+}
+
+#[test]
+fn the_relay_command_requires_the_stdio_flag() -> TestResult {
+    let refused = command().try_get_matches_from(["okf-jawn", RELAY_COMMAND]);
+    assert!(
+        refused.is_err(),
+        "mcp without --stdio must be a usage error"
+    );
+    let matches = command().try_get_matches_from(["okf-jawn", RELAY_COMMAND, "--stdio"])?;
+    assert_eq!(matches.subcommand_name(), Some(RELAY_COMMAND));
+    Ok(())
 }

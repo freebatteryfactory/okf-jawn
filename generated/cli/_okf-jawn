@@ -837,6 +837,16 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help]' \
 && ret=0
 ;;
+(mcp)
+_arguments "${_arguments_options[@]}" : \
+'--token-file=[Read the connector credential from the first line of this file]:PATH:_files' \
+'--server-bin=[The server executable to start when no local service is running (default\: okf-jawn-server beside this executable)]:PATH:_files' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
+'--stdio[Speak MCP over standard input and output, one JSON-RPC message per line]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
 (help)
 _arguments "${_arguments_options[@]}" : \
 ":: :_okf-jawn__subcmd__help_commands" \
@@ -1157,6 +1167,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(mcp)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (help)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -1274,6 +1288,7 @@ _okf-jawn_commands() {
 'revoke_connector:Revoke a local connector credential immediately. Local owner only.' \
 'get_health:Read process liveness, not feature qualification.' \
 'get_readiness:Read configured dependency readiness.' \
+'mcp:Relay MCP messages between a local client'\''s standard streams and the running service, starting the local service when none is running' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'okf-jawn commands' commands "$@"
@@ -1568,6 +1583,7 @@ _okf-jawn__subcmd__help_commands() {
 'revoke_connector:Revoke a local connector credential immediately. Local owner only.' \
 'get_health:Read process liveness, not feature qualification.' \
 'get_readiness:Read configured dependency readiness.' \
+'mcp:Relay MCP messages between a local client'\''s standard streams and the running service, starting the local service when none is running' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'okf-jawn help commands' commands "$@"
@@ -1847,6 +1863,11 @@ _okf-jawn__subcmd__help__subcmd__log_items_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn help log_items commands' commands "$@"
 }
+(( $+functions[_okf-jawn__subcmd__help__subcmd__mcp_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__mcp_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help mcp commands' commands "$@"
+}
 (( $+functions[_okf-jawn__subcmd__help__subcmd__move_item_commands] )) ||
 _okf-jawn__subcmd__help__subcmd__move_item_commands() {
     local commands; commands=()
@@ -2021,6 +2042,11 @@ _okf-jawn__subcmd__list_workspaces_commands() {
 _okf-jawn__subcmd__log_items_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn log_items commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__mcp_commands] )) ||
+_okf-jawn__subcmd__mcp_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn mcp commands' commands "$@"
 }
 (( $+functions[_okf-jawn__subcmd__move_item_commands] )) ||
 _okf-jawn__subcmd__move_item_commands() {

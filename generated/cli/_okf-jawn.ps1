@@ -127,6 +127,7 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('revoke_connector', 'revoke_connector', [CompletionResultType]::ParameterValue, 'Revoke a local connector credential immediately. Local owner only.')
             [CompletionResult]::new('get_health', 'get_health', [CompletionResultType]::ParameterValue, 'Read process liveness, not feature qualification.')
             [CompletionResult]::new('get_readiness', 'get_readiness', [CompletionResultType]::ParameterValue, 'Read configured dependency readiness.')
+            [CompletionResult]::new('mcp', 'mcp', [CompletionResultType]::ParameterValue, 'Relay MCP messages between a local client''s standard streams and the running service, starting the local service when none is running')
             [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
             break
         }
@@ -837,6 +838,15 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
+        'okf-jawn;mcp' {
+            [CompletionResult]::new('--token-file', '--token-file', [CompletionResultType]::ParameterName, 'Read the connector credential from the first line of this file')
+            [CompletionResult]::new('--server-bin', '--server-bin', [CompletionResultType]::ParameterName, 'The server executable to start when no local service is running (default: okf-jawn-server beside this executable)')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
+            [CompletionResult]::new('--stdio', '--stdio', [CompletionResultType]::ParameterName, 'Speak MCP over standard input and output, one JSON-RPC message per line')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
         'okf-jawn;help' {
             [CompletionResult]::new('list_workspaces', 'list_workspaces', [CompletionResultType]::ParameterValue, 'List the workspaces this connection may read, each with its current head revision. Treat head as a pin: pass it to later reads as at = {"kind": "revision", "revision": head} so every call sees one consistent state, and compare it with a later listing to detect change.')
             [CompletionResult]::new('create_workspace', 'create_workspace', [CompletionResultType]::ParameterValue, 'Create a blank workspace; no example content is inserted.')
@@ -915,6 +925,7 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('revoke_connector', 'revoke_connector', [CompletionResultType]::ParameterValue, 'Revoke a local connector credential immediately. Local owner only.')
             [CompletionResult]::new('get_health', 'get_health', [CompletionResultType]::ParameterValue, 'Read process liveness, not feature qualification.')
             [CompletionResult]::new('get_readiness', 'get_readiness', [CompletionResultType]::ParameterValue, 'Read configured dependency readiness.')
+            [CompletionResult]::new('mcp', 'mcp', [CompletionResultType]::ParameterValue, 'Relay MCP messages between a local client''s standard streams and the running service, starting the local service when none is running')
             [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
             break
         }
@@ -1147,6 +1158,9 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             break
         }
         'okf-jawn;help;get_readiness' {
+            break
+        }
+        'okf-jawn;help;mcp' {
             break
         }
         'okf-jawn;help;help' {
