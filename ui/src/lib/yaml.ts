@@ -130,15 +130,7 @@ export function deepestNesting(text: string): { depth: number; line: number } {
   let indent: number | null = 0;
   let indicators = 0;
   let open = 0;
-  let scalarNext = false;
   for (const token of new Lexer().lex(text)) {
-    if (scalarNext) {
-      // A scalar is text, whatever it holds; a block of text spans lines.
-      scalarNext = false;
-      line += token.split('\n').length - 1;
-      continue;
-    }
-    if (token === CST.SCALAR) scalarNext = true;
     if (token === '\n' || token === '\r\n') {
       line += 1;
       indent = 0;
@@ -161,7 +153,7 @@ export function deepestNesting(text: string): { depth: number; line: number } {
     else if (token === '-' || token === '?' || (token === ':' && open === 0)) indicators += 1;
     const depth = indents.length + indicators + open;
     if (depth > deepest.depth) deepest = { depth, line };
-    // A quoted text can span lines.
+    // A text is one token whatever it holds, and can span lines.
     line += token.split('\n').length - 1;
   }
   return deepest;

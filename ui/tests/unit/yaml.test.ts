@@ -268,6 +268,10 @@ describe('the bounds that keep the page from stalling', () => {
     expect(deepestNesting("a: '[[[['\n").depth).toBe(2);
     expect(deepestNesting('a: |\n  [[[[ b: c: d:\n  - - - -\n').depth).toBe(2);
     expect(deepestNesting('# [[[[ a: b: c:\na: 1\n').depth).toBe(2);
+    // Comment lines stand in no block, however they are indented.
+    const comments = Array.from({ length: 40 }, (_, step) => `${' '.repeat(step + 1)}# c\n`);
+    expect(deepestNesting(`a: 1\n${comments.join('')}b: 2\n`).depth).toBe(2);
+    expect(value(`a: 1\n${comments.join('')}b: 2\n`)).toEqual({ a: 1, b: 2 });
     // Inside brackets a colon opens no level: the pairs of a mapping stand side by side.
     expect(deepestNesting('{a: 1, b: 2, c: 3, d: 4}\n').depth).toBe(2);
     // The first line that is the deepest, counted through a text that spans lines.

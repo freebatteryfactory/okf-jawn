@@ -995,3 +995,34 @@ describe('rules typed as YAML a moment before a press', () => {
     expect(prefix()).toHaveProperty('value', 'typed-');
   });
 });
+
+describe('whether there is something to save, a moment after typing', () => {
+  const yamlBox = async () => {
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    return findTextBox('The naming rules as YAML');
+  };
+
+  it('saves rules the text has just changed, though the page still showed them as unchanged', async () => {
+    const { api } = service();
+    await openRules();
+    const box = await yamlBox();
+    replaceText(box, textIn(box).replace(/prefix: .*/, 'prefix: 2026-'));
+    await userEvent.click(button('Save the rules'));
+    await waitFor(() => expect(api.callsTo(SET)).toHaveLength(1));
+    const sent = api.callsTo(SET).at(0)?.rules as NamingRules | undefined;
+    expect(sent?.rules.at(0)?.prefix).toBe('2026-');
+  });
+
+  it('sends nothing when the text has just put the rules back to the saved ones', async () => {
+    const { api } = service();
+    await openRules();
+    await setPrefix('2025-');
+    const box = await yamlBox();
+    replaceText(box, textIn(box).replace(/prefix: .*/, 'prefix: ""'));
+    await userEvent.click(button('Save the rules'));
+    await waitFor(() =>
+      expect(panel().textContent).toContain('These are the saved rules, unchanged.'),
+    );
+    expect(api.callsTo(SET)).toEqual([]);
+  });
+});
