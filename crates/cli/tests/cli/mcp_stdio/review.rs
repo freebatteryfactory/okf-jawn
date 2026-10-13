@@ -20,7 +20,7 @@ use okf_jawn_contract::transport::MAX_REQUEST_BODY_BYTES;
 use serde_json::json;
 
 use super::{notification, request, response};
-use crate::check::{TestResult, some};
+use crate::check::{TestResult, err_of, some};
 use crate::support::doubles::{FakeTransport, Setup, broken, relay};
 use crate::support::http::{Answering, json as json_answer};
 use crate::support::{
@@ -344,37 +344,121 @@ fn mcp_stdio_default_bounds_are_the_stated_ones() {
     assert_eq!(limits.closing, Duration::from_secs(120));
 }
 
-/// B7: the token file is read up to its bound and no further. A first line of exactly the
-/// bound is the credential; whatever its length, no more than the bound is ever taken from a
-/// file, so a file without a line feed costs a few kilobytes, not its size.
+/// What `Credential::from_file` makes of a file with `content`: the length of the
+/// `Authorization` value, or the refusal's words.
+fn read_token(content: &[u8]) -> Outcome<Result<usize, String>> {
+    let path = file("token-case", content)?;
+    let read = Credential::from_file(&path);
+    std::fs::remove_file(path)?;
+    Ok(match read {
+        Ok(credential) => Ok(credential.bearer()?.len()),
+        Err(error) => Err(error.message),
+    })
+}
+
+/// B7 and N1: the token file's first line is bounded, from both sides, and a longer line is
+/// refused, not cut. A line of exactly 8192 bytes is the credential, with a line feed, with a
+/// carriage return and a line feed, with a byte order mark before it, or with nothing after
+/// it; one byte more and the file is refused in words that say so.
+#[test]
+fn mcp_stdio_token_file_line_is_bounded_and_a_longer_line_is_refused() -> TestResult {
+    const BOUND: usize = 8192;
+    let header = "Bearer ".len().saturating_add(BOUND);
+    let longest = vec![b'b'; BOUND];
+    for (before, after) in [
+        (&b""[..], &b"\n"[..]),
+        (b"", b"\r\nsecond line\n"),
+        (b"", b""),
+        (b"\xEF\xBB\xBF", b"\r\n"),
+        (b"\xEF\xBB\xBF", b""),
+    ] {
+        let content = [before, &longest, after].concat();
+        assert_eq!(read_token(&content)?, Ok(header), "{before:?} {after:?}");
+    }
+    let too_long = vec![b'a'; BOUND.saturating_add(1)];
+    for (before, after) in [
+        (&b""[..], &b"\n"[..]),
+        (b"", b"\r\n"),
+        (b"", b""),
+        (b"\xEF\xBB\xBF", b"\n"),
+    ] {
+        let content = [before, &too_long, after].concat();
+        let why = err_of(read_token(&content)?)?;
+        assert!(
+            why.contains("is longer than 8192 bytes") && why.contains("token-case"),
+            "{why}"
+        );
+        assert!(!why.contains("aaaa"), "{why}");
+    }
+    for length in [10_000, 1_000_000] {
+        let why = err_of(read_token(&vec![b'a'; length])?)?;
+        assert!(why.contains("is longer than 8192 bytes"), "{why}");
+    }
+    Ok(())
+}
+
+/// B7: no more of a token file is read than the longest line, a mark and a line ending need,
+/// however long the file is: of 64 MiB without a line feed, 8198 bytes are read.
 #[test]
 fn mcp_stdio_token_file_is_read_within_its_bound() -> TestResult {
-    const BOUND: usize = 8192;
-    let bearer = |content: &[u8]| -> Outcome<Result<usize, String>> {
-        let path = file("bounded-token", content)?;
-        let read = Credential::from_file(&path);
-        std::fs::remove_file(path)?;
-        Ok(match read {
-            Ok(credential) => Ok(credential.bearer()?.len()),
-            Err(error) => Err(error.message),
-        })
-    };
-    let mut exact = vec![b'b'; BOUND];
-    exact.push(b'\n');
-    assert_eq!(bearer(&exact)?, Ok("Bearer ".len().saturating_add(BOUND)));
-    let mut with_return = vec![b'c'; BOUND.saturating_sub(1)];
-    with_return.extend_from_slice(b"\r\nsecond line\n");
-    assert_eq!(
-        bearer(&with_return)?,
-        Ok("Bearer ".len().saturating_add(BOUND).saturating_sub(1))
+    const LENGTH: u64 = 67_108_864;
+    let mut text = std::io::repeat(b'a').take(LENGTH);
+    let why = err_of(Credential::from_reader(
+        &mut text,
+        Path::new("the-token-file"),
+    ))?;
+    assert!(
+        why.message.contains("the-token-file") && why.message.contains("longer than 8192 bytes"),
+        "{}",
+        why.message
     );
-    for length in [BOUND.saturating_add(1), 10_000, 1_000_000] {
-        if let Ok(taken) = bearer(&vec![b'a'; length])? {
-            assert!(
-                taken <= "Bearer ".len().saturating_add(BOUND),
-                "{taken} bytes of a {length}-byte line were taken"
-            );
-        }
+    assert_eq!(LENGTH.saturating_sub(text.limit()), 8198);
+    Ok(())
+}
+
+/// N2: a UTF-8 byte order mark is not part of the credential, and UTF-16, which Windows
+/// PowerShell 5.1 writes with `>` and `Out-File`, is refused in words that say what the file
+/// is and how to write it. No refusal repeats what the file holds.
+#[test]
+fn mcp_stdio_token_file_encodings() -> TestResult {
+    assert_eq!(
+        read_token(b"\xEF\xBB\xBFzq7-with-mark\r\n")?,
+        Ok("Bearer zq7-with-mark".len())
+    );
+    assert_eq!(read_token(b"zq7-plain\n")?, Ok("Bearer zq7-plain".len()));
+    let little: Vec<u8> = "zq7-wide\r\n"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let big: Vec<u8> = "zq7-wide\r\n"
+        .encode_utf16()
+        .flat_map(u16::to_be_bytes)
+        .collect();
+    for content in [
+        little.clone(),
+        big.clone(),
+        [&b"\xFF\xFE"[..], &little].concat(),
+        [&b"\xFE\xFF"[..], &big].concat(),
+    ] {
+        let why = err_of(read_token(&content)?)?;
+        assert!(
+            why.contains("is UTF-16")
+                && why.contains("Write the file as UTF-8 or ASCII")
+                && why.contains("Set-Content -Encoding ascii")
+                && why.contains("token-case"),
+            "{why}"
+        );
+    }
+    for (content, said) in [
+        (&b"\nzq7-on-the-second-line\n"[..], "is empty"),
+        (b"", "is empty"),
+        (b"zq7\xff\xfe\n", "is not text"),
+        (b"zq7\0nul\n", "not usable"),
+        (b"zq7 two words\n", "not usable"),
+    ] {
+        let why = err_of(read_token(content)?)?;
+        assert!(why.contains(said), "{said}: {why}");
+        assert!(!why.contains("zq7"), "{why}");
     }
     Ok(())
 }

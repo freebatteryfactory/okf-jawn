@@ -1,6 +1,8 @@
 //! The bearer token of an operation and the connector credential of the relay.
 //!
-//! A credential comes from the environment or, for the relay, from the first line of a file.
+//! A credential comes from the environment or, for the relay, from the first line of a file
+//! (UTF-8 or ASCII, with or without a byte order mark; at most 8192 bytes, and a longer line
+//! is refused, not cut).
 //! It is never an argument. The type has no `Display` and its `Debug` prints no secret.
 //!
 //! Two functions keep the secret out of what the CLI writes:
@@ -48,8 +50,15 @@ struct Units<'line> {
     inside: bool,
 }
 
-/// Most bytes of a credential file's first line that are read.
+/// The UTF-8 byte order mark a credential file may begin with.
+const BYTE_ORDER_MARK: &[u8] = b"\xEF\xBB\xBF";
+
+/// The longest first line of a credential file that is taken as a credential, in bytes.
 const MAX_CREDENTIAL_BYTES: u64 = 8192;
+
+/// Most bytes ever read of a credential file: the longest line, a byte order mark, a carriage
+/// return and a line feed, and one byte more, which tells a longer line from the longest.
+const MAX_FIRST_LINE_BYTES: u64 = MAX_CREDENTIAL_BYTES + 6;
 
 /// A byte no credential holds and no UTF-8 text contains: what an escape decodes to when it
 /// stands for a character a credential cannot hold.
@@ -92,41 +101,55 @@ impl Credential {
     /// Read the credential on the first line of `path`.
     ///
     /// # Errors
-    /// Returns `InvalidInput` when the file cannot be read, when its first line is blank, or
-    /// when that line is not a usable credential. The line itself is never repeated.
+    /// Returns `InvalidInput` when the file cannot be read, and for each reason
+    /// [`Credential::from_reader`] gives. The line itself is never repeated.
     pub fn from_file(path: &Path) -> Result<Self, ApiError> {
-        let unreadable = |error: std::io::Error| {
-            ApiError::new(
-                ErrorCode::InvalidInput,
-                format!(
-                    "The credential file {} cannot be read: {error}",
-                    path.display()
-                ),
-            )
-        };
-        let file = std::fs::File::open(path).map_err(unreadable)?;
+        let file = std::fs::File::open(path).map_err(|error| unreadable(path, &error))?;
+        Self::from_reader(file, path)
+    }
+
+    /// Read the credential on the first line of `text`; `path` names the text in a refusal.
+    ///
+    /// The line ends at the first line feed, and a carriage return before it is not part of
+    /// it. A UTF-8 byte order mark at the start is skipped. A line longer than 8192 bytes is
+    /// refused, not cut. No more than that, a mark and a line ending are ever read, however
+    /// long the text is.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` when the text cannot be read, is UTF-16, has a first line that
+    /// is too long, empty or not UTF-8, or when that line is not a usable credential. The
+    /// line itself is never repeated.
+    pub fn from_reader<R: Read>(text: R, path: &Path) -> Result<Self, ApiError> {
+        let refused = |what: String| ApiError::new(ErrorCode::InvalidInput, what);
+        let file = format!("the credential file {}", path.display());
         let mut first = Vec::new();
-        BufReader::new(file.take(MAX_CREDENTIAL_BYTES))
+        BufReader::new(text.take(MAX_FIRST_LINE_BYTES))
             .read_until(b'\n', &mut first)
-            .map_err(unreadable)?;
-        let line = String::from_utf8(first).map_err(|_| {
-            ApiError::new(
-                ErrorCode::InvalidInput,
-                format!(
-                    "The first line of the credential file {} is not text",
-                    path.display()
-                ),
-            )
-        })?;
-        Self::parse(&line, "--token-file")?.ok_or_else(|| {
-            ApiError::new(
-                ErrorCode::InvalidInput,
-                format!(
-                    "The first line of the credential file {} is empty",
-                    path.display()
-                ),
-            )
-        })
+            .map_err(|error| unreadable(path, &error))?;
+        // UTF-16 carries a mark of its own, or shows as a NUL beside its first character.
+        if first.starts_with(&[0xFF, 0xFE])
+            || first.starts_with(&[0xFE, 0xFF])
+            || first.iter().take(2).any(|byte| *byte == 0)
+        {
+            return Err(refused(format!(
+                "The text of {file} is UTF-16, which Windows PowerShell writes with > and with \
+                 Out-File. Write the file as UTF-8 or ASCII, for example in PowerShell with \
+                 Set-Content -Encoding ascii"
+            )));
+        }
+        let line = first.strip_prefix(BYTE_ORDER_MARK).unwrap_or(&first);
+        let line = line.strip_suffix(b"\n").unwrap_or(line);
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if u64::try_from(line.len()).unwrap_or(u64::MAX) > MAX_CREDENTIAL_BYTES {
+            return Err(refused(format!(
+                "The first line of {file} is longer than {MAX_CREDENTIAL_BYTES} bytes, which no \
+                 connector credential is"
+            )));
+        }
+        let line = std::str::from_utf8(line)
+            .map_err(|_| refused(format!("The first line of {file} is not text")))?;
+        Self::parse(line, "--token-file")?
+            .ok_or_else(|| refused(format!("The first line of {file} is empty")))
     }
 
     /// Take a credential from raw text: surrounding whitespace is dropped, and blank is none.
@@ -270,6 +293,17 @@ impl<'line> Units<'line> {
             inside: false,
         }
     }
+}
+
+/// The refusal for a credential file that cannot be read.
+fn unreadable(path: &Path, error: &std::io::Error) -> ApiError {
+    ApiError::new(
+        ErrorCode::InvalidInput,
+        format!(
+            "The credential file {} cannot be read: {error}",
+            path.display()
+        ),
+    )
 }
 
 /// What the escape after a backslash stands for, and how many bytes spell it, the backslash
