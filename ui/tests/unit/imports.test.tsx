@@ -718,6 +718,30 @@ describe('uploading', () => {
     );
   });
 
+  it('reads too large as too large when it is the slot, asked again, that is refused', async () => {
+    const service = uploadService();
+    service.script.put.push((transfer, usual) => {
+      usual();
+      transfer.breakConnection();
+      return undefined;
+    });
+    setup(service);
+    await openImport();
+    choose('Choose files…', [fileOf('a.txt', 'abc')]);
+    upload();
+    await notUploaded('a.txt');
+    // Bytes were sent to this slot; now the service refuses the file itself, before any byte.
+    service.script.create.push(() => fail(413, 'too_large', 'at most 2 bytes per file'));
+    fireEvent.click(within(rowOf('a.txt')).getByRole('button', { name: 'Try again' }));
+    await waitFor(() =>
+      expect(rowOf('a.txt').textContent).toContain(
+        'Uploading a.txt: This file is larger than the service accepts.',
+      ),
+    );
+    expect(rowOf('a.txt').textContent).not.toContain('already holds part of this file');
+    expect(within(rowOf('a.txt')).queryByRole('button', { name: /again/i })).toBeNull();
+  });
+
   it('reads a first refusal of the bytes as too large for the service, with nothing left behind', async () => {
     const service = uploadService();
     service.script.put.push(() =>
