@@ -11,7 +11,7 @@
 //!   jobs, before the jobs go;
 //! - every connector's `workspace_ids` loses the workspace;
 //! - every completed mutation-ledger row of the workspace (`mutations.workspace_id`, the
-//!   workspace its request named or its response named at `RequestScope::RESPONSE_WORKSPACE`)
+//!   workspace its request writes or its response names at `RequestScope::RESPONSE_WORKSPACE`)
 //!   is emptied: its stored response (which may hold the workspace's name or an item's title)
 //!   is dropped and the row released, its identity kept. A retry under its key then re-runs
 //!   under the same `MutationId` and is refused by the purge (`guard`, and the catalog for a
@@ -20,8 +20,7 @@
 //!   (`purge_workspace`, `purge_item`) are kept: their response is the purge record, identities
 //!   and counts only, which outlives the workspace as `purges` does, so a retry of the purge
 //!   replays it. The response text is never searched, so another workspace's row that quotes
-//!   the workspace's identity is not touched. A live row from before records schema 2 has no
-//!   workspace, cannot be attributed and is left;
+//!   the workspace's identity is not touched;
 //! - in a ledger without the workspace column (a copy older than records schema 2) no row can
 //!   be attributed, so every completed row of the tenant but a purge's is emptied the same way,
 //!   whichever workspace it belonged to. Such a copy is a backup: its ledger is never consulted
@@ -34,6 +33,14 @@
 //!
 //! "Holds" means holds something a purge still removes or scrubs, so a database or archive
 //! already scrubbed of the workspace no longer holds it.
+//!
+//! Two known limits of the ledger step, in the live database:
+//!
+//! - A row completed before records schema 2 has no `workspace_id`, so the purge leaves its
+//!   response in place until the ledger drops the row: at the first `begin` that comes seven
+//!   days or more after the row completed (`mutations::RETENTION_SECONDS`).
+//! - A row whose `complete` lands after the purge's last pass over the rows (its step 5) keeps
+//!   its response until the ledger drops it the same way.
 
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::identity::PurgeId;

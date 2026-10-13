@@ -48,6 +48,13 @@
 //! response is dropped and the row released, its id kept), so a retry under the same key
 //! re-runs under the same `MutationId` and is refused by the purge, and no other workspace's
 //! row is touched.
+//!
+//! Two known limits of that purge:
+//! - A row completed before the ledger recorded workspaces (storage's records schema 2) has no
+//!   workspace, so a purge leaves its response in place until the row expires (a completed
+//!   row is kept seven days; see "Retention").
+//! - A row that completes after the purge's last pass over the ledger keeps its response until
+//!   the row expires.
 
 use std::collections::BTreeMap;
 
