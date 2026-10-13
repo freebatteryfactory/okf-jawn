@@ -2,9 +2,12 @@
 //!
 //! SPEC section 11: two explicit authentication entry paths selected by deployment
 //! configuration, and "a missing or invalid hosted configuration never falls back to local
-//! authentication". `OKF_AUTH_MODE` selects the path: `local`, or `workos` for hosted. An unset
-//! mode is local; any other value is refused, and `workos` with a missing or invalid setting is
-//! refused, so a hosted deployment either starts hosted or does not start.
+//! authentication". `OKF_AUTH_MODE` selects the path: `local`, or `workos` for hosted, spelled
+//! exactly (a value with surrounding whitespace is refused, not trimmed into a mode). An unset
+//! mode is local only when no `WORKOS_*` setting is present: hosted settings are never ignored.
+//! Any other value is refused, and `workos` with a missing or invalid setting is refused, so a
+//! hosted deployment either starts hosted or does not start. A hosted URL with a query, a
+//! fragment or user information is refused, naming its setting.
 //!
 //! Remote endpoints require HTTPS (SPEC section 2): every hosted URL is `https`. Locally the
 //! public origin may be `http` on loopback; that origin is only where the service answers, never
@@ -51,6 +54,15 @@ pub struct HostedConfig {
     pub redirect_uri: String,
 }
 
+/// The WorkOS settings; any of them present without a mode is refused.
+const HOSTED_SETTINGS: [&str; 5] = [
+    "WORKOS_CLIENT_ID",
+    "WORKOS_API_KEY",
+    "WORKOS_ISSUER",
+    "WORKOS_MCP_RESOURCE",
+    "WORKOS_REDIRECT_URI",
+];
+
 impl Debug for HostedConfig {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HostedConfig")
@@ -76,12 +88,29 @@ impl AuthConfig {
     /// Read the authentication settings through `lookup` (the process environment at startup).
     ///
     /// # Errors
-    /// Returns `InvalidInput` naming the setting for an unknown `OKF_AUTH_MODE`, and for
-    /// `workos` with any WorkOS setting missing or invalid. Never answers `Local` for a hosted
-    /// mode.
+    /// Returns `InvalidInput` naming the setting for an unknown `OKF_AUTH_MODE`, for an unset
+    /// one beside any `WORKOS_*` setting, and for `workos` with any WorkOS setting missing or
+    /// invalid. Never answers `Local` for a hosted mode or beside a hosted setting.
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ApiError> {
-        match lookup("OKF_AUTH_MODE").as_deref().map(str::trim) {
-            None | Some("local") => Ok(Self::Local),
+        // The mode is read exactly as set: a value with surrounding whitespace is no mode.
+        let mode = lookup("OKF_AUTH_MODE");
+        match mode.as_deref() {
+            None => {
+                // Hosted settings are never ignored: with any of them present and no mode, the
+                // deployment was meant to be hosted, and starting it local would hand the
+                // installation to whoever reads the launch link.
+                let hosted_setting = HOSTED_SETTINGS
+                    .iter()
+                    .any(|name| lookup(name).is_some_and(|value| !value.trim().is_empty()));
+                if hosted_setting {
+                    return Err(invalid(
+                        "OKF_AUTH_MODE",
+                        "must be set to `workos` when a WORKOS_* setting is present",
+                    ));
+                }
+                Ok(Self::Local)
+            }
+            Some("local") => Ok(Self::Local),
             Some("workos") => {
                 let required = |name: &str| {
                     lookup(name)
@@ -119,26 +148,33 @@ impl HostedConfig {
             return Err(invalid("WORKOS_API_KEY", "is required in workos mode"));
         }
         if https_url(&self.issuer).is_none() {
-            return Err(invalid("WORKOS_ISSUER", "must be an absolute https URL"));
+            return Err(invalid(
+                "WORKOS_ISSUER",
+                "must be an absolute https URL with no query, fragment or user information",
+            ));
         }
         if https_url(&self.resource).is_none() {
             return Err(invalid(
                 "WORKOS_MCP_RESOURCE",
-                "must be an absolute https URL",
+                "must be an absolute https URL with no query, fragment or user information",
             ));
         }
         if https_url(&self.redirect_uri).is_none_or(|uri| uri.path() != "/auth/callback") {
             return Err(invalid(
                 "WORKOS_REDIRECT_URI",
-                "must be an absolute https URL ending /auth/callback",
+                "must be an absolute https URL ending /auth/callback, with no query, fragment or user information",
             ));
         }
         Ok(())
     }
 }
 
-/// `text` as an absolute `https` URL with a host and no user information.
+/// `text` as an absolute `https` URL with a host and no query, fragment or user information.
 fn https_url(text: &str) -> Option<Uri> {
+    // The parser drops a fragment and keeps a query; neither belongs in a configured URL.
+    if text.contains(['?', '#']) {
+        return None;
+    }
     let uri = Uri::from_str(text).ok()?;
     let authority = uri.authority()?;
     if uri.scheme_str() != Some("https")
