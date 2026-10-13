@@ -285,6 +285,15 @@ describe('the properties form', () => {
     expect(api.violations).toEqual([]);
   });
 
+  it('has no button to submit it: a change is saved with the draft', async () => {
+    typed();
+    await editNote();
+    const form = document.querySelector('.properties-form');
+    if (!(form instanceof HTMLElement)) throw new Error('the form is not on the page');
+    expect(within(form).queryAllByRole('button')).toEqual([]);
+    expect(form.querySelector('[type="submit"]')).toBeNull();
+  });
+
   it('saves a change with the draft, and every other property unchanged', async () => {
     const api = typed();
     await editNote();
@@ -476,6 +485,22 @@ describe('the properties form', () => {
       const api = service({ type: 'object', required: ['okf_jawn'], properties: { owner } });
       await editNote();
       expect(saidAbove()).toContain('“okf_jawn” is required, and this item does not have it.');
+      set('Owner', 'Grace');
+      await pass(AUTOSAVE_DELAY_MS * 3);
+      expect(api.callsTo(SAVE)).toHaveLength(0);
+      expect(saidAbove()).toContain(HELD_BACK);
+    });
+
+    it('judges what a save would carry, not what the form library filled in for itself', async () => {
+      // The type requires a property whose value it fixes. The library shows that value in its
+      // field; the item does not hold it, and the form writes nothing the person did not enter.
+      const api = service({
+        type: 'object',
+        required: ['format'],
+        properties: { owner, format: { type: 'string', title: 'Format', const: 'minutes' } },
+      });
+      await editNote();
+      expect(saidAbove()).toContain('“format” is required, and this item does not have it.');
       set('Owner', 'Grace');
       await pass(AUTOSAVE_DELAY_MS * 3);
       expect(api.callsTo(SAVE)).toHaveLength(0);

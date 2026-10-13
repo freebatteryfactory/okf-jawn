@@ -38,10 +38,8 @@ import {
 } from './sessions';
 import {
   draftConflictsOf,
-  type SnapshotAttempt,
   type Snapshotted,
   saySnapshotted,
-  snapshotAttempt,
   takeSnapshot,
   UnsavedSelection,
 } from './snapshot';
@@ -153,13 +151,13 @@ export function DraftsPanel({
   const selected = rows
     .filter((row) => row.conflict === null && !left.has(row.itemId))
     .map((row) => row.itemId);
-  const last = useRef<SnapshotAttempt | null>(null);
+  // Which request it is, and so its key, is `takeSnapshot`'s to say: here is only what was asked.
   const snapshot = useMutation({
-    mutationFn: (attempt: SnapshotAttempt) => takeSnapshot(client, workspaceId, attempt),
-    onSuccess: (snapshotted, attempt) => {
-      last.current = null;
+    mutationFn: (asked: { itemIds: string[]; message: string }) =>
+      takeSnapshot(client, workspaceId, asked.itemIds, asked.message),
+    onSuccess: (snapshotted, asked) => {
       setName('');
-      saySnapshotted(workspaceId, attempt.message, snapshotted);
+      saySnapshotted(workspaceId, asked.message, snapshotted);
       onSnapshotted(snapshotted);
     },
   });
@@ -172,9 +170,7 @@ export function DraftsPanel({
       return;
     }
     setNameMissing(false);
-    const attempt = snapshotAttempt(last.current, selected, message);
-    last.current = attempt;
-    snapshot.mutate(attempt);
+    snapshot.mutate({ itemIds: selected, message });
   };
   const conflicted = snapshot.isError ? draftConflictsOf(snapshot.error) : null;
   const unsaved =
@@ -184,7 +180,11 @@ export function DraftsPanel({
     request: workspaceId,
     failed: snapshot.isError && conflicted === null && unsaved === null,
     error: snapshot.error,
-    run: () => (last.current === null ? Promise.resolve() : snapshot.mutateAsync(last.current)),
+    // The retry asks for what was asked; it is the same request while nothing was saved since.
+    run: () =>
+      snapshot.variables === undefined
+        ? Promise.resolve()
+        : snapshot.mutateAsync(snapshot.variables),
     loaded: () => headingRef.current,
   });
 

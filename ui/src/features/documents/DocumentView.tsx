@@ -23,7 +23,6 @@
  * focus; "Edit" moves focus into the text box, and after a discard focus is on the switch.
  */
 import {
-  type UseMutationResult,
   type UseQueryResult,
   useInfiniteQuery,
   useMutation,
@@ -130,6 +129,10 @@ export function itemOptions(workspaceId: string, itemId: string, revision: Revis
  * the way to the latest version: a read with `at: latest`, which the server resolves once. Its
  * answer is kept as the first part of a read pinned to the revision it resolved, so the pane,
  * the URL and the continuation all follow that one read.
+ *
+ * The answer moves the pane only while this reader is the one on screen. A reader is keyed by its
+ * tab, so when the person goes to another tab before the answer, this one is gone: its request is
+ * aborted, and an answer that arrives all the same moves nothing and takes no focus.
  */
 function PinnedRevision({
   workspaceId,
@@ -154,14 +157,29 @@ function PinnedRevision({
     staleTime: 0,
     refetchOnWindowFocus: true,
   });
+  // Whether this reader is on screen, and the request it has in flight.
+  const onScreen = useRef(false);
+  const asked = useRef<AbortController | null>(null);
+  useEffect(() => {
+    onScreen.current = true;
+    return () => {
+      onScreen.current = false;
+      asked.current?.abort();
+    };
+  }, []);
   const readLatest = useMutation({
     mutationFn: async () => {
+      const controller = new AbortController();
+      asked.current = controller;
       const { data } = await readItem({
         body: { ...request, at: { kind: 'latest' }, cursor: null },
+        signal: controller.signal,
         throwOnError: true,
       });
       return data;
     },
+    // Whatever the page shows by now, the answer is the first part of that read: only the cache
+    // is told here. (The library runs this after the component is gone, too.)
     onSuccess: (response) => {
       const resolved = response.source.revision;
       const pinned: ReadItemRequest = { ...request, at: { kind: 'revision', revision: resolved } };
@@ -169,13 +187,17 @@ function PinnedRevision({
         pages: [response],
         pageParams: [{ body: pinned }],
       });
-      // The button goes once the pane reads that revision; keyboard focus stays at this notice,
-      // which then says which revision is read, instead of dropping to the page.
-      const notice = noticeRef.current;
-      if (notice?.contains(document.activeElement)) notice.focus();
-      onReadLatest(resolved);
     },
   });
+  /** The answer is here: the pane goes to the revision it resolved, if this reader is still shown. */
+  const arrive = (response: ReadItemResponse) => {
+    if (!onScreen.current) return;
+    // The button goes once the pane reads that revision; keyboard focus stays at this notice,
+    // which then says which revision is read, instead of dropping to the page.
+    const notice = noticeRef.current;
+    if (notice?.contains(document.activeElement)) notice.focus();
+    onReadLatest(response.source.revision);
+  };
   // Either failure keeps its notice through a retry, which ends with keyboard focus at this
   // notice: it then says what the check found, or which revision was read.
   const checkFailure = useRetry({
@@ -189,7 +211,7 @@ function PinnedRevision({
     request: revision,
     failed: readLatest.isError,
     error: readLatest.error,
-    run: () => readLatest.mutateAsync(),
+    run: () => readLatest.mutateAsync().then(arrive),
     loaded: () => noticeRef.current,
   });
 
@@ -199,7 +221,8 @@ function PinnedRevision({
         workspaceId={workspaceId}
         revision={revision}
         latestHead={latestHead}
-        readLatest={readLatest}
+        reading={readLatest.isPending}
+        onRead={() => readLatest.mutate(undefined, { onSuccess: arrive })}
         checkFailure={checkFailure}
         latestFailure={latestFailure}
       />
@@ -211,14 +234,18 @@ function PinnedRevisionState({
   workspaceId,
   revision,
   latestHead,
-  readLatest,
+  reading: readingLatest,
+  onRead,
   checkFailure,
   latestFailure,
 }: {
   workspaceId: string;
   revision: Revision;
   latestHead: UseQueryResult<Workspace>;
-  readLatest: UseMutationResult<ReadItemResponse, Error, void>;
+  /** The latest version is being read. */
+  reading: boolean;
+  /** Read the latest version. */
+  onRead: () => void;
   checkFailure: FailureRetry;
   latestFailure: FailureRetry;
 }) {
@@ -255,12 +282,12 @@ function PinnedRevisionState({
         You are reading revision {reading}; it is not the latest version (checked at {checked}).{' '}
         <button
           type="button"
-          aria-disabled={readLatest.isPending}
+          aria-disabled={readingLatest}
           onClick={() => {
-            if (!readLatest.isPending) readLatest.mutate();
+            if (!readingLatest) onRead();
           }}
         >
-          {readLatest.isPending ? 'Reading the latest version…' : 'Read the latest version'}
+          {readingLatest ? 'Reading the latest version…' : 'Read the latest version'}
         </button>
       </p>
       {latestFailure.shown && (
@@ -527,13 +554,6 @@ export function DocumentView({
           itemId={itemId}
           title={title}
           conflict={conflict}
-          text={
-            session !== undefined
-              ? { body: session.body, properties: session.properties }
-              : heldDraft !== null
-                ? { body: heldDraft.body, properties: heldDraft.properties }
-                : null
-          }
           onSnapshotted={onSnapshotted}
           onResolved={() => {
             focusNext.current = 'switch';

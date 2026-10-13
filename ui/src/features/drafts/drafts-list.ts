@@ -8,6 +8,10 @@
  * is saved, discarded or snapshotted, every cached `get_item` of that item is told, and the list
  * is listed again unless the change is one it can take in place (a later save of a draft it
  * already lists).
+ *
+ * An answer that started before such a write never undoes it: the reads of the item still in
+ * flight are cancelled before the cache is told, and asked again after, so what they then answer
+ * has the write in it.
  */
 import {
   type InfiniteData,
@@ -63,6 +67,16 @@ export function draftsByItem(pages: readonly ListDraftsResponse[] | undefined): 
   return drafts;
 }
 
+/** The draft of an item as the list last answered it; undefined when it lists none. */
+export function listedDraft(
+  client: QueryClient,
+  workspaceId: string,
+  itemId: string,
+): Draft | undefined {
+  const listed = client.getQueryData<DraftPages>(draftsQueryKey(workspaceId));
+  return draftsByItem(listed?.pages).get(itemId);
+}
+
 const zItemKey = z.object({
   _id: z.literal('getItem'),
   body: z.object({ workspace_id: z.string(), item_id: z.string() }),
@@ -76,8 +90,27 @@ function readsItem(queryKey: readonly unknown[], workspaceId: string, itemId: st
   );
 }
 
+/**
+ * Stop the reads of these items that are in flight: each began before the write the cache is
+ * about to be told of, and its answer would put the old draft back after it. Returns what to do
+ * once the cache is told: ask for those reads again.
+ */
+function stopReads(client: QueryClient, workspaceId: string, itemIds: readonly string[]) {
+  const reads = client.getQueryCache().findAll({
+    predicate: (query) =>
+      query.state.fetchStatus === 'fetching' &&
+      itemIds.some((itemId) => readsItem(query.queryKey, workspaceId, itemId)),
+  });
+  if (reads.length === 0) return () => {};
+  const stopped = { predicate: (query: (typeof reads)[number]) => reads.includes(query) };
+  // The read is taken back to what it held before it began, at once; the write goes on top.
+  void client.cancelQueries(stopped);
+  return () => void client.refetchQueries(stopped);
+}
+
 /** Tell the cache that the person has no draft of these items any more: they were snapshotted. */
 export function forgetDrafts(client: QueryClient, workspaceId: string, itemIds: readonly string[]) {
+  const readAgain = stopReads(client, workspaceId, itemIds);
   client.setQueriesData<ItemDocument>(
     {
       predicate: (query) =>
@@ -85,6 +118,7 @@ export function forgetDrafts(client: QueryClient, workspaceId: string, itemIds: 
     },
     (document) => (document === undefined ? document : { ...document, draft: null }),
   );
+  readAgain();
   void client.invalidateQueries({ queryKey: draftsQueryKey(workspaceId) });
 }
 
@@ -98,10 +132,12 @@ export function rememberDraft(
   itemId: string,
   draft: DraftContent | null,
 ): void {
+  const readAgain = stopReads(client, workspaceId, [itemId]);
   client.setQueriesData<ItemDocument>(
     { predicate: (query) => readsItem(query.queryKey, workspaceId, itemId) },
     (document) => (document === undefined ? document : { ...document, draft }),
   );
+  readAgain();
   const key = draftsQueryKey(workspaceId);
   const listed = client.getQueryData<DraftPages>(key);
   const known = draft !== null && draftsByItem(listed?.pages).has(itemId);

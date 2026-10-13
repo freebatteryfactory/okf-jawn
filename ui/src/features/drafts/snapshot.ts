@@ -14,42 +14,47 @@
  * cached `get_item` of them, and the drafts list), and the checks that compare the shown head or a
  * cited revision with the latest run again. Listings, reads and search are keyed by the revision
  * they were asked at, so they are asked afresh under the new head and nothing of the old one is
- * stale: a commit changes no revision that exists. A session whose text was committed ends; one
- * the person changed again meanwhile goes on as a new draft on the committed revision.
+ * stale: a commit changes no revision that exists.
+ *
+ * A session whose text was committed ends. One whose text went on while the Snapshot was taken
+ * (typed since, being saved, or saved in between) goes on as a draft on the revision the Snapshot
+ * made, whichever of the save and the commit answered first: what was committed becomes the text
+ * it started from, its base becomes that revision, and it is saved at once. The service removes a
+ * draft at a Snapshot only if it is still the content it committed, so a draft saved in between
+ * is still held, on its old base; that save moves it. The status says how many items go on so.
  *
  * On `conflict` with the `draft_conflict` detail the service has committed nothing: it takes a
  * Snapshot of all the selected items or of none, and the detail lists every selected item that
  * changed or was deleted since its draft's base. Each is kept (`sessions.ts`) until the person
  * resolves it: keep mine is `save_draft` with `base_revision` set to the item's
- * `current_revision`, then `commit_items` again; take theirs is `discard_draft`. A conflict means
+ * `current_revision` (the session's own save, `rebaseSession` in `saving.ts`), then
+ * `commit_items` again; take theirs is `discard_draft`. A conflict means
  * a newer head exists, so the shell's own check for one runs again and announces it.
  *
- * Idempotency: a Snapshot is repeated under the key it had while it names the same items and the
- * same message, so one whose answer was lost is completed, not committed twice.
+ * Idempotency: a Snapshot is repeated under the key it had while it is the same request: the same
+ * items, the same name, and the same drafts (for each item, the digest and the base the service
+ * answered when it was last saved, or listed). So one whose answer was lost is completed, not
+ * committed twice; and text saved since, or a draft kept on a newer revision, is a new request
+ * with a new key, which the service cannot answer with what it said before. Once an answer says
+ * the Snapshot was taken, the request is forgotten: the same drafts under the same name again are
+ * a new Snapshot.
  */
 import type { QueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
 import { openWorkspaceQueryKey } from '../../api/generated/@tanstack/react-query.gen';
-import { commitItems, saveDraft } from '../../api/generated/sdk.gen';
-import type { Revision, Warning, Workspace } from '../../api/generated/types.gen';
+import { commitItems } from '../../api/generated/sdk.gen';
+import type { Draft, Revision, Warning, Workspace } from '../../api/generated/types.gen';
 import { short } from '../documents/describe';
 import { classifyFailure } from '../errors/failure';
-import { forgetDrafts, rememberDraft } from './drafts-list';
+import { forgetDrafts, listedDraft } from './drafts-list';
 import { endSession, flushSession } from './saving';
 import {
   type ConflictItem,
-  type DraftText,
   needsSave,
+  type SnapshotAttempt,
   sessionKey,
   useDraftSessions,
 } from './sessions';
-
-/** One `commit_items` request. */
-export interface SnapshotAttempt {
-  key: string;
-  itemIds: string[];
-  message: string;
-}
 
 /** What a Snapshot did. */
 export interface Snapshotted {
@@ -58,6 +63,8 @@ export interface Snapshotted {
   /** The head the workspace showed before, when it was known. */
   previousHead: Revision | null;
   itemIds: string[];
+  /** Those of them whose text went on while the Snapshot was taken: each is still a draft. */
+  stillDrafts: string[];
   /** Non-fatal issues the service recorded. */
   warnings: Warning[];
 }
@@ -73,27 +80,62 @@ export class UnsavedSelection extends Error {
   }
 }
 
-/** The request for these items and this message: the last one again while it says the same. */
+const sameList = (a: readonly string[], b: readonly string[]) =>
+  a.length === b.length && a.every((entry, index) => entry === b[index]);
+
+/**
+ * The request for these items, this name and these drafts: the last one again while it is the
+ * same in all three.
+ */
 export function snapshotAttempt(
   last: SnapshotAttempt | null,
   itemIds: string[],
   message: string,
+  drafts: string[],
 ): SnapshotAttempt {
   const same =
     last !== null &&
     last.message === message &&
-    last.itemIds.length === itemIds.length &&
-    last.itemIds.every((id, index) => id === itemIds[index]);
-  return same ? last : { key: crypto.randomUUID(), itemIds, message };
+    sameList(last.itemIds, itemIds) &&
+    sameList(last.drafts, drafts);
+  return same ? last : { key: crypto.randomUUID(), itemIds, message, drafts };
 }
 
-/** Say, where the drafts are listed, what a Snapshot did: it is the person's own change. */
+/** The same saved draft: the same content, saved at the same time, on the same base. */
+function sameDraft(a: Draft, b: Draft | undefined): boolean {
+  return (
+    b !== undefined &&
+    a.content_digest === b.content_digest &&
+    a.saved_at === b.saved_at &&
+    a.base_revision === b.base_revision
+  );
+}
+
+/**
+ * The draft of an item the service holds, as far as this page knows: what its last save answered,
+ * else what the list of drafts says. Named by its digest and its base; empty when it is not known.
+ */
+function draftHeld(client: QueryClient, workspaceId: string, itemId: string): string {
+  const session = useDraftSessions.getState().sessions[sessionKey(workspaceId, itemId)];
+  const draft = session?.confirmed?.draft ?? listedDraft(client, workspaceId, itemId);
+  return draft === undefined ? '' : `${draft.content_digest} on ${draft.base_revision}`;
+}
+
+/**
+ * Say, where the drafts are listed, what a Snapshot did. It says what the answer shows: that the
+ * Snapshot was taken, of how many items (the service takes all that were asked or none), and the
+ * revision it made. Each item was committed as it was last saved before the Snapshot was asked.
+ */
 export function saySnapshotted(workspaceId: string, message: string, snapshotted: Snapshotted) {
   const items = snapshotted.itemIds.length;
+  const still = snapshotted.stillDrafts.length;
   useDraftSessions.getState().say(
     workspaceId,
     `Snapshot “${message}” taken: ${items} ${items === 1 ? 'item' : 'items'}. ` +
-      `The workspace now shows revision ${short(snapshotted.revision)}, which includes your change.`,
+      `The workspace now shows revision ${short(snapshotted.revision)}, which the Snapshot made.` +
+      (still === 0
+        ? ''
+        : ` What you typed in ${still === 1 && items === 1 ? 'it' : `${still} of them`} while it was taken is not in it, and is still a draft.`),
     snapshotted.warnings.map((warning) => warning.message),
   );
 }
@@ -130,15 +172,37 @@ function checkHeadsAgain(client: QueryClient, workspaceId: string) {
 export async function takeSnapshot(
   client: QueryClient,
   workspaceId: string,
-  attempt: SnapshotAttempt,
+  itemIds: string[],
+  message: string,
 ): Promise<Snapshotted> {
-  await Promise.all(attempt.itemIds.map((itemId) => flushSession(client, workspaceId, itemId)));
+  await Promise.all(itemIds.map((itemId) => flushSession(client, workspaceId, itemId)));
   const held = useDraftSessions.getState().sessions;
-  const unsaved = attempt.itemIds.filter((itemId) => {
+  const unsaved = itemIds.filter((itemId) => {
     const session = held[sessionKey(workspaceId, itemId)];
     return session !== undefined && needsSave(session);
   });
   if (unsaved.length > 0) throw new UnsavedSelection(unsaved);
+  // The request is named once the saves have answered: what it commits is known only then.
+  const attempt = snapshotAttempt(
+    useDraftSessions.getState().asked[workspaceId] ?? null,
+    itemIds,
+    message,
+    itemIds.map((itemId) => draftHeld(client, workspaceId, itemId)),
+  );
+  useDraftSessions.getState().ask(workspaceId, attempt);
+  // What the service is asked to commit: the draft each session had confirmed by now, or, of an
+  // item not being edited, the one that is listed.
+  const asked = new Map(
+    itemIds.map((itemId) => {
+      const session = useDraftSessions.getState().sessions[sessionKey(workspaceId, itemId)];
+      return [
+        itemId,
+        session === undefined
+          ? { edited: false as const, listed: listedDraft(client, workspaceId, itemId) }
+          : { edited: true as const, confirmed: session.confirmed },
+      ];
+    }),
+  );
 
   let result: { revision: Revision; warnings: Warning[] };
   try {
@@ -160,71 +224,59 @@ export async function takeSnapshot(
     }
     throw error;
   }
+  // Taken: the same drafts under the same name again would be a new Snapshot.
+  useDraftSessions.getState().ask(workspaceId, null);
 
   const headKey = openWorkspaceQueryKey({ body: { workspace_id: workspaceId } });
   const previousHead = client.getQueryData<Workspace>(headKey)?.head ?? null;
   client.setQueryData<Workspace>(headKey, (workspace) =>
     workspace === undefined ? workspace : { ...workspace, head: result.revision },
   );
+  const stillDrafts: string[] = [];
+  /** Of those, the ones the service still holds a draft of: it was saved in between. */
+  const stillHeld: string[] = [];
   for (const itemId of attempt.itemIds) {
     const key = sessionKey(workspaceId, itemId);
     const session = useDraftSessions.getState().sessions[key];
     useDraftSessions.getState().clearConflict(key);
     if (session === undefined) continue;
-    if (needsSave(session)) {
-      // Changed again while the Snapshot was taken: a new draft, on what was just committed.
-      useDraftSessions.getState().change(key, {
-        committed: session.confirmed ?? session.committed,
-        confirmed: null,
-        baseRevision: result.revision,
-        attempt: null,
-        failure: null,
-      });
-    } else endSession(workspaceId, itemId);
+    const before = asked.get(itemId);
+    const committed = before?.edited ? before.confirmed : null;
+    // A save's answer puts a new record in the session. A session opened while the Snapshot was
+    // taken holds what `get_item` carried: the listed draft, unless it was saved again.
+    const savedSince = before?.edited
+      ? session.confirmed !== committed
+      : session.confirmed !== null && !sameDraft(session.confirmed.draft, before?.listed);
+    if (!session.saving && !savedSince && !needsSave(session)) {
+      endSession(workspaceId, itemId);
+      continue;
+    }
+    // The text went on while the Snapshot was taken: a draft on what was just committed. A
+    // failure stays: only a save that answers says what the service holds.
+    useDraftSessions.getState().change(key, {
+      committed:
+        committed === null
+          ? session.committed
+          : { body: committed.body, properties: committed.properties },
+      // The draft that was committed is gone; one saved in between is still held.
+      confirmed: savedSince ? session.confirmed : null,
+      baseRevision: result.revision,
+    });
+    stillDrafts.push(itemId);
+    if (savedSince) stillHeld.push(itemId);
+    void flushSession(client, workspaceId, itemId);
   }
-  forgetDrafts(client, workspaceId, attempt.itemIds);
+  forgetDrafts(
+    client,
+    workspaceId,
+    attempt.itemIds.filter((itemId) => !stillHeld.includes(itemId)),
+  );
   checkHeadsAgain(client, workspaceId);
   return {
     revision: result.revision,
     previousHead,
     itemIds: attempt.itemIds,
+    stillDrafts,
     warnings: result.warnings,
   };
-}
-
-/**
- * The first half of "keep mine": save the draft's content again with `base_revision` set to the
- * item's `current_revision`, which the service takes as the explicit rebase. `text` is the draft's
- * content: the session's when the item is being edited, otherwise what `get_item` carried.
- * Rejects with what `save_draft` threw, or with `UnsavedSelection` when the editor holds text that
- * could not be saved.
- */
-export async function rebaseDraft(
-  client: QueryClient,
-  workspaceId: string,
-  itemId: string,
-  revision: Revision,
-  text: DraftText,
-  idempotencyKey: string,
-): Promise<void> {
-  await flushSession(client, workspaceId, itemId);
-  const key = sessionKey(workspaceId, itemId);
-  const session = useDraftSessions.getState().sessions[key];
-  if (session !== undefined && needsSave(session)) throw new UnsavedSelection([itemId]);
-  const kept: DraftText =
-    session === undefined ? text : { body: session.body, properties: session.properties };
-  const { data } = await saveDraft({
-    body: {
-      workspace_id: workspaceId,
-      item_id: itemId,
-      base_revision: revision,
-      body: kept.body,
-      properties: kept.properties,
-      idempotency_key: idempotencyKey,
-    },
-    throwOnError: true,
-  });
-  const confirmed = { ...kept, draft: data };
-  useDraftSessions.getState().change(key, { confirmed, baseRevision: data.base_revision });
-  rememberDraft(client, workspaceId, itemId, confirmed);
 }

@@ -18,7 +18,15 @@
  * The base: the first save of a session carries the revision its text was read at, or the base of
  * the draft it continues. After each save the session takes the base the service recorded, and
  * later saves carry that, never the head the shell shows: a save whose base is the current head is
- * the service's explicit rebase, which only "keep mine" may ask for.
+ * the service's explicit rebase, which is asked for in two cases only. "Keep mine" asks for it
+ * (`rebaseSession`): it names the base and the session's own save carries it, so there is still
+ * one request per item at a time, and its key is the key of exactly that text on that base. And a
+ * Snapshot of the item that answered while its text had gone on names the revision it made
+ * (`snapshot.ts`): the text was typed over what that revision holds.
+ *
+ * A discard is repeated under one key until it answers, wherever it is pressed from: the key is
+ * kept here, by item, not in the component that asked. A save sent after a discard that did not
+ * answer makes the next discard another request (it would remove another draft), with a new key.
  *
  * A body larger than the service accepts is not sent; the session says so until it is shortened.
  */
@@ -55,6 +63,20 @@ const unsavedSince = new Map<string, number>();
 const inFlight = new Map<string, Promise<void>>();
 /** Sessions changed while their save was in flight: saved again when it settles. */
 const changedMeanwhile = new Set<string>();
+/** The key of the discard asked of an item and not answered yet, by session. */
+const discardKeys = new Map<string, string>();
+
+/** Why a draft could not be kept on a newer revision, when no request failed. */
+export class DraftNotKept extends Error {
+  /** This page holds no draft of the item (get_item carried none); or its text is too long to save. */
+  readonly reason: 'no-draft' | 'too-long';
+
+  constructor(reason: 'no-draft' | 'too-long') {
+    super(`The draft was not kept: ${reason}`);
+    this.name = 'DraftNotKept';
+    this.reason = reason;
+  }
+}
 
 const sessions = () => useDraftSessions.getState();
 
@@ -197,6 +219,8 @@ async function send(client: QueryClient, key: string): Promise<void> {
       ? last
       : { key: crypto.randomUUID(), baseRevision: session.baseRevision, ...text };
   sessions().change(key, { saving: true, attempt, tooLong: null });
+  // A discard asked before this save and not answered would now remove another draft.
+  discardKeys.delete(key);
   try {
     const { data } = await saveDraft({
       body: {
@@ -210,12 +234,15 @@ async function send(client: QueryClient, key: string): Promise<void> {
       throwOnError: true,
     });
     const confirmed = { body: attempt.body, properties: attempt.properties, draft: data };
+    // A base named while this save was in flight (a Snapshot of the item answered) stays: the
+    // draft the service holds is then not on it, and the next save asks for it.
+    const named = sessions().sessions[key]?.baseRevision ?? attempt.baseRevision;
     sessions().change(key, {
       saving: false,
       failure: null,
       attempt: null,
       confirmed,
-      baseRevision: data.base_revision,
+      baseRevision: named === attempt.baseRevision ? data.base_revision : named,
     });
     rememberDraft(client, session.workspaceId, session.itemId, confirmed);
   } catch (error) {
@@ -224,15 +251,47 @@ async function send(client: QueryClient, key: string): Promise<void> {
 }
 
 /**
+ * Throw why the session's text is not saved, if it is not: what its save threw, or that it is too
+ * long. A session that is saved, or that is not there, passes.
+ */
+export function assertSaved(workspaceId: string, itemId: string) {
+  const session = sessions().sessions[sessionKey(workspaceId, itemId)];
+  if (session === undefined || !needsSave(session)) return;
+  throw session.failure ?? new DraftNotKept('too-long');
+}
+
+/**
+ * The first half of "keep mine": the draft is saved again with `revision` as its base, which the
+ * service takes as the explicit rebase when that is the revision the item is at. The session's own
+ * save carries it, after any save in flight and with the text the editor holds by then. A draft
+ * already on that base, with that text, is not sent again. Rejects with what the save threw, or
+ * with `DraftNotKept`.
+ */
+export async function rebaseSession(
+  client: QueryClient,
+  workspaceId: string,
+  itemId: string,
+  revision: Revision,
+): Promise<void> {
+  const key = sessionKey(workspaceId, itemId);
+  if (sessions().sessions[key] === undefined) throw new DraftNotKept('no-draft');
+  cancelTimer(key);
+  // A save in flight answers with the base it was sent on: the new base is named after it.
+  await inFlight.get(key);
+  sessions().change(key, { baseRevision: revision });
+  await save(client, key);
+  assertSaved(workspaceId, itemId);
+}
+
+/**
  * Discard the person's draft of an item: `discard_draft` when the service holds one, and the
  * session with its text either way. Rejects with what `discard_draft` threw, leaving the session
- * as it was. `idempotencyKey` is the same for every attempt of one discard.
+ * as it was. Every attempt of one discard carries the same key, whoever asks.
  */
 export async function discardSession(
   client: QueryClient,
   workspaceId: string,
   itemId: string,
-  idempotencyKey: string,
 ): Promise<void> {
   const key = sessionKey(workspaceId, itemId);
   cancelTimer(key);
@@ -241,10 +300,13 @@ export async function discardSession(
   await inFlight.get(key);
   const session = sessions().sessions[key];
   if (session === undefined || session.confirmed !== null) {
+    const idempotencyKey = discardKeys.get(key) ?? crypto.randomUUID();
+    discardKeys.set(key, idempotencyKey);
     await discardDraft({
       body: { workspace_id: workspaceId, item_id: itemId, idempotency_key: idempotencyKey },
       throwOnError: true,
     });
+    discardKeys.delete(key);
   }
   cancelTimer(key);
   sessions().remove(key);
@@ -267,5 +329,6 @@ export function resetDraftSessions() {
   unsavedSince.clear();
   changedMeanwhile.clear();
   inFlight.clear();
-  useDraftSessions.setState({ sessions: {}, conflicts: {}, said: {} });
+  discardKeys.clear();
+  useDraftSessions.setState({ sessions: {}, conflicts: {}, said: {}, asked: {} });
 }

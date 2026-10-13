@@ -151,9 +151,12 @@ function service(options: { drafts?: string[]; conflictOn?: string } = {}): Serv
         await new Promise<void>((resolve) => state.waiting.push(resolve));
       const id = String(body.item_id);
       const before = state.drafts.get(id);
-      // The service's rule: a first save, and a save on the current head, take the head as base.
+      // The service's rule: a first save records the base the request carries; a later one keeps
+      // the draft's base unless it carries the current head, which is the explicit rebase.
       const base =
-        before !== undefined && body.base_revision !== state.head ? before.base : state.head;
+        before === undefined || body.base_revision === state.head
+          ? String(body.base_revision)
+          : before.base;
       state.drafts.set(id, {
         body: String(body.body),
         properties: (body.properties ?? {}) as Body,
@@ -318,7 +321,7 @@ test.describe('editing a document', () => {
     await shot(page, '12-snapshot-form');
     await press(page, 'Snapshot 2 drafts');
     await expect(said(page)).toHaveText(
-      `Snapshot “Tidy the notes” taken: 2 items. The workspace now shows revision ${MADE.slice(0, 10)}, which includes your change.`,
+      `Snapshot “Tidy the notes” taken: 2 items. The workspace now shows revision ${MADE.slice(0, 10)}, which the Snapshot made.`,
     );
     expect(played.sent.at(-1)).toMatchObject({
       path: 'commit_items',
