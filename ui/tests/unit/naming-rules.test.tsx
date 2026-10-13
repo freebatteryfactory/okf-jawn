@@ -1026,3 +1026,81 @@ describe('whether there is something to save, a moment after typing', () => {
     expect(api.callsTo(SET)).toEqual([]);
   });
 });
+
+describe('the question before a renaming, when it leaves by itself', () => {
+  const question = () => screen.queryByRole('group', { name: /^Rename / });
+
+  it('puts keyboard focus on the button that opened it when a save in flight lands under it', async () => {
+    let release: (reply: Reply) => void = () => {};
+    const holder: { move: () => string } = { move: () => '' };
+    const own = service({
+      [SET]: () =>
+        new Promise<Reply>((resolve) => {
+          release = resolve;
+        }),
+    });
+    holder.move = own.moveHead;
+    await openRules();
+    await setPrefix('2025-');
+    await previewNow();
+    // The save is pressed first and is still in flight when the question opens.
+    await userEvent.click(button('Save the rules'));
+    await userEvent.click(button('Apply this preview…'));
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Keep the names' }));
+    await act(async () => {
+      release(ok({ revision: holder.move(), receipt_id: RECEIPT, warnings: [] }));
+      await Promise.resolve();
+    });
+    await within(panel()).findByText(/This preview is out of date and cannot be applied/);
+    expect(question()).toBeNull();
+    // Not the page body: the button that opened the question, which now says it is unavailable.
+    const apply = button('Apply this preview…');
+    expect(document.activeElement).toBe(apply);
+    expect(apply.getAttribute('aria-disabled')).toBe('true');
+    expect(own.api.callsTo(APPLY)).toEqual([]);
+  });
+
+  it('does not open again by itself when the rules are put back', async () => {
+    const { api } = service();
+    await openRules();
+    await setPrefix('2025-');
+    await previewNow();
+    await userEvent.click(button('Apply this preview…'));
+    expect(question()).not.toBeNull();
+    await setPrefix('2026-');
+    await within(panel()).findByText(/This preview is out of date and cannot be applied/);
+    expect(question()).toBeNull();
+    // Back to the rules of the preview: it can be applied again, and that is asked for again.
+    await setPrefix('2025-');
+    await waitFor(() =>
+      expect(button('Apply this preview…').getAttribute('aria-disabled')).toBe('false'),
+    );
+    expect(question()).toBeNull();
+    await userEvent.click(button('Apply this preview…'));
+    expect(question()).not.toBeNull();
+    expect(api.callsTo(APPLY)).toEqual([]);
+  });
+
+  it('does not open unasked for a new preview after the service refused the one before', async () => {
+    const { api, moveHead } = service();
+    await openRules();
+    await setPrefix('2025-');
+    await previewNow();
+    moveHead();
+    await userEvent.click(button('Apply this preview…'));
+    await userEvent.click(button('Rename 2 items'));
+    await within(panel()).findByText(/The service refused this preview/);
+    await userEvent.click(await screen.findByRole('button', { name: 'Refresh the workspace' }));
+    await waitFor(() =>
+      expect(screen.getByText(/Showing the workspace as of/).textContent).toContain('cccccccccc'),
+    );
+    await userEvent.click(button('Preview the renames'));
+    await waitFor(() => expect(api.callsTo(PREVIEW)).toHaveLength(2));
+    await waitFor(() =>
+      expect(button('Apply this preview…').getAttribute('aria-disabled')).toBe('false'),
+    );
+    // A preview that can be applied, and nobody asked to apply it.
+    expect(question()).toBeNull();
+    expect(api.callsTo(APPLY)).toHaveLength(1);
+  });
+});

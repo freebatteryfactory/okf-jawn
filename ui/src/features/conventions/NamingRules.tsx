@@ -26,7 +26,12 @@
  *
  * Focus: the panel opens on its heading; a preview puts focus on the preview's heading; the
  * question before renaming opens on the choice that keeps the names, and gives focus back to the
- * button that opened it; after the renaming focus is on the panel's heading. Buttons that can
+ * button that opened it; after the renaming focus is on the panel's heading. When the question
+ * leaves by itself with keyboard focus in it (its preview went out of date: a save pressed just
+ * before landed, the service refused the plan), focus goes to the button that opened it, which is
+ * then unavailable and says why beside it, else to the panel's heading (`useWatchedPart`). A
+ * question that left so is over: it does not open again by itself when the preview is the preview
+ * of what the page shows once more. Buttons that can
  * become unavailable with focus use `aria-disabled`.
  */
 
@@ -36,6 +41,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useId, useLayoutEffect, useRef, useState } from 'react';
 import { z } from 'zod';
 import type { NamingRules, RenamePlan, Revision } from '../../api/generated/types.gen';
+import { takeHeld, useWatchedPart } from '../../lib/focus';
 import { keyed } from '../../lib/keys';
 import { usePausedReading, YamlEditor, YamlFindings } from '../../lib/YamlEditor';
 import { writeYaml, type YamlRead } from '../../lib/yaml';
@@ -160,19 +166,29 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
   const [asking, setAsking] = useState(false);
   // Where focus goes in the commit that shows what an action did.
   const focusNext = useRef<'heading' | 'preview' | 'keep' | 'apply' | 'problems' | null>('heading');
+  // The question before a renaming, watched: whether it left the page with keyboard focus in it.
+  const heldInQuestion = useRef<HTMLElement | null>(null);
+  const [, questionRef] = useWatchedPart<HTMLFieldSetElement>(heldInQuestion);
   useLayoutEffect(() => {
+    const left = takeHeld(heldInQuestion);
     const next = focusNext.current;
-    if (next === null) return;
-    const target = {
-      heading: headingRef,
-      preview: previewRef,
-      keep: keepButton,
-      apply: applyButton,
-      problems: problemsRef,
-    }[next].current;
-    if (target === null) return;
-    focusNext.current = null;
-    target.focus();
+    const target =
+      next === null
+        ? null
+        : {
+            heading: headingRef,
+            preview: previewRef,
+            keep: keepButton,
+            apply: applyButton,
+            problems: problemsRef,
+          }[next].current;
+    if (target !== null) {
+      focusNext.current = null;
+      target.focus();
+      return;
+    }
+    // The question left by itself: to the button that opened it, else the panel's heading.
+    if (left) (applyButton.current ?? headingRef.current)?.focus();
   });
 
   const save = useChange<NamingRules, HeadChange>(
@@ -208,6 +224,8 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
   });
   // Why the preview on screen can no longer be applied; null while it can.
   const stale = preview === null ? null : staleReason(preview, head, value, refused);
+  // A question whose preview went out of date is over: it does not come back by itself.
+  if (asking && stale !== null) setAsking(false);
   const apply = useChange<Preview, HeadChange>(
     applyPreview,
     (result, applied) => {
@@ -540,7 +558,7 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
           {canWrite &&
             renames.length > 0 &&
             (asking && stale === null ? (
-              <fieldset className="confirm">
+              <fieldset className="confirm" ref={questionRef}>
                 <legend>Rename {count(renames.length, 'item', 'items')}?</legend>
                 <p>
                   This is one change of the workspace, made on the version of this preview. Links to
