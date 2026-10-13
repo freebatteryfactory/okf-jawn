@@ -531,7 +531,7 @@ export function DocumentView({
         <div ref={actionsRef}>
           <ItemActions
             item={lastRead}
-            mark={draftMarkOf(session, heldDraft !== null)}
+            mark={() => draftMarkOf(session, heldDraft !== null)}
             busy={document === undefined}
           />
         </div>

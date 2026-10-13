@@ -23,7 +23,11 @@ import { changeLifecycle, type Lifecycle, STATUS_WORDS, type StatusWord } from '
 export interface ItemActionsProps {
   /** The item as the pane last read it at the head the workspace shows. */
   item: ItemSummary;
-  mark: DraftMark | null;
+  /**
+   * How the person's draft of the item stands, asked when it is needed (a form opens, a change is
+   * made): telling it compares the whole text, which is not done on every render of the pane.
+   */
+  mark: () => DraftMark | null;
   /** The pane is reading the item again (the head moved): nothing is changed meanwhile. */
   busy: boolean;
 }
@@ -62,7 +66,7 @@ export function ItemActions({ item, mark, busy }: ItemActionsProps) {
             ? 'Archived. It no longer shows in the folders; its history is kept. Unarchive brings it back.'
             : 'Unarchived. It shows in the folders again.';
       // The item changed under the person's draft, as the service will find at its Snapshot.
-      setSaid(mark === null ? done : `${done} ${DRAFT_FOLLOWS}`);
+      setSaid(mark() === null ? done : `${done} ${DRAFT_FOLLOWS}`);
     },
     statusRef,
   );
@@ -138,7 +142,7 @@ export function ItemActions({ item, mark, busy }: ItemActionsProps) {
       {form === 'move' && (
         <MoveForm
           item={item}
-          mark={mark}
+          mark={mark()}
           onCancel={() => close('move')}
           onDone={(_moved, destination) => {
             setSaid(`“${title}” is now at ${destination}. This tab stays on it.`);
@@ -150,7 +154,7 @@ export function ItemActions({ item, mark, busy }: ItemActionsProps) {
         // After the delete these controls leave with the item; the pane places focus.
         <DeleteQuestion
           item={item}
-          mark={mark}
+          mark={mark()}
           onCancel={() => close('delete')}
           onDone={() => {}}
         />
