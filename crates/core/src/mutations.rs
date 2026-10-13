@@ -57,6 +57,10 @@
 //!   row is kept seven days; see "Retention").
 //! - A row that completes after the purge's last pass over the ledger keeps its response until
 //!   the row expires.
+//!
+//! An emptied row is not gone: it keeps its idempotency key and the digest of its request until
+//! it expires, and a refused retry of it restarts that row's retention. The storage adapter's
+//! header states these, and what it does with a ledger it cannot read.
 
 use std::collections::BTreeMap;
 

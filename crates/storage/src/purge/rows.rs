@@ -34,7 +34,7 @@
 //! "Holds" means holds something a purge still removes or scrubs, so a database or archive
 //! already scrubbed of the workspace no longer holds it.
 //!
-//! Two known limits of the ledger step, in the live database:
+//! Known limits of the ledger step (the first two concern the live database only):
 //!
 //! - A row completed before records schema 2 has no `workspace_id`, so the purge leaves its
 //!   response in place until the ledger drops the row: at the first `begin` that comes seven

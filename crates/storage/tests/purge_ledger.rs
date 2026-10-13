@@ -790,6 +790,17 @@ async fn purge_ledger_an_emptied_row_expires_on_the_clock_of_the_completed_one()
         vec![Some(six_days_ago); 3],
         "the create, the draft and the comment, emptied, keep the time they completed"
     );
+    call(
+        &purged.harness,
+        "create_workspace",
+        json!({ "name": "Sooner", "description": "", "idempotency_key": key(8) }),
+    )
+    .await?;
+    assert_eq!(
+        ledger_rows(directory.path(), purged.target, "released")?.len(),
+        3,
+        "six days after they completed, a begin leaves the emptied rows where they are"
+    );
     rusqlite::Connection::open(&records)?.execute(
         "UPDATE mutations SET finished_ms = finished_ms - ?1",
         [2 * DAY_MS],

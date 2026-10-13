@@ -137,6 +137,11 @@ fn writes_a_workspace(targets: &[Target]) -> bool {
 
 /// Every place `schema` names a `WorkspaceId`, resolving `$ref`s into `defs`, in objects, lists,
 /// tuples (`prefixItems`), maps (value and `propertyNames` key) and combinators.
+///
+/// Limit: a map keyed by workspace is seen only when its schema says so. schemars 1.2 writes no
+/// `propertyNames` for a Rust map, so a contract type that holds a `BTreeMap<WorkspaceId, _>`
+/// would name workspaces this walk cannot see. No contract type has that shape; one that gains
+/// it must declare its response's workspace by hand and say so here.
 fn workspace_fields(
     schema: &Value,
     defs: &Value,
