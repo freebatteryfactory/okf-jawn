@@ -31,7 +31,7 @@ use uuid::Uuid;
 use crate::check::{TestResult, err_of, some};
 use crate::fixture::{
     ALICE, Built, CARD_BODY, NOTE, World, alice, context, converted, digest, draft_of, file_patch,
-    file_text, instant, mutation, note, record, revision, scope, source_card,
+    file_text, instant, mutation, note, path, record, revision, scope, source_card,
 };
 
 const OTHER: u128 = 21;
@@ -2582,6 +2582,144 @@ async fn a_rewind_onto_a_path_another_item_holds_conflicts_whichever_edits_it_se
         assert_eq!(refused.code, ErrorCode::Conflict, "{}", refused.message);
         assert_eq!(world.versions.commits()?.len(), 0);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_taker_of_the_last_path_on_a_later_page_of_its_folder_is_seen() -> TestResult {
+    // The folder of the last path lists one entry a page; the item that took the path since is
+    // on the second.
+    let world = deleted_since("notes/old.md", "notes/new.md")?;
+    note_at(&world, THIRD, "notes/first.md", &['b'])?;
+    note_at(&world, OTHER, "notes/new.md", &['b'])?;
+    world.versions.page_listings(1)?;
+    assert!(one_restore(&rewound(&world).await?)?);
+    let asked: Vec<_> = world
+        .versions
+        .list_queries()?
+        .into_iter()
+        .map(|(at, folder, page)| (at, folder, page.cursor))
+        .collect();
+    let (base, folder) = (revision('b')?, Some(path("notes")?));
+    assert_eq!(
+        asked,
+        vec![
+            (base.clone(), folder.clone(), None),
+            (base, folder, Some("1".to_owned()))
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_store_fault_in_any_read_of_the_last_holder_lookup_fails_the_rewind() -> TestResult {
+    // The reads after the first: the item at the target, its history, the item at its last
+    // holder, the folder of its last path. A fault in any of them is the Rewind's error; it is
+    // never read as "nothing to relink", which would restore the item and leave its links.
+    type Inject = fn(&World, ErrorCode) -> Built<()>;
+    let reads: [(&str, Inject); 4] = [
+        ("show at the target", |world, code| {
+            world.versions.fail_show_number(2, code)
+        }),
+        ("log", |world, code| world.versions.fail_next_log(code)),
+        ("show at the last holder", |world, code| {
+            world.versions.fail_show_number(3, code)
+        }),
+        ("list", |world, code| world.versions.fail_next_list(code)),
+    ];
+    for (read, inject) in reads {
+        // `NotFound` from `log` or `list` is an unknown revision, not an absent item.
+        let codes = if read.starts_with("show") {
+            vec![ErrorCode::Unavailable]
+        } else {
+            vec![ErrorCode::Unavailable, ErrorCode::NotFound]
+        };
+        for code in codes {
+            let world = deleted_since("notes/old.md", "notes/new.md")?;
+            inject(&world, code.clone())?;
+            let failed = err_of(
+                world
+                    .service
+                    .restore_items(
+                        &alice(OperationName::RestoreItems, Some(mutation(1)))?,
+                        rewind('b', 'a', Some(NOTE))?,
+                    )
+                    .await,
+            )?;
+            assert_eq!(failed.code, code, "{read}");
+            assert_eq!(failed.message, "the store failed", "{read}");
+            assert_eq!(world.versions.commits()?.len(), 0, "{read}");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rewind_of_an_item_neither_revision_holds_is_left_to_the_store() -> TestResult {
+    // The target does not hold the item either: that `NotFound` is tolerated, the one restore
+    // is sent, and the refusal is the store's own.
+    let world = World::new()?;
+    world.versions.set_head(revision('b')?)?;
+    world.versions.put_diff(
+        &revision('b')?,
+        &revision('a')?,
+        Some(item(NOTE)),
+        vec![change(FileChangeKind::Added, None, Some("notes/old.md"))],
+    )?;
+    world.versions.queue_revision(revision('c')?)?;
+    let refused = err_of(
+        world
+            .service
+            .restore_items(
+                &alice(OperationName::RestoreItems, Some(mutation(1)))?,
+                rewind('b', 'a', Some(NOTE))?,
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::NotFound);
+    assert_eq!(refused.message, "no such item at either revision");
+    assert_eq!(world.versions.log_queries()?.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rewind_whose_newest_commits_parent_does_not_hold_the_item_is_one_restore() -> TestResult
+{
+    // The history names a parent that does not hold the item: that `NotFound` is tolerated.
+    let world = deleted_since("notes/old.md", "notes/new.md")?;
+    world.versions.set_head(revision('f')?)?;
+    world.versions.put_diff(
+        &revision('f')?,
+        &revision('a')?,
+        Some(item(NOTE)),
+        vec![change(FileChangeKind::Added, None, Some("notes/old.md"))],
+    )?;
+    world.versions.put_log(
+        &revision('f')?,
+        Some(item(NOTE)),
+        LogResponse {
+            commits: vec![Commit {
+                parents: vec![revision('e')?],
+                ..wire_commit('f')?
+            }],
+            next_cursor: None,
+        },
+    )?;
+    world
+        .service
+        .restore_items(
+            &alice(OperationName::RestoreItems, Some(mutation(1)))?,
+            rewind('f', 'a', Some(NOTE))?,
+        )
+        .await?;
+    let commits = world.versions.commits()?;
+    let commit = some(commits.first(), "the rewind")?;
+    assert!(one_restore(&commit.edits)?, "{:?}", commit.edits);
+    assert_eq!(
+        world.versions.shows(),
+        3,
+        "the base, the target, the parent"
+    );
     Ok(())
 }
 

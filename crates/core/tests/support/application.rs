@@ -15,7 +15,7 @@
 //! a rule about what links say after a write is proven only against real storage. It applies no
 //! other edit (a delete, a status change, a folder), and only the items an applied edit wrote
 //! are readable at the new revision. A test may make the next `show` fail with a code it
-//! names (`fail_next_show`), as a store fault would. `item_at_path` answers from the scripted documents as its port documents it: `None` when no item is at the path at
+//! names (`fail_next_show`, `fail_show_number`), as a store fault would, and so may the next `log` and the next `list` (`fail_next_log`, `fail_next_list`). `item_at_path` answers from the scripted documents as its port documents it: `None` when no item is at the path at
 //! a known revision, `NotFound` only for an unknown revision. A port the operations
 //! under test do not call answers `Internal` ("not used by this test").
 //!
@@ -162,7 +162,9 @@ pub struct FakeVersions {
     stage: Staged,
     shows: AtomicUsize,
     fail_next_lookup: AtomicBool,
-    fail_next_show: Mutex<Option<ErrorCode>>,
+    fail_show: Mutex<Option<(usize, ErrorCode)>>,
+    fail_next_log: Mutex<Option<ErrorCode>>,
+    fail_next_list: Mutex<Option<ErrorCode>>,
 }
 
 #[derive(Default)]
@@ -363,7 +365,9 @@ impl FakeVersions {
             stage: Staged::conformant()?,
             shows: AtomicUsize::new(0),
             fail_next_lookup: AtomicBool::new(false),
-            fail_next_show: Mutex::new(None),
+            fail_show: Mutex::new(None),
+            fail_next_log: Mutex::new(None),
+            fail_next_list: Mutex::new(None),
         })
     }
 
@@ -477,7 +481,34 @@ impl FakeVersions {
     /// # Errors
     /// Returns when the lock is poisoned.
     pub fn fail_next_show(&self, code: ErrorCode) -> Built<()> {
-        *lock(&self.fail_next_show)? = Some(code);
+        self.fail_show_number(1, code)
+    }
+
+    /// Make the `number`-th `show` from now (1 is the next) fail with `code`, as a store
+    /// fault in the middle of a handler's reads would; the shows before it answer.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn fail_show_number(&self, number: usize, code: ErrorCode) -> Built<()> {
+        *lock(&self.fail_show)? = Some((number, code));
+        Ok(())
+    }
+
+    /// Make the next `log` fail with `code`, as a store fault would.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn fail_next_log(&self, code: ErrorCode) -> Built<()> {
+        *lock(&self.fail_next_log)? = Some(code);
+        Ok(())
+    }
+
+    /// Make the next `list` fail with `code`, as a store fault would.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn fail_next_list(&self, code: ErrorCode) -> Built<()> {
+        *lock(&self.fail_next_list)? = Some(code);
         Ok(())
     }
 
@@ -749,7 +780,8 @@ impl VersionState {
     /// commit produced it, or the test scripted content at it.
     /// The listing of `folder` at `revision` from the documents there, when no test scripted
     /// one: the items directly inside it and its child folders. A folder no document lies
-    /// under is `NotFound`, as is an unknown revision.
+    /// under has an empty listing, as real storage answers it; only an unknown revision is
+    /// `NotFound`.
     fn derived_listing(
         &self,
         revision: &Revision,
@@ -778,9 +810,6 @@ impl VersionState {
                     folders.insert(child);
                 }
             }
-        }
-        if folder.is_some() && items.is_empty() && folders.is_empty() {
-            return Err(ApiError::new(ErrorCode::NotFound, "no such folder"));
         }
         Ok(FolderListing {
             items,
@@ -1076,6 +1105,9 @@ impl VersionStore for FakeVersions {
             state
                 .list_queries
                 .push((revision.clone(), folder.cloned(), page.clone()));
+            if let Some(code) = lock_api(&self.fail_next_list)?.take() {
+                return Err(ApiError::new(code, "the store failed"));
+            }
             let whole = match state
                 .listings
                 .iter()
@@ -1117,8 +1149,15 @@ impl VersionStore for FakeVersions {
     ) -> PortFuture<'a, ItemDocument> {
         self.shows.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
-            if let Some(code) = lock_api(&self.fail_next_show)?.take() {
-                return Err(ApiError::new(code, "the store failed"));
+            {
+                let mut failing = lock_api(&self.fail_show)?;
+                match failing.take() {
+                    Some((number, code)) if number <= 1 => {
+                        return Err(ApiError::new(code, "the store failed"));
+                    }
+                    Some((number, code)) => *failing = Some((number.saturating_sub(1), code)),
+                    None => {}
+                }
             }
             lock_api(&self.state)?
                 .documents
@@ -1257,6 +1296,9 @@ impl VersionStore for FakeVersions {
         Box::pin(async move {
             let mut state = lock_api(&self.state)?;
             state.log_queries.push(query.clone());
+            if let Some(code) = lock_api(&self.fail_next_log)?.take() {
+                return Err(ApiError::new(code, "the store failed"));
+            }
             state.require_known(&query.tip)?;
             let scripted = state
                 .logs

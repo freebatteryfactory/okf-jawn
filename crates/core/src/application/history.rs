@@ -485,8 +485,11 @@ async fn path_at(
 
 /// Whether `revision` holds an item or a folder at `path`, compared as the store compares
 /// paths for a collision (`WorkspacePath::collision_key`), so a path differing only in letter
-/// case counts as taken. The folder `path` lies in is listed; a folder the revision does not
-/// hold has nothing in it.
+/// case counts as taken. The folder `path` lies in is listed, every page of it; the store lists
+/// a folder the revision does not hold as empty.
+///
+/// # Errors
+/// Returns any error of listing the folder.
 async fn taken(
     service: &ApplicationService,
     scope: &StorageScope,
@@ -508,11 +511,11 @@ async fn taken(
             cursor: cursor.take(),
             limit: FOLDER_PAGE,
         };
-        let listing = match versions.list(scope, revision, folder.as_ref(), page).await {
-            Ok(listing) => listing,
-            Err(error) if error.code == ErrorCode::NotFound => return Ok(false),
-            Err(error) => return Err(error),
-        };
+        // Every error is the Rewind's: the store lists a folder the revision does not hold as
+        // empty, so `NotFound` here would be an unknown revision, never "nothing there".
+        let listing = versions
+            .list(scope, revision, folder.as_ref(), page)
+            .await?;
         let collides = listing
             .items
             .iter()
