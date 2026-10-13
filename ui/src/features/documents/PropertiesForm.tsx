@@ -32,9 +32,10 @@
  * (a required property with no field, a property a strict type does not allow, a rule about the
  * properties together) is listed above the form, and only there: the library is not given the
  * errors about the map as a whole, which it would draw under the form in the validator's words.
- * The library judges a form when it is changed, so a form that opens on held-back input is asked
- * to judge it at once. A map that did not fit before anything was entered is listed the same way,
- * and nothing is held back by it until the person enters something.
+ * The library judges a form when it is changed, so a form is asked to judge what it opens on,
+ * once. A map that did not fit before anything was entered is therefore said the same way (at
+ * its fields, and above the form), and nothing is held back by it until the person enters
+ * something.
  *
  * Without a schema there is no form, and the properties are shown as they are: when the
  * workspace has no definition of the item's type, when the definition names no properties, when
@@ -371,12 +372,13 @@ function TypedForm({
   // The properties the person has changed in a field since the form opened: these, and no other,
   // go from the form into the draft.
   const [entered, setEntered] = useState<readonly string[]>(() => held?.entered ?? []);
-  // The form library says what is wrong at a field once that form has been changed. A form that
-  // opens on input held back is asked to judge it at once, so the reason is at its field again.
+  // The form library says what is wrong at a field once that form has been changed. So a form is
+  // asked to judge what it opens on, once: stored properties that do not fit at a field, and
+  // input held back before, have their reason at the field from the start.
   const formRef = useRef<Form<PropertyMap> | null>(null);
   useEffect(() => {
-    if (held !== null) formRef.current?.validateForm();
-  }, [held]);
+    formRef.current?.validateForm();
+  }, []);
   const rules: RJSFSchema = schema;
   const drawn = drawnProperties(schema, data);
   // What a save would carry if the form's input went into the draft now: it is this, without the
@@ -434,8 +436,8 @@ function TypedForm({
       <Form<PropertyMap>
         ref={formRef}
         className="properties-form"
-        // Asked to judge when it opens on held-back input (above), the library reports what it
-        // found here; it is on the page already, at the fields and above the form.
+        // Asked to judge what it opens on (above), the library reports what it found here; it is
+        // on the page already, at the fields and above the form.
         onError={NOTHING_MORE}
         schema={rules}
         uiSchema={{ ...uiSchema, ...NO_SUBMIT }}

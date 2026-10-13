@@ -349,6 +349,31 @@ describe('the properties form', () => {
     });
   });
 
+  it('says at its field what does not fit in the stored properties, before anything is typed', async () => {
+    // The item lacks the required owner, and holds fewer attendees than its type allows.
+    const api = typed({
+      [ITEM]: () =>
+        ok({
+          ...itemDocument(noteSummary),
+          properties: { type: 'meeting-note', attendees: 0, okf_jawn: { id: NOTE } },
+        }),
+    });
+    await editNote();
+    const errorsAt = (label: string) =>
+      (field(label).getAttribute('aria-describedby') ?? '')
+        .split(' ')
+        .map((id) => document.getElementById(id)?.textContent ?? '')
+        .join(' ');
+    await eventually(() => expect(errorsAt('Attendees')).toMatch(/must be >= 1/));
+    expect(errorsAt('Owner')).toMatch(/required/);
+    // Saying so is not an edit: nothing is held back, marked or sent.
+    expect(document.querySelector('.form-said')?.textContent).toBe('');
+    expect(document.querySelector('.save-state')?.textContent).toBe('No changes to save.');
+    expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
+    await pass(AUTOSAVE_DELAY_MS * 3);
+    expect(api.callsTo(SAVE)).toHaveLength(0);
+  });
+
   // The service judges the whole map without the application's header; so does the form.
   describe('a type whose rules reach beyond the properties it names', () => {
     const has = { type: 'meeting-note', owner: 'Ada', reviewed: true, okf_jawn: { id: NOTE } };
