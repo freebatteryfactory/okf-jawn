@@ -12,8 +12,9 @@
  * Editing happens in place of the reading: one button switches the pane between the committed
  * text (rendered, read through `read_item`) and the person's draft (`DraftEditor`, its text from
  * `get_item`). Two panes can show the two side by side, since any pane can be split. An item that
- * has a draft opens on the draft, marked as one. A draft is started only where the pane reads the
- * version the workspace shows and the person may write; a pane that reads another revision says
+ * has a draft opens on the draft, marked as one. Editing is for Notes: a Source or a View is shown
+ * by the reader alone, with no "Edit". A draft is started only where the pane reads the version
+ * the workspace shows and the person may write; a pane of a Note that reads another revision says
  * so and offers that version. The switch is one element whatever it says, so it keeps keyboard
  * focus; "Edit" moves focus into the text box, and after a discard focus is on the switch.
  */
@@ -287,7 +288,16 @@ export function DocumentView({
 
   // Reading or editing. Until the person chooses, an item with a draft opens on the draft.
   const session = useDraftSession(workspaceId, itemId);
-  const editable = canWrite && revision === head;
+  // Editing is for Notes: a Source's text is changed through corrections and a View has its own
+  // editor, so neither is offered "Edit". Whether the item is a Note is known once `get_item` has
+  // answered, and stays known while the item is read again at another revision (an item's kind
+  // never changes), so the switch does not leave under keyboard focus. A session exists only for
+  // a Note.
+  const atShown = canWrite && revision === head;
+  const [seenAsNote, setSeenAsNote] = useState(false);
+  if (!seenAsNote && document?.summary.kind === 'note') setSeenAsNote(true);
+  const isNote = session !== undefined || seenAsNote;
+  const editable = atShown && isNote;
   const hasDraft = session !== undefined || (document?.draft ?? null) !== null;
   const [chosen, setChosen] = useState<'read' | 'edit' | null>(null);
   const wantsEdit = editable && (chosen ?? (hasDraft ? 'edit' : 'read')) === 'edit';
@@ -303,7 +313,7 @@ export function DocumentView({
   // Whether this pane opens on a draft is known once `get_item` has answered. Until then the
   // committed text is neither read nor shown, so it never stands where the draft will.
   const undecided =
-    editable && chosen === null && session === undefined && document === undefined && !item.isError;
+    atShown && chosen === null && session === undefined && document === undefined && !item.isError;
   const request: ReadItemRequest = {
     workspace_id: workspaceId,
     item_id: itemId,
@@ -433,7 +443,7 @@ export function DocumentView({
           onReadLatest={onReadLatest}
         />
       )}
-      {canWrite && !editable && (
+      {canWrite && !atShown && isNote && (
         <p role="note" className="notice">
           {hasDraft ? 'You have a draft of this item. ' : ''}
           Editing starts from the version this workspace shows, and this tab reads another revision.{' '}
@@ -444,15 +454,17 @@ export function DocumentView({
       )}
       {editable && (
         <p className="document-actions">
-          {/* aria-disabled, not disabled, until the item has been read: it may hold focus. */}
+          {/* aria-disabled, not disabled, while the item is read again: it may hold focus. */}
           <button
             type="button"
             ref={switchRef}
-            aria-disabled={document === undefined}
+            aria-disabled={session === undefined && document === undefined}
             onClick={() => {
               if (editing) setChosen('read');
-              else if (document !== undefined) {
-                beginSession(workspaceId, revision, document);
+              else if (session !== undefined || document !== undefined) {
+                if (session === undefined && document !== undefined) {
+                  beginSession(workspaceId, revision, document);
+                }
                 focusNext.current = 'text';
                 setChosen('edit');
               }

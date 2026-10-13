@@ -26,8 +26,10 @@ import {
   OLD,
   OTHER,
   otherSummary,
+  readResponse,
   renderAt,
   SOURCE,
+  summary,
   WS,
   workspace,
   writableWorkspace,
@@ -131,6 +133,33 @@ describe('who may edit, and where', () => {
     await screen.findByRole('button', { name: 'Edit' });
     expect(router.state.location.search).toEqual({});
     expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`);
+  });
+
+  // A Source's text is changed through corrections and a View has its own editor.
+  it.each([
+    ['a Source', 'source', 'Annual report'],
+    ['a View', 'view', 'Quarterly'],
+  ] as const)('offers no editing for %s, even one that has a draft', async (_what, kind, title) => {
+    const item = summary(SOURCE, 'things/it.md', title, 'thing', kind);
+    const api = writable({
+      [ITEM]: () =>
+        ok({
+          ...itemDocument(item),
+          draft: {
+            body: 'a draft made elsewhere',
+            properties: { type: 'thing', okf_jawn: { id: SOURCE } },
+            draft: draftOf(SOURCE, HEAD, LATER),
+          },
+        }),
+      '/api/reads/read-item': () => ok(readResponse(item, `# ${title}\n\nCommitted text`)),
+    });
+    renderAt(`/w/${WS}/i/${SOURCE}`);
+    await screen.findByText('Committed text');
+    await screen.findByRole('tab', { name: `${title} (draft)` });
+    expect(screen.queryByRole('button', { name: /Edit/ })).toBeNull();
+    expect(screen.queryByRole('textbox', { name: `Text of ${title}` })).toBeNull();
+    expect(screen.queryByText(/Editing starts from/)).toBeNull();
+    expect(api.callsTo(SAVE)).toHaveLength(0);
   });
 
   it('lets a tab that cites the shown version be edited', async () => {
