@@ -4,9 +4,22 @@
 //! The stream holds no behaviour of its own: each poll is the `list_events` operation run through
 //! `core::dispatch` as the request's own principal, so authorization (and the rule that only a
 //! workspace administrator sees security events) is exactly the JSON operation's. Each event is
-//! sent with its cursor as the SSE `id`, so a reconnecting client resumes after the last one it
-//! received. A refusal on the first poll is the operation's `ApiError` JSON; a refusal later
+//! sent with its cursor as the SSE `id`, and `Last-Event-ID` is forwarded as the operation's
+//! `after`, so a reconnecting client resumes after the last event it received; a `Last-Event-ID`
+//! that is not a short text cursor is refused as `InvalidInput`, never dropped into a replay from
+//! the start. A refusal on the first poll is the operation's `ApiError` JSON; a refusal later
 //! (a revoked grant, say) ends the stream. Notifications are projections, not canonical content.
+//!
+//! A stream lives only while its credential does (SPEC section 11: "Logging out ends the session
+//! immediately"). Before every poll after the first, the stream asks the identity middleware's own
+//! `Identity::still_authenticates` whether the credential that opened it would authenticate a new
+//! request now (the session not revoked or expired, the connector not revoked, the Connect token
+//! not past its `exp`), and ends if not. So a logout or a revocation closes an open stream within
+//! one poll interval, and no event is delivered after that check fails.
+//!
+//! A poll that returns a full page is followed by the next poll at once; only a page that is not
+//! full is followed by a wait of the poll interval. Each open stream costs one `list_events` per
+//! interval; nothing here limits the streams of one principal (carried to M2).
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -26,38 +39,76 @@ use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
 use serde_json::json;
 
 use crate::errors::error_response;
+use crate::identity::{Credential, Identity};
 use crate::{BoundApplication, SessionId};
+
+/// What the stream route is built from.
+#[derive(Clone)]
+pub struct EventStreams {
+    /// The application and dispatch's ports.
+    pub bound: BoundApplication,
+    /// The identity middleware's state, asked before every poll whether the stream's credential
+    /// still authenticates.
+    pub identity: Identity,
+    /// How long an open stream waits after a page that was not full.
+    pub interval: Duration,
+}
 
 /// Where an open stream stands.
 struct Polling {
-    bound: BoundApplication,
+    streams: EventStreams,
     principal: Principal,
+    credential: Credential,
     session_id: Option<String>,
     workspace_id: String,
     after: Option<String>,
     pending: VecDeque<okf_jawn_contract::events::Event>,
-    /// Whether the next poll may run without waiting first.
-    waited: bool,
+    /// Whether the last poll returned a full page, so more may be waiting.
+    full_page: bool,
     ended: bool,
 }
 
 /// The route (`api/transports.json` `stream_events`).
 pub const EVENTS_PATH: &str = "/api/workspaces/{workspace_id}/events";
 
-/// How often an open stream asks for new notifications.
+/// How long a production stream waits after a page that was not full.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Most notifications one poll reads.
-const PAGE_LIMIT: u16 = 100;
+/// Most notifications one poll reads; a poll that returns this many is a full page.
+pub const PAGE_LIMIT: u16 = 100;
 
 /// Longest `Last-Event-ID` accepted; a cursor is short and opaque.
-const MAX_CURSOR_CHARS: usize = 256;
+pub const MAX_CURSOR_CHARS: usize = 256;
 
 /// The stream route, for `ServiceParts::extra`.
-pub fn routes(bound: BoundApplication) -> Router {
+pub fn routes(streams: EventStreams) -> Router {
     Router::new()
         .route(EVENTS_PATH, get(stream_events))
-        .with_state(bound)
+        .with_state(streams)
+}
+
+/// The cursor a reconnecting client resumes after: `Ok(None)` without the header or with an
+/// empty one (which resets the cursor).
+///
+/// # Errors
+/// Returns `InvalidInput` naming the header when it is not text or is longer than
+/// [`MAX_CURSOR_CHARS`].
+pub fn last_event_id(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    let Some(value) = headers.get("last-event-id") else {
+        return Ok(None);
+    };
+    let invalid = || {
+        ApiError::new(
+            ErrorCode::InvalidInput,
+            "Last-Event-ID must be a cursor of at most 256 characters",
+        )
+        .with_field("Last-Event-ID")
+    };
+    let cursor = value.to_str().map_err(|_| invalid())?;
+    if cursor.chars().count() > MAX_CURSOR_CHARS {
+        return Err(invalid());
+    }
+    Ok((!cursor.is_empty()).then(|| cursor.to_owned()))
 }
 
 /// One poll: the notifications after `after`, as `list_events` answers the caller.
@@ -98,26 +149,26 @@ async fn poll(
 }
 
 async fn stream_events(
-    State(bound): State<BoundApplication>,
+    State(streams): State<EventStreams>,
     principal: Option<Extension<Principal>>,
+    credential: Option<Extension<Credential>>,
     session: Option<Extension<SessionId>>,
     Path(workspace_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(Extension(principal)) = principal else {
+    let (Some(Extension(principal)), Some(Extension(credential))) = (principal, credential) else {
         return error_response(ApiError::new(
             ErrorCode::Unauthenticated,
             "Authentication is required",
         ));
     };
     let session_id = session.map(|Extension(SessionId(id))| id);
-    let after = headers
-        .get("last-event-id")
-        .and_then(|value| value.to_str().ok())
-        .filter(|cursor| !cursor.is_empty() && cursor.chars().count() <= MAX_CURSOR_CHARS)
-        .map(str::to_owned);
+    let after = match last_event_id(&headers) {
+        Ok(after) => after,
+        Err(error) => return error_response(error),
+    };
     let first = match poll(
-        &bound,
+        &streams.bound,
         &principal,
         session_id.as_deref(),
         &workspace_id,
@@ -129,19 +180,25 @@ async fn stream_events(
         Err(error) => return error_response(error),
     };
     let state = Polling {
-        bound,
+        streams,
         principal,
+        credential,
         session_id,
         workspace_id,
         after,
+        full_page: is_full(&first),
         pending: first.events.into(),
-        waited: false,
         ended: false,
     };
     let events = stream::unfold(state, next_event);
     Sse::new(events)
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+/// Whether `page` is full, so the next poll should not wait.
+fn is_full(page: &ListEventsResponse) -> bool {
+    page.events.len() >= usize::from(PAGE_LIMIT)
 }
 
 /// The stream's next SSE event: a pending notification, or the result of the next poll.
@@ -155,12 +212,20 @@ async fn next_event(mut state: Polling) -> Option<(Result<SseEvent, axum::Error>
             let sent = SseEvent::default().id(event.id.clone()).json_data(&event);
             return Some((sent, state));
         }
-        if !state.waited {
-            tokio::time::sleep(POLL_INTERVAL).await;
+        if !state.full_page {
+            tokio::time::sleep(state.streams.interval).await;
         }
-        state.waited = false;
+        // Asked before every poll: a stream never outlives the credential that opened it.
+        if !state
+            .streams
+            .identity
+            .still_authenticates(&state.credential)
+            .await
+        {
+            return None;
+        }
         match poll(
-            &state.bound,
+            &state.streams.bound,
             &state.principal,
             state.session_id.as_deref(),
             &state.workspace_id,
@@ -168,7 +233,10 @@ async fn next_event(mut state: Polling) -> Option<(Result<SseEvent, axum::Error>
         )
         .await
         {
-            Ok(page) => state.pending = page.events.into(),
+            Ok(page) => {
+                state.full_page = is_full(&page);
+                state.pending = page.events.into();
+            }
             Err(_) => state.ended = true,
         }
     }

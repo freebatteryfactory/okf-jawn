@@ -54,6 +54,7 @@ fn app(hosted: bool) -> Result<Router, Box<dyn std::error::Error>> {
                     subject: OWNER.to_owned(),
                     organization_id: "org_01".to_owned(),
                     client_id: "client_mcp".to_owned(),
+                    expires_at: u64::MAX,
                 },
             }),
             resource_metadata: "https://okf.example.test/.well-known/oauth-protected-resource"

@@ -87,6 +87,7 @@ struct ConnectClaims {
     sub: String,
     org_id: String,
     client_id: String,
+    exp: u64,
 }
 
 /// Seconds of clock difference tolerated on `exp` and `nbf`.
@@ -212,6 +213,7 @@ impl ConnectTokens {
             subject: claims.sub,
             organization_id: claims.org_id,
             client_id: claims.client_id,
+            expires_at: claims.exp,
         })
     }
 }

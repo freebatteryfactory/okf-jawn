@@ -1,7 +1,10 @@
 //! The identity middleware: the only place a `Principal` or a `SessionId` enters a request.
 //!
 //! It is layered outside every router, and it first removes any such extension already on the
-//! request, so no inner layer or route can supply one. Each request takes exactly one entry path:
+//! request, so no inner layer or route can supply one. Beside every `Principal` it inserts the
+//! `Credential` the request authenticated with (a route reads one only with the other), and `Identity::still_authenticates` answers,
+//! through the same functions the middleware authenticates with, whether that credential would
+//! authenticate a new request; an event stream asks it before every poll. Each request takes exactly one entry path:
 //!
 //! - **Bearer** (`Authorization: Bearer ...`): locally a connector secret, resolved through
 //!   `CredentialStore::lookup_connector` by `secret_hash`; hosted a WorkOS Connect access token
@@ -23,13 +26,16 @@
 //! Loopback is never trust and there is no guest owner.
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Request, State};
 use axum::http::header::{AUTHORIZATION, ORIGIN, WWW_AUTHENTICATE};
 use axum::http::{HeaderMap, HeaderValue, Method};
 use axum::middleware::Next;
 use axum::response::Response;
-use okf_jawn_contract::access::{AccessRoute, CSRF_HEADER, DelegationCeiling, Principal};
+use okf_jawn_contract::access::{
+    AccessRoute, CSRF_HEADER, Connector, DelegationCeiling, Principal,
+};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::TenantId;
 use okf_jawn_contract::metadata::{OperationName, operations};
@@ -58,6 +64,16 @@ pub trait CookieReader: Send + Sync {
     fn read(&self, headers: &HeaderMap, name: &str) -> Option<String>;
 }
 
+/// Where the middleware reads the wall-clock time a session's expiry is compared with.
+pub trait WallClock: Send + Sync {
+    /// Milliseconds since the Unix epoch.
+    fn unix_millis(&self) -> u128;
+}
+
+/// The operating system's wall clock.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemWallClock;
+
 /// What a valid Connect access token identifies; it carries no workspace permission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectIdentity {
@@ -67,6 +83,33 @@ pub struct ConnectIdentity {
     pub organization_id: String,
     /// The OAuth client (`client_id`), kept separately from the subject.
     pub client_id: String,
+    /// When the token expires (`exp`), in seconds since the Unix epoch.
+    pub expires_at: u64,
+}
+
+/// How a request authenticated. The middleware inserts it beside the `Principal`, so a response
+/// that outlives its request (an event stream) can ask [`Identity::still_authenticates`] whether
+/// the same credential would authenticate a new request. It holds no secret: a session by its
+/// stored id, a connector by the SHA-256 of its secret, a Connect token by its expiry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Credential {
+    /// A browser session.
+    Session {
+        /// The stored session id (the SHA-256 of the cookie secret, in hex).
+        session_id: String,
+    },
+    /// A local connector secret.
+    Connector {
+        /// The SHA-256 of the presented secret, as the store looks it up.
+        secret_hash: [u8; 32],
+        /// The connector the secret resolved to.
+        connector_id: String,
+    },
+    /// A WorkOS Connect access token.
+    Connect {
+        /// The token's `exp`, in seconds since the Unix epoch.
+        expires_at: u64,
+    },
 }
 
 /// How a bearer token is resolved: by the deployment's entry path.
@@ -105,6 +148,7 @@ struct Inner {
     ports: IdentityPorts,
     /// Origins a cookie request may come from: the service's own public origin.
     origins: Vec<String>,
+    clock: Arc<dyn WallClock>,
 }
 
 /// The browser session cookie (`api/openapi.json` `browserSession`).
@@ -113,68 +157,85 @@ pub const SESSION_COOKIE: &str = "okf-session";
 /// The MCP endpoint path (`api/transports.json` `mcp_request`).
 pub const MCP_PATH: &str = "/mcp";
 
+impl WallClock for SystemWallClock {
+    fn unix_millis(&self) -> u128 {
+        // A clock before 1970 reads as the epoch: every session is then unexpired by this
+        // check, and the store's own check still stands.
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis())
+    }
+}
+
 impl Identity {
     /// The middleware state: bearer tokens resolved by `bearer`, sessions and connectors read
-    /// through `ports`, and cookie requests accepted only from `origins`.
+    /// through `ports`, and cookie requests accepted only from `origins`. Session expiry is
+    /// compared with the operating system's clock.
     #[must_use]
     pub fn new(bearer: BearerAuth, ports: IdentityPorts, origins: Vec<String>) -> Self {
+        Self::with_clock(bearer, ports, origins, Arc::new(SystemWallClock))
+    }
+
+    /// [`Identity::new`], reading the wall-clock time from `clock`.
+    #[must_use]
+    pub fn with_clock(
+        bearer: BearerAuth,
+        ports: IdentityPorts,
+        origins: Vec<String>,
+        clock: Arc<dyn WallClock>,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 bearer,
                 ports,
                 origins,
+                clock,
             }),
         }
     }
 
-    /// The `Principal` a bearer token authenticates.
-    async fn bearer_principal(&self, token: &str) -> Result<Principal, ApiError> {
-        match &self.inner.bearer {
-            BearerAuth::Local => {
-                let credentials = &self.inner.ports.credentials;
-                let connector = credentials
-                    .lookup_connector(secret_hash(token))
-                    .await?
-                    .filter(|connector| connector.revoked_at.is_none())
-                    .ok_or_else(invalid_token)?;
-                let owner = credentials.installation_identity().await?;
-                Ok(Principal {
-                    subject: owner.subject,
-                    tenant_id: TenantId::local(),
-                    route: AccessRoute::McpDelegation,
-                    client_id: Some(connector.connector_id.0.to_string()),
-                    delegation: Some(DelegationCeiling {
-                        permissions: connector.permissions,
-                        workspace_ids: Some(connector.workspace_ids),
-                    }),
-                })
+    /// Whether `credential` would authenticate a new request now: the session still stored, of
+    /// this deployment's browser route and not expired; the connector still resolving, unrevoked,
+    /// to the same connector; the Connect token not past its `exp`. The session and connector
+    /// answers come from the very functions the middleware authenticates with
+    /// (`live_session`, `live_connector`). A store fault answers `false`: a response that
+    /// outlives its request ends when its credential cannot be confirmed.
+    pub async fn still_authenticates(&self, credential: &Credential) -> bool {
+        match credential {
+            Credential::Session { session_id } => {
+                matches!(self.live_session(session_id).await, Ok(Some(_)))
             }
-            BearerAuth::Hosted { connect, .. } => {
-                let identity = connect.verify(token).await?;
-                let tenant_id =
-                    TenantId::try_from(identity.organization_id).map_err(|_| invalid_token())?;
-                Ok(Principal {
-                    subject: identity.subject,
-                    tenant_id,
-                    route: AccessRoute::McpDelegation,
-                    client_id: Some(identity.client_id),
-                    delegation: None,
-                })
+            Credential::Connector {
+                secret_hash,
+                connector_id,
+            } => matches!(
+                self.live_connector(*secret_hash).await,
+                Ok(Some(connector)) if connector.connector_id.0.to_string() == *connector_id
+            ),
+            Credential::Connect { expires_at } => {
+                u128::from(*expires_at).saturating_mul(1000) > self.inner.clock.unix_millis()
             }
         }
     }
 
-    /// The session a cookie request carries, when its cookie names a live session whose route
-    /// this deployment's browser sessions take.
-    async fn session(&self, secret: &str) -> Result<Option<(Principal, SessionId)>, ApiError> {
-        let session_id = session_id_of(secret);
-        let Some(record) = self
+    /// The connector a secret's hash resolves to, when it is not revoked.
+    async fn live_connector(&self, hash: [u8; 32]) -> Result<Option<Connector>, ApiError> {
+        Ok(self
             .inner
             .ports
             .credentials
-            .get_session(&session_id)
+            .lookup_connector(hash)
             .await?
-        else {
+            .filter(|connector| connector.revoked_at.is_none()))
+    }
+
+    /// The principal of the stored session `session_id`, when that session is live: stored
+    /// under that id, of the route this deployment's browser sessions take, and not expired.
+    ///
+    /// The port says the store answers only unexpired sessions; the server compares
+    /// `expires_at` with its own clock as well, and a session is dead from that instant on.
+    async fn live_session(&self, session_id: &str) -> Result<Option<Principal>, ApiError> {
+        let Some(record) = self.inner.ports.credentials.get_session(session_id).await? else {
             return Ok(None);
         };
         let expected = match self.inner.bearer {
@@ -184,7 +245,74 @@ impl Identity {
         if record.principal.route != expected || record.session_id != session_id {
             return Ok(None);
         }
-        Ok(Some((record.principal, SessionId(session_id))))
+        let expires = record.expires_at.instant().map_err(|_| {
+            ApiError::new(
+                ErrorCode::Internal,
+                "A stored session has no readable expiry",
+            )
+        })?;
+        let expires_ms = expires
+            .unix_timestamp_nanos()
+            .checked_div(1_000_000)
+            .unwrap_or(i128::MIN);
+        let now_ms = i128::try_from(self.inner.clock.unix_millis()).unwrap_or(i128::MAX);
+        if expires_ms <= now_ms {
+            return Ok(None);
+        }
+        Ok(Some(record.principal))
+    }
+
+    /// The `Principal` a bearer token authenticates, and the credential it authenticated with.
+    async fn bearer_principal(&self, token: &str) -> Result<(Principal, Credential), ApiError> {
+        match &self.inner.bearer {
+            BearerAuth::Local => {
+                let hash = secret_hash(token);
+                let connector = self.live_connector(hash).await?.ok_or_else(invalid_token)?;
+                let owner = self.inner.ports.credentials.installation_identity().await?;
+                let connector_id = connector.connector_id.0.to_string();
+                let principal = Principal {
+                    subject: owner.subject,
+                    tenant_id: TenantId::local(),
+                    route: AccessRoute::McpDelegation,
+                    client_id: Some(connector_id.clone()),
+                    delegation: Some(DelegationCeiling {
+                        permissions: connector.permissions,
+                        workspace_ids: Some(connector.workspace_ids),
+                    }),
+                };
+                let credential = Credential::Connector {
+                    secret_hash: hash,
+                    connector_id,
+                };
+                Ok((principal, credential))
+            }
+            BearerAuth::Hosted { connect, .. } => {
+                let identity = connect.verify(token).await?;
+                let tenant_id =
+                    TenantId::try_from(identity.organization_id).map_err(|_| invalid_token())?;
+                let principal = Principal {
+                    subject: identity.subject,
+                    tenant_id,
+                    route: AccessRoute::McpDelegation,
+                    client_id: Some(identity.client_id),
+                    delegation: None,
+                };
+                let credential = Credential::Connect {
+                    expires_at: identity.expires_at,
+                };
+                Ok((principal, credential))
+            }
+        }
+    }
+
+    /// The session a cookie request carries, when its cookie names a live session whose route
+    /// this deployment's browser sessions take.
+    async fn session(&self, secret: &str) -> Result<Option<(Principal, SessionId)>, ApiError> {
+        let session_id = session_id_of(secret);
+        Ok(self
+            .live_session(&session_id)
+            .await?
+            .map(|principal| (principal, SessionId(session_id))))
     }
 
     /// Whether a cookie request comes from this service's own origin and site.
@@ -259,8 +387,9 @@ pub async fn identify(
             ));
         };
         return match identity.bearer_principal(&token).await {
-            Ok(principal) => {
+            Ok((principal, credential)) => {
                 request.extensions_mut().insert(principal);
+                request.extensions_mut().insert(credential);
                 next.run(request).await
             }
             Err(error) if error.code == ErrorCode::Unauthenticated => identity.challenge(error),
@@ -302,6 +431,9 @@ pub async fn identify(
         ));
     }
     request.extensions_mut().insert(principal);
+    request.extensions_mut().insert(Credential::Session {
+        session_id: session_id.0.clone(),
+    });
     request.extensions_mut().insert(session_id);
     next.run(request).await
 }

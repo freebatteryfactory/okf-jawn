@@ -2,27 +2,55 @@
 //! operation, and the byte routes over a `Transfers` double.
 #![cfg(feature = "runtime")]
 
+use std::collections::VecDeque;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use futures_util::StreamExt as _;
-use okf_jawn_contract::access::AccessRoute;
+use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::identity::{ArtifactId, Digest, ItemId, Revision, UploadId, WorkspaceId};
+use okf_jawn_contract::identity::{
+    ArtifactId, Digest, ItemId, Revision, TenantId, Timestamp, UploadId, WorkspaceId,
+};
 use okf_jawn_contract::import::Upload;
-use okf_jawn_core::ports::PortFuture;
+use okf_jawn_core::context::OperationContext;
+use okf_jawn_core::credentials::{CredentialStore, SessionRecord};
+use okf_jawn_core::ports::{Application, PortFuture};
 use okf_jawn_core::storage::ByteReader;
+use okf_jawn_server::events::EventStreams;
+use okf_jawn_server::identity::session_id_of;
 use okf_jawn_server::transfers::{ByteRange, Download, TransferCaller, Transfers};
-use okf_jawn_server::{events, transfers};
-use serde_json::json;
+use okf_jawn_server::{BoundApplication, events, transfers};
+use serde_json::{Value, json};
 use tokio::io::AsyncReadExt as _;
 use tower::ServiceExt;
 
 use check::{TestResult, some};
-use support::{HOST, LocalApp, SECRET, WORKSPACE};
+use fixtures::workspace;
+use support::{CONNECTOR, HOST, LocalApp, OWNER, SECRET, WORKSPACE};
+
+macro_rules! scripted_operations {
+    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
+        $operator:literal, $visibility:literal, $permission:ident, $ui:literal, $status:literal,
+        $destructive:literal, $description:literal)),* $(,)?) => {
+        impl Application for Scripted {
+            $(fn $id<'a>(&'a self, _context: &'a OperationContext, request: $request)
+                -> PortFuture<'a, $response> {
+                Box::pin(async move {
+                    let asked = serde_json::to_value(&request)
+                        .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+                    let value = self.answer(stringify!($id), asked)?;
+                    serde_json::from_value(value)
+                        .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))
+                })
+            })*
+        }
+    };
+}
 
 /// A transfers double: it keeps what was uploaded and serves one fixed object.
 #[derive(Default)]
@@ -33,9 +61,112 @@ struct Bytes {
     stored_type: &'static str,
 }
 
+/// An application whose `list_events` plays scripted pages and keeps every request it was
+/// asked; every other operation is refused. The shared counting double records contexts only.
+#[derive(Default)]
+struct Scripted {
+    pages: Mutex<VecDeque<Value>>,
+    asked: Mutex<Vec<Value>>,
+}
+
+/// One open stream and what it was built over.
+struct Stream {
+    base: LocalApp,
+    scripted: Arc<Scripted>,
+    app: Router,
+}
+
+const FAR_FUTURE: &str = "2999-01-01T00:00:00.000Z";
+const LONG_PAST: &str = "2000-01-01T00:00:00.000Z";
+const SHORT: Duration = Duration::from_millis(20);
+const NEVER: Duration = Duration::from_secs(3600);
+
 const OBJECT: &[u8] = b"0123456789";
 const UPLOAD: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const ITEM: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+impl Scripted {
+    fn answer(&self, operation: &str, asked: Value) -> Result<Value, ApiError> {
+        if operation != "list_events" {
+            return Err(ApiError::new(ErrorCode::NotImplemented, "not scripted"));
+        }
+        self.asked.lock().map_err(|_| poisoned())?.push(asked);
+        Ok(self
+            .pages
+            .lock()
+            .map_err(|_| poisoned())?
+            .pop_front()
+            .unwrap_or_else(|| json!({ "events": [] })))
+    }
+
+    fn asked(&self) -> Result<Vec<Value>, ApiError> {
+        Ok(self.asked.lock().map_err(|_| poisoned())?.clone())
+    }
+}
+
+impl Stream {
+    /// A stream service polling every `interval` over `pages`.
+    fn new(interval: Duration, pages: Vec<Value>) -> Result<Self, Box<dyn std::error::Error>> {
+        let base = LocalApp::new()?;
+        let scripted = Arc::new(Scripted {
+            pages: Mutex::new(pages.into()),
+            asked: Mutex::new(Vec::new()),
+        });
+        let streams = EventStreams {
+            bound: BoundApplication {
+                application: scripted.clone(),
+                ..base.bound()
+            },
+            identity: base.identity(),
+            interval,
+        };
+        let app = base.service(events::routes(streams), Vec::new(), None)?;
+        Ok(Self {
+            base,
+            scripted,
+            app,
+        })
+    }
+
+    /// Open the stream with `headers`; the response of the first poll.
+    async fn open(
+        &self,
+        headers: &[(&str, &str)],
+    ) -> Result<axum::response::Response, Box<dyn std::error::Error>> {
+        let mut builder =
+            Request::get(format!("/api/workspaces/{WORKSPACE}/events")).header("host", HOST);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        Ok(self
+            .app
+            .clone()
+            .oneshot(builder.body(Body::empty())?)
+            .await?)
+    }
+
+    /// Store a live owner session and answer its `Cookie` header.
+    fn session(
+        &self,
+        secret: &str,
+        expires_at: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        self.base.credentials.add_session(SessionRecord {
+            session_id: session_id_of(secret),
+            principal: Principal {
+                subject: OWNER.to_owned(),
+                tenant_id: TenantId::local(),
+                route: AccessRoute::LocalOwner,
+                client_id: None,
+                delegation: None,
+            },
+            expires_at: Timestamp::try_from(expires_at.to_owned())?,
+        })?;
+        Ok(format!("okf-session={secret}"))
+    }
+}
+
+okf_jawn_contract::for_each_operation!(scripted_operations);
 
 impl Bytes {
     fn saw(&self, caller: &TransferCaller) -> Result<(), ApiError> {
@@ -146,6 +277,55 @@ impl Transfers for Bytes {
             self.saw(caller)?;
             self.object(None)
         })
+    }
+}
+
+fn poisoned() -> ApiError {
+    ApiError::new(ErrorCode::Internal, "poisoned")
+}
+
+/// A page of `count` events whose ids start at `first`.
+fn page(first: usize, count: usize) -> Value {
+    let events: Vec<Value> = (first..first.saturating_add(count))
+        .map(|id| {
+            json!({
+                "id": id.to_string(),
+                "workspace_id": WORKSPACE,
+                "kind": "changed",
+                "at": "2026-10-12T12:00:00.000Z"
+            })
+        })
+        .collect();
+    json!({ "events": events })
+}
+
+/// Read the stream until it ends or `events` events were seen, giving up after ten seconds; the
+/// text received, and whether the stream ended.
+async fn read(
+    response: axum::response::Response,
+    events: usize,
+) -> Result<(String, bool), Box<dyn std::error::Error>> {
+    let mut frames = response.into_body().into_data_stream();
+    let mut seen = String::new();
+    let reading = async {
+        loop {
+            if seen.matches("\"kind\"").count() >= events {
+                return Ok::<bool, axum::Error>(false);
+            }
+            match frames.next().await {
+                Some(chunk) => seen.push_str(&String::from_utf8_lossy(&chunk?)),
+                None => return Ok(true),
+            }
+        }
+    };
+    let ended = tokio::time::timeout(Duration::from_secs(10), reading).await;
+    match ended {
+        Ok(ended) => Ok((seen, ended?)),
+        Err(_) => Err(format!(
+            "the stream neither ended nor delivered {events} events in ten seconds; got {} bytes",
+            seen.len()
+        )
+        .into()),
     }
 }
 
@@ -430,72 +610,189 @@ async fn a_byte_route_needs_a_principal_and_reports_the_applications_refusal() -
 
 #[tokio::test]
 async fn workspace_events_stream_as_sse_with_their_cursor_as_the_id() -> TestResult {
-    let base = LocalApp::new()?;
-    base.counting.set_response(
-        "list_events",
-        json!({
-            "events": [
-                { "id": "41", "workspace_id": WORKSPACE, "kind": "changed",
-                  "at": "2026-10-12T12:00:00.000Z" },
-                { "id": "42", "workspace_id": WORKSPACE, "kind": "imported",
-                  "at": "2026-10-12T12:00:01.000Z" }
-            ]
-        }),
-    )?;
-    let app = base.service(events::routes(base.bound()), Vec::new(), None)?;
-    let path = format!("/api/workspaces/{WORKSPACE}/events");
-    let response = app
-        .clone()
-        .oneshot(request("GET", &path, true, None, Body::empty())?)
+    let stream = Stream::new(NEVER, vec![page(41, 2)])?;
+    let response = stream
+        .open(&[("authorization", &format!("Bearer {SECRET}"))])
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok()),
+        header(&response, "content-type").as_deref(),
         Some("text/event-stream")
     );
-    let mut frames = response.into_body().into_data_stream();
-    let mut seen = String::new();
-    // Two events are pending; a bounded read, so a stream that sent neither cannot hang the test.
-    for _ in 0..4 {
-        if seen.contains("\"imported\"") {
-            break;
-        }
-        let chunk = some(frames.next().await, "another SSE frame")??;
-        seen.push_str(&String::from_utf8_lossy(&chunk));
-    }
+    let (seen, ended) = read(response, 2).await?;
+    assert!(!ended);
     assert!(seen.contains("id: 41") || seen.contains("id:41"));
     assert!(seen.contains("id: 42") || seen.contains("id:42"));
-    assert!(seen.contains("\"kind\":\"changed\""));
-    assert!(seen.contains("\"kind\":\"imported\""));
-    // The stream ran the operation as the caller: an agent route, with no browser session.
-    let contexts = base.counting.contexts("list_events")?;
-    let context = some(contexts.first(), "the poll's context")?;
-    assert_eq!(context.principal.route, AccessRoute::McpDelegation);
 
     // Without a principal the stream never opens.
-    let anonymous = app
-        .oneshot(request("GET", &path, false, None, Body::empty())?)
-        .await?;
+    let anonymous = stream.open(&[]).await?;
     assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
     Ok(())
 }
 
 #[tokio::test]
-async fn a_stream_the_caller_may_not_read_is_the_operations_refusal() -> TestResult {
-    let base = LocalApp::new()?;
-    let app = base.service(events::routes(base.bound()), Vec::new(), None)?;
-    // The connector's ceiling names one workspace; this is another.
-    let path = "/api/workspaces/22222222-2222-4222-8222-222222222222/events";
-    let response = app
-        .oneshot(request("GET", path, true, None, Body::empty())?)
+async fn last_event_id_is_forwarded_as_after_and_each_poll_resumes_after_the_last_event()
+-> TestResult {
+    let stream = Stream::new(SHORT, vec![page(42, 2), page(44, 1)])?;
+    let response = stream
+        .open(&[
+            ("authorization", &format!("Bearer {SECRET}")),
+            ("last-event-id", "41"),
+        ])
         .await?;
+    let (_, ended) = read(response, 3).await?;
+    assert!(!ended);
+    let asked = stream.scripted.asked()?;
+    let first = some(asked.first(), "the first poll")?;
+    assert_eq!(first.get("after"), Some(&json!("41")));
+    assert_eq!(first.get("workspace_id"), Some(&json!(WORKSPACE)));
+    let second = some(asked.get(1), "the second poll")?;
+    assert_eq!(second.get("after"), Some(&json!("43")));
+
+    // Without the header the first poll names no cursor.
+    let fresh = Stream::new(NEVER, vec![page(1, 1)])?;
+    let response = fresh
+        .open(&[("authorization", &format!("Bearer {SECRET}"))])
+        .await?;
+    read(response, 1).await?;
+    let asked = fresh.scripted.asked()?;
+    assert_eq!(some(asked.first(), "the first poll")?.get("after"), None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_last_event_id_over_the_bound_is_refused_not_dropped() -> TestResult {
+    let stream = Stream::new(NEVER, vec![page(1, 1), page(1, 1)])?;
+    let bearer = format!("Bearer {SECRET}");
+    let at_bound = "c".repeat(256);
+    let accepted = stream
+        .open(&[("authorization", &bearer), ("last-event-id", &at_bound)])
+        .await?;
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let over = "c".repeat(257);
+    let refused = stream
+        .open(&[("authorization", &bearer), ("last-event-id", &over)])
+        .await?;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let error: ApiError = serde_json::from_slice(&to_bytes(refused.into_body(), 65_536).await?)?;
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.field.as_deref(), Some("Last-Event-ID"));
+    // Only the accepted request reached the operation.
+    assert_eq!(stream.scripted.asked()?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_backlog_of_three_pages_arrives_without_waiting_between_full_pages() -> TestResult {
+    // The interval is an hour: only polls that follow a full page at once can deliver page two
+    // and page three inside the read's ten seconds.
+    let stream = Stream::new(NEVER, vec![page(1, 100), page(101, 100), page(201, 1)])?;
+    let response = stream
+        .open(&[("authorization", &format!("Bearer {SECRET}"))])
+        .await?;
+    let (seen, ended) = read(response, 201).await?;
+    assert!(!ended);
+    assert!(seen.contains("id: 201") || seen.contains("id:201"));
+    assert_eq!(stream.scripted.asked()?.len(), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_page_that_is_not_full_is_followed_by_a_wait() -> TestResult {
+    let stream = Stream::new(NEVER, vec![page(1, 99), page(100, 1)])?;
+    let response = stream
+        .open(&[("authorization", &format!("Bearer {SECRET}"))])
+        .await?;
+    let mut frames = response.into_body().into_data_stream();
+    let mut seen = String::new();
+    while seen.matches("\"kind\"").count() < 99 {
+        let chunk = some(frames.next().await, "another SSE frame")??;
+        seen.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    // The second page is an hour away: nothing more arrives, and the operation ran once.
+    let more = tokio::time::timeout(Duration::from_millis(300), frames.next()).await;
+    assert!(more.is_err(), "an event arrived without the wait");
+    assert_eq!(stream.scripted.asked()?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stream_ends_when_its_session_is_logged_out() -> TestResult {
+    let stream = Stream::new(SHORT, vec![page(1, 1), page(99, 1)])?;
+    let cookie = stream.session("stream-session-secret", FAR_FUTURE)?;
+    let response = stream.open(&[("cookie", &cookie)]).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    // Logged out before the second poll: the session is gone from the store.
+    stream
+        .base
+        .credentials
+        .revoke_session(&session_id_of("stream-session-secret"))
+        .await?;
+    let (seen, ended) = read(response, 2).await?;
+    assert!(ended, "the stream outlived its session");
+    assert!(!seen.contains("id: 99") && !seen.contains("id:99"));
+    assert_eq!(stream.scripted.asked()?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stream_ends_when_its_session_expires() -> TestResult {
+    let stream = Stream::new(SHORT, vec![page(1, 1), page(99, 1)])?;
+    let cookie = stream.session("stream-session-secret", FAR_FUTURE)?;
+    let response = stream.open(&[("cookie", &cookie)]).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    // The store double keeps answering the record; only its expiry is now in the past.
+    stream.session("stream-session-secret", LONG_PAST)?;
+    let (seen, ended) = read(response, 2).await?;
+    assert!(ended, "the stream outlived its session's expiry");
+    assert!(!seen.contains("id: 99") && !seen.contains("id:99"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stream_ends_when_its_connector_is_revoked() -> TestResult {
+    let stream = Stream::new(SHORT, vec![page(1, 1), page(99, 1)])?;
+    let response = stream
+        .open(&[("authorization", &format!("Bearer {SECRET}"))])
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    stream.base.credentials.add_connector(
+        SECRET,
+        CONNECTOR,
+        vec![workspace(WORKSPACE)?],
+        vec![Permission::Read],
+        true,
+    )?;
+    let (seen, ended) = read(response, 2).await?;
+    assert!(ended, "the stream outlived its connector");
+    assert!(!seen.contains("id: 99") && !seen.contains("id:99"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stream_whose_credential_lives_keeps_delivering() -> TestResult {
+    let stream = Stream::new(SHORT, vec![page(1, 1), page(99, 1)])?;
+    let cookie = stream.session("stream-session-secret", FAR_FUTURE)?;
+    let response = stream.open(&[("cookie", &cookie)]).await?;
+    let (seen, ended) = read(response, 2).await?;
+    assert!(!ended);
+    assert!(seen.contains("id: 99") || seen.contains("id:99"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stream_the_caller_may_not_read_is_the_operations_refusal() -> TestResult {
+    let stream = Stream::new(NEVER, vec![page(1, 1)])?;
+    // The connector's ceiling names one workspace; this is another.
+    let request = Request::get("/api/workspaces/22222222-2222-4222-8222-222222222222/events")
+        .header("host", HOST)
+        .header("authorization", format!("Bearer {SECRET}"))
+        .body(Body::empty())?;
+    let response = stream.app.clone().oneshot(request).await?;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let error: ApiError = serde_json::from_slice(&to_bytes(response.into_body(), 65_536).await?)?;
     assert_eq!(error.code, ErrorCode::Forbidden);
-    assert_eq!(base.counting.call_count("list_events")?, 0);
+    assert_eq!(stream.scripted.asked()?.len(), 0);
     Ok(())
 }
 

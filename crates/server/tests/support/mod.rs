@@ -114,6 +114,19 @@ impl FakeCredentials {
         Ok(())
     }
 
+    /// Store `record` under `key`, whatever session the record itself names: a store that
+    /// answers the wrong record.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn add_session_under(&self, key: &str, record: SessionRecord) -> Result<(), ApiError> {
+        self.sessions
+            .lock()
+            .map_err(|_| poisoned())?
+            .insert(key.to_owned(), record);
+        Ok(())
+    }
+
     /// Every session id revoked so far.
     ///
     /// # Errors
@@ -252,6 +265,20 @@ impl LocalApp {
         }
     }
 
+    /// The local identity middleware state over these fixtures, reading real cookies.
+    #[must_use]
+    pub fn identity(&self) -> Identity {
+        Identity::new(
+            BearerAuth::Local,
+            IdentityPorts {
+                credentials: self.credentials.clone(),
+                events: self.ports.events.clone(),
+                cookies: Arc::new(CrateCookies),
+            },
+            vec![ORIGIN.to_owned()],
+        )
+    }
+
     /// The local service with `extra` routes, the given CORS origins and UI directory.
     ///
     /// # Errors
@@ -262,18 +289,9 @@ impl LocalApp {
         cors_origins: Vec<String>,
         ui_dir: Option<PathBuf>,
     ) -> Result<Router, ApiError> {
-        let identity = Identity::new(
-            BearerAuth::Local,
-            IdentityPorts {
-                credentials: self.credentials.clone(),
-                events: self.ports.events.clone(),
-                cookies: Arc::new(CrateCookies),
-            },
-            vec![ORIGIN.to_owned()],
-        );
         service(ServiceParts {
             bound: self.bound(),
-            identity,
+            identity: self.identity(),
             hosts: vec![HOST.to_owned()],
             hosted: None,
             cors_origins,
@@ -327,6 +345,7 @@ mod tests {
                 subject: OWNER.to_owned(),
                 organization_id: "org".to_owned(),
                 client_id: "client".to_owned(),
+                expires_at: u64::MAX,
             },
         };
         assert_eq!(
@@ -358,6 +377,9 @@ mod tests {
             expires_at: Timestamp::try_from(INSTANT.to_owned())?,
         })?;
         assert!(credentials.get_session("s").await?.is_some());
+        let other = credentials.get_session("s").await?.ok_or("the session")?;
+        credentials.add_session_under("t", other)?;
+        assert!(credentials.get_session("t").await?.is_some());
         credentials.revoke_session("s").await?;
         assert!(credentials.get_session("s").await?.is_none());
         assert_eq!(credentials.revoked_sessions()?, vec!["s".to_owned()]);
