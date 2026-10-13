@@ -145,9 +145,9 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
   // Every other way off the rules goes through the router, and the router holds it back until
   // the same question is answered: Back and Forward, a link to another page, a search result's
   // link. Not the page's own corrections of the address (a replace: a tab follows a change), and
-  // not a change of the search query alone. A navigation that goes on and stays on this
-  // workspace's page shows the documents again: the item it names is on screen, not behind the
-  // rules. Reload and closing the browser tab are the panel's own (`beforeunload`).
+  // not a change of the search query alone. A navigation that goes on closes the rules: an item
+  // it names on this page is on screen, not behind them. Reload and closing the browser tab are
+  // the panel's own (`beforeunload`).
   const holdBack = useRef<ShouldBlockFn>(() => false);
   // What had keyboard focus when a way off the rules was taken, once the documents are back in
   // their place: focus goes back to it (a row of the folders, a link), and when it went with the
@@ -167,13 +167,11 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
   useEffect(() => {
     holdBack.current = ({ current, next, action }) => {
       if (action === 'REPLACE' || !leavesRules(current, next)) return false;
-      const here =
-        next.pathname === `/w/${workspaceId}` || next.pathname.startsWith(`/w/${workspaceId}/`);
       const asker = document.activeElement;
       return new Promise<boolean>((resolve) => {
         leaveRules(
           () => {
-            if (here) showDocuments(asker);
+            showDocuments(asker);
             resolve(false);
           },
           () => resolve(true),

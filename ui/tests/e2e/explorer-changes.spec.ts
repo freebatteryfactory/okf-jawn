@@ -687,6 +687,17 @@ test.describe('changing the tree and the naming rules', () => {
     await expect(prefix).toHaveValue('unsaved-');
     await expect(prefix).toBeFocused();
 
+    // Another way out, taken while the question is open, ends the first: Back is undone, and the
+    // question is then about Close.
+    await page.evaluate(() => history.back());
+    await expect(question).toBeVisible();
+    await press(page, 'Close the naming rules');
+    await expect(page).toHaveURL(onWorkspace);
+    await expect(question).toBeVisible();
+    await press(page, 'Keep editing');
+    await expect(question).toHaveCount(0);
+    await expect(prefix).toHaveValue('unsaved-');
+
     // Back again, and this time the edits are discarded: the workspace list.
     await page.evaluate(() => history.back());
     await press(page, 'Discard my changes');

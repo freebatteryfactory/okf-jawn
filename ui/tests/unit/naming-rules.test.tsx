@@ -502,7 +502,7 @@ describe('the naming rules', () => {
   it('applies only after the question, sending exactly the plan and the rules of the preview', async () => {
     const { api } = service();
     // The open tab cites the head as it is before the renaming (a search result's link does).
-    await openRules(`/w/${WS}/i/${NOTE}?rev=${HEAD}`);
+    const { router } = await openRules(`/w/${WS}/i/${NOTE}?rev=${HEAD}`);
     // Nothing to apply before a preview.
     expect(screen.queryByRole('button', { name: /Apply this preview/ })).toBeNull();
     await setPrefix('2025-');
@@ -550,6 +550,12 @@ describe('the naming rules', () => {
     expect(screen.queryByRole('heading', { name: 'Preview: what would be renamed' })).toBeNull();
     expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Naming rules' }));
     expect(screen.getByText(/Showing the workspace as of/).textContent).toContain('cccccccccc');
+    // The address follows the renaming by the page's own correction, which is not the person
+    // leaving: the rules, still not saved, stay open and nothing is asked.
+    await waitFor(() => expect(router.state.location.search).toMatchObject({ rev: FIRST }));
+    expect(
+      screen.queryByRole('group', { name: 'Leave the naming rules without saving?' }),
+    ).toBeNull();
     // The open item is the same item at its new name, once its tab is back in view: the tab
     // that cited the old head cites the revision the renaming made. The rules that renamed were
     // never saved, so closing asks first.
