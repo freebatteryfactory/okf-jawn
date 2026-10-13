@@ -219,7 +219,6 @@ export async function chosenFromDrop(
   // A folder takes a while to read: say so before the first of its files is found.
   if (carried.some(({ entry }) => entry?.isDirectory === true)) progress?.(0);
   for (const { entry, offered } of carried) {
-    if (found.tooMany) break;
     if (entry !== null) await walk(entry, '', 0, found, offered, progress);
     // No entry: the browser knows the thing only as a File (a drag a page made, an older browser).
     else if (offered !== null) {
