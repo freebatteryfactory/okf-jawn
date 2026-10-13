@@ -1017,6 +1017,60 @@ describe('discarding a draft', () => {
     expect(second).toEqual(first);
   });
 
+  // A discard's key belongs to the item's draft, not to the editor that asked.
+  it('repeats a discard under the same key after the editor was left and opened again', async () => {
+    let failing = true;
+    const api = writable({
+      [ITEM]: (body) => (body.item_id === NOTE ? ok(withDraft()) : ok(itemDocument(otherSummary))),
+      [DISCARD]: (body) =>
+        failing ? fail(503, 'unavailable', 'busy') : ok(draftOf(String(body.item_id), HEAD, LATER)),
+    });
+    renderAt(`/w/${WS}/i/${NOTE}`);
+    await findTextBox('Text of Meeting notes');
+    fireEvent.click(screen.getByRole('button', { name: 'Discard draft' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Discard the draft' }));
+    await screen.findByText('Discarding this draft: The service is temporarily unavailable.');
+    // The person reads the committed text and comes back: the editor is a new one.
+    fireEvent.click(screen.getByRole('button', { name: 'Read the committed text' }));
+    await waitFor(() =>
+      expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Edit your draft' }));
+    await findTextBox('Text of Meeting notes');
+    expect(screen.queryByText(/^Discarding this draft:/)).toBeNull();
+    failing = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Discard draft' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Discard the draft' }));
+    await waitFor(() => expect(api.callsTo(DISCARD)).toHaveLength(2));
+    const [first, second] = api.callsTo(DISCARD);
+    expect(second).toEqual(first);
+  });
+
+  it('asks a discard under a new key once the draft was saved again', async () => {
+    let failing = true;
+    const api = writable({
+      [ITEM]: (body) => (body.item_id === NOTE ? ok(withDraft()) : ok(itemDocument(otherSummary))),
+      [DISCARD]: (body) =>
+        failing ? fail(503, 'unavailable', 'busy') : ok(draftOf(String(body.item_id), HEAD, LATER)),
+    });
+    renderAt(`/w/${WS}/i/${NOTE}`);
+    const box = await findTextBox('Text of Meeting notes');
+    fireEvent.click(screen.getByRole('button', { name: 'Discard draft' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Discard the draft' }));
+    await screen.findByText('Discarding this draft: The service is temporarily unavailable.');
+    // The first discard may have been applied. The text saved now is another draft.
+    vi.useFakeTimers();
+    typeInto(box, ' after all');
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+    failing = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await eventually(() => expect(api.callsTo(DISCARD)).toHaveLength(2));
+    const [first, second] = api.callsTo(DISCARD);
+    expect({ ...second, idempotency_key: null }).toEqual({ ...first, idempotency_key: null });
+    expect(second?.idempotency_key).not.toBe(first?.idempotency_key);
+  });
+
   it('asks nothing of the service for text that was never saved', async () => {
     const api = writable({ [SAVE]: () => fail(503, 'unavailable', 'busy') });
     const { box } = await startEditing();

@@ -63,6 +63,16 @@ export function draftsByItem(pages: readonly ListDraftsResponse[] | undefined): 
   return drafts;
 }
 
+/** The draft of an item as the list last answered it; undefined when it lists none. */
+export function listedDraft(
+  client: QueryClient,
+  workspaceId: string,
+  itemId: string,
+): Draft | undefined {
+  const listed = client.getQueryData<DraftPages>(draftsQueryKey(workspaceId));
+  return draftsByItem(listed?.pages).get(itemId);
+}
+
 const zItemKey = z.object({
   _id: z.literal('getItem'),
   body: z.object({ workspace_id: z.string(), item_id: z.string() }),

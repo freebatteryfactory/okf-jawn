@@ -20,8 +20,9 @@
  * the service finds a conflict it has snapshotted nothing, and the panel says so.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { Draft, Revision } from '../../api/generated/types.gen';
+import { type HeldFocus, takeHeld, useWatchedPart } from '../../lib/focus';
 import { Instant } from '../../lib/instant';
 import { keyed } from '../../lib/keys';
 import { itemOptions } from '../documents/DocumentView';
@@ -37,10 +38,8 @@ import {
 } from './sessions';
 import {
   draftConflictsOf,
-  type SnapshotAttempt,
   type Snapshotted,
   saySnapshotted,
-  snapshotAttempt,
   takeSnapshot,
   UnsavedSelection,
 } from './snapshot';
@@ -133,6 +132,18 @@ export function DraftsPanel({
     loaded: () => firstRow() ?? headingRef.current,
   });
 
+  // A draft's row leaves when its draft is snapshotted or discarded. Keyboard focus that was in
+  // it goes to the row now in its place, else the one before, else the panel's heading.
+  const heldRow = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    const left = heldRow.current;
+    if (!takeHeld(heldRow) || left === null) return;
+    const at = Number(left.getAttribute('data-row') ?? 0);
+    const remaining = listRef.current?.querySelectorAll<HTMLElement>(':scope > li') ?? [];
+    const next = remaining[at] ?? remaining[at - 1];
+    (next?.querySelector<HTMLElement>('button') ?? headingRef.current)?.focus();
+  });
+
   // The Snapshot: which drafts, under which name.
   const [left, setLeft] = useState<ReadonlySet<string>>(new Set());
   const [name, setName] = useState('');
@@ -140,13 +151,13 @@ export function DraftsPanel({
   const selected = rows
     .filter((row) => row.conflict === null && !left.has(row.itemId))
     .map((row) => row.itemId);
-  const last = useRef<SnapshotAttempt | null>(null);
+  // Which request it is, and so its key, is `takeSnapshot`'s to say: here is only what was asked.
   const snapshot = useMutation({
-    mutationFn: (attempt: SnapshotAttempt) => takeSnapshot(client, workspaceId, attempt),
-    onSuccess: (snapshotted, attempt) => {
-      last.current = null;
+    mutationFn: (asked: { itemIds: string[]; message: string }) =>
+      takeSnapshot(client, workspaceId, asked.itemIds, asked.message),
+    onSuccess: (snapshotted, asked) => {
       setName('');
-      saySnapshotted(workspaceId, attempt.message, snapshotted);
+      saySnapshotted(workspaceId, asked.message, snapshotted);
       onSnapshotted(snapshotted);
     },
   });
@@ -159,9 +170,7 @@ export function DraftsPanel({
       return;
     }
     setNameMissing(false);
-    const attempt = snapshotAttempt(last.current, selected, message);
-    last.current = attempt;
-    snapshot.mutate(attempt);
+    snapshot.mutate({ itemIds: selected, message });
   };
   const conflicted = snapshot.isError ? draftConflictsOf(snapshot.error) : null;
   const unsaved =
@@ -171,7 +180,11 @@ export function DraftsPanel({
     request: workspaceId,
     failed: snapshot.isError && conflicted === null && unsaved === null,
     error: snapshot.error,
-    run: () => (last.current === null ? Promise.resolve() : snapshot.mutateAsync(last.current)),
+    // The retry asks for what was asked; it is the same request while nothing was saved since.
+    run: () =>
+      snapshot.variables === undefined
+        ? Promise.resolve()
+        : snapshot.mutateAsync(snapshot.variables),
     loaded: () => headingRef.current,
   });
 
@@ -194,9 +207,11 @@ export function DraftsPanel({
       )}
       {rows.length > 0 && (
         <ul ref={listRef} className="draft-list">
-          {rows.map((row) => (
+          {rows.map((row, index) => (
             <DraftRow
               key={row.itemId}
+              index={index}
+              held={heldRow}
               workspaceId={workspaceId}
               head={head}
               row={row}
@@ -327,6 +342,8 @@ function Standing({ row }: { row: Row }) {
 }
 
 function DraftRow({
+  index,
+  held,
   workspaceId,
   head,
   row,
@@ -335,6 +352,9 @@ function DraftRow({
   onSelect,
   onOpenItem,
 }: {
+  /** The row's place in the list, and where a row that leaves with focus in it is noted. */
+  index: number;
+  held: HeldFocus;
   workspaceId: string;
   head: Revision;
   row: Row;
@@ -347,8 +367,9 @@ function DraftRow({
   const summary = item.data?.summary;
   const name = summary ? summary.title || summary.path : `Item ${row.itemId.slice(0, 8)}`;
   const conflicting = row.conflict !== null;
+  const [, rowRef] = useWatchedPart<HTMLLIElement>(held);
   return (
-    <li>
+    <li ref={rowRef} data-row={index}>
       {selectable && (
         // aria-disabled rather than disabled: a conflict can arrive while the box has focus. A
         // conflicting draft's box shows unticked whatever is pressed, until it is resolved.
