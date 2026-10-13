@@ -20,6 +20,12 @@
 //! credential lived (at most one page, [`PAGE_LIMIT`]) are still delivered after it dies, as
 //! they would have been a moment sooner. A check the store cannot answer counts as failed.
 //!
+//! By ruling, a hosted stream ends at its token's `exp`, not when the issuer withdraws the key
+//! that signed the token: the check compares the stored expiry with the clock and asks the
+//! verifier nothing, so a withdrawn key ends no stream already open (a new stream with that
+//! token is not opened). The check allows no leeway, so a stream ends up to 30 seconds before
+//! a new request with the same token would be refused.
+//!
 //! A poll that returns a full page is followed by the next poll at once; only a page that is not
 //! full is followed by a wait of the poll interval. Each open stream costs one `list_events` per
 //! interval; nothing here limits the streams of one principal (carried to M2).
