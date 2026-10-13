@@ -23,6 +23,7 @@ import {
   noteSummary,
   otherSummary,
   renderAt,
+  summary,
   WS,
   writableWorkspace,
 } from './support/workspace';
@@ -1430,3 +1431,107 @@ async function eventuallyButton(name: string): Promise<HTMLElement> {
   });
   return screen.getByRole('button', { name });
 }
+
+// A session whose item a read says is not a Note is refused: nothing of it is saved, and what
+// the person typed is kept on screen, read-only. That is the text and what they entered in the
+// properties, whether it went into the draft or was held back.
+describe('the kept text of a refused session', () => {
+  const NEWER = 'd'.repeat(40);
+  const asSource = summary(NOTE, 'notes/meeting.md', 'Meeting notes', 'meeting-note', 'source');
+  const DRAFT_PROPERTIES = 'The properties of your draft, read only';
+  const HELD = 'What you entered in the properties and was held back, read only';
+
+  /** The note with its type's form; at the newer head the same item is a Source. */
+  function becomesSource() {
+    const held = { head: HEAD };
+    const api = typed({
+      '/api/workspaces/open-workspace': () => ok({ ...writableWorkspace, head: held.head }),
+      [ITEM]: (body) =>
+        ok(
+          body.item_id === NOTE
+            ? {
+                ...itemDocument(JSON.stringify(body.at).includes(NEWER) ? asSource : noteSummary),
+                properties: stored,
+              }
+            : itemDocument(otherSummary),
+        ),
+    });
+    return { api, held };
+  }
+
+  /** The workspace is refreshed to the head where the item is a Source: the kept text is shown. */
+  async function refuse(held: { head: string }) {
+    held.head = NEWER;
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await eventually(() =>
+      expect(
+        screen.getByText(`Refreshed: now showing revision ${NEWER.slice(0, 10)}.`),
+      ).toBeDefined(),
+    );
+    await pass(500);
+    await eventually(() => expect(screen.getByLabelText('Your text, read only')).toBeDefined());
+    return screen.getByRole('region', { name: 'Draft of Meeting notes, not saved' });
+  }
+
+  /** The names and values a group lists, as "name: value". */
+  const listed = (group: HTMLElement) =>
+    [...group.querySelectorAll('.property')].map(
+      (entry) =>
+        `${entry.querySelector('dt')?.textContent}: ${entry.querySelector('dd')?.textContent}`,
+    );
+
+  it('shows the properties of the draft when the person changed one, and nothing as held back', async () => {
+    const { api, held } = becomesSource();
+    await editNote();
+    set('Owner', 'Grace');
+    // Still waiting for its autosave when the read says the item is a Source.
+    await pass(100);
+    const region = await refuse(held);
+    const group = within(region).getByRole('group', { name: DRAFT_PROPERTIES });
+    expect(listed(group)).toContain('owner: Grace');
+    // The whole map of the draft, with what the form never drew.
+    expect(listed(group)).toContain('attendees: 4');
+    expect(listed(group).some((entry) => entry.startsWith('x-okf-review: '))).toBe(true);
+    expect(within(region).queryByRole('group', { name: HELD })).toBeNull();
+    // Read-only: the form's fields are gone, and nothing is sent.
+    expect(screen.queryByLabelText(/^Owner/)).toBeNull();
+    await pass(AUTOSAVE_DELAY_MS * 12);
+    expect(api.callsTo(SAVE)).toHaveLength(0);
+  }, 20_000);
+
+  it('shows what was entered and held back as it was entered, an emptied field as empty, and the question names it', async () => {
+    const { api, held } = becomesSource();
+    await editNote();
+    // Neither fits the type: fewer attendees than one, and no owner. Both are held back.
+    set('Attendees', '0');
+    set('Owner', '');
+    await pass(100);
+    const region = await refuse(held);
+    const group = within(region).getByRole('group', { name: HELD });
+    expect(listed(group)).toEqual(['attendees: 0', 'owner: (empty)']);
+    // The draft's own properties are the committed ones: nothing went into it.
+    expect(within(region).queryByRole('group', { name: DRAFT_PROPERTIES })).toBeNull();
+    fireEvent.click(within(region).getByRole('button', { name: 'Discard draft' }));
+    expect(
+      within(region).getByRole('group', { name: 'Discard this draft?' }).textContent,
+    ).toContain(
+      'Your text here, and what you changed in the properties that is not saved, will be removed. The committed text stays as it is.',
+    );
+    await pass(AUTOSAVE_DELAY_MS * 12);
+    expect(api.callsTo(SAVE)).toHaveLength(0);
+  }, 20_000);
+
+  it('shows the text alone when nothing was entered in the properties', async () => {
+    const { held } = becomesSource();
+    await editNote();
+    typeInto(textBox('Text of Meeting notes'), ' and more');
+    await pass(100);
+    const region = await refuse(held);
+    expect(screen.getByLabelText('Your text, read only')).toHaveProperty(
+      'value',
+      '# Meeting notes and more',
+    );
+    expect(within(region).queryByRole('group', { name: DRAFT_PROPERTIES })).toBeNull();
+    expect(within(region).queryByRole('group', { name: HELD })).toBeNull();
+  }, 20_000);
+});

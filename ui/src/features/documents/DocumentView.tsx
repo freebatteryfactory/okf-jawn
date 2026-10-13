@@ -462,6 +462,8 @@ export function DocumentView({
   // The editor and the form leave when the session ends by another hand than this pane's own
   // buttons (a Snapshot taken in the Drafts panel). Keyboard focus that was in them goes to the
   // pane's switch, as after the other ways out of the editor; with no switch, to the page's heading.
+  // The kept text of a refused session leaves the same way when its draft is discarded: the item
+  // is not a Note, so there is no switch, and focus goes to the page's heading.
   const heldFocus = useRef<HTMLElement | null>(null);
   const [, editingRef] = useWatchedPart<HTMLDivElement>(heldFocus);
   // The editor gives way to the kept text when the item is read as not a Note: focus that was in
@@ -574,9 +576,11 @@ export function DocumentView({
               ? 'Read the committed text'
               : elsewhere
                 ? 'Edit here'
-                : hasDraft
-                  ? 'Edit your draft'
-                  : 'Edit'}
+                : notANote !== null
+                  ? 'Show your draft'
+                  : hasDraft
+                    ? 'Edit your draft'
+                    : 'Edit'}
           </button>
         </p>
       )}
