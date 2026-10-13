@@ -18,9 +18,11 @@
  * The base: the first save of a session carries the revision its text was read at, or the base of
  * the draft it continues. After each save the session takes the base the service recorded, and
  * later saves carry that, never the head the shell shows: a save whose base is the current head is
- * the service's explicit rebase, which only "keep mine" may ask for. "Keep mine" asks for it here
- * too (`rebaseSession`): it names the base and the session's own save carries it, so there is
- * still one request per item at a time, and its key is the key of exactly that text on that base.
+ * the service's explicit rebase, which is asked for in two cases only. "Keep mine" asks for it
+ * (`rebaseSession`): it names the base and the session's own save carries it, so there is still
+ * one request per item at a time, and its key is the key of exactly that text on that base. And a
+ * Snapshot of the item that answered while its text had gone on names the revision it made
+ * (`snapshot.ts`): the text was typed over what that revision holds.
  *
  * A discard is repeated under one key until it answers, wherever it is pressed from: the key is
  * kept here, by item, not in the component that asked. A save sent after a discard that did not
@@ -232,12 +234,15 @@ async function send(client: QueryClient, key: string): Promise<void> {
       throwOnError: true,
     });
     const confirmed = { body: attempt.body, properties: attempt.properties, draft: data };
+    // A base named while this save was in flight (a Snapshot of the item answered) stays: the
+    // draft the service holds is then not on it, and the next save asks for it.
+    const named = sessions().sessions[key]?.baseRevision ?? attempt.baseRevision;
     sessions().change(key, {
       saving: false,
       failure: null,
       attempt: null,
       confirmed,
-      baseRevision: data.base_revision,
+      baseRevision: named === attempt.baseRevision ? data.base_revision : named,
     });
     rememberDraft(client, session.workspaceId, session.itemId, confirmed);
   } catch (error) {

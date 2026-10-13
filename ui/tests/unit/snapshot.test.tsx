@@ -168,6 +168,8 @@ const said = () => panel().querySelector('.snapshot-said')?.textContent ?? '';
 const nameField = () => within(panel()).getByRole('textbox', { name: 'Snapshot name' });
 const snapshotButton = () => within(panel()).getByRole('button', { name: /^(Snapshot \d|Taking)/ });
 const headLine = () => document.querySelector('.head-line')?.textContent ?? '';
+/** What the status adds when the text of the one snapshotted item went on meanwhile. */
+const STILL_A_DRAFT = 'What you typed in it while it was taken is not in it, and is still a draft.';
 
 /** Open the workspace with its two drafts listed, name the Snapshot, and press the button. */
 async function pressSnapshot(name: string) {
@@ -566,12 +568,221 @@ describe('taking a Snapshot', () => {
     typeInto(box, ' second part');
     act(() => answer());
     await eventually(() => expect(said()).toMatch(/^Snapshot “First part” taken/));
+    expect(said()).toContain(STILL_A_DRAFT);
     expect(textIn(textBox('Text of Meeting notes'))).toBe(`${DRAFT_BODY} second part`);
     await pass(AUTOSAVE_DELAY_MS);
     await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
     expect(api.callsTo(SAVE).at(0)).toMatchObject({
       base_revision: MADE,
       body: `${DRAFT_BODY} second part`,
+    });
+  });
+
+  // The same, against a service that holds the draft as the real one does, in each order the
+  // save and the commit can answer.
+  describe('text that went on while the Snapshot was taken', () => {
+    /** A digest that differs with the text, as the service's does. */
+    const digestOf = (text: string) => text.length.toString(16).padStart(64, '0');
+
+    /**
+     * A service that holds one draft of the note as the real one does. `save_draft` replaces it;
+     * a first save records the request's base, a later one moves the base only onto the head.
+     * `commit_items` commits the draft it read when it started and removes the draft only if it
+     * is still that content (crates/core/src/application/history.rs: "A draft saved again in
+     * between ... stays in place"). With `holdSaves` a save is applied when the test answers it.
+     */
+    function remembering(holdSaves = false) {
+      const held = {
+        head: HEAD,
+        committed: '# Meeting notes',
+        draft: DRAFT_BODY as string | null,
+        base: HEAD,
+      };
+      const properties = { type: 'meeting-note', okf_jawn: { id: NOTE } };
+      const draftNow = () => ({
+        ...draftOf(NOTE, held.base, LATER),
+        content_digest: digestOf(held.draft ?? ''),
+      });
+      let commit: () => void = () => {};
+      const saves: Array<() => void> = [];
+      const { api } = service(
+        {
+          [OPEN]: () => ok({ ...writableWorkspace, head: held.head }),
+          [ITEM]: (body) => {
+            if (body.item_id !== NOTE) return ok(itemDocument(otherSummary));
+            const document = { ...itemDocument(noteSummary), body: held.committed };
+            return ok(
+              held.draft === null
+                ? document
+                : { ...document, draft: { body: held.draft, properties, draft: draftNow() } },
+            );
+          },
+          [DRAFTS]: () => ok({ items: held.draft === null ? [] : [draftNow()], next_cursor: null }),
+          [SAVE]: (body) => {
+            const apply = () => {
+              const base = String(body.base_revision);
+              if (held.draft === null || base === held.head) held.base = base;
+              held.draft = String(body.body);
+              return ok(draftNow());
+            };
+            if (!holdSaves) return apply();
+            return new Promise<Reply>((resolve) => {
+              saves.push(() => resolve(apply()));
+            });
+          },
+          [COMMIT]: () => {
+            const read = held.draft;
+            return new Promise<Reply>((resolve) => {
+              commit = () => {
+                held.committed = read ?? held.committed;
+                if (held.draft === read) held.draft = null;
+                held.head = MADE;
+                resolve(committed());
+              };
+            });
+          },
+        },
+        [NOTE],
+      );
+      return {
+        api,
+        held,
+        answerCommit: () => act(() => commit()),
+        answerSave: () =>
+          act(() => {
+            saves.shift()?.();
+          }),
+      };
+    }
+
+    it('saved before the Snapshot answers: it stays on screen, and its draft is moved onto the revision the Snapshot made', async () => {
+      const { api, held, answerCommit } = remembering();
+      renderAt(`/w/${WS}/i/${NOTE}`);
+      const box = await findTextBox('Text of Meeting notes');
+      await screen.findByRole('region', { name: 'Drafts (1)' });
+      vi.useFakeTimers();
+      await pressSnapshot('First part');
+      await eventually(() => expect(api.callsTo(COMMIT)).toHaveLength(1));
+      typeInto(box, ' second part');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      // Saved in between, on the draft's old base: the service keeps this draft at the commit.
+      expect(api.callsTo(SAVE).at(0)).toMatchObject({ base_revision: HEAD });
+      await pass(10);
+      answerCommit();
+      await eventually(() => expect(said()).toMatch(/^Snapshot “First part” taken: 1 item\./));
+      expect(said()).toContain(STILL_A_DRAFT);
+      // At once, not at the next keystroke: the draft the service holds is on the Snapshot's revision.
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+      expect(api.callsTo(SAVE).at(1)).toMatchObject({
+        base_revision: MADE,
+        body: `${DRAFT_BODY} second part`,
+      });
+      await eventually(() =>
+        expect(held).toEqual({
+          head: MADE,
+          committed: DRAFT_BODY,
+          draft: `${DRAFT_BODY} second part`,
+          base: MADE,
+        }),
+      );
+      await pass(50);
+      const boxes = screen.getAllByRole('textbox', { name: 'Text of Meeting notes' });
+      expect(boxes.map((each) => textIn(each))).toEqual([`${DRAFT_BODY} second part`]);
+      expect(screen.getByRole('tab', { name: 'Meeting notes (draft)' })).toBeDefined();
+      await eventually(() =>
+        expect(screen.getByRole('region', { name: 'Drafts (1)' })).toBeDefined(),
+      );
+      // The next change is saved on that revision too.
+      typeInto(textBox('Text of Meeting notes'), '!');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(3));
+      expect(api.callsTo(SAVE).at(2)).toMatchObject({
+        base_revision: MADE,
+        body: `${DRAFT_BODY} second part!`,
+      });
+    });
+
+    it('being saved when the Snapshot answers: once the save has answered, the draft is moved onto that revision', async () => {
+      const { api, held, answerCommit, answerSave } = remembering(true);
+      renderAt(`/w/${WS}/i/${NOTE}`);
+      const box = await findTextBox('Text of Meeting notes');
+      await screen.findByRole('region', { name: 'Drafts (1)' });
+      vi.useFakeTimers();
+      await pressSnapshot('First part');
+      await eventually(() => expect(api.callsTo(COMMIT)).toHaveLength(1));
+      typeInto(box, ' second part');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      answerCommit();
+      await eventually(() => expect(said()).toMatch(/^Snapshot “First part” taken: 1 item\./));
+      expect(said()).toContain(STILL_A_DRAFT);
+      // One save of the item at a time: the next waits for the one in flight.
+      await pass(AUTOSAVE_DELAY_MS * 2);
+      expect(api.callsTo(SAVE)).toHaveLength(1);
+      // The save lands after the commit: a first save, which records the old base it carried.
+      answerSave();
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+      expect(held.base).toBe(HEAD);
+      const [first, second] = api.callsTo(SAVE);
+      expect(first).toMatchObject({ base_revision: HEAD, body: `${DRAFT_BODY} second part` });
+      expect(second).toMatchObject({ base_revision: MADE, body: `${DRAFT_BODY} second part` });
+      expect(second?.idempotency_key).not.toBe(first?.idempotency_key);
+      answerSave();
+      await eventually(() => expect(held.base).toBe(MADE));
+      await eventually(() =>
+        expect(document.querySelector('.save-state')?.textContent).toMatch(/^Saved as a draft at/),
+      );
+      await pass(AUTOSAVE_DELAY_MS * 2);
+      expect(api.callsTo(SAVE)).toHaveLength(2);
+    });
+
+    it('put back, while the Snapshot is taken, to what it was before the draft: that is saved, on what was committed', async () => {
+      const { api, held, answerCommit } = remembering();
+      renderAt(`/w/${WS}/i/${NOTE}`);
+      const box = await findTextBox('Text of Meeting notes');
+      await screen.findByRole('region', { name: 'Drafts (1)' });
+      vi.useFakeTimers();
+      await pressSnapshot('First part');
+      await eventually(() => expect(api.callsTo(COMMIT)).toHaveLength(1));
+      // The draft is being committed; the person takes it all back.
+      replaceText(box, '# Meeting notes');
+      answerCommit();
+      await eventually(() => expect(said()).toMatch(/^Snapshot “First part” taken: 1 item\./));
+      // What was committed is the draft, so the text on screen differs from it and is a draft.
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      expect(api.callsTo(SAVE).at(0)).toMatchObject({
+        base_revision: MADE,
+        body: '# Meeting notes',
+      });
+      await eventually(() =>
+        expect(held).toMatchObject({ committed: DRAFT_BODY, draft: '# Meeting notes', base: MADE }),
+      );
+      await eventually(() =>
+        expect(document.querySelector('.save-state')?.textContent).toMatch(/^Saved as a draft at/),
+      );
+    });
+
+    it('an item opened while the Snapshot is taken, on the draft being committed, ends with it', async () => {
+      const { api, held, answerCommit } = remembering();
+      renderAt(`/w/${WS}`);
+      await screen.findByRole('region', { name: 'Drafts (1)' });
+      const row = await within(panel()).findByRole('button', { name: 'Meeting notes' });
+      await pressSnapshot('Tidy');
+      await eventuallyReal(() => expect(api.callsTo(COMMIT)).toHaveLength(1));
+      fireEvent.click(row);
+      await findTextBox('Text of Meeting notes');
+      answerCommit();
+      await eventuallyReal(() => expect(said()).toMatch(/^Snapshot “Tidy” taken: 1 item\./));
+      expect(said()).not.toContain(STILL_A_DRAFT);
+      await screen.findByRole('region', { name: 'Drafts (0)' });
+      await eventuallyReal(() =>
+        expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull(),
+      );
+      expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
+      // Nothing was typed: nothing is saved, and the service holds no draft.
+      expect(api.callsTo(SAVE)).toHaveLength(0);
+      expect(held.draft).toBeNull();
     });
   });
 

@@ -14,8 +14,14 @@
  * cached `get_item` of them, and the drafts list), and the checks that compare the shown head or a
  * cited revision with the latest run again. Listings, reads and search are keyed by the revision
  * they were asked at, so they are asked afresh under the new head and nothing of the old one is
- * stale: a commit changes no revision that exists. A session whose text was committed ends; one
- * the person changed again meanwhile goes on as a new draft on the committed revision.
+ * stale: a commit changes no revision that exists.
+ *
+ * A session whose text was committed ends. One whose text went on while the Snapshot was taken
+ * (typed since, being saved, or saved in between) goes on as a draft on the revision the Snapshot
+ * made, whichever of the save and the commit answered first: what was committed becomes the text
+ * it started from, its base becomes that revision, and it is saved at once. The service removes a
+ * draft at a Snapshot only if it is still the content it committed, so a draft saved in between
+ * is still held, on its old base; that save moves it. The status says how many items go on so.
  *
  * On `conflict` with the `draft_conflict` detail the service has committed nothing: it takes a
  * Snapshot of all the selected items or of none, and the detail lists every selected item that
@@ -37,7 +43,7 @@ import type { QueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
 import { openWorkspaceQueryKey } from '../../api/generated/@tanstack/react-query.gen';
 import { commitItems } from '../../api/generated/sdk.gen';
-import type { Revision, Warning, Workspace } from '../../api/generated/types.gen';
+import type { Draft, Revision, Warning, Workspace } from '../../api/generated/types.gen';
 import { short } from '../documents/describe';
 import { classifyFailure } from '../errors/failure';
 import { forgetDrafts, listedDraft } from './drafts-list';
@@ -57,6 +63,8 @@ export interface Snapshotted {
   /** The head the workspace showed before, when it was known. */
   previousHead: Revision | null;
   itemIds: string[];
+  /** Those of them whose text went on while the Snapshot was taken: each is still a draft. */
+  stillDrafts: string[];
   /** Non-fatal issues the service recorded. */
   warnings: Warning[];
 }
@@ -93,6 +101,16 @@ export function snapshotAttempt(
   return same ? last : { key: crypto.randomUUID(), itemIds, message, drafts };
 }
 
+/** The same saved draft: the same content, saved at the same time, on the same base. */
+function sameDraft(a: Draft, b: Draft | undefined): boolean {
+  return (
+    b !== undefined &&
+    a.content_digest === b.content_digest &&
+    a.saved_at === b.saved_at &&
+    a.base_revision === b.base_revision
+  );
+}
+
 /**
  * The draft of an item the service holds, as far as this page knows: what its last save answered,
  * else what the list of drafts says. Named by its digest and its base; empty when it is not known.
@@ -110,10 +128,14 @@ function draftHeld(client: QueryClient, workspaceId: string, itemId: string): st
  */
 export function saySnapshotted(workspaceId: string, message: string, snapshotted: Snapshotted) {
   const items = snapshotted.itemIds.length;
+  const still = snapshotted.stillDrafts.length;
   useDraftSessions.getState().say(
     workspaceId,
     `Snapshot “${message}” taken: ${items} ${items === 1 ? 'item' : 'items'}. ` +
-      `The workspace now shows revision ${short(snapshotted.revision)}, which the Snapshot made.`,
+      `The workspace now shows revision ${short(snapshotted.revision)}, which the Snapshot made.` +
+      (still === 0
+        ? ''
+        : ` What you typed in ${still === 1 && items === 1 ? 'it' : `${still} of them`} while it was taken is not in it, and is still a draft.`),
     snapshotted.warnings.map((warning) => warning.message),
   );
 }
@@ -168,6 +190,19 @@ export async function takeSnapshot(
     itemIds.map((itemId) => draftHeld(client, workspaceId, itemId)),
   );
   useDraftSessions.getState().ask(workspaceId, attempt);
+  // What the service is asked to commit: the draft each session had confirmed by now, or, of an
+  // item not being edited, the one that is listed.
+  const asked = new Map(
+    itemIds.map((itemId) => {
+      const session = useDraftSessions.getState().sessions[sessionKey(workspaceId, itemId)];
+      return [
+        itemId,
+        session === undefined
+          ? { edited: false as const, listed: listedDraft(client, workspaceId, itemId) }
+          : { edited: true as const, confirmed: session.confirmed },
+      ];
+    }),
+  );
 
   let result: { revision: Revision; warnings: Warning[] };
   try {
@@ -197,28 +232,51 @@ export async function takeSnapshot(
   client.setQueryData<Workspace>(headKey, (workspace) =>
     workspace === undefined ? workspace : { ...workspace, head: result.revision },
   );
+  const stillDrafts: string[] = [];
+  /** Of those, the ones the service still holds a draft of: it was saved in between. */
+  const stillHeld: string[] = [];
   for (const itemId of attempt.itemIds) {
     const key = sessionKey(workspaceId, itemId);
     const session = useDraftSessions.getState().sessions[key];
     useDraftSessions.getState().clearConflict(key);
     if (session === undefined) continue;
-    if (needsSave(session)) {
-      // Changed again while the Snapshot was taken: a new draft, on what was just committed.
-      useDraftSessions.getState().change(key, {
-        committed: session.confirmed ?? session.committed,
-        confirmed: null,
-        baseRevision: result.revision,
-        attempt: null,
-        failure: null,
-      });
-    } else endSession(workspaceId, itemId);
+    const before = asked.get(itemId);
+    const committed = before?.edited ? before.confirmed : null;
+    // A save's answer puts a new record in the session. A session opened while the Snapshot was
+    // taken holds what `get_item` carried: the listed draft, unless it was saved again.
+    const savedSince = before?.edited
+      ? session.confirmed !== committed
+      : session.confirmed !== null && !sameDraft(session.confirmed.draft, before?.listed);
+    if (!session.saving && !savedSince && !needsSave(session)) {
+      endSession(workspaceId, itemId);
+      continue;
+    }
+    // The text went on while the Snapshot was taken: a draft on what was just committed. A
+    // failure stays: only a save that answers says what the service holds.
+    useDraftSessions.getState().change(key, {
+      committed:
+        committed === null
+          ? session.committed
+          : { body: committed.body, properties: committed.properties },
+      // The draft that was committed is gone; one saved in between is still held.
+      confirmed: savedSince ? session.confirmed : null,
+      baseRevision: result.revision,
+    });
+    stillDrafts.push(itemId);
+    if (savedSince) stillHeld.push(itemId);
+    void flushSession(client, workspaceId, itemId);
   }
-  forgetDrafts(client, workspaceId, attempt.itemIds);
+  forgetDrafts(
+    client,
+    workspaceId,
+    attempt.itemIds.filter((itemId) => !stillHeld.includes(itemId)),
+  );
   checkHeadsAgain(client, workspaceId);
   return {
     revision: result.revision,
     previousHead,
     itemIds: attempt.itemIds,
+    stillDrafts,
     warnings: result.warnings,
   };
 }
