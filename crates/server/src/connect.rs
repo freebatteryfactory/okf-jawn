@@ -22,11 +22,21 @@
 //!   after the last successful fetch; after that, and when no set was ever fetched, the answer is
 //!   `Unavailable`.
 //!
-//! One fetch runs at a time and verification waits for it. Known limit: the fetch follows
-//! whatever redirect policy the transport it is given has. [`IssuerKeys`] cannot see or refuse a
-//! redirect through the `workos` transport interface; the composition must hand it a transport
-//! whose client follows none (`ReqwestTransport::from_client`), which needs `reqwest` in this
-//! crate's manifest (reported as a request).
+//! A fetch holds up one request only. The cache's lock is held to decide and to store, never
+//! while the issuer is asked. The request that takes the minute's attempt (its `kid` is unknown,
+//! or the set is stale) waits for that fetch; every other request is answered at once from the
+//! cached set as it stands, so a token whose key is cached is verified however slow the issuer
+//! is, and an unknown `kid` that arrives during a fetch, or inside the minute after one, causes
+//! no second fetch. The fetch is bounded by [`FETCH_TIME_LIMIT`] (10 seconds), this module's own
+//! limit whatever the transport's is; a fetch that exceeds it is a failed fetch. It runs in a
+//! task of its own, so a caller that goes away after taking the minute's attempt does not take
+//! the refresh with it.
+//!
+//! Known limit: the fetch follows whatever redirect policy the transport it is given has.
+//! [`IssuerKeys`] cannot see or refuse a redirect through the `workos` transport interface; the
+//! composition must hand it a transport whose client follows none
+//! (`ReqwestTransport::from_client`), which needs `reqwest` in this crate's manifest (reported as
+//! a request).
 //!
 //! Only public-key signature verification happens here: no private-key operation is ever
 //! performed in production, so the `rsa` crate's private-key decryption timing advisory
@@ -44,6 +54,8 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_core::ports::PortFuture;
 use serde::Deserialize;
+use tokio::sync::Mutex;
+use tokio::time::timeout;
 use workos::transport::{HttpRequest, SharedTransport};
 
 use crate::config::HostedConfig;
@@ -68,7 +80,8 @@ pub struct ConnectTokens {
     clock: Arc<dyn Clock>,
     issuer: String,
     audience: String,
-    cache: tokio::sync::Mutex<KeyCache>,
+    /// Locked to decide and to store, never while the issuer is asked.
+    cache: Arc<Mutex<KeyCache>>,
 }
 
 /// The cached key set and when the issuer was last asked.
@@ -101,6 +114,30 @@ pub const KEY_SET_MAX_AGE: Duration = Duration::from_secs(600);
 
 /// How long after its last successful fetch a key set stays in use while refreshes fail.
 pub const KEY_SET_KEPT: Duration = Duration::from_secs(3600);
+
+/// The longest one fetch of the key set may take, whatever the transport's own limit; a fetch
+/// that exceeds it is a failed fetch.
+pub const FETCH_TIME_LIMIT: Duration = Duration::from_secs(10);
+
+impl KeyCache {
+    /// Whether a request naming `kid` at `now` is the one that asks the issuer: the minute's
+    /// attempt is still free, and the set is stale or does not hold the key.
+    fn needs_fetch(&self, kid: &str, now: Instant) -> bool {
+        let known = self.set.as_ref().is_some_and(|set| set.find(kid).is_some());
+        let stale = since(self.fetched_at, now).is_none_or(|age| age >= KEY_SET_MAX_AGE);
+        let may_refresh =
+            since(self.attempted_at, now).is_none_or(|waited| waited >= REFRESH_INTERVAL);
+        may_refresh && (stale || !known)
+    }
+
+    /// The verification key `kid` names in the cached set as it stands at `now`.
+    fn key(&self, kid: &str, now: Instant) -> Result<DecodingKey, ApiError> {
+        let kept = since(self.fetched_at, now).is_some_and(|age| age < KEY_SET_KEPT);
+        let set = self.set.as_ref().filter(|_| kept).ok_or_else(unavailable)?;
+        let jwk = set.find(kid).ok_or_else(refused)?;
+        DecodingKey::from_jwk(jwk).map_err(|_| refused())
+    }
+}
 
 impl IssuerKeys {
     /// The key set at `{issuer}/oauth2/jwks`, fetched through `transport`.
@@ -151,40 +188,28 @@ impl ConnectTokens {
             clock,
             issuer: config.issuer.clone(),
             audience: config.resource.clone(),
-            cache: tokio::sync::Mutex::new(KeyCache::default()),
+            cache: Arc::new(Mutex::new(KeyCache::default())),
         })
     }
 
     /// The verification key `kid` names, by the timing rules of the module header.
     async fn key(&self, kid: &str) -> Result<DecodingKey, ApiError> {
         let now = self.clock.now();
-        let since = |at: Option<Instant>| at.and_then(|at| now.checked_duration_since(at));
-        // Held across the fetch: one fetch at a time, and no second decision on a half-updated
-        // cache.
-        let mut cache = self.cache.lock().await;
-        let known = cache
-            .set
-            .as_ref()
-            .is_some_and(|set| set.find(kid).is_some());
-        let stale = since(cache.fetched_at).is_none_or(|age| age >= KEY_SET_MAX_AGE);
-        let may_refresh = since(cache.attempted_at).is_none_or(|waited| waited >= REFRESH_INTERVAL);
-        if may_refresh && (stale || !known) {
-            cache.attempted_at = Some(now);
-            // The one error tolerated here: a failed refresh leaves the cached set in use, for
-            // as long as `KEY_SET_KEPT` allows below.
-            if let Ok(set) = self.keys.fetch().await {
-                cache.set = Some(set);
-                cache.fetched_at = Some(now);
+        {
+            let mut cache = self.cache.lock().await;
+            if !cache.needs_fetch(kid, now) {
+                return cache.key(kid, now);
             }
+            // Taken under the lock, before the issuer is asked: every other request of this
+            // minute, also one that arrives while the fetch runs, answers from the cache.
+            cache.attempted_at = Some(now);
         }
-        let kept = since(cache.fetched_at).is_some_and(|age| age < KEY_SET_KEPT);
-        let set = cache
-            .set
-            .as_ref()
-            .filter(|_| kept)
-            .ok_or_else(unavailable)?;
-        let jwk = set.find(kid).ok_or_else(refused)?;
-        DecodingKey::from_jwk(jwk).map_err(|_| refused())
+        // The lock is released. The fetch runs in a task of its own, so it and what it brings
+        // outlive this request if its caller goes away.
+        let fetching = tokio::spawn(refresh(self.keys.clone(), self.cache.clone(), now));
+        // A task that did not finish is a failed fetch, tolerated like any other below.
+        let _finished = fetching.await;
+        self.cache.lock().await.key(kid, now)
     }
 
     async fn identity(&self, token: &str) -> Result<ConnectIdentity, ApiError> {
@@ -241,6 +266,23 @@ pub fn install_crypto() -> Result<(), ApiError> {
             "Another JWT crypto provider was installed before this service's",
         ))
     }
+}
+
+/// Ask the issuer once, within [`FETCH_TIME_LIMIT`], and keep what it answers, stamped with
+/// `began`, the instant the attempt was taken.
+async fn refresh(keys: Arc<dyn KeySource>, cache: Arc<Mutex<KeyCache>>, began: Instant) {
+    // The one error tolerated here: a fetch that fails, or that exceeds the time limit, leaves
+    // the cached set in use, for as long as `KEY_SET_KEPT` allows.
+    if let Ok(Ok(set)) = timeout(FETCH_TIME_LIMIT, keys.fetch()).await {
+        let mut cache = cache.lock().await;
+        cache.set = Some(set);
+        cache.fetched_at = Some(began);
+    }
+}
+
+/// How long before `now` the instant `at` was, when there is one and it is not later.
+fn since(at: Option<Instant>, now: Instant) -> Option<Duration> {
+    at.and_then(|at| now.checked_duration_since(at))
 }
 
 fn refused() -> ApiError {

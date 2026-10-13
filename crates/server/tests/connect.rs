@@ -16,14 +16,26 @@ use okf_jawn_server::connect::{ConnectTokens, KeySource};
 use okf_jawn_server::grants::Clock;
 use okf_jawn_server::identity::ConnectVerifier;
 use serde_json::{Value, json};
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
 use check::{TestResult, err_of};
 
 /// The issuer's key endpoint: it serves the set a test last published, or fails, and counts
-/// every fetch.
+/// every fetch that starts. A test can hold the next fetch before it answers, for a while or
+/// for ever.
 struct Issuer {
     published: Mutex<Option<JwkSet>>,
     fetches: AtomicUsize,
+    /// The next fetch waits here, after it was counted, until it is let go.
+    gate: Mutex<Option<Arc<Notify>>>,
+    /// Signalled when a fetch is waiting at the gate.
+    waiting: Notify,
+    /// How many fetches have given their answer.
+    answers: AtomicUsize,
+    /// Signalled when a fetch gives its answer.
+    answered: Notify,
 }
 
 /// A clock that moves only when a test advances it.
@@ -34,7 +46,7 @@ struct TestClock {
 
 /// One verifier, its issuer and its clock.
 struct Setup {
-    verifier: ConnectTokens,
+    verifier: Arc<ConnectTokens>,
     issuer: Arc<Issuer>,
     clock: Arc<TestClock>,
 }
@@ -48,15 +60,23 @@ const KEY_SET: &str = include_str!("keys/test-only-rsa.jwks.json");
 const SECOND_PRIVATE_KEY: &str = include_str!("keys/test-only-rsa-2.pem");
 const SECOND_KEY_SET: &str = include_str!("keys/test-only-rsa-2.jwks.json");
 
+/// What a request that must not wait is given: far longer than an answer from the cache takes,
+/// and it decides only a failure.
+const AT_ONCE: Duration = Duration::from_secs(2);
+
 impl KeySource for Issuer {
     fn fetch(&self) -> PortFuture<'_, JwkSet> {
         Box::pin(async move {
             self.fetches.fetch_add(1, Ordering::SeqCst);
-            self.published
-                .lock()
-                .map_err(|_| ApiError::new(ErrorCode::Internal, "poisoned"))?
-                .clone()
-                .ok_or_else(|| ApiError::new(ErrorCode::Unavailable, "the issuer is down"))
+            let gate = self.gate.lock().map_err(|_| poisoned())?.take();
+            if let Some(gate) = gate {
+                self.waiting.notify_one();
+                gate.notified().await;
+            }
+            let published = self.published.lock().map_err(|_| poisoned())?.clone();
+            self.answers.fetch_add(1, Ordering::SeqCst);
+            self.answered.notify_one();
+            published.ok_or_else(|| ApiError::new(ErrorCode::Unavailable, "the issuer is down"))
         })
     }
 }
@@ -70,6 +90,26 @@ impl Issuer {
 
     fn fetches(&self) -> usize {
         self.fetches.load(Ordering::SeqCst)
+    }
+
+    /// Make the next fetch wait before it answers; the returned handle lets it go. A test that
+    /// never uses the handle has an issuer that never answers.
+    fn hold_next(&self) -> Result<Arc<Notify>, ApiError> {
+        let gate = Arc::new(Notify::new());
+        *self.gate.lock().map_err(|_| poisoned())? = Some(gate.clone());
+        Ok(gate)
+    }
+
+    /// Wait until a fetch is held at the gate.
+    async fn held(&self) {
+        self.waiting.notified().await;
+    }
+
+    /// Wait until `count` fetches have given their answer.
+    async fn answered(&self, count: usize) {
+        while self.answers.load(Ordering::SeqCst) < count {
+            self.answered.notified().await;
+        }
     }
 }
 
@@ -97,6 +137,10 @@ impl Setup {
         let issuer = Arc::new(Issuer {
             published: Mutex::new(None),
             fetches: AtomicUsize::new(0),
+            gate: Mutex::new(None),
+            waiting: Notify::new(),
+            answers: AtomicUsize::new(0),
+            answered: Notify::new(),
         });
         issuer.publish(set)?;
         let clock = Arc::new(TestClock {
@@ -111,7 +155,7 @@ impl Setup {
             redirect_uri: "https://okf.example.test/auth/callback".to_owned(),
         };
         Ok(Self {
-            verifier: ConnectTokens::new(issuer.clone(), &config, clock.clone())?,
+            verifier: Arc::new(ConnectTokens::new(issuer.clone(), &config, clock.clone())?),
             issuer,
             clock,
         })
@@ -120,6 +164,16 @@ impl Setup {
     async fn code_of(&self, token: &str) -> Result<ErrorCode, String> {
         Ok(err_of(self.verifier.verify(token).await)?.code)
     }
+
+    /// Verify `token` in a task of its own; the task answers the refusal's code, if any.
+    fn verifying(&self, token: String) -> JoinHandle<Option<ErrorCode>> {
+        let verifier = self.verifier.clone();
+        tokio::spawn(async move { verifier.verify(&token).await.err().map(|error| error.code) })
+    }
+}
+
+fn poisoned() -> ApiError {
+    ApiError::new(ErrorCode::Internal, "poisoned")
 }
 
 fn now() -> Result<u64, std::time::SystemTimeError> {
@@ -375,6 +429,97 @@ async fn with_no_key_set_and_the_issuer_down_the_answer_is_unavailable() -> Test
     assert_eq!(setup.code_of(&token).await?, ErrorCode::Unavailable);
     // One attempt for both: a down issuer is not asked on every request either.
     assert_eq!(setup.issuer.fetches(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_hanging_fetch_holds_up_no_token_whose_key_is_cached() -> TestResult {
+    let setup = Setup::new(Some(KEY_SET))?;
+    let valid = sign(&claims()?, Some(KID))?;
+    setup.verifier.verify(&valid).await?;
+    setup.clock.advance(Duration::from_secs(61))?;
+    // A token naming an unknown key takes the minute's attempt, and the issuer never answers.
+    let _never = setup.issuer.hold_next()?;
+    let stuck = setup.verifying(sign(&claims()?, Some("unknown-key"))?);
+    setup.issuer.held().await;
+    assert_eq!(setup.issuer.fetches(), 2);
+    // The valid token's key is in the cached set, 61 seconds old: it is verified at once.
+    let identity = timeout(AT_ONCE, setup.verifier.verify(&valid)).await??;
+    assert_eq!(identity.subject, "user_01");
+    assert_eq!(setup.issuer.fetches(), 2);
+    assert!(
+        !stuck.is_finished(),
+        "the request that asked the issuer waits for it"
+    );
+    stuck.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn two_unknown_key_ids_at_the_same_moment_cause_one_fetch() -> TestResult {
+    let setup = Setup::new(Some(KEY_SET))?;
+    setup.verifier.verify(&sign(&claims()?, Some(KID))?).await?;
+    setup.clock.advance(Duration::from_secs(60))?;
+    let gate = setup.issuer.hold_next()?;
+    let first = setup.verifying(sign(&claims()?, Some("unknown-a"))?);
+    setup.issuer.held().await;
+    // The second arrives while the first's fetch is under way: answered from the cached set,
+    // without waiting and without a fetch of its own.
+    let second = sign(&claims()?, Some("unknown-b"))?;
+    let code = timeout(AT_ONCE, setup.code_of(&second)).await??;
+    assert_eq!(code, ErrorCode::Unauthenticated);
+    assert_eq!(setup.issuer.fetches(), 2);
+    gate.notify_one();
+    assert_eq!(first.await?, Some(ErrorCode::Unauthenticated));
+    // Nor does a third, inside the minute after that fetch.
+    setup.clock.advance(Duration::from_secs(59))?;
+    setup.code_of(&sign(&claims()?, Some("unknown-c"))?).await?;
+    assert_eq!(setup.issuer.fetches(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_fetch_over_ten_seconds_is_a_failed_fetch_and_the_cached_set_stays_in_use() -> TestResult
+{
+    let setup = Setup::new(Some(KEY_SET))?;
+    let token = sign(&with("exp", json!(now()?.saturating_add(7200)))?, Some(KID))?;
+    setup.verifier.verify(&token).await?;
+    // Ten minutes on, the set is stale: this request takes the attempt, and the issuer hangs.
+    setup.clock.advance(Duration::from_secs(600))?;
+    let _never = setup.issuer.hold_next()?;
+    let began = Instant::now();
+    let waited = timeout(Duration::from_secs(40), setup.verifier.verify(&token)).await;
+    let took = began.elapsed();
+    // The server's own limit ended the fetch, and the set fetched before answers (stale on
+    // error).
+    waited??;
+    assert!(took >= Duration::from_secs(10), "answered after {took:?}");
+    assert_eq!(setup.issuer.fetches(), 2);
+    // That was the minute's attempt: the next request asks nobody and waits for nothing.
+    timeout(AT_ONCE, setup.verifier.verify(&token)).await??;
+    assert_eq!(setup.issuer.fetches(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_fetch_outlives_the_request_that_began_it() -> TestResult {
+    let setup = Setup::new(Some(KEY_SET))?;
+    setup.verifier.verify(&sign(&claims()?, Some(KID))?).await?;
+    setup.issuer.publish(Some(SECOND_KEY_SET))?;
+    setup.clock.advance(Duration::from_secs(60))?;
+    let rotated = sign_with(&claims()?, Some(SECOND_KID), SECOND_PRIVATE_KEY)?;
+    let gate = setup.issuer.hold_next()?;
+    let gone = setup.verifying(rotated.clone());
+    setup.issuer.held().await;
+    // The caller that took the minute's attempt goes away while the issuer is still answering.
+    gone.abort();
+    assert!(gone.await.is_err(), "the request was dropped");
+    gate.notify_one();
+    timeout(AT_ONCE, setup.issuer.answered(2)).await?;
+    // Its fetch was kept: the new key verifies inside the same minute, with no second fetch.
+    let identity = timeout(AT_ONCE, setup.verifier.verify(&rotated)).await??;
+    assert_eq!(identity.subject, "user_01");
+    assert_eq!(setup.issuer.fetches(), 2);
     Ok(())
 }
 
