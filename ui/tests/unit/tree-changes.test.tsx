@@ -1663,6 +1663,18 @@ describe('the item’s controls while its pane reads it again', () => {
     await userEvent.click(archive);
     await waitFor(() => expect(api.callsTo(LIFE)).toHaveLength(1));
     expect(api.callsTo(LIFE).at(0)).toMatchObject({ archived: true, base_revision: FIRST });
+    // The change is followed to its end before the test leaves. It reads the item at the revision
+    // it made; left held, that read is stopped when the page goes and asked again after it, of
+    // whatever service the next tests have.
+    hold = false;
+    await waitFor(() =>
+      expect(screen.getByText(/Showing the workspace as of/).textContent).toContain('dddddddddd'),
+    );
+    await act(async () => {
+      waiting.release();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(archive.getAttribute('aria-disabled')).toBe('false'));
   });
 });
 
