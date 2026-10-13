@@ -35,7 +35,7 @@ import {
   workspace,
   writableWorkspace,
 } from './support/workspace';
-import { type HeldReading, heldEngine } from './support/yaml-engine';
+import { type HeldReading, heldEngine, inlineEngine } from './support/yaml-engine';
 
 const OPEN = '/api/workspaces/open-workspace';
 const LIST = '/api/items/list-items';
@@ -1432,6 +1432,32 @@ describe('leaving the naming rules with edits that are not saved', () => {
     await userEvent.click(button('Naming rules'));
     await within(panel()).findByRole('textbox', { name: /^prefix/ });
     expect(prefix()).toHaveProperty('value', '');
+  });
+
+  it('leaves a YAML reading under way behind: answered after "Discard my changes", it brings nothing back', async () => {
+    service();
+    await openRules();
+    await setPrefix('unsaved-');
+    const held = heldEngine();
+    setYamlEngine(held.engine);
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const box = await findTextBox('The naming rules as YAML');
+    replaceText(box, textIn(box).replace(/prefix: .*/, 'prefix: late-'));
+    act(() => {
+      fireEvent.blur(box);
+    });
+    act(() => held.readings.at(0)?.began());
+    await userEvent.click(close());
+    await userEvent.click(button('Discard my changes'));
+    expect(screen.queryByRole('region', { name: 'Naming rules' })).toBeNull();
+    // The answer arrives at a panel that is gone; the panel opened next starts from the saved rules.
+    act(() => held.readings.at(0)?.done());
+    await turn();
+    setYamlEngine(inlineEngine);
+    await userEvent.click(button('Naming rules'));
+    await within(panel()).findByRole('textbox', { name: /^prefix/ });
+    expect(prefix()).toHaveProperty('value', '');
+    expect(leavingAsks()).toBe(false);
   });
 
   it('asks nothing when there is nothing to lose: rules put back to the saved ones', async () => {
