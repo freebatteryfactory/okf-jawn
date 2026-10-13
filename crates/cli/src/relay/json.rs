@@ -819,6 +819,146 @@ mod mcp_stdio {
         );
     }
 
+    /// A place is counted in bytes of the text that is kept, not in characters (the second
+    /// re-review's B2): after text that is not ASCII, every place noted is still the place of
+    /// its value, in the text as it stands and in the line it is made into.
+    #[test]
+    fn a_place_is_counted_in_bytes_after_text_that_is_not_ascii() -> TestResult {
+        let text = "{\"s\":\"\u{e9}\u{1f600}\",\"id\":\"\u{e9}\",\"jsonrpc\":\"2.0\",\"error\":{\"\u{4e16}\":1,\"message\":\"m\u{e9}\"},\"result\":{\"k\":\"\u{1f600}\",\"protocolVersion\":\"v\"},\"method\":\"n\"}";
+        let found = some(noted(text), "one JSON value")?;
+        assert_eq!(at(text, found.id), Some("\"\u{e9}\""));
+        assert_eq!(at(text, found.jsonrpc), Some("\"2.0\""));
+        assert_eq!(at(text, found.error_message), Some("\"m\u{e9}\""));
+        assert_eq!(at(text, found.version), Some("\"v\""));
+        assert_eq!(at(text, found.method), Some("\"n\""));
+        assert_eq!(
+            at(text, found.result),
+            Some("{\"k\":\"\u{1f600}\",\"protocolVersion\":\"v\"}")
+        );
+        let (line, found) =
+            one_line("{\"s\":\"\u{e9}\u{1f600}\",\r\n\"id\":7,\n\"code\":\"\u{e9}\"}");
+        let found = some(found, "one JSON value")?;
+        assert_eq!(
+            line,
+            "{\"s\":\"\u{e9}\u{1f600}\",\"id\":7,\"code\":\"\u{e9}\"}"
+        );
+        assert_eq!(
+            (at(&line, found.id), at(&line, found.code)),
+            (Some("7"), Some("\"\u{e9}\""))
+        );
+        Ok(())
+    }
+
+    /// A raw control character inside a string is not JSON (the second re-review's B2): each
+    /// of U+0000 to U+001F, the last one included, refuses the text, in a value and in a key,
+    /// as it does for the JSON library. The characters next to that range are taken.
+    #[test]
+    fn every_raw_control_character_inside_a_string_is_refused() -> TestResult {
+        for code in 0..0x20_u32 {
+            let raw = some(char::from_u32(code), "a character")?;
+            for text in [
+                format!("\"a{raw}b\""),
+                format!("{{\"id\":\"{raw}\"}}"),
+                format!("{{\"k{raw}\":1}}"),
+                format!("[\"\\\\{raw}\"]"),
+            ] {
+                assert_eq!(noted(&text), None, "U+{code:04X} in {text:?}");
+                assert_eq!(one_line(&text).1, None, "U+{code:04X} in {text:?}");
+                assert!(
+                    serde_json::from_str::<IgnoredAny>(&text).is_err(),
+                    "U+{code:04X} in {text:?}"
+                );
+            }
+        }
+        for taken in [' ', '\u{7f}', '\u{80}', '\u{9f}'] {
+            let text = format!("{{\"k{taken}\":\"a{taken}b\"}}");
+            assert!(noted(&text).is_some(), "{taken:?}");
+            assert!(
+                serde_json::from_str::<IgnoredAny>(&text).is_ok(),
+                "{taken:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A key is matched whole (the second re-review's B2). For every name the reader looks
+    /// for, a key that only starts with the name, however long it goes on, one that only ends
+    /// with it, and one that stops a character short are other keys: nothing is noted for
+    /// them. The name itself is noted, so the cases say something.
+    #[test]
+    fn a_key_is_matched_whole_for_every_name() -> TestResult {
+        let others = |name: &str| {
+            let short: String = name.chars().take(name.len().saturating_sub(1)).collect();
+            [
+                format!("{name}X"),
+                format!("{name}2"),
+                format!("{name}{}", "X".repeat(20)),
+                format!("X{name}"),
+                short,
+            ]
+        };
+        let top = Noted {
+            opening: Some(1),
+            ..Noted::default()
+        };
+        for name in [
+            "code", "error", "id", "jsonrpc", "message", "method", "result",
+        ] {
+            assert_ne!(noted(&format!("{{\"{name}\":1}}")), Some(top), "{name}");
+            for key in others(name) {
+                assert_eq!(noted(&format!("{{\"{key}\":1}}")), Some(top), "{key}");
+                // After the member itself, such a key does not take its place either.
+                let text = format!("{{\"{name}\":1,\"{key}\":22}}");
+                let found = some(noted(&text), "one JSON value")?;
+                let places = [
+                    found.code,
+                    found.error,
+                    found.id,
+                    found.jsonrpc,
+                    found.message,
+                    found.method,
+                    found.result,
+                ];
+                let noted_values: Vec<&str> = places
+                    .iter()
+                    .filter_map(|place| at(&text, *place))
+                    .collect();
+                assert_eq!(noted_values, ["1"], "{text}");
+            }
+        }
+        for (member, name) in [("result", "protocolVersion"), ("error", "message")] {
+            let inside = |found: Noted| match member {
+                "result" => found.version,
+                _ => found.error_message,
+            };
+            let text = format!("{{\"{member}\":{{\"{name}\":\"right\"}}}}");
+            assert_eq!(
+                at(&text, inside(some(noted(&text), "one JSON value")?)),
+                Some("\"right\""),
+                "{text}"
+            );
+            for key in others(name) {
+                let alone = format!("{{\"{member}\":{{\"{key}\":\"wrong\"}}}}");
+                assert_eq!(
+                    inside(some(noted(&alone), "one JSON value")?),
+                    None,
+                    "{alone}"
+                );
+                for text in [
+                    format!("{{\"{member}\":{{\"{name}\":\"right\",\"{key}\":\"wrong\"}}}}"),
+                    format!("{{\"{member}\":{{\"{key}\":\"wrong\",\"{name}\":\"right\"}}}}"),
+                ] {
+                    assert_eq!(
+                        at(&text, inside(some(noted(&text), "one JSON value")?)),
+                        Some("\"right\""),
+                        "{text}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Depth costs a bit for each level and no recursion: a text nested a hundred thousand
     /// deep, in arrays and objects by turns, is read, and one closed in the wrong order is
     /// refused.

@@ -521,3 +521,107 @@ async fn an_answer_nested_a_million_deep_is_passed_on() -> TestResult {
     assert_eq!((ran.stderr.as_str(), ran.code), ("", 0));
     Ok(())
 }
+
+/// An answer that holds text that is not ASCII before its `id` is the request's answer (the
+/// second re-review's B2): it is passed on once, as it is, and the request gets no error of
+/// the relay's besides. The places the reader notes are places in bytes, so the id is read
+/// where it stands. The same for a refusal: the request's id goes where the `null` stands,
+/// after such text.
+#[tokio::test]
+async fn an_answer_with_text_that_is_not_ascii_before_its_id_is_passed_on_once() -> TestResult {
+    for raw in [
+        "{\"jsonrpc\":\"2.0\",\"r\":\"\u{e9}\u{1f600}\",\"id\":1,\"result\":{}}",
+        "{\"\u{4e16}\u{754c}\":\"\u{e9}\",\"jsonrpc\":\"2.0\",\"result\":{\"s\":\"\u{1f600}\"},\"id\":1}",
+    ] {
+        let ran = answered_with(200, raw).await?;
+        assert_eq!(
+            (ran.stdout.as_str(), ran.stderr.as_str(), ran.code),
+            (format!("{raw}\n").as_str(), "", 0)
+        );
+    }
+    let refusal = "{\"error\":{\"code\":-32020,\"message\":\"\u{e9}\u{1f600}\"},\"jsonrpc\":\"2.0\",\"id\":null}";
+    let ran = answered_with(400, refusal).await?;
+    assert_eq!(
+        (ran.stdout.as_str(), ran.stderr.as_str()),
+        (
+            "{\"error\":{\"code\":-32020,\"message\":\"\u{e9}\u{1f600}\"},\"jsonrpc\":\"2.0\",\"id\":1}\n",
+            ""
+        )
+    );
+    Ok(())
+}
+
+/// No line that is not JSON reaches the output (the second re-review's B2): an answer with a
+/// raw control character inside a string, each of U+0000 to U+001F and the last one
+/// included, is dropped, and the request gets the relay's own error instead. Every line
+/// written is JSON for the JSON library.
+#[tokio::test]
+async fn an_answer_with_a_raw_control_character_in_a_string_is_never_written() -> TestResult {
+    for code in 0..0x20_u32 {
+        let raw = some(char::from_u32(code), "a character")?;
+        let body = format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"a{raw}b\"}}");
+        let ran = answered_with(200, &body).await?;
+        assert_eq!(
+            ran.stdout.matches('\n').count(),
+            1,
+            "U+{code:04X}: {:?}",
+            ran.stdout
+        );
+        let lines = ran.lines()?;
+        let only = some(lines.first(), "an answer")?;
+        assert_eq!(
+            (lines.len(), only.get("id"), only.pointer("/error/code")),
+            (1, Some(&json!(1)), Some(&json!(-32603))),
+            "U+{code:04X}"
+        );
+        assert!(
+            !ran.stdout.contains(&format!("a{raw}b")),
+            "U+{code:04X}: {:?}",
+            ran.stdout
+        );
+    }
+    Ok(())
+}
+
+/// A key is matched whole (the second re-review's B2): `protocolVersionX` in the answer to
+/// `initialize` is not the protocol version. With the version beside it, the version is put
+/// in force; alone, none is.
+#[tokio::test]
+async fn a_key_that_only_starts_with_protocol_version_names_no_version() -> TestResult {
+    for (result, in_force) in [
+        (
+            "{\"protocolVersion\":\"2025-06-18\",\"protocolVersionX\":\"wrong\"}",
+            Some("2025-06-18"),
+        ),
+        (
+            "{\"protocolVersionX\":\"wrong\",\"protocolVersion\":\"2025-06-18\"}",
+            Some("2025-06-18"),
+        ),
+        ("{\"protocolVersionX\":\"wrong\"}", None),
+        ("{\"protocolVersion2025\":\"wrong\"}", None),
+    ] {
+        let transport = FakeTransport::scripted(move |message| {
+            let id = message.get("id").unwrap_or(&Value::Null);
+            match message.get("method").and_then(Value::as_str) {
+                Some("initialize") => status(
+                    200,
+                    Body::Json(format!(
+                        "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{result}}}"
+                    )),
+                ),
+                _ => answered(&response(id, &json!({}))),
+            }
+        });
+        let input = format!(
+            "{}{}",
+            request(&json!(0), "initialize", &json!({})),
+            request(&json!(1), "ping", &json!({}))
+        );
+        let ran = relay(Setup::new(&transport), input.as_bytes()).await?;
+        assert_eq!(ran.lines()?.len(), 2, "{}", ran.stdout);
+        let posts = transport.posts()?;
+        let ping = some(posts.get(1), "the second message")?;
+        assert_eq!(header(ping, "MCP-Protocol-Version"), in_force, "{result}");
+    }
+    Ok(())
+}
