@@ -20,11 +20,11 @@ use tokio::sync::watch;
 
 use super::{notification, request, response};
 use crate::check::{TestResult, some};
-use crate::support::Outcome;
 use crate::support::doubles::{
     Body, Broken, FakeTransport, Script, Setup, Stuck, answered, broken, relay, relay_on,
     relay_over, status,
 };
+use crate::support::{Outcome, TOKEN};
 
 /// An input that hands out its bytes, counts how many were taken, and then stays open.
 struct Counted {
@@ -990,5 +990,45 @@ async fn no_more_lines_are_read_ahead_than_there_are_turns() -> TestResult {
         "{taken} bytes were taken from the input; two long lines end after {two}, three after {three}"
     );
     assert_eq!(transport.posts()?.len(), 1);
+    Ok(())
+}
+
+/// The relay's last words are cleaned of the credential like every other line it writes (the
+/// second re-review's B3). They go straight to the error stream, past the queue every other
+/// diagnostic takes. A request whose id holds the credential is still unanswered when the
+/// closing time runs out, and so is an `initialize` with such an id, which the read loop
+/// itself waits for: each is named with the mark where the credential stood.
+#[tokio::test]
+async fn the_relay_s_last_words_never_carry_the_credential() -> TestResult {
+    let secret_id = json!(format!("id-{TOKEN}"));
+    for (input, names) in [
+        (
+            format!(
+                "{}{}",
+                request(&json!(7), "tools/call", &json!({})),
+                request(&secret_id, "tools/call", &json!({}))
+            ),
+            ["request \"id-[credential]\"", "request 7"].as_slice(),
+        ),
+        (
+            request(&secret_id, "initialize", &json!({})),
+            ["request \"id-[credential]\""].as_slice(),
+        ),
+    ] {
+        let transport = FakeTransport::new(|_, _| Box::pin(std::future::pending()));
+        let setup = Setup {
+            limits: Limits {
+                closing: Duration::from_millis(300),
+                ..Limits::default()
+            },
+            ..Setup::new(&transport)
+        };
+        let ran = tokio::time::timeout(PATIENCE, relay(setup, input.as_bytes())).await??;
+        assert_eq!(
+            (ran.code, ran.stderr.as_str()),
+            (1, unfinished(names).as_str())
+        );
+        assert!(!ran.stderr.contains(TOKEN), "{}", ran.stderr);
+    }
     Ok(())
 }
