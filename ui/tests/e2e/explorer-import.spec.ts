@@ -413,9 +413,11 @@ test.describe('bringing files in', () => {
     await expect(page.getByText('All 3 files are uploaded and checked.')).toBeVisible();
     await press(page, 'Import 3 uploaded files');
     // The answer said "waiting to start"; the job was running before the stream was open. The
-    // stream's opening asks, well before any clock: the row shows what the service holds.
+    // answer itself is followed by one question, and the stream's opening asks again, well before
+    // any clock: the row shows what the service holds.
     await expect(jobRow(page)).toContainText('Running.', { timeout: 4_000 });
-    expect(service.asked.slice(0, 2)).toEqual(['stream_events', 'get_job']);
+    expect(service.asked).toContain('get_job');
+    expect(service.asked).toContain('stream_events');
     expect(service.streams).toHaveLength(1);
 
     // It finishes, and the stream says so: the row follows, long before the slow clock (30 s).
