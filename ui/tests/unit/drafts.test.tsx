@@ -1006,6 +1006,85 @@ describe('a save that takes long', () => {
     expect(textIn(box)).toBe(`${LARGE} and more`);
   });
 
+  // After "Stop" nothing is sent without the person. The autosave's timer is the test above;
+  // these are the other ways a save is sent with nobody asking, and then the person acting.
+  describe('after "Stop"', () => {
+    /** A large save was stopped; what the next `save_draft` answers is the test's to say. */
+    async function stopped(next: Handler = (body) => saved(body)) {
+      let first = true;
+      const made = await sending((body) => {
+        if (!first) return next(body);
+        first = false;
+        return new Promise<never>(() => {});
+      });
+      await pass(1);
+      fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+      await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+      expect(made.api.callsTo(SAVE)).toHaveLength(1);
+      return made;
+    }
+
+    /** The page is hidden: another browser tab, a minimised window. */
+    function hidePage() {
+      const hidden = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+      document.dispatchEvent(new Event('visibilitychange'));
+      hidden.mockRestore();
+    }
+
+    it('sends nothing when the page is hidden', async () => {
+      const { api, box } = await stopped();
+      hidePage();
+      await pass(AUTOSAVE_DELAY_MS * 5);
+      expect(api.callsTo(SAVE)).toHaveLength(1);
+      expect(textIn(box)).toBe(LARGE);
+    });
+
+    it('sends nothing when the page is about to leave, and still asks before it does', async () => {
+      const { api } = await stopped();
+      const leaving = new Event('beforeunload', { cancelable: true });
+      window.dispatchEvent(leaving);
+      expect(leaving.defaultPrevented).toBe(true);
+      await pass(AUTOSAVE_DELAY_MS * 5);
+      expect(api.callsTo(SAVE)).toHaveLength(1);
+    });
+
+    it('sends nothing when the editor is left, and keeps the text', async () => {
+      const { api } = await stopped();
+      fireEvent.click(screen.getByRole('button', { name: 'Read the committed text' }));
+      await eventually(() =>
+        expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull(),
+      );
+      await pass(AUTOSAVE_DELAY_MS * 5);
+      expect(api.callsTo(SAVE)).toHaveLength(1);
+      fireEvent.click(screen.getByRole('button', { name: 'Edit your draft' }));
+      await eventually(() => textBox('Text of Meeting notes'));
+      expect(textIn(textBox('Text of Meeting notes'))).toBe(LARGE);
+      expect(saveState()).toBe('Not saved. Your text is kept here.');
+    });
+
+    it('is over once the person types again: a hidden page then saves at once', async () => {
+      const { api, box } = await stopped();
+      typeInto(box, ' and more');
+      hidePage();
+      // No wait for the autosave's moment: the page being hidden is the moment again.
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+      expect(api.callsTo(SAVE).at(1)?.body).toBe(`${LARGE} and more`);
+    });
+
+    it('is over once the person tries again: a retry that fails is a failed save like any other, which a hidden page sends', async () => {
+      const { api } = await stopped(() => fail(503, 'unavailable', 'busy'));
+      fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+      await eventually(() =>
+        expect(
+          screen.getByText('Saving this draft: The service is temporarily unavailable.'),
+        ).toBeDefined(),
+      );
+      hidePage();
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(3));
+    });
+  });
+
   it('repeats a stopped save under its key when the text is the same, and starts it as "Saving…"', async () => {
     const { api } = await sending(() => new Promise<never>(() => {}));
     await pass(1);

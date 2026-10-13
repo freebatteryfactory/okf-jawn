@@ -83,6 +83,11 @@ export interface DraftSession extends DraftText {
    * holds is unknown.
    */
   failure: unknown;
+  /**
+   * The person stopped this session's last save and has not acted since: until they do, nothing
+   * of it is sent (`saving.ts` says what the person acting is).
+   */
+  stopped: boolean;
   /** The request in flight or failed. */
   attempt: SaveAttempt | null;
   /** The text is larger than the service accepts, in bytes; nothing is sent while it is. */
