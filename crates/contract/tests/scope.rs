@@ -135,7 +135,8 @@ fn writes_a_workspace(targets: &[Target]) -> bool {
     matches!(targets.first(), Some(Target::Workspace(..)))
 }
 
-/// Every place `schema` names a `WorkspaceId`, resolving `$ref`s into `defs`.
+/// Every place `schema` names a `WorkspaceId`, resolving `$ref`s into `defs`, in objects, lists,
+/// tuples (`prefixItems`), maps (value and `propertyNames` key) and combinators.
 fn workspace_fields(
     schema: &Value,
     defs: &Value,
@@ -172,14 +173,23 @@ fn workspace_fields(
             workspace_fields(property, defs, &field, next, found)?;
         }
     }
-    for listing in ["items", "additionalProperties"] {
+    let listed = WorkspaceField {
+        pointer: at.pointer.clone(),
+        listed: true,
+    };
+    // A list's element, a map's value, a map's key, and each position of a tuple.
+    for listing in ["items", "additionalProperties", "propertyNames"] {
         if let Some(element) = object.get(listing) {
-            let field = WorkspaceField {
-                pointer: at.pointer.clone(),
-                listed: true,
-            };
-            workspace_fields(element, defs, &field, next, found)?;
+            workspace_fields(element, defs, &listed, next, found)?;
         }
+    }
+    for element in object
+        .get("prefixItems")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        workspace_fields(element, defs, &listed, next, found)?;
     }
     for combinator in ["oneOf", "anyOf", "allOf"] {
         for branch in object
@@ -882,5 +892,57 @@ fn typed_error_details_are_tagged_and_closed() -> Result<(), Box<dyn Error>> {
         in_progress,
         ErrorDetail::InProgress { retry_after: 2, .. }
     ));
+    Ok(())
+}
+
+/// The workspace identities `schema` names, walked from the root, as (pointer, listed) pairs.
+fn workspace_fields_of(schema: &Value) -> Result<Vec<(String, bool)>, Box<dyn Error>> {
+    let defs = json!({ "WorkspaceId": { "type": "string" } });
+    let root = WorkspaceField {
+        pointer: String::new(),
+        listed: false,
+    };
+    let mut found = BTreeSet::new();
+    workspace_fields(schema, &defs, &root, 0, &mut found)?;
+    Ok(found
+        .into_iter()
+        .map(|field| (field.pointer, field.listed))
+        .collect())
+}
+
+/// The walk that finds where a response names a workspace sees the two shapes a tuple and a map
+/// add to the object, the array and the combinators: a workspace identity at a position of a
+/// tuple (`prefixItems`) and a map keyed by workspace (`propertyNames`). Each is one of
+/// several, so `listed`.
+#[test]
+fn the_workspace_walk_sees_a_tuple_and_a_map_keyed_by_workspace() -> Result<(), Box<dyn Error>> {
+    let workspace = json!({ "$ref": "#/$defs/WorkspaceId" });
+    let tuple = json!({
+        "type": "object",
+        "properties": {
+            "home": { "type": "array", "prefixItems": [{ "type": "string" }, workspace] }
+        }
+    });
+    assert_eq!(workspace_fields_of(&tuple)?, [("/home".to_owned(), true)]);
+    let keyed = json!({
+        "type": "object",
+        "properties": {
+            "visits": {
+                "type": "object",
+                "propertyNames": workspace,
+                "additionalProperties": { "type": "integer" }
+            }
+        }
+    });
+    assert_eq!(workspace_fields_of(&keyed)?, [("/visits".to_owned(), true)]);
+    // The walk still finds nothing in a schema that names no workspace.
+    let plain = json!({
+        "type": "object",
+        "properties": {
+            "home": { "type": "array", "prefixItems": [{ "type": "string" }] },
+            "visits": { "type": "object", "propertyNames": { "type": "string" } }
+        }
+    });
+    assert_eq!(workspace_fields_of(&plain)?, Vec::<(String, bool)>::new());
     Ok(())
 }
