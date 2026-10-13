@@ -1,7 +1,9 @@
 //! The one request path of an operation command: JSON in, one `POST`, the response body out.
 //!
 //! The input is read inline, from a file (`@path`) or from standard input (`-`), within the
-//! contract's request-body limit, and is sent as it was given once it is known to be JSON.
+//! contract's request-body limit, and is sent as it was given once it is known to be JSON. A
+//! file and standard input are read by one function, which takes the limit and one byte and
+//! no more, however long the source is.
 //! A success body is copied to the output as it arrives, followed by one line feed when it does
 //! not end with one; nothing else is written there. A refusal is returned with the service's
 //! own code and message; an answer that carries none is given the code its HTTP status stands
@@ -14,6 +16,8 @@
 //! the message, and the HTTP status then decides the code.
 
 use std::io::Read;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
@@ -21,7 +25,7 @@ use okf_jawn_contract::metadata::OperationInfo;
 use okf_jawn_contract::transport::MAX_REQUEST_BODY_BYTES;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use crate::credential::Credential;
 use crate::endpoint::Endpoint;
@@ -36,8 +40,24 @@ pub(crate) struct Failure {
     pub(crate) detail: Option<String>,
 }
 
+/// An input file, read where it is asked for: an operation reads its one input before it
+/// does anything else, so nothing waits on these reads.
+struct FromFile(std::fs::File);
+
 /// How long one operation may take, connection and answer together.
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
+
+impl AsyncRead for FromFile {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let read = self.0.read(buffer.initialize_unfilled())?;
+        buffer.advance(read);
+        Poll::Ready(Ok(()))
+    }
+}
 
 impl From<ApiError> for Failure {
     fn from(error: ApiError) -> Self {
@@ -139,23 +159,21 @@ pub(crate) async fn input<I: AsyncRead + Unpin>(
     argument: &str,
     stdin: &mut I,
 ) -> Result<Vec<u8>, ApiError> {
-    let limit = u64::try_from(MAX_REQUEST_BODY_BYTES)
-        .unwrap_or(u64::MAX)
-        .saturating_add(1);
-    let mut bytes = Vec::new();
-    if argument == "-" {
-        stdin
-            .take(limit)
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(|error| unreadable("standard input", &error))?;
+    let mut file;
+    let (name, source): (&str, Option<&mut (dyn AsyncRead + Unpin)>) = if argument == "-" {
+        ("standard input", Some(stdin))
     } else if let Some(path) = argument.strip_prefix('@') {
-        std::fs::File::open(path)
-            .and_then(|file| file.take(limit).read_to_end(&mut bytes))
-            .map_err(|error| unreadable(path, &error))?;
+        file = FromFile(std::fs::File::open(path).map_err(|error| unreadable(path, &error))?);
+        (path, Some(&mut file))
     } else {
-        bytes.extend_from_slice(argument.as_bytes());
-    }
+        ("", None)
+    };
+    let bytes = match source {
+        Some(source) => bounded(source, MAX_REQUEST_BODY_BYTES)
+            .await
+            .map_err(|error| unreadable(name, &error))?,
+        None => argument.as_bytes().to_vec(),
+    };
     if bytes.len() > MAX_REQUEST_BODY_BYTES {
         return Err(ApiError::new(
             ErrorCode::TooLarge,
@@ -173,6 +191,19 @@ pub(crate) async fn input<I: AsyncRead + Unpin>(
         )
         .with_field("json")
     })?;
+    Ok(bytes)
+}
+
+/// Read `source` to its end, or to one byte past `limit`, whichever comes first: the byte
+/// past the limit is what tells a source that is too long from one that is exactly as long
+/// as allowed, and nothing after it is read.
+async fn bounded<R: AsyncRead + Unpin + ?Sized>(
+    source: &mut R,
+    limit: usize,
+) -> std::io::Result<Vec<u8>> {
+    let most = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
+    let mut bytes = Vec::new();
+    source.take(most).read_to_end(&mut bytes).await?;
     Ok(bytes)
 }
 
@@ -286,7 +317,9 @@ mod tests {
     use okf_jawn_contract::error::ErrorCode;
     use okf_jawn_contract::metadata::operations;
 
-    use super::{OPERATION_TIMEOUT, call_within};
+    use tokio::io::AsyncReadExt;
+
+    use super::{FromFile, OPERATION_TIMEOUT, bounded, call_within};
     use crate::endpoint::Endpoint;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -300,6 +333,29 @@ mod tests {
 
     fn some<T>(value: Option<T>, what: &str) -> Result<T, String> {
         value.ok_or_else(|| format!("expected {what} to be present"))
+    }
+
+    /// The one function that reads an operation's input from a file or from standard input
+    /// (the re-review's note N6) takes the limit and one byte, and no more: a source of exactly
+    /// the limit is read whole, and of a longer one, however long, one byte past the limit is
+    /// taken and the rest is left unread. A file is read through it like any other source.
+    #[tokio::test]
+    async fn input_is_read_up_to_its_limit_and_one_byte() -> TestResult {
+        const LIMIT: usize = 1000;
+        let mut exact = tokio::io::repeat(b'x').take(1000);
+        assert_eq!(bounded(&mut exact, LIMIT).await?.len(), 1000);
+        let mut longer = tokio::io::repeat(b'x').take(1_000_000);
+        assert_eq!(bounded(&mut longer, LIMIT).await?.len(), 1001);
+        assert_eq!(1_000_000_u64.saturating_sub(longer.limit()), 1001);
+        let path =
+            std::env::temp_dir().join(format!("okf-jawn-cli-input-{}.json", std::process::id()));
+        std::fs::write(&path, vec![b'y'; 5000])?;
+        let mut file = FromFile(std::fs::File::open(&path)?);
+        let read = bounded(&mut file, LIMIT).await;
+        drop(file);
+        std::fs::remove_file(&path)?;
+        assert_eq!(read?, vec![b'y'; 1001]);
+        Ok(())
     }
 
     /// One operation has a limit in time, connection and answer together (the review's

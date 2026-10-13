@@ -340,9 +340,33 @@ async fn the_relay_s_own_lines_hold_room_too() -> TestResult {
     Ok(())
 }
 
-/// Diagnostics share the room with the lines. The error stream stands still and every
-/// notification fails, which is said there: the first diagnostic fills a room smaller than
-/// itself, and the relay forwards nothing more until the stream is read again.
+/// A text longer than the whole shared part still gets through (the re-review's note N7):
+/// it takes the place beside the shared part. With a shared part of ten bytes, one request
+/// is answered, where a text that waited for room it can never have would wait for ever.
+#[tokio::test]
+async fn a_line_longer_than_the_room_still_gets_through() -> TestResult {
+    let transport = FakeTransport::echoing();
+    let setup = Setup {
+        limits: Limits {
+            waiting_bytes: 10,
+            ..Limits::default()
+        },
+        ..Setup::new(&transport)
+    };
+    let ran = tokio::time::timeout(
+        Duration::from_secs(10),
+        relay(setup, request(&json!(1), "ping", &json!({})).as_bytes()),
+    )
+    .await
+    .map_err(|_| "a line longer than the room never got through")??;
+    assert_eq!((ran.lines()?.len(), ran.code), (1, 0));
+    Ok(())
+}
+
+/// Diagnostics hold room as lines do. The error stream stands still and every notification
+/// fails, which is said there: the first diagnostic is longer than the shared part and takes
+/// the place beside it, and the relay forwards nothing more until the stream is read again.
+/// Every wait here is bounded, so a relay that stands still fails the test.
 #[tokio::test]
 async fn diagnostics_wait_in_the_same_room() -> TestResult {
     let transport = FakeTransport::scripted(|_| broken("connection reset by peer"));
@@ -374,7 +398,11 @@ async fn diagnostics_wait_in_the_same_room() -> TestResult {
     assert_eq!(transport.posts()?.len(), 1);
     drop(client_in);
     let mut said = String::new();
-    let (ran, read) = tokio::join!(running, client_err.read_to_string(&mut said));
+    let (ran, read) = tokio::time::timeout(PATIENCE, async {
+        tokio::join!(running, client_err.read_to_string(&mut said))
+    })
+    .await
+    .map_err(|_| "the relay stood still with its diagnostics unread")?;
     assert_eq!(ran?, 0);
     read?;
     assert_eq!(said.matches("was not delivered").count(), 3, "{said}");

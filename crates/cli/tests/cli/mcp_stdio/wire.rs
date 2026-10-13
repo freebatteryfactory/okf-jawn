@@ -556,7 +556,11 @@ async fn the_transport_holds_an_answer_only_in_room_it_took() -> TestResult {
     assert_eq!(room.free(), 1000);
     // No shared part, and the one place beside it is taken.
     let narrow = Room::new(0);
-    let first = narrow.hold("a text that has the place".to_owned()).await;
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        narrow.hold("a text that has the place".to_owned()),
+    )
+    .await?;
     let (sender, _receiver) = mpsc::channel(4);
     let mut sending = Box::pin(transport.send(post(), sender, &narrow));
     assert!(
