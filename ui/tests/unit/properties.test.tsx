@@ -6,7 +6,7 @@ import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-libra
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mergeProperties, namedProperties } from '../../src/features/documents/PropertiesForm';
 import { AUTOSAVE_DELAY_MS, resetDraftSessions } from '../../src/features/drafts/saving';
-import { type Handler, mockApi, ok } from './support/api';
+import { fail, type Handler, mockApi, ok } from './support/api';
 import { textBox, typeInto } from './support/editor';
 import {
   draftOf,
@@ -416,6 +416,48 @@ describe('the properties form', () => {
     expect(form?.textContent).toContain('![pix](https://elsewhere.example/p.png)');
     expect(form?.textContent).toContain('[help](https://elsewhere.example/h)');
     expect(form?.textContent).toContain('![in](https://elsewhere.example/r.png)');
+  });
+
+  // A read that fails when it is asked again never takes away what is on screen.
+  describe('a read asked again in the background that fails', () => {
+    it.each([
+      ['get_item', ITEM, 'Reading this item’s properties: The service is temporarily unavailable.'],
+      ['list_types', TYPES, 'Reading this item’s type: The service is temporarily unavailable.'],
+    ] as const)(
+      '%s: the form stays, with what was typed and with focus, and the failure is said beside it',
+      async (_read, path, words) => {
+        let down: string | null = null;
+        typed({
+          [ITEM]: () =>
+            down === ITEM
+              ? fail(503, 'unavailable', 'down')
+              : ok({ ...itemDocument(noteSummary), properties: stored }),
+          [TYPES]: () =>
+            down === TYPES ? fail(503, 'unavailable', 'down') : ok({ items: [meetingNote] }),
+        });
+        const { queryClient } = renderAt(`/w/${WS}/i/${NOTE}`);
+        const edit = await screen.findByRole('button', { name: 'Edit' });
+        await screen.findByText('Text of Meeting notes');
+        fireEvent.click(edit);
+        await waitFor(() => field('Owner'));
+        // Typed and not valid yet: it is only in the form.
+        set('Attendees', '0');
+        act(() => field('Attendees').focus());
+        down = path;
+        await act(() => queryClient.invalidateQueries());
+        expect(await screen.findByText(words)).toBeDefined();
+        expect(field('Attendees')).toHaveProperty('value', '0');
+        expect(document.activeElement).toBe(field('Attendees'));
+        expect(screen.getByRole('textbox', { name: 'Text of Meeting notes' })).toBeDefined();
+        // The notice has the retry; when it answers, the form is still the same one.
+        down = null;
+        const attendees = field('Attendees');
+        fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+        await waitFor(() => expect(screen.queryByText(words)).toBeNull());
+        expect(field('Attendees')).toBe(attendees);
+        expect(attendees).toHaveProperty('value', '0');
+      },
+    );
   });
 
   it('does not send a required property emptied', async () => {

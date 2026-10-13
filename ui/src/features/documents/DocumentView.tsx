@@ -29,7 +29,7 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import {
   getItemOptions,
   openWorkspaceQueryKey,
@@ -42,6 +42,7 @@ import type {
   Revision,
   Workspace,
 } from '../../api/generated/types.gen';
+import { pageHeading, takeHeld, useWatchedPart } from '../../lib/focus';
 import { Instant } from '../../lib/instant';
 import { keyed } from '../../lib/keys';
 import { ConflictNotice } from '../drafts/ConflictNotice';
@@ -299,6 +300,11 @@ export function DocumentView({
   const atShown = canWrite && revision === head;
   const [seenAsNote, setSeenAsNote] = useState(false);
   if (!seenAsNote && document?.summary.kind === 'note') setSeenAsNote(true);
+  // The item's type, kept the same way: the form is drawn from it while the item is read again.
+  const [typeName, setTypeName] = useState<string | null>(null);
+  if (document !== undefined && typeName !== document.summary.type_name) {
+    setTypeName(document.summary.type_name);
+  }
   const isNote = session !== undefined || seenAsNote;
   const editable = atShown && isNote;
   const hasDraft = session !== undefined || (document?.draft ?? null) !== null;
@@ -404,6 +410,14 @@ export function DocumentView({
       focusNext.current = null;
       target.focus();
     }
+  });
+  // The editor and the form leave when the session ends by another hand than this pane's own
+  // buttons (a Snapshot taken in the Drafts panel). Keyboard focus that was in them goes to the
+  // pane's switch, as after the other ways out of the editor; with no switch, to the page's heading.
+  const heldFocus = useRef<HTMLElement | null>(null);
+  const [, editingRef] = useWatchedPart<HTMLDivElement>(heldFocus);
+  useLayoutEffect(() => {
+    if (takeHeld(heldFocus)) (switchRef.current ?? pageHeading())?.focus();
   });
   const reading = JSON.stringify(request);
   const itemFailure = useRetry({
@@ -535,32 +549,36 @@ export function DocumentView({
         </p>
       )}
 
-      {itemFailure.shown ? (
+      {/* A read that fails when asked again never takes away what is on screen: the notice
+          stands beside the properties, the form and the text, and replaces them only when there
+          is nothing to show. */}
+      {itemFailure.shown && (
         <FailureNotice
           context="Reading this item’s properties"
           error={itemFailure.error}
           retry={itemFailure}
           workspaceId={workspaceId}
         />
-      ) : editing && document ? (
-        <PropertiesForm session={session} typeName={document.summary.type_name} />
-      ) : document ? (
-        <Properties properties={document.properties} />
-      ) : (
-        <p role="status">Loading properties…</p>
       )}
-
       {editing ? (
-        <DraftEditor
-          session={session}
-          title={title}
-          onDiscarded={() => {
-            focusNext.current = 'switch';
-            setChosen('read');
-          }}
-        />
+        <div ref={editingRef} className="editing">
+          {typeName === null ? null : <PropertiesForm session={session} typeName={typeName} />}
+          <DraftEditor
+            session={session}
+            title={title}
+            onDiscarded={() => {
+              focusNext.current = 'switch';
+              setChosen('read');
+            }}
+          />
+        </div>
       ) : (
         <>
+          {document ? (
+            <Properties properties={document.properties} />
+          ) : itemFailure.shown ? null : (
+            <p role="status">Loading properties…</p>
+          )}
           {first && first.outline.length > 0 && (
             <details className="outline">
               <summary>Outline ({first.outline.length})</summary>

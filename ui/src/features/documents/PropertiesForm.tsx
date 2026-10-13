@@ -163,15 +163,20 @@ export function PropertiesForm({ session, typeName }: PropertiesFormProps) {
   return (
     <details className="properties" open>
       <summary ref={summaryRef}>Properties ({count})</summary>
-      {typesFailure.shown ? (
+      {/* Beside the form when the types were read before: a read that fails when asked again
+          never takes the form, and what was typed in it, away. */}
+      {typesFailure.shown && (
         <FailureNotice
           context="Reading this item’s type"
           error={typesFailure.error}
           retry={typesFailure}
           workspaceId={session.workspaceId}
         />
-      ) : types.data === undefined ? (
-        <p role="status">Reading this item’s type…</p>
+      )}
+      {types.data === undefined ? (
+        typesFailure.shown ? null : (
+          <p role="status">Reading this item’s type…</p>
+        )
       ) : definition === undefined ? (
         <p role="note" className="notice">
           This workspace has no definition of the type <span className="type-name">{typeName}</span>
