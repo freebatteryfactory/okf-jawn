@@ -1032,3 +1032,39 @@ async fn the_relay_s_last_words_never_carry_the_credential() -> TestResult {
     }
     Ok(())
 }
+
+/// The last words get two seconds and no more (the second re-review's note N3), from both
+/// sides. Neither output stream takes anything and the closing time is 300 ms, so the relay
+/// ends 2.3 seconds after its input: not sooner, which would be an error stream that was not
+/// given its two seconds, and not much later, which would keep a client waiting for a relay
+/// that has nothing more to do. Ten seconds are left for a machine that is busy.
+#[tokio::test]
+async fn the_relay_s_last_words_get_two_seconds_and_no_more() -> TestResult {
+    let transport = FakeTransport::echoing();
+    let setup = Setup {
+        limits: Limits {
+            closing: Duration::from_millis(300),
+            ..Limits::default()
+        },
+        ..Setup::new(&transport)
+    };
+    let started = std::time::Instant::now();
+    let code = tokio::time::timeout(
+        PATIENCE,
+        relay_on(
+            setup,
+            request(&json!(1), "tools/call", &json!({})).as_bytes(),
+            Stuck,
+            Stuck,
+        ),
+    )
+    .await
+    .map_err(|_| "the relay waited for an error stream that takes nothing")??;
+    let took = started.elapsed();
+    assert_eq!(code, 1);
+    assert!(
+        took >= Duration::from_millis(2300) && took < Duration::from_millis(12_300),
+        "the relay ended {took:?} after its input"
+    );
+    Ok(())
+}
