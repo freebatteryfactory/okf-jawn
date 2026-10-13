@@ -541,10 +541,11 @@ async fn an_image_whose_bytes_begin_with_its_types_signature_is_shown() -> TestR
 }
 
 /// Bytes with a wrong signature are described, for each type: a signature wrong only in its
-/// last byte, wrong after its first byte, and (WebP) wrong in either half.
+/// last byte, wrong after its first byte, (WebP) wrong in either half, and a right signature
+/// that sits after other bytes instead of at the start.
 #[tokio::test]
 async fn an_image_whose_bytes_do_not_begin_with_its_types_signature_is_described() -> TestResult {
-    let cases: [(&str, &[u8]); 17] = [
+    let cases: [(&str, &[u8]); 25] = [
         ("image/png", b"\x89PNG\r\n\x1a\x0b\x00\x00\x00\rIHDR"),
         ("image/png", b"\x89QNG\r\n\x1a\n"),
         ("image/png", b"\x89\x00\x00\x00\x00\x00\x00\x00"),
@@ -563,6 +564,17 @@ async fn an_image_whose_bytes_do_not_begin_with_its_types_signature_is_described
         ("image/webp", b"RIFFWEBP\x00\x00\x00\x00"),
         ("IMAGE/WEBP", b"RIFF\x24\x00\x00\x00WAVE"),
         ("Image/PNG; charset=binary", b"\x89PNG\r\n\x1a\x0b"),
+        // The right signature, but not at the start: the bytes begin with something else.
+        ("image/png", b"\x00\x89PNG\r\n\x1a\n"),
+        ("image/jpeg", b"\x00\xff\xd8\xff\xe0"),
+        ("image/jpeg", b"<html>\xff\xd8\xff"),
+        ("image/gif", b" GIF89a\x01\x00\x01\x00"),
+        ("image/gif", b"\x00GIF87a"),
+        ("image/webp", b"\x00RIFF\x00\x00\x00\x00WEBP"),
+        // `RIFF` one byte late, so that `WEBP` still sits where a RIFF file puts it.
+        ("image/webp", b"\x00RIFF\x00\x00\x00WEBP"),
+        // `RIFF` at the start, but `WEBP` one byte late.
+        ("image/webp", b"RIFF\x24\x00\x00\x00\x00WEBP"),
     ];
     for (served, bytes) in cases {
         check_served("images-signature-wrong.html", served, bytes, false).await?;
