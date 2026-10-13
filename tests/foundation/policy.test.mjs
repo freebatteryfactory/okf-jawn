@@ -65,6 +65,19 @@ test('core composes ports only and never depends on concrete adapter crates',asy
  const manifest=await readFile(join(root,'crates/core/Cargo.toml'),'utf8');
  for(const crate of ['okf-jawn-storage','okf-jawn-ingest','okf-jawn-server','okf-jawn-mcp','okf-jawn-cli'])assert.doesNotMatch(manifest,new RegExp(crate),crate);
 });
+test('core writes no file: no source under crates/core/src names std::fs, tempfile or temp_dir',async()=>{
+ // crates/core/src/application/shared.rs: "This service runs no check of its own on a replay and writes no file." Ports do the IO.
+ const sources=(await files(root)).filter(f=>f.startsWith('crates/core/src/')&&f.endsWith('.rs'));
+ assert.ok(sources.length>20,`the scan read only ${sources.length} core sources`);
+ // `std::fs` also as a grouped import (`use std::{fs, io}`), which never spells the two words together.
+ const named=[['std::fs',/\bstd::fs\b/],['std::fs',/\bstd::\{[^}]*\bfs\b/],['tempfile',/\btempfile\b/],['temp_dir',/\btemp_dir\b/]];
+ const found=[];
+ for(const file of sources){
+  const source=await readFile(join(root,file),'utf8');
+  for(const [name,pattern] of named)if(pattern.test(source))found.push(`${file} names ${name}`);
+ }
+ assert.deepEqual(found,[],'the application service writes no file; file access belongs to a port\'s adapter');
+});
 test('test-support applications are included only by test targets',async()=>{
  for(const file of (await files(root)).filter(f=>f.endsWith('.rs'))){
   const normalized=file.replaceAll('\\','/');
