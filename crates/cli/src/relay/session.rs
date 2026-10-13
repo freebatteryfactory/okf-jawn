@@ -17,9 +17,13 @@
 //!   not written, the error stream says so, and a request it would have answered gets the
 //!   relay's own error instead.
 //!
-//! An answer is written again from its parsed JSON, so that it holds no line break: member
-//! order and insignificant white space are not kept. A message to the service is sent as the
-//! client wrote it.
+//! - An answer is passed on as the service wrote it. The relay checks that it is one JSON
+//!   value and a JSON-RPC message, removes the line feeds and carriage returns that stand
+//!   between its tokens so that it is one line, and changes no other byte, the credential
+//!   apart: a number of any size, a key that occurs twice and every escape come out as they
+//!   went in. A refusal that lacks the request's id gets it put into its text. An id is
+//!   written back as the client wrote it. A message to the service is sent as the client
+//!   wrote it.
 
 use std::sync::Arc;
 
@@ -30,9 +34,10 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
 
 use super::frame::{Frame, Frames};
+use super::json::one_line;
 use super::launch::{Arrival, Launcher, StartPolicy, start_or_connect};
 use super::message::{
-    INTERNAL_ERROR, INVALID_REQUEST, Kind, Lifecycle, Outgoing, Refusal, error_line, is_message,
+    Envelope, INTERNAL_ERROR, INVALID_REQUEST, Kind, Lifecycle, Outgoing, Refusal, error_line,
     prepare,
 };
 use super::transport::{Body, Transport, TransportError};
@@ -128,36 +133,31 @@ impl Default for Limits {
 /// Returns, in plain words, why it was not written. Anything that is not a message is dropped
 /// and logged: the output stream carries protocol messages only.
 async fn deliver(
-    data: &str,
+    data: String,
     kind: &Kind,
     initialize: bool,
     desk: &Desk,
     seen: &mut Seen,
 ) -> Result<(), &'static str> {
-    let value = match serde_json::from_str::<Value>(data) {
-        Ok(value) if is_message(&value) => value,
-        _ => {
-            note(
-                desk,
-                "dropped an answer of the service that is not a JSON-RPC message",
-            )
-            .await;
-            return Err(NOT_A_MESSAGE);
-        }
+    let Some(envelope) = Envelope::read(&data) else {
+        note(
+            desk,
+            "dropped an answer of the service that is not a JSON-RPC message",
+        )
+        .await;
+        return Err(NOT_A_MESSAGE);
     };
-    if !line(desk, value.to_string()).await {
+    // The text itself is passed on: only the line breaks between its tokens are removed.
+    if !line(desk, one_line(data)).await {
         return Err(ANSWER_WITHHELD);
     }
-    if let Kind::Request { id } = kind
-        && value.get("method").is_none()
-        && value.get("id") == Some(id)
+    if let Kind::Request { id, .. } = kind
+        && !envelope.method
+        && envelope.id.as_ref() == Some(id)
     {
         seen.answered = true;
         if initialize {
-            seen.negotiated = value
-                .pointer("/result/protocolVersion")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
+            seen.negotiated = envelope.negotiated;
         }
     }
     Ok(())
@@ -188,7 +188,7 @@ async fn exchange<T: Transport>(transport: &T, outgoing: Outgoing, desk: &Desk) 
         let mut seen = Seen::default();
         while let Some(data) = arriving.recv().await {
             // What is not passed on is said on the error stream by `deliver` and `line`.
-            let _ = deliver(&data, &kind, initialize, desk, &mut seen).await;
+            let _ = deliver(data, &kind, initialize, desk, &mut seen).await;
         }
         seen
     };
@@ -204,12 +204,12 @@ async fn exchange<T: Transport>(transport: &T, outgoing: Outgoing, desk: &Desk) 
         }
     };
     match (&kind, failure) {
-        (Kind::Request { id }, failure) if !seen.answered => {
+        (Kind::Request { written, .. }, failure) if !seen.answered => {
             let why = failure.unwrap_or_else(|| {
                 "The okf-jawn service ended its answer without a response to this request"
                     .to_owned()
             });
-            line(desk, error_line(Some(id), INTERNAL_ERROR, &why)).await;
+            line(desk, error_line(Some(written), INTERNAL_ERROR, &why)).await;
         }
         (Kind::Request { .. }, Some(why)) => {
             note(desk, &format!("after a request was answered: {why}")).await;
@@ -417,7 +417,7 @@ async fn settle(
         (401, _) => Some(CREDENTIAL_REFUSED.to_owned()),
         (403, _) => Some(ACCESS_REFUSED.to_owned()),
         (200..=299, Body::Empty | Body::Events) => None,
-        (200..=299, Body::Json(text)) => deliver(&text, kind, initialize, desk, seen)
+        (200..=299, Body::Json(text)) => deliver(text, kind, initialize, desk, seen)
             .await
             .err()
             .map(str::to_owned),
@@ -425,7 +425,7 @@ async fn settle(
             "The okf-jawn service answered HTTP {status} with a body that is neither JSON nor \
              an event stream"
         )),
-        (_, Body::Json(text)) => refusal(status, &text, kind, desk, seen).await,
+        (_, Body::Json(text)) => refusal(status, text, kind, desk, seen).await,
         (_, Body::Empty | Body::Events | Body::Other) => {
             Some(format!("The okf-jawn service answered HTTP {status}"))
         }
@@ -434,18 +434,19 @@ async fn settle(
 
 /// A JSON body the service sent with a status that is not success.
 ///
-/// A JSON-RPC error answering a request is the request's answer: it is written with the
-/// request's id, which the service leaves out when it refused the request before reading it.
-/// Any other body is a failure, described with the service's own code and message when the
-/// body is an `ApiError`.
+/// A JSON-RPC error answering a request is the request's answer. The service leaves the id
+/// out, or writes `null`, when it refused the request before reading it; the request's id, as
+/// the client wrote it, is then put into the text (`"id":<id>,` after the opening brace, or in
+/// place of the `null`) and no other byte of the text changes. Any other body is a failure,
+/// described with the service's own code and message when it has them.
 async fn refusal(
     status: u16,
-    text: &str,
+    text: String,
     kind: &Kind,
     desk: &Desk,
     seen: &mut Seen,
 ) -> Option<String> {
-    let parsed = serde_json::from_str::<Value>(text).ok();
+    let parsed = serde_json::from_str::<Value>(&text).ok();
     let message = |pointer: &str| {
         parsed
             .as_ref()
@@ -453,25 +454,34 @@ async fn refusal(
             .and_then(Value::as_str)
             .map(str::to_owned)
     };
-    if let Some(Value::Object(error)) = &parsed
-        && error.get("error").is_some_and(Value::is_object)
-        && error.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
+    if let Some(envelope) = Envelope::read(&text)
+        && envelope.error
     {
-        let Kind::Request { id } = kind else {
+        let Kind::Request { id, written } = kind else {
             return Some(format!(
                 "The okf-jawn service answered HTTP {status}: {}",
                 message("/error/message").unwrap_or_default()
             ));
         };
-        let mut error = error.clone();
-        if error.get("id").is_none_or(Value::is_null) {
-            error.insert("id".to_owned(), id.clone());
-        }
-        let answers = error.get("id") == Some(id);
-        if !line(desk, Value::Object(error).to_string()).await {
+        let (answer, answers) = match (&envelope.id, envelope.id_at) {
+            (_, None) => (with_id(&text, written), true),
+            (Some(Value::Null), Some((start, end))) => (
+                text.get(..start)
+                    .zip(text.get(end..))
+                    .map(|(before, after)| format!("{before}{written}{after}")),
+                true,
+            ),
+            (other, Some(_)) => (Some(text), other.as_ref() == Some(id)),
+        };
+        let Some(answer) = answer else {
+            return Some(NOT_A_MESSAGE.to_owned());
+        };
+        if !line(desk, one_line(answer)).await {
             return Some(ANSWER_WITHHELD.to_owned());
         }
-        seen.answered = answers;
+        if answers {
+            seen.answered = true;
+        }
         return None;
     }
     Some(match (message("/code"), message("/message")) {
@@ -480,6 +490,12 @@ async fn refusal(
         }
         _ => format!("The okf-jawn service answered HTTP {status}"),
     })
+}
+
+/// The JSON object `text` with the member `"id":<id>` put first, and nothing else changed.
+fn with_id(text: &str, id: &str) -> Option<String> {
+    let (before, after) = text.split_once('{')?;
+    Some(format!("{before}{{\"id\":{id},{after}"))
 }
 
 /// Write each queued line whole, followed by a line feed, until every sender is gone.

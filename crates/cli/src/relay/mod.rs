@@ -6,7 +6,8 @@
 //! one line. It opens no store and never opens the data directory, so the service stays the
 //! only writer (SPEC sections 2 and 11).
 //!
-//! - `frame` reads bounded lines; `message` classifies them and derives the HTTP headers.
+//! - `frame` reads bounded lines; `message` classifies them and derives the HTTP headers;
+//!   `json` reads an answer of the service without writing it again.
 //! - `transport` and `launch` are the two seams: sending a message and asking whether the
 //!   service is up, and starting the server process. `http` and `launch::ProcessLauncher` are
 //!   the production sides; tests use doubles.
@@ -32,6 +33,7 @@ pub use self::transport::{Body, Post, Probe, Reply, Transport, TransportError};
 
 mod frame;
 mod http;
+mod json;
 mod launch;
 mod message;
 mod session;

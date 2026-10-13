@@ -24,6 +24,7 @@ pub fn response(id: &Value, result: &Value) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "result": result})
 }
 
+mod answers;
 mod credential;
 mod errors;
 mod forwarding;

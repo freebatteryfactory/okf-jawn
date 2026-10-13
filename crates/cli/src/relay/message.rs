@@ -14,9 +14,25 @@
 //! the `2026-07-28` revision says. A batch (a JSON array) is refused: `rmcp` 3.5.0 has no batch
 //! message.
 
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 
+use super::json::{is_json, last, members};
 use super::transport::Post;
+
+/// What the relay reads of a message the service wrote, without changing the text.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Envelope {
+    /// The id, when the message has one.
+    pub(super) id: Option<Value>,
+    /// Where the id's value stands in the text, when the message has an `id` member.
+    pub(super) id_at: Option<(usize, usize)>,
+    /// Whether the message has a method: a request or a notification of the service.
+    pub(super) method: bool,
+    /// Whether the message has an error object.
+    pub(super) error: bool,
+    /// The protocol version its result names, as an `initialize` result does.
+    pub(super) negotiated: Option<String>,
+}
 
 /// What kind of message a line holds; it decides what the relay owes the client afterwards.
 #[derive(Debug, Clone, PartialEq)]
@@ -25,6 +41,8 @@ pub(super) enum Kind {
     Request {
         /// The request's id, a string or a number.
         id: Value,
+        /// The id as the client wrote it, which is how the relay writes it back.
+        written: String,
     },
     /// A notification: nothing is owed; a failure is logged.
     Notification {
@@ -85,6 +103,32 @@ const BASE64_SUFFIX: &str = "?=";
 /// The UTF-8 byte order mark a line may begin with.
 const BYTE_ORDER_MARK: &[u8] = b"\xEF\xBB\xBF";
 
+impl Envelope {
+    /// Read a text the service wrote. `None` when it is not one JSON value, or not a JSON-RPC
+    /// 2.0 message. When a member occurs twice, the last one counts.
+    pub(super) fn read(text: &str) -> Option<Self> {
+        if !is_json(text) {
+            return None;
+        }
+        let found = members(text)?;
+        let version = serde_json::from_str::<Value>(last(&found, "jsonrpc")?.value).ok()?;
+        if version.as_str() != Some("2.0") {
+            return None;
+        }
+        let id = last(&found, "id");
+        Some(Self {
+            id: id.and_then(|member| serde_json::from_str::<Value>(member.value).ok()),
+            id_at: id.map(|member| (member.start, member.end)),
+            method: last(&found, "method").is_some(),
+            error: last(&found, "error").is_some_and(|member| member.value.starts_with('{')),
+            negotiated: last(&found, "result").and_then(|result| {
+                let inside = members(result.value)?;
+                serde_json::from_str::<String>(last(&inside, "protocolVersion")?.value).ok()
+            }),
+        })
+    }
+}
+
 /// Whether a value can travel as an HTTP header value as it is: printable ASCII with no
 /// leading or trailing blank, and not shaped like the Base64 sentinel.
 fn bare(value: &str) -> bool {
@@ -99,18 +143,12 @@ fn bare(value: &str) -> bool {
     bytes.iter().all(|byte| (0x20..=0x7E).contains(byte))
 }
 
-/// One JSON-RPC error message as an output line; `id` is left out when it could not be read.
-pub(super) fn error_line(id: Option<&Value>, code: i64, message: &str) -> String {
-    let mut error = Map::new();
-    error.insert("jsonrpc".to_owned(), json!("2.0"));
-    if let Some(id) = id {
-        error.insert("id".to_owned(), id.clone());
-    }
-    error.insert(
-        "error".to_owned(),
-        json!({"code": code, "message": message}),
-    );
-    Value::Object(error).to_string()
+/// One JSON-RPC error message as an output line. `id` is the request's id as the client
+/// wrote it, and is written back as it stands; it is left out when it could not be read.
+pub(super) fn error_line(id: Option<&str>, code: i64, message: &str) -> String {
+    let message = Value::from(message);
+    let id = id.map(|id| format!("\"id\":{id},")).unwrap_or_default();
+    format!("{{\"jsonrpc\":\"2.0\",{id}\"error\":{{\"code\":{code},\"message\":{message}}}}}")
 }
 
 /// The headers of one message, which also moves `lifecycle` forward.
@@ -199,7 +237,7 @@ pub(super) fn prepare(line: &[u8], lifecycle: &mut Lifecycle) -> Result<Option<O
         ))
     })?;
     let invalid =
-        |id: Option<&Value>, why: &str| Refusal::Answer(error_line(id, INVALID_REQUEST, why));
+        |id: Option<&str>, why: &str| Refusal::Answer(error_line(id, INVALID_REQUEST, why));
     let Value::Object(message) = &value else {
         return Err(invalid(
             None,
@@ -213,13 +251,21 @@ pub(super) fn prepare(line: &[u8], lifecycle: &mut Lifecycle) -> Result<Option<O
     let id = message
         .get("id")
         .filter(|id| id.is_string() || id.is_number());
+    // The id is written back as the client wrote it: a number is not read and spelled again.
+    let written = id.map(|id| written_id(line).unwrap_or_else(|| id.to_string()));
+    let id = id.zip(written.as_deref());
+    let written = written.as_deref();
     if !is_message(&value) {
-        return Err(invalid(id, "Invalid request: jsonrpc must be \"2.0\""));
+        return Err(invalid(written, "Invalid request: jsonrpc must be \"2.0\""));
     }
     let (kind, method) = match (message.get("method"), message.get("id"), id) {
-        (Some(Value::String(method)), _, Some(id)) => {
-            (Kind::Request { id: id.clone() }, Some(method.as_str()))
-        }
+        (Some(Value::String(method)), _, Some((id, written))) => (
+            Kind::Request {
+                id: id.clone(),
+                written: written.to_owned(),
+            },
+            Some(method.as_str()),
+        ),
         (Some(Value::String(method)), None, None) => (
             Kind::Notification {
                 method: method.clone(),
@@ -232,13 +278,15 @@ pub(super) fn prepare(line: &[u8], lifecycle: &mut Lifecycle) -> Result<Option<O
                 "Invalid request: an id is a string or a number",
             ));
         }
-        (Some(_), _, _) => return Err(invalid(id, "Invalid request: method must be a string")),
+        (Some(_), _, _) => {
+            return Err(invalid(written, "Invalid request: method must be a string"));
+        }
         (None, _, Some(_)) if message.contains_key("result") || message.contains_key("error") => {
             (Kind::Response, None)
         }
         (None, _, _) => {
             return Err(invalid(
-                id,
+                written,
                 "Invalid request: a message has a method, or an id with a result or an error",
             ));
         }
@@ -246,7 +294,9 @@ pub(super) fn prepare(line: &[u8], lifecycle: &mut Lifecycle) -> Result<Option<O
     let request = matches!(kind, Kind::Request { .. });
     let initialize = request && method == Some("initialize");
     let headers = headers(message, method, request, lifecycle).map_err(|why| match &kind {
-        Kind::Request { id } => Refusal::Answer(error_line(Some(id), INVALID_REQUEST, &why)),
+        Kind::Request { written, .. } => {
+            Refusal::Answer(error_line(Some(written), INVALID_REQUEST, &why))
+        }
         Kind::Notification { method } => {
             Refusal::Log(format!("the notification {method:?} was not sent: {why}"))
         }
@@ -260,4 +310,10 @@ pub(super) fn prepare(line: &[u8], lifecycle: &mut Lifecycle) -> Result<Option<O
         kind,
         initialize,
     }))
+}
+
+/// The id of the message on `line`, as the client wrote it.
+fn written_id(line: &[u8]) -> Option<String> {
+    let found = members(std::str::from_utf8(line).ok()?)?;
+    Some(last(&found, "id")?.value.to_owned())
 }
