@@ -1109,6 +1109,68 @@ describe('a Snapshot that conflicts', () => {
     expect(api.violations).toEqual([]);
   });
 
+  it('conflicts for a draft begun from a view that was already behind, and shows the Conflict flow', async () => {
+    // The service as ruled: a first save records the base the request carries, so a draft begun
+    // from a view that is behind is known to be behind. A later save moves the base only onto
+    // the head.
+    const held = { base: null as string | null };
+    const made = service(
+      {
+        [SAVE]: (body) => {
+          const carried = String(body.base_revision);
+          if (held.base === null || carried === made.state.head) held.base = carried;
+          made.state.drafts.add(NOTE);
+          return ok(draftOf(NOTE, held.base, LATER));
+        },
+        [COMMIT]: () => {
+          if (held.base !== made.state.head) {
+            return conflict([
+              conflictOf(NOTE, { draft_base: held.base, current_revision: made.state.head }),
+            ]);
+          }
+          made.state.drafts.clear();
+          made.state.head = MADE;
+          return committed();
+        },
+      },
+      [],
+    );
+    const { api } = made;
+    renderAt(`/w/${WS}/i/${NOTE}`);
+    const edit = await screen.findByRole('button', { name: 'Edit' });
+    await screen.findByText('Text of Meeting notes');
+    // Someone else changes the note: the service's head moves. The page shows the head it resolved.
+    made.state.head = THEIRS;
+    vi.useFakeTimers();
+    fireEvent.click(edit);
+    await eventually(() => textBox('Text of Meeting notes'));
+    typeInto(textBox('Text of Meeting notes'), ' and mine');
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+    expect(api.callsTo(SAVE).at(0)).toMatchObject({ base_revision: HEAD });
+    await eventually(() =>
+      expect(screen.getByRole('region', { name: 'Drafts (1)' })).toBeDefined(),
+    );
+    await pressSnapshot('Mine');
+    await eventually(() =>
+      expect(
+        screen.getByRole('region', { name: 'Meeting notes changed since your draft was started' }),
+      ).toBeDefined(),
+    );
+    const notice = screen.getByRole('region', {
+      name: 'Meeting notes changed since your draft was started',
+    });
+    expect(notice.textContent).toContain(`Your draft started from revision ${HEAD.slice(0, 10)}.`);
+    expect(notice.textContent).toContain(`The item is now at revision ${THEIRS.slice(0, 10)}.`);
+    expect(within(panel()).getByRole('alert').textContent).toContain('Nothing was snapshotted.');
+    expect(notice.querySelectorAll('ins').length).toBeGreaterThan(0);
+    // Their change is not written over in silence: the person chooses.
+    fireEvent.click(within(notice).getByRole('button', { name: 'Keep mine' }));
+    await eventually(() => expect(said()).toMatch(/^Snapshot “Mine” taken: 1 item\./));
+    expect(api.callsTo(SAVE).at(-1)).toMatchObject({ base_revision: THEIRS });
+    expect(held.base).toBe(THEIRS);
+  });
+
   /** Open the note's pane with its conflict on screen. */
   async function openConflict(extra: Json = {}, overrides: Record<string, Handler> = {}) {
     const made = withConflict(extra, overrides);

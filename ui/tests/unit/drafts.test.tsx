@@ -258,17 +258,41 @@ describe('autosave', () => {
     expect(api.violations).toEqual([]);
   });
 
-  it('keeps the base the service recorded for later saves, never the head on screen', async () => {
-    // The service records its own base at the first save: here an older one than the pane reads.
-    const api = writable({ [SAVE]: (body) => saved(body, OLD) });
+  it('keeps the base its first save carried for later saves, never the head on screen', async () => {
+    const NEWER = 'd'.repeat(40);
+    // The service as ruled: a first save records the base the request carries; a later one keeps
+    // the draft's base unless it carries the current head.
+    const held = { head: HEAD, base: null as string | null };
+    const api = writable({
+      '/api/workspaces/open-workspace': () => ok({ ...writableWorkspace, head: held.head }),
+      [SAVE]: (body) => {
+        const carried = String(body.base_revision);
+        if (held.base === null || carried === held.head) held.base = carried;
+        return saved(body, held.base);
+      },
+    });
     const { box } = await startEditing();
     typeInto(box, ' one');
     await pass(AUTOSAVE_DELAY_MS);
     await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
-    typeInto(box, ' two');
+    // Someone else makes a newer head and the person refreshes: the pane now shows that one.
+    held.head = NEWER;
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    // The clock is the test's: the answer of the Refresh needs it to move.
+    await pass(50);
+    await eventually(() =>
+      expect(
+        screen.getByText(`Refreshed: now showing revision ${NEWER.slice(0, 10)}.`),
+      ).toBeDefined(),
+    );
+    await eventually(() => textBox('Text of Meeting notes'));
+    typeInto(textBox('Text of Meeting notes'), ' two');
     await pass(AUTOSAVE_DELAY_MS);
-    expect(api.callsTo(SAVE).map((sent) => sent.base_revision)).toEqual([HEAD, OLD]);
-    expect(screen.getByText('Draft.').parentElement?.textContent).toContain(OLD.slice(0, 7));
+    await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+    // The draft is still on the revision it was begun from: a save on the head would be a rebase.
+    expect(api.callsTo(SAVE).map((sent) => sent.base_revision)).toEqual([HEAD, HEAD]);
+    expect(held.base).toBe(HEAD);
+    expect(screen.getByText('Draft.').parentElement?.textContent).toContain(HEAD.slice(0, 7));
   });
 
   it('tells the cache what the service now holds, and lists the drafts again only for a new one', async () => {
