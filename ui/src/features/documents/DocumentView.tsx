@@ -475,7 +475,9 @@ export function DocumentView({
   // still in flight is no longer shown.
   const articleRef = useRef<HTMLElement | null>(null);
   // Where keyboard focus goes once the pane has switched: into the text box after "Edit", onto
-  // the switch after a discard (the editor and its buttons are gone then).
+  // the switch after a discard (the editor and its buttons are gone then). A request is made only
+  // for a drawing that has its target: one that found none would wait for a later drawing that
+  // has it, and take focus from where the person had put it by then.
   const switchRef = useRef<HTMLButtonElement | null>(null);
   const focusNext = useRef<'text' | 'switch' | null>(null);
   useEffect(() => {
@@ -558,6 +560,13 @@ export function DocumentView({
   // it goes to the switch at once (the text box is not there yet) and from there into the text box.
   const heldKept = useRef<HTMLElement | null>(null);
   const [, keptPartRef] = useWatchedPart<HTMLDivElement>(heldKept);
+  // The conflict notice leaves when the session is refused (nothing of it may be saved, so "Keep
+  // mine" is not offered), and when the conflict is resolved. Focus that was in it goes to the
+  // kept text when that is what took its place, else to the switch, which is there whenever the
+  // kept text is not: both need the pane to be editable, and a conflict is of a draft the service
+  // holds, so its session is never ended at the refusal.
+  const heldNotice = useRef<HTMLElement | null>(null);
+  const [, noticePartRef] = useWatchedPart<HTMLDivElement>(heldNotice);
   // The switch itself leaves when the pane stops being editable (a read says the item is not a
   // Note any more, the pane no longer reads the version shown, or the person deleted the item).
   // Focus on it goes to "Close this tab" of a deleted item, else to the page's heading.
@@ -567,6 +576,7 @@ export function DocumentView({
     if (takeHeld(heldFocus)) (switchRef.current ?? pageHeading())?.focus();
     if (takeHeld(heldSwitch)) (closeRef.current ?? pageHeading())?.focus();
     if (takeHeld(heldEditor)) keptRef.current?.focus();
+    if (takeHeld(heldNotice)) (keptRef.current ?? switchRef.current)?.focus();
     if (takeHeld(heldKept) && editing && notANote === null) {
       switchRef.current?.focus();
       focusNext.current = 'text';
@@ -697,17 +707,19 @@ export function DocumentView({
                 }
                 // "Edit here" moves the editor from the pane that has it to this one.
                 claimEditor(workspaceId, itemId, pane, true);
-                focusNext.current = 'text';
+                // Into the text box, which the next drawing has unless the session is refused:
+                // that drawing shows the kept text ("Show your draft"), and focus stays here.
+                if (notANote === null) focusNext.current = 'text';
                 setChosen('edit');
               }
             }}
           >
             {editing
               ? 'Read the committed text'
-              : elsewhere
-                ? 'Edit here'
-                : notANote !== null
-                  ? 'Show your draft'
+              : notANote !== null
+                ? 'Show your draft'
+                : elsewhere
+                  ? 'Edit here'
                   : hasDraft
                     ? 'Edit your draft'
                     : 'Edit'}
@@ -717,17 +729,19 @@ export function DocumentView({
       {/* Not for a refused session: "Keep mine" would save, and nothing of it is saved. The
           conflict stays with the item, and its notice is back when the refusal is lifted. */}
       {editable && conflict !== undefined && notANote === null && (
-        <ConflictNotice
-          workspaceId={workspaceId}
-          itemId={itemId}
-          title={title}
-          conflict={conflict}
-          onSnapshotted={onSnapshotted}
-          onResolved={() => {
-            focusNext.current = 'switch';
-            setChosen('read');
-          }}
-        />
+        <div ref={noticePartRef}>
+          <ConflictNotice
+            workspaceId={workspaceId}
+            itemId={itemId}
+            title={title}
+            conflict={conflict}
+            onSnapshotted={onSnapshotted}
+            onResolved={() => {
+              focusNext.current = 'switch';
+              setChosen('read');
+            }}
+          />
+        </div>
       )}
       {editable && !editing && session !== undefined && (
         <p role="note" className="notice">

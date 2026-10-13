@@ -236,7 +236,11 @@ pub fn line_blocks(document: &DoclingDocument, markdown: &str) -> Vec<Block> {
 ///   same assets); otherwise none of them is paired. A paired picture names its item
 ///   (`#/pictures/{n}`) and that encoding's digest; an unpaired one names none.
 /// - An export item holding an image that no picture of the document pairs with (a node the
-///   walk does not reach) is written from the export's own bytes, so no picture is lost.
+///   walk does not reach) is written from the export's own bytes, so no picture is lost. Those
+///   bytes are docling's encoding of the picture, not always its original: the export keeps a
+///   PNG as it is, and re-encodes a JPEG as a PNG (`image/png`). The original of such a picture
+///   and its media type are not in the export, so this asset cannot carry them; no docling
+///   2.3.0 backend is known to reach this path.
 /// - Only when `page_images` is set, every page render, with its page.
 ///
 /// # Errors

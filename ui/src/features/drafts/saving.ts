@@ -83,9 +83,10 @@
  * - A session that holds nothing of the person's (nothing typed, nothing saved, nothing held
  *   back) is ended, not refused: there is nothing to keep, and nothing to discard.
  * - When a later read says the item is a Note, the refusal is lifted: the editor is drawn again
- *   with the text the session kept, and the save it owes is sent a moment later, as after a
- *   change. The lift does not send again a save that had failed or was stopped: its notice,
- *   back with the editor, has the retry.
+ *   with the text the session kept, and the save it owes is sent as after a change: a moment
+ *   later, or at once when the first change not yet sent is older than the autosave's longest
+ *   wait. The lift does not send again a save that had failed or was stopped: its notice, back
+ *   with the editor, has the retry.
  * Limits. The refusal is per item, whichever pane read it: a pane that reads the item at another
  * revision, where it is a Note, lifts what another pane set. And with no pane of the item open
  * nothing reads its kind for the session: a save sent then (the page is hidden) is the service's
@@ -350,8 +351,9 @@ export function editSession(
 
 /**
  * Save a session now if it holds content the service has not confirmed, because the person asked
- * (a retry, a Snapshot). Settles once nothing is in flight for it; it never rejects: the outcome
- * is the session's state.
+ * (a retry, a Snapshot). Settles once nothing is in flight for it, or at once for a refused
+ * session, whatever is in flight for it (nothing is sent); it never rejects: the outcome is the
+ * session's state.
  */
 export function flushSession(client: QueryClient, workspaceId: string, itemId: string) {
   const key = sessionKey(workspaceId, itemId);

@@ -363,8 +363,8 @@ export function DraftsPanel({
           </p>
           <p>
             {count(unsaved.length, 'selected item has', 'selected items have')} text that is not
-            saved, and a Snapshot is taken of saved drafts. Open it: its own notice says why and has
-            the retry.
+            saved, or a draft that is no longer saved, and a Snapshot is taken of saved drafts. Open
+            it: its own notice says why, and has the retry when there is one.
           </p>
         </div>
       )}

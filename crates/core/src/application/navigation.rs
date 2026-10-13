@@ -1,7 +1,9 @@
 //! Search, links and the graph (SPEC section 7) over the derived index behind `SearchIndex`.
 //!
 //! The application owns what the index does not: the caller's workspace scope (dispatch has
-//! authorized it), resolving the selector once (a named revision is purge-checked first), the
+//! authorized it), resolving the selector once (a named revision is purge-checked first; a
+//! later page of a search or of an item's links reads the revision its first page resolved,
+//! which its cursor carries, `shared::resolve_page`), the
 //! request's folder as a workspace path, and coordinating the index with content. A write
 //! indexes the revision it produced (`shared::announce`). A query at a revision the index has
 //! not built yet (it answers `Unavailable`) builds that revision's index on demand, bounded:
@@ -47,7 +49,7 @@ use okf_jawn_contract::source::SourceReference;
 use tokio::sync::OwnedMutexGuard;
 
 use super::ApplicationService;
-use super::shared::{invalid, record_receipt, resolve, workspace_scope};
+use super::shared::{invalid, next_page, record_receipt, resolve, resolve_page, workspace_scope};
 use super::sources::{citation, record_of};
 use crate::context::OperationContext;
 use crate::conversion::ConversionRecord;
@@ -60,12 +62,13 @@ const INDEX_WINDOW: usize = 1000;
 /// Commits asked per page of the history walk that decides whether a revision is in the window.
 const WINDOW_PAGE: u16 = 250;
 
-/// Search one resolved revision and return cited snippets.
+/// Search one resolved revision and return cited snippets. A continuation searches the
+/// revision its first page resolved (`shared::resolve_page`).
 ///
 /// # Errors
 /// Returns `InvalidInput` on `/folder` for a folder that is not a workspace path, on `/query`
-/// for a blank query without an extraction filter; the typed `NotFound` of an invalidated
-/// revision; or any port error.
+/// for a blank query without an extraction filter, on `/page/cursor` for a cursor that is not this operation's (see `shared::resolve_page`) or one that continues a read of another revision than `at` names;
+/// the typed `NotFound` of an invalidated revision; or any port error.
 pub(super) async fn search_items(
     service: &ApplicationService,
     context: &OperationContext,
@@ -73,14 +76,21 @@ pub(super) async fn search_items(
 ) -> Result<SearchResponse, ApiError> {
     let scope = workspace_scope(context)?;
     let folder = folder_of(request.folder)?;
-    let revision = resolve(service, &scope, &request.at).await?;
+    let (revision, page, _) = resolve_page(
+        service,
+        &scope,
+        context.operation,
+        &request.at,
+        request.page,
+    )
+    .await?;
     let query = SearchQuery {
         revision: revision.clone(),
         text: request.query,
         folder,
         include_archived: request.include_archived,
         extraction: request.extraction,
-        page: request.page.into(),
+        page,
     };
     query.check().map_err(|error| error.with_field("/query"))?;
     let index = &service.ports().search;
@@ -91,28 +101,39 @@ pub(super) async fn search_items(
     let returned = response.hits.iter().map(|hit| hit.source.clone()).collect();
     record_receipt(service, context, &scope, None, returned).await?;
     Ok(SearchResponse {
+        next_cursor: next_page(context.operation, &revision, response.next_cursor, None)?,
         revision,
-        ..response
+        hits: response.hits,
     })
 }
 
 /// One item's outgoing links, backlinks or both at one resolved revision, recorded in a receipt
-/// that cites each link (`link_citations`).
+/// that cites each link (`link_citations`). A continuation reads the revision its first page
+/// resolved (`shared::resolve_page`).
 ///
 /// # Errors
-/// Returns the typed `NotFound` of an invalidated revision, or any port error.
+/// Returns `InvalidInput` on `/page/cursor` for a cursor that is not this operation's (see `shared::resolve_page`) or one
+/// that continues a read of another revision than `at` names, the typed `NotFound` of an
+/// invalidated revision, or any port error.
 pub(super) async fn get_links(
     service: &ApplicationService,
     context: &OperationContext,
     request: GetLinksRequest,
 ) -> Result<GetLinksResponse, ApiError> {
     let scope = workspace_scope(context)?;
-    let revision = resolve(service, &scope, &request.at).await?;
+    let (revision, page, _) = resolve_page(
+        service,
+        &scope,
+        context.operation,
+        &request.at,
+        request.page,
+    )
+    .await?;
     let query = LinkQuery {
         revision: revision.clone(),
         item_id: request.item_id,
         direction: request.direction,
-        page: request.page.into(),
+        page,
     };
     let index = &service.ports().search;
     let response = indexed(service, &scope, &revision, || {
@@ -122,8 +143,9 @@ pub(super) async fn get_links(
     let sources = link_citations(service, &scope, &revision, &response.links).await?;
     record_receipt(service, context, &scope, None, sources).await?;
     Ok(GetLinksResponse {
+        next_cursor: next_page(context.operation, &revision, response.next_cursor, None)?,
         revision,
-        ..response
+        links: response.links,
     })
 }
 

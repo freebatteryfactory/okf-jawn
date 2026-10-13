@@ -2,6 +2,11 @@
 //! only the caller's own draft, and every write commits on its base with the conformance
 //! check, then indexes, announces and (for a `MutationResult`) records a receipt.
 
+use std::path::PathBuf;
+
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
 use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::common::PageRequest;
 use okf_jawn_contract::error::{ErrorCode, ErrorDetail};
@@ -135,7 +140,203 @@ async fn list_items_lists_one_folder_at_the_head_resolved_once() -> TestResult {
     assert_eq!(response.revision, revision('a')?);
     assert_eq!(response.items.len(), 2);
     assert_eq!(response.folders, vec!["notes/old".to_owned()]);
-    assert_eq!(response.next_cursor.as_deref(), Some("next"));
+    // The continuation is this service's cursor, not the store's own.
+    let next = some(response.next_cursor, "a continuation")?;
+    assert_ne!(next, "next");
+    Ok(())
+}
+
+/// A listing of `notes` at `at`, 50 entries a page.
+fn listing_of_notes(at: At, cursor: Option<String>) -> Built<ListItemsRequest> {
+    Ok(ListItemsRequest {
+        workspace_id: scope()?.workspace_id,
+        at,
+        folder: "notes".to_owned(),
+        extraction: None,
+        page: PageRequest { cursor, limit: 50 },
+    })
+}
+
+#[tokio::test]
+async fn a_listing_at_a_named_revision_stays_a_current_listing_on_page_two() -> TestResult {
+    let world = World::new()?;
+    let mut archived = listed(2, None)?;
+    archived.archived = true;
+    world.versions.put_listing(
+        &revision('a')?,
+        Some(path("notes")?),
+        FolderListing {
+            items: vec![listed(1, None)?, archived],
+            folders: Vec::new(),
+            next_cursor: Some("next".to_owned()),
+        },
+    )?;
+    let caller = alice(OperationName::ListItems, None)?;
+    let named_a = || -> Built<At> {
+        Ok(At::Revision {
+            revision: revision('a')?,
+        })
+    };
+    let ids = |items: &[okf_jawn_contract::item::ItemSummary]| -> Vec<ItemId> {
+        items.iter().map(|item| item.id).collect()
+    };
+    let live = vec![ItemId(Uuid::from_u128(1))];
+    // Page one names `a`, which is the head: a current listing, its archived item hidden.
+    let first = world
+        .service
+        .list_items(&caller, listing_of_notes(named_a()?, None)?)
+        .await?;
+    assert_eq!(ids(&first.items), live, "page one");
+    let cursor = some(first.next_cursor, "a continuation")?;
+    // A write lands between the pages: `a` is history now, and the listing is still the
+    // current listing it began as, with `a` named again or with `latest`.
+    world.versions.set_head(revision('b')?)?;
+    for at in [named_a()?, At::Latest] {
+        let second = world
+            .service
+            .list_items(&caller, listing_of_notes(at, Some(cursor.clone()))?)
+            .await?;
+        assert_eq!(ids(&second.items), live, "page two hides what page one hid");
+    }
+    // A listing that begins at `a` now is a listing of history, and stays one when `a` is the
+    // head again: its later page shows the archived item, as its first did.
+    let history = world
+        .service
+        .list_items(&caller, listing_of_notes(named_a()?, None)?)
+        .await?;
+    assert_eq!(history.items.len(), 2);
+    let cursor = some(history.next_cursor, "a continuation")?;
+    world.versions.set_head(revision('a')?)?;
+    let later = world
+        .service
+        .list_items(&caller, listing_of_notes(named_a()?, Some(cursor))?)
+        .await?;
+    assert_eq!(later.items.len(), 2, "page two shows what page one showed");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_listing_of_three_pages_reads_every_page_at_the_revision_the_first_resolved() -> TestResult
+{
+    // The cursor a continuation returns carries the first page's revision too: a write lands
+    // after each page, and no later head holds the folder.
+    let world = World::new()?;
+    world.versions.put_listing(
+        &revision('a')?,
+        Some(path("notes")?),
+        FolderListing {
+            items: (1..=5_u128)
+                .map(|id| listed(id, None))
+                .collect::<Built<_>>()?,
+            folders: Vec::new(),
+            next_cursor: None,
+        },
+    )?;
+    world.versions.page_listings(2)?;
+    let caller = alice(OperationName::ListItems, None)?;
+    let mut ids = Vec::new();
+    let mut cursor = None;
+    for landing in ['b', 'c', 'd'] {
+        let mut request = listing_of_notes(At::Latest, cursor.take())?;
+        request.page.limit = 2;
+        let page = world.service.list_items(&caller, request).await?;
+        assert_eq!(page.revision, revision('a')?);
+        ids.extend(page.items.iter().map(|item| item.id));
+        cursor = page.next_cursor;
+        world.versions.set_head(revision(landing)?)?;
+    }
+    assert_eq!(cursor, None, "three pages");
+    let expected: Vec<ItemId> = (1..=5_u128).map(|id| ItemId(Uuid::from_u128(id))).collect();
+    assert_eq!(ids, expected, "each item once, over three pages");
+    let asked: Vec<_> = world
+        .versions
+        .list_queries()?
+        .into_iter()
+        .map(|(at, _, page)| (at, page.cursor))
+        .collect();
+    let at = revision('a')?;
+    assert_eq!(
+        asked,
+        vec![
+            (at.clone(), None),
+            (at.clone(), Some("2".to_owned())),
+            (at, Some("4".to_owned()))
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_listing_continues_at_the_revision_its_first_page_resolved() -> TestResult {
+    let world = World::new()?;
+    let mut archived = listed(2, None)?;
+    archived.archived = true;
+    world.versions.put_listing(
+        &revision('a')?,
+        Some(path("notes")?),
+        FolderListing {
+            items: vec![listed(1, None)?, archived],
+            folders: Vec::new(),
+            next_cursor: Some("next".to_owned()),
+        },
+    )?;
+    let caller = alice(OperationName::ListItems, None)?;
+    let first = world
+        .service
+        .list_items(&caller, listing_of_notes(At::Latest, None)?)
+        .await?;
+    let cursor = some(first.next_cursor, "a continuation")?;
+    // A write lands: `latest` is `b` now, which holds no `notes` folder.
+    world.versions.set_head(revision('b')?)?;
+    let second = world
+        .service
+        .list_items(&caller, listing_of_notes(At::Latest, Some(cursor.clone()))?)
+        .await?;
+    assert_eq!(second.revision, revision('a')?);
+    // Still the current listing it began as: its archived item stays hidden.
+    let ids: Vec<ItemId> = second.items.iter().map(|item| item.id).collect();
+    assert_eq!(ids, vec![ItemId(Uuid::from_u128(1))]);
+    // Both pages listed the first page's revision, and the store got its own cursor back.
+    let asked: Vec<_> = world
+        .versions
+        .list_queries()?
+        .into_iter()
+        .map(|(at, folder, page)| (at, folder, page.cursor, page.limit))
+        .collect();
+    assert_eq!(
+        asked,
+        vec![
+            (revision('a')?, Some(path("notes")?), None, 50),
+            (
+                revision('a')?,
+                Some(path("notes")?),
+                Some("next".to_owned()),
+                50
+            ),
+        ]
+    );
+    // A cursor this operation did not issue; one that continues another revision's listing;
+    // and a listing's cursor in every part but the answer its first page gave.
+    let named_b = At::Revision {
+        revision: revision('b')?,
+    };
+    let no_answer = URL_SAFE_NO_PAD
+        .encode(json!({ "op": "list_items", "tip": "a".repeat(40), "next": "next" }).to_string());
+    for (at, text) in [
+        (At::Latest, "next".to_owned()),
+        (named_b, cursor),
+        (At::Latest, no_answer),
+    ] {
+        let refused = err_of(
+            world
+                .service
+                .list_items(&caller, listing_of_notes(at, Some(text))?)
+                .await,
+        )?;
+        assert_eq!(refused.code, ErrorCode::InvalidInput);
+        assert_eq!(refused.field.as_deref(), Some("/page/cursor"));
+    }
+    assert_eq!(world.versions.list_queries()?.len(), 2);
     Ok(())
 }
 
@@ -784,6 +985,72 @@ async fn a_replayed_write_whose_warnings_cannot_be_rebuilt_still_answers_its_com
         only.message.contains("could not be rebuilt") && only.message.contains("type"),
         "says why: {}",
         only.message
+    );
+    Ok(())
+}
+
+/// The directories a replayed commit's check wrote under the system's temporary directory
+/// (`okf-jawn-recheck-*`) that still hold `file`.
+fn recheck_directories_holding(file: &str) -> Built<Vec<PathBuf>> {
+    let mut holding = Vec::new();
+    for entry in std::fs::read_dir(std::env::temp_dir())? {
+        let directory = entry?.path();
+        let rechecks = directory
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("okf-jawn-recheck-"));
+        if rechecks && directory.join(file).exists() {
+            holding.push(directory);
+        }
+    }
+    Ok(holding)
+}
+
+#[tokio::test]
+async fn the_directory_a_replayed_commits_check_wrote_is_removed_after_the_check() -> TestResult {
+    // The commit's tree holds one file no other test writes, so the directory this check wrote
+    // is told apart from one a concurrent test's check is still using.
+    let unique = format!("archive/{}.md", Uuid::new_v4().simple());
+    let world = World::new()?;
+    note_at(&world, &['a'])?;
+    let moved = note(
+        NOTE,
+        &revision('b')?,
+        &unique,
+        "No heading.\n",
+        json!({ "type": "Note" }),
+    )?;
+    world
+        .versions
+        .put_document(&revision('b')?, moved.clone())?;
+    world.versions.queue_revision(revision('b')?)?;
+    let stage = world.versions.stage();
+    std::fs::remove_file(stage.0.join("notes/plan.md"))?;
+    std::fs::create_dir_all(stage.0.join("archive"))?;
+    stage.write(&unique, &file_text(&moved))?;
+    let request = || -> Built<MoveItemRequest> {
+        Ok(MoveItemRequest {
+            destination: path(&unique)?,
+            ..move_request()?
+        })
+    };
+    let caller = alice(OperationName::MoveItem, Some(mutation(1)))?;
+    // The write fails after its commit; the retry replays the commit and checks its tree again.
+    world.search.fail_next();
+    err_of(world.service.move_item(&caller, request()?).await)?;
+    let retried = world.service.move_item(&caller, request()?).await?;
+    // The check did run over a directory holding that tree: its warning names the file.
+    assert!(
+        retried.warnings.iter().any(|warning| {
+            warning.code.starts_with("okf_lint")
+                && warning.location.as_deref() == Some(unique.as_str())
+        }),
+        "{:?}",
+        retried.warnings
+    );
+    assert_eq!(
+        recheck_directories_holding(&unique)?,
+        Vec::<PathBuf>::new(),
+        "the check's directory is gone"
     );
     Ok(())
 }

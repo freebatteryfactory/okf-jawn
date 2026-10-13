@@ -407,8 +407,10 @@ pub fn read_window(
 /// The images the child wrote, as the window's assets, in the reply's order.
 ///
 /// A picture keeps its pixel size, media type and caption as the child read them; its location
-/// is its paired export item's (`picture_location`). A page render is located on its page, and
-/// only a page the window converted (one the export holds) keeps its render.
+/// is its paired export item's (`picture_location`). A picture paired with no item is
+/// unresolved: `FormatHasNoLocator` when the export holds no page (DOCX, HTML, Markdown), and
+/// `NotLocatedByConverter` when it does. A page render is located on its page, and only a page
+/// the window converted (one the export holds) keeps its render.
 ///
 /// # Errors
 /// Returns `Internal` when an entry's file is not a safe plain name (`asset_path`), a page
@@ -439,7 +441,13 @@ fn assets_of(
             AssetRole::Picture => {
                 let location = match file.picture {
                     Some(index) => picture_location(export, index, file.encoding.as_deref())?,
-                    // A picture paired with no export item has no provenance to take.
+                    // A picture paired with no export item has no provenance to take. In a
+                    // format with no pages there is no locator to give it; on pages, the
+                    // converter gave it none (the rule `picture_location` applies to an item
+                    // without provenance).
+                    None if present.is_empty() => SourceLocation::Unresolved {
+                        reason: UnresolvedReason::FormatHasNoLocator,
+                    },
                     None => SourceLocation::Unresolved {
                         reason: UnresolvedReason::NotLocatedByConverter,
                     },
