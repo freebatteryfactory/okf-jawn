@@ -891,30 +891,6 @@
       "qualification": []
     },
     {
-      "name": "uppy",
-      "use_sites": [],
-      "planned_use_sites": [
-        "ui/src/features/explorer"
-      ],
-      "official_sources": [
-        "https://uppy.io/docs/"
-      ],
-      "symbols": [
-        "Uppy",
-        "Dashboard",
-        "XHRUpload"
-      ],
-      "context7_library_id": null,
-      "context7_query": null,
-      "knowledge_source": "Official documentation reference; qualify installed version before use",
-      "offline_notes": [
-        "Upload UX is provided by the library. Server recovery and idempotency remain explicit.",
-        "XHR alone does not promise resumable browser-restart uploads."
-      ],
-      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": []
-    },
-    {
       "name": "webmcp",
       "use_sites": [
         "ui/src/webmcp/register.ts"
