@@ -3,6 +3,7 @@
  * is changed through CodeMirror's own view (happy-dom has no layout and no real key input), as the
  * typing a person does. Real typing is covered by the browser specs.
  */
+import { undo } from '@codemirror/commands';
 import { EditorView } from '@codemirror/view';
 import { act, screen } from '@testing-library/react';
 
@@ -67,4 +68,14 @@ export function typeAtCaret(box: HTMLElement, text: string) {
   act(() => {
     view.dispatch(view.state.replaceSelection(text), { userEvent: 'input.type' });
   });
+}
+
+/** Press undo in the box, as Ctrl+Z does. Whether there was anything to undo. */
+export function undoIn(box: HTMLElement): boolean {
+  const view = viewOf(box);
+  let undone = false;
+  act(() => {
+    undone = undo(view);
+  });
+  return undone;
 }

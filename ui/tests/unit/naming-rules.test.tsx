@@ -19,7 +19,15 @@ import { YAML_PAUSE_MS } from '../../src/lib/yaml';
 import { setYamlEngine, TOO_COMPLEX_WORDS, YAML_LIMIT_MS } from '../../src/lib/yaml-reading';
 import { type Handler, type Json, mockApi, ok, type Reply } from './support/api';
 import { CANCELLED, handed, TAKEN } from './support/drags';
-import { caretIn, findTextBox, putCaret, replaceText, textIn, typeAtCaret } from './support/editor';
+import {
+  caretIn,
+  findTextBox,
+  putCaret,
+  replaceText,
+  textIn,
+  typeAtCaret,
+  undoIn,
+} from './support/editor';
 import {
   DIGEST,
   HEAD,
@@ -2215,6 +2223,26 @@ describe('the YAML view of the rules when the version shown changes', () => {
       schema_version: 1,
       rules: [{ ...rule, prefix: 'mine-', separator: '_' }],
     });
+  });
+
+  it('follows every time the rules shown change, and offers nothing to undo: the text before was never the person’s', async () => {
+    const own = service();
+    const { box } = await openYamlView(own);
+    await refreshToTheirs(own);
+    await waitFor(() => expect(textIn(box)).toContain('prefix: theirs-'));
+    // Undo does not bring the older rules back as if they were an edit of the person’s.
+    expect(undoIn(box)).toBe(false);
+    expect(textIn(box)).toContain('prefix: theirs-');
+    await turn();
+    expect(panel().textContent).toContain('These are the saved rules, unchanged.');
+    // Nothing was typed, so the box follows the next change of the rules as it did the first.
+    const newest = own.moveHead();
+    own.state.rules.set(newest, { schema_version: 1, rules: [{ ...rule, prefix: 'newest-' }] });
+    await userEvent.click(await screen.findByRole('button', { name: /^Refresh/ }));
+    await waitFor(() => expect(textIn(box)).toContain('prefix: newest-'));
+    expect(textIn(box)).not.toContain('theirs-');
+    expect(panel().textContent).not.toContain(changedUnderneath);
+    expect(own.api.callsTo(SET)).toEqual([]);
   });
 
   it('keeps the text the person typed through a Refresh, and says the rules changed underneath', async () => {
