@@ -167,3 +167,14 @@ describe('a drag that carries no file', () => {
     expect(over instanceof DragEvent ? over.dataTransfer?.dropEffect : null).toBe('copy');
   });
 });
+
+describe('the root guard once the page is gone', () => {
+  it('lets go of both listeners: a drag of files is no longer cancelled', async () => {
+    serve(EMPTY_TREE);
+    renderAt(`/w/${WS}/import`);
+    await screen.findByRole('heading', { name: 'Import files' });
+    expect(dragOnto(document.body, files())).toEqual(CANCELLED);
+    cleanup();
+    expect(dragOnto(document.body, files())).toEqual(UNTOUCHED);
+  });
+});

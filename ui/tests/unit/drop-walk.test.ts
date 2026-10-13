@@ -140,6 +140,20 @@ describe('the bounds of the walk of a drop', () => {
   });
 });
 
+describe('a walk past the bound', () => {
+  it('reads no further folder and says nothing of one it did not read', async () => {
+    const found = await chosenFromDrop(
+      dropOfEntries([
+        droppedFolder('big', manyFiles(MAX_DROP_FILES + 1)),
+        droppedFolder('later', []),
+      ]),
+    );
+    expect(found.tooMany).toBe(true);
+    expect(found.emptyFolders).toEqual([]);
+    expect(found.unlistedFolders).toEqual([]);
+  });
+});
+
 describe('the progress of a walk', () => {
   it('is told when a folder is begun, and every PROGRESS_EVERY files, not each file', async () => {
     const told: number[] = [];

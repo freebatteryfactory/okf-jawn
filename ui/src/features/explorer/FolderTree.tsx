@@ -242,6 +242,13 @@ export function FolderTree({
   const showMore = useExplorerStore((state) => state.showMore);
   const treeRef = useRef<TreeApi<TreeEntry> | undefined>(undefined);
   const boxRef = useRef<HTMLDivElement | null>(null);
+  // The tree's box as state: the drag backend is scoped to it, and the tree mounts only once the
+  // element is known (a ref read during render is null on a mount whose listing is cached).
+  const [box, setBox] = useState<HTMLDivElement | null>(null);
+  const boxCallback = useCallback((element: HTMLDivElement | null) => {
+    boxRef.current = element;
+    setBox(element);
+  }, []);
   const height = useElementHeight(boxRef);
   const heading = useId();
 
@@ -468,8 +475,8 @@ export function FolderTree({
       <p role="status" className="sr-only">
         {loadNote}
       </p>
-      <div ref={boxRef} className="tree-box">
-        {root?.isSuccess && entries.length > 0 && (
+      <div ref={boxCallback} className="tree-box">
+        {box !== null && root?.isSuccess && entries.length > 0 && (
           <TreeRowContext.Provider value={rowContext}>
             <Tree<TreeEntry>
               ref={treeRef}
@@ -486,7 +493,7 @@ export function FolderTree({
               // The tree takes no drag, so its drag backend is kept to the tree's own box: left on the
               // window it cancels every dragged text on the page (a drop on the draft editor among
               // them), and the page's one answer to a drag of files is the root guard's.
-              dndRootElement={boxRef.current}
+              dndRootElement={box}
               disableSelect={(entry) => entry.kind === 'status'}
               // Arborist memoizes on its props as a list, so every prop is always passed: no
               // selection is the empty string.
