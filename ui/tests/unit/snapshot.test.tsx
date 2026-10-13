@@ -7,7 +7,7 @@ import { act, cleanup, fireEvent, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { REQUEST_TIMEOUT_MS } from '../../src/app/api-client';
 import { itemOptions } from '../../src/features/documents/DocumentView';
-import { readPatch } from '../../src/features/drafts/patch';
+import { MAX_DIFF_LINES, MAX_LINE_CHARS, readPatch } from '../../src/features/drafts/patch';
 import { AUTOSAVE_DELAY_MS, resetDraftSessions } from '../../src/features/drafts/saving';
 import { fail, type Handler, type Json, mockApi, ok, type Reply } from './support/api';
 import { findTextBox, replaceText, textBox, textIn, typeInto } from './support/editor';
@@ -170,7 +170,7 @@ async function pressSnapshot(name: string) {
 
 describe('reading a patch', () => {
   it('gives the lines of each hunk and leaves out Git’s header', () => {
-    expect(readPatch(PATCH)).toEqual([
+    expect(readPatch(PATCH).hunks).toEqual([
       {
         oldStart: 1,
         newStart: 1,
@@ -197,7 +197,7 @@ describe('reading a patch', () => {
   });
 
   it('reads a hunk of one line, and nothing from an empty patch', () => {
-    expect(readPatch('@@ -3 +3 @@\n-a\n+b\n')).toEqual([
+    expect(readPatch('@@ -3 +3 @@\n-a\n+b\n').hunks).toEqual([
       {
         oldStart: 3,
         newStart: 3,
@@ -207,15 +207,52 @@ describe('reading a patch', () => {
         ],
       },
     ]);
-    expect(readPatch('')).toEqual([]);
+    expect(readPatch('')).toEqual({ hunks: [], shown: 0, more: 0 });
   });
 
   it('keeps a line that begins with a sign of its own', () => {
-    const [hunk] = readPatch('@@ -1,2 +1,2 @@\n-- a list entry\n++ plus\n -5 degrees\n');
+    const [hunk] = readPatch('@@ -1,2 +1,2 @@\n-- a list entry\n++ plus\n -5 degrees\n').hunks;
     expect(hunk?.lines).toEqual([
       { kind: 'removed', text: '- a list entry' },
       { kind: 'added', text: '+ plus' },
       { kind: 'same', text: '-5 degrees' },
+    ]);
+  });
+});
+
+describe('the bounds of a diff', () => {
+  const lines = (count: number, from = 0) =>
+    Array.from({ length: count }, (_, index) => `+line ${from + index}`).join('\n');
+
+  it('keeps exactly the lines there is room for and counts the rest, across hunks', () => {
+    const patch = `@@ -1 +1,3 @@\n${lines(3)}\n@@ -9 +11,3 @@\n${lines(3, 3)}\n`;
+    expect(readPatch(patch, 6)).toMatchObject({ shown: 6, more: 0 });
+    const read = readPatch(patch, 4);
+    expect(read).toMatchObject({ shown: 4, more: 2 });
+    expect(read.hunks.map((hunk) => hunk.lines.length)).toEqual([3, 1]);
+    // With no room left, a further hunk is not opened at all.
+    expect(readPatch(patch, 3).hunks).toHaveLength(1);
+    expect(readPatch(patch, 3)).toMatchObject({ shown: 3, more: 3 });
+    expect(readPatch(patch).shown).toBe(6);
+    expect(MAX_DIFF_LINES).toBe(2_000);
+  });
+
+  it('cuts a line longer than the bound, and no shorter one', () => {
+    const read = readPatch(
+      `@@ -1 +1,2 @@\n+${'x'.repeat(MAX_LINE_CHARS)}\n+${'y'.repeat(MAX_LINE_CHARS + 1)}\n`,
+    );
+    expect(read.hunks.at(0)?.lines).toEqual([
+      { kind: 'added', text: 'x'.repeat(MAX_LINE_CHARS) },
+      { kind: 'added', text: 'y'.repeat(MAX_LINE_CHARS), cut: true },
+    ]);
+  });
+
+  it('shows no carriage return of a file with Windows line ends', () => {
+    const read = readPatch('@@ -1,2 +1,2 @@\r\n same\r\n-old\r\n+new\r\n');
+    expect(read.hunks.at(0)?.lines).toEqual([
+      { kind: 'same', text: 'same' },
+      { kind: 'removed', text: 'old' },
+      { kind: 'added', text: 'new' },
     ]);
   });
 });
@@ -692,6 +729,38 @@ describe('a Snapshot that conflicts', () => {
     expect(notice.textContent).not.toContain('No newline at end of file');
     // The person's own text is still in the editor, beside what changed.
     expect(textIn(textBox('Text of Meeting notes'))).toBe(DRAFT_BODY);
+  });
+
+  it('puts at most 2,000 lines of a diff on the page, counts the rest, and marks a cut line', async () => {
+    const change = (path: string, patch: string) => ({
+      kind: 'modified',
+      binary: false,
+      old_path: path,
+      new_path: path,
+      patch,
+    });
+    const added = (count: number) => Array.from({ length: count }, () => '+a line').join('\n');
+    const { notice } = await openConflict({
+      changes: [
+        change(
+          'notes/meeting.md',
+          `@@ -1 +1,1500 @@\n+${'z'.repeat(MAX_LINE_CHARS + 5)}\n${added(1_499)}\n`,
+        ),
+        change('notes/meeting.appearance.md', `@@ -1 +1,505 @@\n${added(505)}\n`),
+      ],
+    });
+    // The bound is over the whole conflict, not per file.
+    expect(notice.querySelectorAll('ins')).toHaveLength(MAX_DIFF_LINES);
+    expect(notice.textContent).toContain(
+      'and 5 more lines: this change is too long to show whole.',
+    );
+    const first = notice.querySelector('ins')?.textContent ?? '';
+    expect(first).toBe(`Added: + ${'z'.repeat(MAX_LINE_CHARS)} … (a long line, cut here)\n`);
+  });
+
+  it('says nothing of more lines when the whole diff is shown', async () => {
+    const { notice } = await openConflict();
+    expect(notice.textContent).not.toContain('more line');
   });
 
   it('keep mine: saves the draft on the current revision, then takes the Snapshot of it', async () => {
