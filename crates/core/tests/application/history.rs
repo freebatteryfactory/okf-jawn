@@ -2448,6 +2448,59 @@ async fn a_rewind_moves_no_links_when_they_have_nothing_to_follow() -> TestResul
 }
 
 #[tokio::test]
+async fn a_rewind_between_two_spellings_of_one_path_is_one_restore() -> TestResult {
+    // `report.md` became `Report.md` (by way of another name, since the store refuses a move
+    // that changes only letter case) and was deleted. To the store the two are one path: it
+    // would refuse the move back, so the Rewind is the one restore, and it lands.
+    let world = deleted_since("notes/report.md", "notes/Report.md")?;
+    assert!(one_restore(&rewound(&world).await?)?);
+    let shown = world
+        .versions
+        .show(&scope()?, &revision('c')?, item(NOTE))
+        .await?;
+    assert_eq!(shown.summary.path.as_str(), "notes/report.md");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rewind_onto_a_path_another_item_holds_conflicts_whichever_edits_it_sends() -> TestResult
+{
+    // Another item holds the path at the target. Deleted since: the move of the three edits is
+    // refused. Still held at the base: the one restore is. Nothing is written either way.
+    let deleted = deleted_since("notes/old.md", "notes/new.md")?;
+    let moved = World::new()?;
+    note_at(&moved, NOTE, "notes/old.md", &['a'])?;
+    note_at(&moved, NOTE, "notes/new.md", &['b'])?;
+    moved.versions.set_head(revision('b')?)?;
+    moved.versions.put_diff(
+        &revision('b')?,
+        &revision('a')?,
+        Some(item(NOTE)),
+        vec![change(
+            FileChangeKind::Moved,
+            Some("notes/new.md"),
+            Some("notes/old.md"),
+        )],
+    )?;
+    moved.versions.queue_revision(revision('c')?)?;
+    for world in [deleted, moved] {
+        note_at(&world, OTHER, "notes/old.md", &['b'])?;
+        let refused = err_of(
+            world
+                .service
+                .restore_items(
+                    &alice(OperationName::RestoreItems, Some(mutation(1)))?,
+                    rewind('b', 'a', Some(NOTE))?,
+                )
+                .await,
+        )?;
+        assert_eq!(refused.code, ErrorCode::Conflict, "{}", refused.message);
+        assert_eq!(world.versions.commits()?.len(), 0);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_rewind_that_cannot_read_where_the_item_is_writes_nothing() -> TestResult {
     let world = deleted_since("notes/old.md", "notes/new.md")?;
     world.versions.fail_next_show(ErrorCode::Unavailable)?;

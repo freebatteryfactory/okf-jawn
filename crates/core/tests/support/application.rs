@@ -5,11 +5,16 @@
 //! on its expected head, replays a repeated mutation, and runs the check it is handed on a
 //! staged directory; the draft store keeps one draft per (item, editor); the record store
 //! answers revision maps and derived objects for exactly the (item, revision, digest) recorded.
-//! Content is scripted by the test (`put_document`, `put_listing`). Two edits are applied as a
-//! store would, so what `show` reads at the revision a commit produced follows them: an
-//! `EditItem` (the item's document at the commit's base, with the edit's body and properties)
-//! and a `RestoreItem` (the item as `from` holds it, its source appearance included, with the
-//! port's `NotFound` and `Conflict`). A test may make the next `show` fail with a code it
+//! Content is scripted by the test (`put_document`, `put_listing`). Three edits are applied, in
+//! order, to the items the commit's base holds, so what `show` reads at the revision a commit
+//! produced follows them (`VersionState::applied`): an `EditItem` (the edit's body and
+//! properties), a `MoveItem` (the item is at its destination, or the port's `NotFound` and
+//! `Conflict` for a destination whose collision key is taken) and a `RestoreItem` (the item as
+//! `from` holds it, its source appearance included, with the port's `NotFound` and
+//! `Conflict`). The fake does NOT rewrite links: a move or a restore changes no other item, so
+//! a rule about what links say after a write is proven only against real storage. It applies no
+//! other edit (a delete, a status change, a folder), and only the items an applied edit wrote
+//! are readable at the new revision. A test may make the next `show` fail with a code it
 //! names (`fail_next_show`), as a store fault would. `item_at_path` answers from the scripted documents as its port documents it: `None` when no item is at the path at
 //! a known revision, `NotFound` only for an unknown revision. A port the operations
 //! under test do not call answers `Internal` ("not used by this test").
@@ -609,59 +614,105 @@ impl VersionState {
         None
     }
 
-    /// The documents each `TreeEdit::RestoreItem` of `changes` restores, as its port documents
-    /// it: the item as `from` holds it, its source appearance (the companion files) included;
-    /// nothing for an item absent at `from`, which is removed. Consecutive `RestoreItem` edits
-    /// are one group: every item of the group is looked up first (`NotFound` for one absent both
-    /// at `from` and at the expected head), and the group's items have left their current paths
-    /// before any is written back, so only an item outside the group holding a restored path at
-    /// the expected head is a `Conflict`. A later listing of an item wins (`show` reads the
-    /// newest document first).
-    fn restored_items(&self, changes: &CommitChanges) -> Result<Vec<ItemDocument>, ApiError> {
+    /// What `show` reads, at the revision a commit of `changes` produces, of each item an edit
+    /// wrote, with whether it replaces a document a test scripted there. The edits apply in
+    /// order to the items the expected head holds, as the port documents each:
+    ///
+    /// - `EditItem`: the item's document with the edit's body and properties.
+    /// - `MoveItem` ("Move an item"): the item is at its destination afterwards; `NotFound`
+    ///   for an item the tree does not hold, and `Conflict` when a path of the tree has the
+    ///   destination's collision key (the item's own path included, so a move that changes
+    ///   only letter case is refused, as storage refuses it). A move to the path the item
+    ///   holds changes nothing.
+    /// - `RestoreItem`: the item as `from` holds it, its source appearance (the companion
+    ///   files) included; an item absent at `from` is removed. Consecutive `RestoreItem`
+    ///   edits are one group: every item of the group is looked up first (`NotFound` for one
+    ///   absent both at `from` and in the tree), and the group's items have left their paths
+    ///   before any is written back, so only another item holding a restored path (by
+    ///   collision key) is a `Conflict`. A later listing of an item wins.
+    ///
+    /// Every other edit is not applied.
+    fn applied(&self, changes: &CommitChanges) -> Result<Vec<(ItemDocument, bool)>, ApiError> {
         let at = |revision: &Revision, item: ItemId| {
             self.documents
                 .iter()
                 .find(|(held, document)| held == revision && document.summary.id == item)
                 .map(|(_, document)| document.clone())
         };
-        let mut restored = Vec::new();
-        for group in changes
-            .edits
-            .split(|edit| !matches!(edit, TreeEdit::RestoreItem { .. }))
-        {
-            let listed: Vec<(ItemId, &Revision)> = group
+        let mut tree: Vec<ItemDocument> = Vec::new();
+        for (held, document) in &self.documents {
+            let listed = tree
                 .iter()
-                .filter_map(|edit| match edit {
-                    TreeEdit::RestoreItem { item_id, from } => Some((*item_id, from)),
-                    _ => None,
-                })
-                .collect();
-            for (item_id, from) in &listed {
-                if at(from, *item_id).is_none() && at(&changes.expected_head, *item_id).is_none() {
-                    return Err(ApiError::new(ErrorCode::NotFound, "no such item"));
-                }
-            }
-            for (item_id, from) in &listed {
-                let Some(document) = at(from, *item_id) else {
-                    continue;
-                };
-                if self.documents.iter().any(|(held, other)| {
-                    *held == changes.expected_head
-                        && other.summary.path == document.summary.path
-                        && listed
-                            .iter()
-                            .all(|(grouped, _)| *grouped != other.summary.id)
-                }) {
-                    return Err(ApiError::new(
-                        ErrorCode::Conflict,
-                        "another item holds the restored path",
-                    ));
-                }
-                restored.push(document);
+                .any(|kept| kept.summary.id == document.summary.id);
+            if *held == changes.expected_head && !listed {
+                tree.push(document.clone());
             }
         }
-        Ok(restored)
+        let mut written: Vec<(ItemId, bool)> = Vec::new();
+        let mut wrote = |item: ItemId, replaces: bool| {
+            let before = written
+                .iter()
+                .any(|(id, replaced)| *id == item && *replaced);
+            written.retain(|(id, _)| *id != item);
+            written.push((item, replaces || before));
+        };
+        let restores = |edit: &TreeEdit| matches!(edit, TreeEdit::RestoreItem { .. });
+        for group in changes
+            .edits
+            .chunk_by(|first, second| restores(first) && restores(second))
+        {
+            match group {
+                [
+                    TreeEdit::EditItem {
+                        item_id,
+                        body,
+                        properties,
+                    },
+                ] => {
+                    if let Some(edited) = tree.iter_mut().find(|held| held.summary.id == *item_id) {
+                        edited.body.clone_from(body);
+                        edited.properties.clone_from(properties);
+                        wrote(*item_id, true);
+                    }
+                }
+                [
+                    TreeEdit::MoveItem {
+                        item_id,
+                        destination,
+                    },
+                ] => {
+                    if move_in(&mut tree, *item_id, destination)? {
+                        wrote(*item_id, false);
+                    }
+                }
+                _ => {
+                    // The group's items, each with the document its `from` holds.
+                    let listed: Vec<(ItemId, Option<ItemDocument>)> = group
+                        .iter()
+                        .filter_map(|edit| match edit {
+                            TreeEdit::RestoreItem { item_id, from } => {
+                                Some((*item_id, at(from, *item_id)))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    restore_in(&mut tree, &listed)?;
+                    for (item_id, _) in &listed {
+                        wrote(*item_id, true);
+                    }
+                }
+            }
+        }
+        Ok(written
+            .into_iter()
+            .filter_map(|(item, replaces)| {
+                tree.iter()
+                    .find(|held| held.summary.id == item)
+                    .map(|held| (held.clone(), replaces))
+            })
+            .collect())
     }
+
     /// The commit before `revision` on the line: the head a written commit was based on, or the
     /// head a test moved away from.
     fn parent_of(&self, revision: &Revision) -> Option<&Revision> {
@@ -1125,36 +1176,23 @@ impl VersionStore for FakeVersions {
             if state.head.as_ref() != Some(&changes.expected_head) {
                 return Err(ApiError::new(ErrorCode::Conflict, "the head moved"));
             }
-            let restored = state.restored_items(&changes)?;
+            let written = state.applied(&changes)?;
             let warnings = check.check(&self.stage.0)?;
             if state.queued.is_empty() {
                 return Err(ApiError::new(ErrorCode::Internal, "no revision queued"));
             }
             let revision = state.queued.remove(0);
-            // What `show` reads of each edited item at the new revision.
-            for edit in &changes.edits {
-                if let TreeEdit::EditItem {
-                    item_id,
-                    body,
-                    properties,
-                } = edit
-                    && let Some(mut edited) = state
-                        .documents
-                        .iter()
-                        .find(|(at, document)| {
-                            *at == changes.expected_head && document.summary.id == *item_id
-                        })
-                        .map(|(_, document)| document.clone())
-                {
-                    edited.summary.revision = revision.clone();
-                    edited.body.clone_from(body);
-                    edited.properties.clone_from(properties);
-                    state.documents.insert(0, (revision.clone(), edited));
+            // What `show` reads of each written item at the new revision. A document a test
+            // scripted there stands against a move, which the fake applies to the path only.
+            for (mut document, replaces) in written {
+                let scripted = state
+                    .documents
+                    .iter()
+                    .any(|(at, held)| *at == revision && held.summary.id == document.summary.id);
+                if replaces || !scripted {
+                    document.summary.revision = revision.clone();
+                    state.documents.insert(0, (revision.clone(), document));
                 }
-            }
-            for mut document in restored {
-                document.summary.revision = revision.clone();
-                state.documents.insert(0, (revision.clone(), document));
             }
             state.head = Some(revision.clone());
             state.commits.push((changes, revision.clone()));
@@ -2606,6 +2644,71 @@ fn metadata(write: &DraftWrite) -> Result<Draft, okf_jawn_contract::identity::Id
         content_digest: write.content_digest.clone(),
         saved_at: instant()?,
     })
+}
+
+/// Apply one `MoveItem` to the fake's tree, and say whether the item changed path: `NotFound`
+/// for an item the tree does not hold, `Conflict` when a path of the tree (the item's own
+/// included) has the destination's collision key and the item is not already there.
+fn move_in(
+    tree: &mut [ItemDocument],
+    item: ItemId,
+    destination: &WorkspacePath,
+) -> Result<bool, ApiError> {
+    let taken = tree
+        .iter()
+        .any(|held| held.summary.path.collision_key() == destination.collision_key());
+    let moved = tree
+        .iter_mut()
+        .find(|held| held.summary.id == item)
+        .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such item to move"))?;
+    if moved.summary.path == *destination {
+        return Ok(false);
+    }
+    if taken {
+        return Err(ApiError::new(
+            ErrorCode::Conflict,
+            format!("{} is already taken", destination.as_str()),
+        ));
+    }
+    moved.summary.path = destination.clone();
+    Ok(true)
+}
+
+/// Apply one group of consecutive `RestoreItem` edits to the fake's tree: `listed` holds each
+/// item with the document its `from` holds. Every item is looked up first, the group's items
+/// leave their paths, and each is then written back in order (a later listing wins); an item
+/// its `from` does not hold stays removed.
+fn restore_in(
+    tree: &mut Vec<ItemDocument>,
+    listed: &[(ItemId, Option<ItemDocument>)],
+) -> Result<(), ApiError> {
+    for (item, earlier) in listed {
+        if earlier.is_none() && tree.iter().all(|held| held.summary.id != *item) {
+            return Err(ApiError::new(
+                ErrorCode::NotFound,
+                "no such item at either revision",
+            ));
+        }
+    }
+    tree.retain(|held| listed.iter().all(|(id, _)| *id != held.summary.id));
+    for (item, earlier) in listed {
+        tree.retain(|held| held.summary.id != *item);
+        let Some(document) = earlier else {
+            continue;
+        };
+        let key = document.summary.path.collision_key();
+        if tree
+            .iter()
+            .any(|held| held.summary.path.collision_key() == key)
+        {
+            return Err(ApiError::new(
+                ErrorCode::Conflict,
+                "another item holds the restored path",
+            ));
+        }
+        tree.push(document.clone());
+    }
+    Ok(())
 }
 
 /// Whether an item lies in `folder` or a folder beneath it; every item lies in no folder.

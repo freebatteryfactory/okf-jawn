@@ -401,9 +401,11 @@ pub(super) async fn restore_items(
 ///
 /// The move separates the two restores, so the store applies them in order and not as one
 /// group. In every other case the links have nothing to follow, and the Rewind is the one
-/// `RestoreItem`: the item's last path is its path at `target`; another item, or a folder, took
-/// that last path since (its links are that one's now); or the history of `base` never held
-/// the item.
+/// `RestoreItem`: the item's last path is its path at `target`, or another spelling of it (the
+/// two have one collision key, `WorkspacePath::collision_key`, so the store holds one file for
+/// both and refuses a move between them; the links then keep the spelling they have, which may
+/// be the last path's and not the restored one's); another item, or a folder, took that last
+/// path since (its links are that one's now); or the history of `base` never held the item.
 ///
 /// # Errors
 /// Returns any port error of reading the item, its history or the folder of its last path.
@@ -449,7 +451,9 @@ async fn item_restore(
     let Some(last_path) = path_at(service, scope, &last, item).await? else {
         return Ok(vec![restore]);
     };
-    if last_path == destination || taken(service, scope, base, &last_path).await? {
+    // Compared as the store compares them: a move between two spellings of one path is refused.
+    let same_path = last_path.collision_key() == destination.collision_key();
+    if same_path || taken(service, scope, base, &last_path).await? {
         return Ok(vec![restore]);
     }
     Ok(vec![
