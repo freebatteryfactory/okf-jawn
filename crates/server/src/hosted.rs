@@ -7,9 +7,17 @@
 //! `Secure`, `SameSite=Lax`, `Path=/`, `Max-Age=600`, no `Domain`). `GET /auth/callback` refuses,
 //! before any call to the provider, unless that cookie is present, well formed
 //! ([`PendingLogin::parse`]) and its state is the `state` parameter; it then exchanges the code
-//! with the cookie's verifier ([`HostedLogin::complete`]) and clears the cookie, whatever the
-//! outcome. So only the browser that began a sign-in can complete it, and an unauthenticated
-//! caller of `/auth/login` costs the server no memory.
+//! with the cookie's verifier ([`HostedLogin::complete`]). So only the browser that began a
+//! sign-in can complete it, and an unauthenticated caller of `/auth/login` costs the server no
+//! memory.
+//!
+//! The cookie is cleared on every outcome of the callback whose state matches it, success or
+//! refusal. A callback that does not match (no cookie, a cookie that is not a sign-in, another
+//! state) is refused and leaves the cookie alone: a browser holds one sign-in cookie, so when
+//! two tabs each begin a sign-in the later one's cookie stands, the earlier tab's callback is
+//! refused without touching it, and the later tab's still completes. Leaving it costs nothing:
+//! the cookie is useless without the provider's code for its own verifier, and the browser
+//! drops it after its `Max-Age`.
 //!
 //! The cookie is not sealed, and need not be. It is `HttpOnly` and `__Host-`, so no script and no
 //! other host can read or set it; a person who edits their own cookie can only complete their own

@@ -1,6 +1,7 @@
 //! Hosted browser sign-in over the real service, with an identity-provider double: only the
 //! browser that began a sign-in completes it, nothing reaches the provider without that
-//! browser's cookie, and the cookie is cleared on every outcome.
+//! browser's cookie, the cookie is cleared on every outcome of the callback it is waiting for,
+//! and a callback that is not this browser's sign-in leaves the cookie alone.
 #![cfg(feature = "runtime")]
 
 use std::sync::Arc;
@@ -185,8 +186,23 @@ fn assert_login_cookie_cleared(response: &Response) -> TestResult {
     Ok(())
 }
 
-/// A refusal of the callback: 401, private, the sign-in cookie cleared, and no session.
+/// A refusal of the callback the browser's sign-in was waiting for (its state matched): no
+/// sign-in, and the sign-in cookie cleared.
 async fn assert_refused(hosted: &Hosted, response: &Response) -> TestResult {
+    assert_no_sign_in(hosted, response).await?;
+    assert_login_cookie_cleared(response)
+}
+
+/// A refusal of a callback that is not this browser's sign-in: no sign-in, and the sign-in
+/// cookie neither cleared nor set, so a sign-in begun in another tab can still finish.
+async fn assert_left_alone(hosted: &Hosted, response: &Response) -> TestResult {
+    assert_no_sign_in(hosted, response).await?;
+    assert_eq!(set_cookies(response, LOGIN_COOKIE), Vec::<String>::new());
+    Ok(())
+}
+
+/// A refusal of the callback: 401, private, and no session.
+async fn assert_no_sign_in(hosted: &Hosted, response: &Response) -> TestResult {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
         response
@@ -202,7 +218,6 @@ async fn assert_refused(hosted: &Hosted, response: &Response) -> TestResult {
             .and_then(|v| v.to_str().ok()),
         Some("no-referrer")
     );
-    assert_login_cookie_cleared(response)?;
     assert_eq!(set_cookies(response, "okf-session"), Vec::<String>::new());
     assert!(!hosted.signed_in().await?);
     Ok(())
@@ -305,13 +320,13 @@ async fn a_callback_from_a_browser_that_began_no_sign_in_reaches_no_provider() -
     // The attacker began the sign-in; the victim's browser has no sign-in cookie.
     hosted.app.clone().oneshot(get("/auth/login")?).await?;
     let response = hosted.callback(STATE, CODE, None).await?;
-    assert_refused(&hosted, &response).await?;
+    assert_left_alone(&hosted, &response).await?;
     assert_eq!(hosted.exchanges(), 0);
     // A session cookie of the same browser is no sign-in cookie either.
     let response = hosted
         .callback(STATE, CODE, Some("okf-session=anything"))
         .await?;
-    assert_refused(&hosted, &response).await?;
+    assert_left_alone(&hosted, &response).await?;
     assert_eq!(hosted.exchanges(), 0);
     Ok(())
 }
@@ -324,14 +339,14 @@ async fn a_callback_with_another_sign_ins_cookie_or_another_state_reaches_no_pro
     let response = hosted
         .callback(STATE, CODE, Some(&pending(OTHER_STATE, OTHER_VERIFIER)))
         .await?;
-    assert_refused(&hosted, &response).await?;
+    assert_left_alone(&hosted, &response).await?;
     // This browser's cookie, with a state it did not begin, an empty one and an oversized one.
     let oversized = "s".repeat(1025);
     for state in [OTHER_STATE, "forged", "", oversized.as_str()] {
         let response = hosted
             .callback(state, CODE, Some(&pending(STATE, VERIFIER)))
             .await?;
-        assert_refused(&hosted, &response).await?;
+        assert_left_alone(&hosted, &response).await?;
     }
     assert_eq!(hosted.exchanges(), 0);
     Ok(())
@@ -352,7 +367,7 @@ async fn a_state_that_differs_in_case_or_is_a_prefix_or_an_extension_reaches_no_
         let response = hosted
             .callback(state, CODE, Some(&pending(STATE, VERIFIER)))
             .await?;
-        assert_refused(&hosted, &response).await?;
+        assert_left_alone(&hosted, &response).await?;
         assert_eq!(hosted.exchanges(), 0, "state {state}");
     }
     // The same the other way round: the cookie's state is the near one.
@@ -360,7 +375,7 @@ async fn a_state_that_differs_in_case_or_is_a_prefix_or_an_extension_reaches_no_
         let response = hosted
             .callback(STATE, CODE, Some(&pending(state, VERIFIER)))
             .await?;
-        assert_refused(&hosted, &response).await?;
+        assert_left_alone(&hosted, &response).await?;
         assert_eq!(hosted.exchanges(), 0, "cookie state {state}");
     }
     // The state itself, whole, completes: the refusals above are the comparison's alone.
@@ -391,15 +406,18 @@ async fn a_malformed_or_oversized_sign_in_cookie_reaches_no_provider() -> TestRe
         format!("{}; {}", pending(STATE, VERIFIER), pending(STATE, VERIFIER)),
     ] {
         let response = hosted.callback(STATE, CODE, Some(&cookie)).await?;
-        assert_refused(&hosted, &response).await?;
+        assert_left_alone(&hosted, &response).await?;
         assert_eq!(hosted.exchanges(), 0, "cookie {cookie}");
     }
-    // A code over the bound is not sent to the provider either.
-    let response = hosted
-        .callback(STATE, &"c".repeat(1025), Some(&pending(STATE, VERIFIER)))
-        .await?;
-    assert_refused(&hosted, &response).await?;
-    assert_eq!(hosted.exchanges(), 0);
+    // A code over the bound, or none, is not sent to the provider either. The state matched, so
+    // this was the callback the sign-in was waiting for, and its cookie is cleared.
+    for code in ["c".repeat(1025), String::new()] {
+        let response = hosted
+            .callback(STATE, &code, Some(&pending(STATE, VERIFIER)))
+            .await?;
+        assert_refused(&hosted, &response).await?;
+        assert_eq!(hosted.exchanges(), 0);
+    }
     Ok(())
 }
 
@@ -424,7 +442,7 @@ async fn the_same_callback_sent_twice_signs_in_once() -> TestResult {
     // The browser dropped its cookie when the first answer cleared it.
     let again = hosted.callback(STATE, CODE, None).await?;
     assert_eq!(again.status(), StatusCode::UNAUTHORIZED);
-    assert_login_cookie_cleared(&again)?;
+    assert_eq!(set_cookies(&again, LOGIN_COOKIE), Vec::<String>::new());
     assert_eq!(hosted.exchanges(), 1);
     // A replay that kept the cookie reaches the provider, where the code is spent.
     let replay = hosted.callback(STATE, CODE, Some(&cookie)).await?;
@@ -432,6 +450,28 @@ async fn the_same_callback_sent_twice_signs_in_once() -> TestResult {
     assert_login_cookie_cleared(&replay)?;
     assert_eq!(set_cookies(&replay, "okf-session"), Vec::<String>::new());
     assert_eq!(hosted.exchanges(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_sign_in_begun_in_a_second_tab_still_completes_after_the_first_tabs_callback()
+-> TestResult {
+    let hosted = Hosted::new()?;
+    // Two tabs each began a sign-in; the browser holds one cookie, the second tab's.
+    let cookie = pending(STATE, VERIFIER);
+    // The first tab returns from the provider with its own state, which the cookie no longer
+    // holds: refused, with nothing asked of the provider and the cookie left as it is.
+    let first = hosted
+        .callback(OTHER_STATE, "code-of-the-first-tab", Some(&cookie))
+        .await?;
+    assert_left_alone(&hosted, &first).await?;
+    assert_eq!(hosted.exchanges(), 0);
+    // The second tab's callback finds its sign-in still pending and completes it.
+    let second = hosted.callback(STATE, CODE, Some(&cookie)).await?;
+    assert_eq!(second.status(), StatusCode::FOUND);
+    assert_login_cookie_cleared(&second)?;
+    assert!(hosted.signed_in().await?);
+    assert_eq!(hosted.exchanges(), 1);
     Ok(())
 }
 

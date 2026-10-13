@@ -261,8 +261,12 @@ async fn begin_login(State(sessions): State<Sessions>) -> Response {
 }
 
 /// Complete a hosted sign-in for the browser that began it. Nothing reaches the provider unless
-/// the request carries the sign-in cookie, well formed, with the state of the `state` parameter;
-/// the cookie is cleared on every outcome.
+/// the request carries the sign-in cookie, well formed, with the state of the `state` parameter.
+///
+/// A callback that is not the one this browser's sign-in is waiting for (no cookie, a cookie
+/// that is not a sign-in, or another state) is refused and leaves the cookie alone, so a sign-in
+/// begun in another tab can still finish. Once the state matches, the cookie is cleared on
+/// every outcome, success or refusal.
 async fn complete_login(
     State(sessions): State<Sessions>,
     Readable(Query(query)): Readable<Query<BTreeMap<String, String>>>,
@@ -271,35 +275,33 @@ async fn complete_login(
     let SessionEntry::Hosted { login } = &sessions.inner.parts.entry else {
         return private(error_response(not_here()));
     };
+    let refused = || {
+        ApiError::new(
+            ErrorCode::Unauthenticated,
+            "The sign-in is not valid or has expired; start it again",
+        )
+    };
+    let bounded = |name: &str| {
+        query.get(name).filter(|value| {
+            !value.is_empty() && value.chars().count() <= MAX_CALLBACK_PARAMETER_CHARS
+        })
+    };
+    // Digests are compared, so the comparison's timing says nothing about the state.
+    let pending = CrateCookies
+        .read(&headers, LOGIN_COOKIE)
+        .and_then(|value| PendingLogin::parse(&value))
+        .filter(|pending| {
+            bounded("state").is_some_and(|state| secret_hash(&pending.state) == secret_hash(state))
+        });
+    let Some(pending) = pending else {
+        return private(error_response(refused()));
+    };
     let cleared = match cleared_login_cookie() {
         Ok(cleared) => cleared,
         Err(error) => return private(error_response(error)),
     };
     let outcome = async {
-        let refused = || {
-            ApiError::new(
-                ErrorCode::Unauthenticated,
-                "The sign-in is not valid or has expired; start it again",
-            )
-        };
-        let bounded = |name: &str| {
-            query
-                .get(name)
-                .filter(|value| {
-                    !value.is_empty() && value.chars().count() <= MAX_CALLBACK_PARAMETER_CHARS
-                })
-                .ok_or_else(refused)
-        };
-        let state = bounded("state")?;
-        let code = bounded("code")?;
-        let pending = CrateCookies
-            .read(&headers, LOGIN_COOKIE)
-            .and_then(|value| PendingLogin::parse(&value))
-            .ok_or_else(refused)?;
-        // Digests are compared, so the comparison's timing says nothing about the state.
-        if secret_hash(&pending.state) != secret_hash(state) {
-            return Err(refused());
-        }
+        let code = bounded("code").ok_or_else(refused)?;
         let user = login.complete(code, &pending.verifier).await?;
         let tenant_id = TenantId::try_from(user.organization_id).map_err(|_| refused())?;
         sessions
