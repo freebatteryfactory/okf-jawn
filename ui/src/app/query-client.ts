@@ -7,6 +7,9 @@
  * Requests are sent whatever the browser says about being online (`networkMode: 'always'`): the
  * service is on this computer by default, and TanStack Query's default would hold a request back
  * while the browser reports no network, showing "Saving…" with nothing in flight and no bound.
+ * That mode also turns off the library's asking again when the network returns, so it is turned
+ * back on (`refetchOnReconnect`): a read that failed while the network was away is asked again
+ * when it is back, as it was before that mode was set.
  */
 import { QueryClient } from '@tanstack/react-query';
 import { shouldRetry } from '../features/errors/failure';
@@ -21,6 +24,7 @@ export function createQueryClient(): QueryClient {
         refetchOnWindowFocus: false,
         staleTime: 30_000,
         networkMode: 'always',
+        refetchOnReconnect: true,
       },
       mutations: { networkMode: 'always' },
     },

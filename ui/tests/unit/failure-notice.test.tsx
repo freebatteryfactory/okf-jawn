@@ -9,7 +9,7 @@ import {
   createRouter,
   RouterProvider,
 } from '@tanstack/react-router';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { type ReactNode, StrictMode, useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
@@ -136,9 +136,12 @@ function Watched({
   status,
   code = 'internal',
   notice = 'one',
+  covered = false,
 }: {
   status: 'failed' | 'asking' | 'loaded';
   code?: ErrorCode;
+  /** The caller shows something else in the notice's place while the operation is still failed. */
+  covered?: boolean;
   /** The notice's key: under another key it is another notice, a new element. */
   notice?: string;
 }) {
@@ -156,9 +159,10 @@ function Watched({
       <button type="button" data-presses={presses} onClick={() => setPresses(presses + 1)}>
         Elsewhere
       </button>
-      {retry.shown && (
+      {retry.shown && !covered && (
         <FailureNotice key={notice} context="Opening" error={retry.error} retry={retry} />
       )}
+      {covered && <p>Something else is shown here.</p>}
       {status === 'loaded' && (
         <h2 id="content" tabIndex={-1}>
           The content
@@ -207,6 +211,101 @@ async function retryOutlived() {
     await act(async () => run());
   };
   return { runs, button, notice, end };
+}
+
+/**
+ * A failure that allows no retry and offers a way out, in a page with a router. A press of
+ * "Change" from script moves no focus: the operation's state changes by itself.
+ */
+function WayOut({ becomes }: { becomes: 'loaded' | ErrorCode }) {
+  const [state, setState] = useState<'loaded' | ErrorCode>('not_found');
+  const retry = useRetry({
+    request: 'one',
+    failed: state !== 'loaded',
+    error: apiError(state === 'loaded' ? 'not_found' : state),
+    run: () => Promise.resolve(),
+    loaded: () => document.getElementById('content'),
+  });
+  return (
+    <>
+      <button type="button" onClick={() => setState(becomes)}>
+        Change
+      </button>
+      {retry.shown && <FailureNotice context="Reading" error={retry.error} retry={retry} />}
+      {state === 'loaded' && (
+        <h2 id="content" tabIndex={-1}>
+          The content
+        </h2>
+      )}
+    </>
+  );
+}
+
+/** Render that failure with keyboard focus on its way out, the only control it has. */
+async function wayOutWithFocus(becomes: 'loaded' | ErrorCode) {
+  await renderNotice(<WayOut becomes={becomes} />);
+  const link = screen.getByRole('link', { name: 'Go to your workspaces' });
+  const notice = screen.getByRole('alert').parentElement;
+  if (notice === null) throw new Error('the alert is not in a notice');
+  expect(screen.queryByRole('button', { name: /Try/ })).toBeNull();
+  act(() => link.focus());
+  const change = () => fireEvent.click(screen.getByRole('button', { name: 'Change' }));
+  return { link, notice, change };
+}
+
+/** Two operations of one caller, each with its own notice and its own content, as the reader has. */
+function Two({
+  first,
+  second,
+  secondCode = 'internal',
+}: {
+  first: 'failed' | 'loaded';
+  second: 'failed' | 'loaded';
+  secondCode?: ErrorCode;
+}) {
+  const one = useRetry({
+    request: 'first',
+    failed: first === 'failed',
+    error: apiError('internal'),
+    run: () => Promise.resolve(),
+    loaded: () => document.getElementById('first-content'),
+  });
+  const two = useRetry({
+    request: 'second',
+    failed: second === 'failed',
+    error: apiError(secondCode),
+    run: () => Promise.resolve(),
+    loaded: () => document.getElementById('second-content'),
+  });
+  return (
+    <>
+      <section aria-label="First">
+        {one.shown && <FailureNotice context="First" error={one.error} retry={one} />}
+        {first === 'loaded' && (
+          <h2 id="first-content" tabIndex={-1}>
+            First content
+          </h2>
+        )}
+      </section>
+      <section aria-label="Second">
+        {two.shown && <FailureNotice context="Second" error={two.error} retry={two} />}
+        {second === 'loaded' && (
+          <h2 id="second-content" tabIndex={-1}>
+            Second content
+          </h2>
+        )}
+      </section>
+    </>
+  );
+}
+
+/** The retry button of the first of the two notices, with keyboard focus on it. */
+function firstRetryFocused() {
+  const button = within(screen.getByRole('region', { name: 'First' })).getByRole('button', {
+    name: 'Try again',
+  });
+  act(() => button.focus());
+  return button;
 }
 
 /** Render the watched operation, failed, with keyboard focus on its retry button. */
@@ -277,16 +376,17 @@ describe('failure messages', () => {
     }
   });
 
-  it('shows a failure that allows no retry as the alert alone, as before, where a retry could be offered', () => {
+  it('shows a failure that allows no retry with no retry button and no status, where a retry could be offered', () => {
     const run = vi.fn(async () => undefined);
     render(<Retried context="Reading" error={apiError('forbidden')} run={run} />);
     const alert = screen.getByRole('alert');
-    expect(alert.className).toBe('failure-notice');
-    expect(alert.hasAttribute('tabindex')).toBe(false);
-    expect(alert.parentElement?.className).not.toBe('failure-notice');
     expect(alert.textContent).toContain('Reading: You do not have permission to do this.');
     expect(screen.queryByRole('button')).toBeNull();
     expect(screen.queryByRole('status')).toBeNull();
+    // The notice around the alert is the hook's whatever the failure allows: script can focus it.
+    const notice = alert.parentElement;
+    expect(notice?.className).toBe('failure-notice');
+    expect(notice?.getAttribute('tabindex')).toBe('-1');
   });
 
   it('offers no retry without the retry that keeps the notice on screen', () => {
@@ -548,6 +648,15 @@ describe('a failure that changes without a retry', () => {
     expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1 }));
   });
 
+  it('moves focus to the page’s level-one heading when the notice leaves while its failure stays and nothing is named', () => {
+    const { rerender, notice } = watchedWithFocus();
+    // The operation is still failed; the caller shows something else where the notice was.
+    rerender(<Watched status="failed" covered />);
+    expect(notice.isConnected).toBe(false);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1 }));
+  });
+
   it('leaves focus that was not in the notice where it is when the failure goes away by itself', () => {
     const { rerender, notice } = watchedWithFocus();
     const elsewhere = screen.getByRole('button', { name: 'Elsewhere' });
@@ -584,6 +693,26 @@ describe('a failure that changes without a retry', () => {
     expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'The content' }));
   });
 
+  it('follows focus on the way out of a failure that allows no retry when that failure goes away by itself', async () => {
+    const { link, notice, change } = await wayOutWithFocus('loaded');
+    expect(document.activeElement).toBe(link);
+    change();
+    expect(notice.isConnected).toBe(false);
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'The content' }));
+  });
+
+  it('moves focus from the way out to the notice itself when the failure is replaced by one with nothing to focus', async () => {
+    const { link, notice, change } = await wayOutWithFocus('forbidden');
+    change();
+    expect(screen.getByRole('alert').textContent).toContain(
+      'Reading: You do not have permission to do this.',
+    );
+    expect(link.isConnected).toBe(false);
+    expect(notice.isConnected).toBe(true);
+    expect(notice.getAttribute('tabindex')).toBe('-1');
+    expect(document.activeElement).toBe(notice);
+  });
+
   it('moves focus to the retry button of the notice that replaces the one shown', () => {
     const { rerender, button, notice } = watchedWithFocus();
     rerender(<Watched status="failed" code="unavailable" notice="two" />);
@@ -591,6 +720,45 @@ describe('a failure that changes without a retry', () => {
     expect(button.isConnected).toBe(false);
     const replacement = screen.getByRole('button', { name: 'Try again' });
     expect(document.activeElement).toBe(replacement);
+  });
+
+  describe('with two notices in one caller, one leaving never moves focus that is in the other', () => {
+    it('when the other’s failure goes away by itself', () => {
+      const { rerender } = render(<Two first="failed" second="failed" />);
+      const button = firstRetryFocused();
+      rerender(<Two first="failed" second="loaded" />);
+      expect(screen.getByRole('heading', { name: 'Second content' })).toBeTruthy();
+      expect(document.activeElement).toBe(button);
+    });
+
+    it('when the other’s failure is replaced by one that allows no retry', () => {
+      const { rerender } = render(<Two first="failed" second="failed" />);
+      const button = firstRetryFocused();
+      rerender(<Two first="failed" second="failed" secondCode="forbidden" />);
+      expect(screen.getByText('Second: You do not have permission to do this.')).toBeTruthy();
+      expect(document.activeElement).toBe(button);
+    });
+
+    it('under StrictMode, when the other leaves first and then its own', () => {
+      const { rerender } = render(
+        <StrictMode>
+          <Two first="failed" second="failed" />
+        </StrictMode>,
+      );
+      const button = firstRetryFocused();
+      rerender(
+        <StrictMode>
+          <Two first="failed" second="loaded" />
+        </StrictMode>,
+      );
+      expect(document.activeElement).toBe(button);
+      rerender(
+        <StrictMode>
+          <Two first="loaded" second="loaded" />
+        </StrictMode>,
+      );
+      expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'First content' }));
+    });
   });
 
   describe('under StrictMode, which in development clears and sets again the refs of what has just mounted', () => {

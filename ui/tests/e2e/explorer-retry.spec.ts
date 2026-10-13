@@ -10,6 +10,9 @@
  * when the window regains focus, takes its notice off the page; focus that was on the retry button
  * is then on the revision notice, not on the body.
  *
+ * And a navigation that takes the focused link off the page (a notice's way out, a workspace in
+ * the list): it ends on the new page's level-one heading.
+ *
  * Needs `bun --bun run build` first: the spec serves the built `dist/` itself.
  */
 
@@ -312,6 +315,55 @@ test.describe('a failure notice’s retry from the keyboard', () => {
       await expect.poll(() => operation.inFlight()).toBe(1);
       operation.end('answers');
       await expect(caller.loaded(page)).toBeFocused();
+    });
+  }
+
+  // A navigation that takes the focused element off the page. A notice's way out is a link of the
+  // page it leaves, and a workspace's link is one of the list: activated from the keyboard, each
+  // ends on the new page's level-one heading, not on the body.
+  const gone = (): Reply => ({ status: 404, body: { code: 'not_found', message: 'gone' } });
+  const leaving = [
+    {
+      name: 'the way out of a workspace that is gone ends on the list’s heading',
+      url: '/',
+      answers: { '/api/workspaces/open-workspace': gone },
+      from: `/w/${WS}`,
+      link: 'Go to your workspaces',
+      heading: 'Your workspaces',
+    },
+    {
+      name: 'the way out of a failed read ends on the workspace’s name',
+      url: `/w/${WS}`,
+      answers: { '/api/items/get-item': gone },
+      from: `/w/${WS}/i/${NOTE}`,
+      link: 'Go to this workspace',
+      heading: 'Workshop notes',
+    },
+    {
+      name: 'a workspace opened from the list ends on the workspace’s name',
+      url: `/w/${WS}`,
+      answers: {},
+      from: '/',
+      link: 'Workshop notes',
+      heading: 'Workshop notes',
+    },
+  ];
+  for (const leave of leaving) {
+    test(`${leave.name}, activated from the keyboard`, async ({ page }) => {
+      await routeApi(page, leave.answers);
+      await page.goto(`${server.origin()}${leave.from}`);
+      const link = page.getByRole('link', { name: leave.link, exact: true });
+      await link.focus();
+      await expect(link).toBeFocused();
+      await page.keyboard.press('Enter');
+      await expect(page).toHaveURL(`${server.origin()}${leave.url}`);
+      const heading = page.getByRole('heading', { level: 1, name: leave.heading });
+      await expect(heading).toBeFocused();
+      await page.waitForTimeout(300);
+      expect(await focused(page)).not.toBe('body');
+      await expect(heading).toBeFocused();
+      await expectVisibleFocus(page);
+      await expectNoAxeViolations(page, leave.name);
     });
   }
 

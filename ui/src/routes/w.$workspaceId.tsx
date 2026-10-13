@@ -13,13 +13,14 @@
  */
 import { useQuery } from '@tanstack/react-query';
 import { createFileRoute, Link } from '@tanstack/react-router';
-import { type ReactNode, useRef } from 'react';
+import { type ReactNode, type RefCallback, useLayoutEffect, useRef } from 'react';
 import { openWorkspaceOptions } from '../api/generated/@tanstack/react-query.gen';
 import { zWorkspaceId } from '../api/generated/zod.gen';
 import { FailureNotice } from '../features/errors/FailureNotice';
 import { useRetry } from '../features/errors/retry';
 import { ExplorerShell } from '../features/explorer/ExplorerShell';
 import { validateWorkspaceSearch } from '../features/explorer/search-params';
+import { pageHeading, takeHeld, useWatchedPart } from '../lib/focus';
 
 export const Route = createFileRoute('/w/$workspaceId')({
   validateSearch: validateWorkspaceSearch,
@@ -32,10 +33,16 @@ export const Route = createFileRoute('/w/$workspaceId')({
  * workspace's name. It takes focus from script: where keyboard focus goes when it was in a failure
  * notice that left with nothing loaded in its place (`useRetry`).
  */
-function BeforeTheExplorer({ children }: { children: ReactNode }) {
+function BeforeTheExplorer({
+  children,
+  headingRef,
+}: {
+  children: ReactNode;
+  headingRef: RefCallback<HTMLHeadingElement>;
+}) {
   return (
     <div className="page-status">
-      <h1 className="sr-only" tabIndex={-1}>
+      <h1 className="sr-only" tabIndex={-1} ref={headingRef}>
         Workspace
       </h1>
       {children}
@@ -61,9 +68,18 @@ function WorkspaceRoute() {
     run: () => workspace.refetch(),
     loaded: () => nameRef.current,
   });
+  // The heading of the page before the Explorer can hold keyboard focus: a navigation ended on it,
+  // or a failure left nothing nearer to focus. When the Explorer replaces that page the heading
+  // goes, and focus that was on it goes on to the page's heading as it then is: the workspace's
+  // name.
+  const heldFocus = useRef<HTMLElement | null>(null);
+  const [, headingRef] = useWatchedPart<HTMLHeadingElement>(heldFocus);
+  useLayoutEffect(() => {
+    if (takeHeld(heldFocus)) pageHeading()?.focus();
+  });
   if (!valid) {
     return (
-      <BeforeTheExplorer>
+      <BeforeTheExplorer headingRef={headingRef}>
         <div role="alert" className="failure-notice">
           <p>
             <strong>This link is not valid.</strong>
@@ -77,13 +93,13 @@ function WorkspaceRoute() {
   if (workspace.data === undefined) {
     if (opening.shown) {
       return (
-        <BeforeTheExplorer>
+        <BeforeTheExplorer headingRef={headingRef}>
           <FailureNotice context="Opening this workspace" error={opening.error} retry={opening} />
         </BeforeTheExplorer>
       );
     }
     return (
-      <BeforeTheExplorer>
+      <BeforeTheExplorer headingRef={headingRef}>
         <p role="status">Opening the workspace…</p>
       </BeforeTheExplorer>
     );
