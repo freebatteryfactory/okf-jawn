@@ -346,9 +346,10 @@ export function DocumentView({
   // session, not the read: the editor leaves only once the session is refused, so the save the
   // editor sends on its way out finds it refused, in whatever order the effects run.
   const sessionHere = session !== undefined;
+  const queryClient = useQueryClient();
   useEffect(() => {
-    if (sessionHere && kind !== null) refuseSaving(workspaceId, itemId, kind);
-  }, [sessionHere, kind, workspaceId, itemId]);
+    if (sessionHere && kind !== null) refuseSaving(queryClient, workspaceId, itemId, kind);
+  }, [queryClient, sessionHere, kind, workspaceId, itemId]);
   const notANote = session?.refused ?? null;
   const editable = atShown && isNote;
   const hasDraft = session !== undefined || (document?.draft ?? null) !== null;
@@ -465,6 +466,10 @@ export function DocumentView({
   const heldEditor = useRef<HTMLElement | null>(null);
   const [, liveRef] = useWatchedPart<HTMLDivElement>(heldEditor);
   const keptRef = useRef<HTMLTextAreaElement | null>(null);
+  // And back: the kept text gives way to the editor when the refusal is lifted. Focus that was in
+  // it goes to the switch at once (the text box is not there yet) and from there into the text box.
+  const heldKept = useRef<HTMLElement | null>(null);
+  const [, keptPartRef] = useWatchedPart<HTMLDivElement>(heldKept);
   // The switch itself leaves when the pane stops being editable (a read says the item is not a
   // Note any more, or the pane no longer reads the version shown). Focus on it goes to the page's
   // heading.
@@ -474,6 +479,10 @@ export function DocumentView({
     if (takeHeld(heldFocus)) (switchRef.current ?? pageHeading())?.focus();
     if (takeHeld(heldSwitch)) pageHeading()?.focus();
     if (takeHeld(heldEditor)) keptRef.current?.focus();
+    if (takeHeld(heldKept) && editing && notANote === null) {
+      switchRef.current?.focus();
+      focusNext.current = 'text';
+    }
   });
   const reading = JSON.stringify(request);
   const itemFailure = useRetry({
@@ -616,10 +625,14 @@ export function DocumentView({
       )}
       {editing ? (
         <div ref={editingRef} className="editing">
+          {/* Each part has its own key: it is another element, removed whole, so its ref is
+              cleared while keyboard focus is still in it (`useWatchedPart`). */}
           {notANote !== null ? (
-            <KeptText session={session} title={title} kind={ROLE[notANote]} boxRef={keptRef} />
+            <div key="kept" ref={keptPartRef}>
+              <KeptText session={session} title={title} kind={ROLE[notANote]} boxRef={keptRef} />
+            </div>
           ) : (
-            <div ref={liveRef}>
+            <div key="live" ref={liveRef}>
               {typeName === null ? null : <PropertiesForm session={session} typeName={typeName} />}
               <DraftEditor
                 session={session}

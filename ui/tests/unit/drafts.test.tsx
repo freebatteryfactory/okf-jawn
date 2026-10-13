@@ -418,6 +418,62 @@ describe('who may edit, and where', () => {
       // The save that was under way answered; nothing was sent after it.
       expect(api.callsTo(SAVE)).toHaveLength(1);
     }, 20_000);
+
+    describe('when a later read says it is a Note again', () => {
+      /** A head after the newer one, where the item is a Note once more. */
+      const AGAIN = 'f'.repeat(40);
+
+      it('lifts the refusal: the editor is back with the text and focus, the save owed is sent, and the next change is saved', async () => {
+        const { api, held, kept } = await refused();
+        expect(document.activeElement).toBe(kept);
+        expect(api.callsTo(SAVE)).toHaveLength(0);
+        await refreshTo(held, AGAIN);
+        const box = await eventuallyGet(() => textBox('Text of Meeting notes'));
+        expect(textIn(box)).toBe(`${COMMITTED} and more`);
+        expect(screen.queryByLabelText('Your text, read only')).toBeNull();
+        expect(screen.queryByText(/This item is now a Source/)).toBeNull();
+        // Focus that was in the kept text is in the text box, not on the page body.
+        await eventually(() => expect(document.activeElement).toBe(box));
+        // The save the refusal held up is sent as after a change, with nothing typed since.
+        await pass(AUTOSAVE_DELAY_MS);
+        await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+        expect(api.callsTo(SAVE).at(0)?.body).toBe(`${COMMITTED} and more`);
+        await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+        typeInto(box, ' again');
+        await pass(AUTOSAVE_DELAY_MS);
+        await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+        expect(api.callsTo(SAVE).at(1)?.body).toBe(`${COMMITTED} and more again`);
+        expect(api.violations).toEqual([]);
+      }, 20_000);
+
+      it('does not send by itself a save that had failed before the refusal: its notice is back with the retry', async () => {
+        const made = becomesSource(asSource, { [SAVE]: () => fail(503, 'unavailable', 'busy') });
+        const { box } = await startEditing();
+        typeInto(box, ' and more');
+        await pass(AUTOSAVE_DELAY_MS);
+        await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+        await refreshTo(made.held, NEWER);
+        await eventuallyGet(keptText);
+        await refreshTo(made.held, AGAIN);
+        await eventuallyGet(() => textBox('Text of Meeting notes'));
+        expect(saveState()).toBe('Not saved. Your text is kept here.');
+        await pass(AUTOSAVE_DELAY_MS * 12);
+        expect(made.api.callsTo(SAVE)).toHaveLength(1);
+        // The person's own retry sends it.
+        fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+        await eventually(() => expect(made.api.callsTo(SAVE)).toHaveLength(2));
+      }, 20_000);
+
+      it('draws the conflict notice again: the conflict stayed with the item', async () => {
+        const { held } = await refused();
+        act(() => useDraftSessions.getState().setConflicts(WS, 'Tidy', [conflictOfNote]));
+        await pass(0);
+        expect(screen.queryByRole('button', { name: 'Keep mine' })).toBeNull();
+        await refreshTo(held, AGAIN);
+        await eventuallyGet(() => screen.getByRole('button', { name: 'Keep mine' }));
+        expect(screen.getByRole('button', { name: 'Take theirs' })).toBeDefined();
+      }, 20_000);
+    });
   });
 });
 

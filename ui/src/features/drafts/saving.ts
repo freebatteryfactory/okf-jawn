@@ -53,7 +53,9 @@
  *   `flushSession` settles at once, and its outcome is the session's state, as ever.
  * - A discard is still sent: it is the way out, and the refusal ends with the session.
  * - When a later read says the item is a Note, the refusal is lifted: the editor is drawn again
- *   with the text the session kept.
+ *   with the text the session kept, and the save it owes is sent a moment later, as after a
+ *   change. A session whose last save failed or was stopped is not sent by itself, here as
+ *   anywhere: its notice has the retry.
  * Limits. The refusal is per item, whichever pane read it: a pane that reads the item at another
  * revision, where it is a Note, lifts what another pane set. And with no pane of the item open
  * nothing reads its kind for the session: a save sent then (the page is hidden) is the service's
@@ -179,20 +181,46 @@ export function releaseEditor(workspaceId: string, itemId: string, pane: string)
 /**
  * A pane read the item, and this is what the answer says it is. Anything but a Note refuses the
  * item's session (see the header: nothing of it is sent, and nothing waits on it); a Note lifts
- * the refusal. An item with no session has nothing to refuse.
+ * the refusal, and the save the session owes is sent a moment later (the autosave the refusal
+ * held up). An item with no session has nothing to refuse.
  */
-export function refuseSaving(workspaceId: string, itemId: string, kind: ItemSummary['kind']) {
+export function refuseSaving(
+  client: QueryClient,
+  workspaceId: string,
+  itemId: string,
+  kind: ItemSummary['kind'],
+) {
   const key = sessionKey(workspaceId, itemId);
   const session = sessions().sessions[key];
   const refused = kind === 'note' ? null : kind;
   if (session === undefined || session.refused === refused) return;
   sessions().change(key, { refused });
+  // A save that failed is not sent again by itself: its notice, back with the editor, has the retry.
+  if (refused === null && session.failure === null) saveSoon(client, key);
 }
 
 function cancelTimer(key: string) {
   const timer = timers.get(key);
   if (timer !== undefined) clearTimeout(timer);
   timers.delete(key);
+}
+
+/** Save a session a moment from now, and at the latest so long after its first change not yet sent. */
+function saveSoon(client: QueryClient, key: string) {
+  cancelTimer(key);
+  const now = Date.now();
+  const since = unsavedSince.get(key) ?? now;
+  unsavedSince.set(key, since);
+  timers.set(
+    key,
+    setTimeout(
+      () => {
+        timers.delete(key);
+        void save(client, key);
+      },
+      Math.max(0, Math.min(AUTOSAVE_DELAY_MS, since + AUTOSAVE_MAX_WAIT_MS - now)),
+    ),
+  );
 }
 
 /**
@@ -216,21 +244,7 @@ export function editSession(
   const key = sessionKey(workspaceId, itemId);
   if (sessions().sessions[key] === undefined) return;
   sessions().change(key, change.properties === undefined ? change : { ...change, heldBack: null });
-  cancelTimer(key);
-  // A moment after this change, and at the latest so long after the first one not yet sent.
-  const now = Date.now();
-  const since = unsavedSince.get(key) ?? now;
-  unsavedSince.set(key, since);
-  timers.set(
-    key,
-    setTimeout(
-      () => {
-        timers.delete(key);
-        void save(client, key);
-      },
-      Math.max(0, Math.min(AUTOSAVE_DELAY_MS, since + AUTOSAVE_MAX_WAIT_MS - now)),
-    ),
-  );
+  saveSoon(client, key);
 }
 
 /**
