@@ -5,18 +5,18 @@
 //!   owns the stream and writes each line whole; diagnostics go to the error stream.
 //! - Every request the relay accepts gets a response or an error with its id: the service's
 //!   own, or one the relay writes when the service gave none. A failed notification is
-//!   logged to the error stream instead.
+//!   logged to the error stream instead. The one exception is a request still in flight when
+//!   the relay stops, which is named on the error stream (see "how it ends").
 //! - Messages are forwarded concurrently, at most `Limits::in_flight` at a time; while that
-//!   many are in flight no further line is read. `initialize` is exchanged alone, because the
-//!   headers of every later message come from its answer.
-//! - When the input ends, the messages in flight finish before the relay returns 0.
+//!   many are in flight no further line is read. `initialize` is exchanged alone, after the
+//!   messages in flight have finished, because the headers of every later message come from
+//!   its answer.
 //! - The connector credential is never written, whoever wrote the line: every line for the
 //!   output stream, the service's own included, passes `Credential::redact_line` in `line`,
 //!   the one place a line is queued, and every diagnostic passes `Credential::redact`. A line
 //!   that spells the credential outside a JSON string cannot be cleaned and stay JSON: it is
 //!   not written, the error stream says so, and a request it would have answered gets the
 //!   relay's own error instead.
-//!
 //! - An answer is passed on as the service wrote it. The relay checks that it is one JSON
 //!   value and a JSON-RPC message, removes the line feeds and carriage returns that stand
 //!   between its tokens so that it is one line, and changes no other byte, the credential
@@ -24,14 +24,41 @@
 //!   went in. A refusal that lacks the request's id gets it put into its text. An id is
 //!   written back as the client wrote it. A message to the service is sent as the client
 //!   wrote it.
+//!
+//! What the relay holds. Everything waiting to be written, lines and diagnostics together,
+//! shares one room of `Limits::waiting_bytes` (64 MiB: the length of the longest answer, the
+//! least that still lets every answer through). A text takes its length of that room before
+//! it is queued and gives it back once it is written. While the room is full, an exchange
+//! waits with the answer it has in hand and takes no further event, so the transport stops
+//! reading from the service; and the read loop holds the one message it has read and neither
+//! forwards it nor reads another. Outside that room, each message in flight can hold its
+//! request line (16 MiB), the answer or event being read (64 MiB), one event waiting to be
+//! taken (64 MiB), and the one in hand, with a second copy while the credential is removed
+//! from it (2 x 64 MiB). With sixteen in flight the worst case is about 4.3 GiB. It takes
+//! sixteen event streams that each send events of the full 64 MiB repeating the credential;
+//! an ordinary answer costs once or twice its own length.
+//!
+//! How it ends. When the input ends, the messages in flight get `Limits::closing` (two
+//! minutes, what the CLI gives one operation) to finish; the relay then returns 0, or names
+//! on the error stream the messages that had not finished and returns 1. When the output
+//! stream fails, the relay stops at once and returns 1, whatever it was waiting for.
+//!
+//! Known limits:
+//! - A forwarded message has no limit in time: a tool call may run long, and an event stream
+//!   has no fixed length. Sixteen messages that do not end therefore hold every turn, the
+//!   relay reads no further line, and it learns that its input ended only when one of them
+//!   ends; `initialize` likewise waits for the messages in flight.
+//! - A response the service sends for another request's id is passed on as it is.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use okf_jawn_contract::transport::MAX_REQUEST_BODY_BYTES;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{Semaphore, mpsc};
-use tokio::task::JoinSet;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::task::{Id, JoinError, JoinSet};
 
 use super::frame::{Frame, Frames};
 use super::json::one_line;
@@ -44,12 +71,22 @@ use super::transport::{Body, Transport, TransportError};
 use crate::credential::Credential;
 use crate::run::Streams;
 
-/// The channels one exchange writes to, and the secret it keeps out of them.
+/// The channels one exchange writes to, the room they share, and the secret kept out of them.
 #[derive(Clone)]
 struct Desk {
-    lines: mpsc::Sender<String>,
-    notes: mpsc::Sender<String>,
+    lines: mpsc::Sender<Queued>,
+    notes: mpsc::Sender<Queued>,
     secret: Arc<Credential>,
+    /// One permit for each byte that may still wait to be written.
+    room: Arc<Semaphore>,
+    /// The whole room: no text takes more than this, so the longest one still gets through.
+    budget: u32,
+}
+
+/// The messages in flight: their tasks, and what each is called when it has to be named.
+struct Flight {
+    tasks: JoinSet<()>,
+    names: HashMap<Id, String>,
 }
 
 /// The relay's bounds.
@@ -61,6 +98,11 @@ pub struct Limits {
     pub answer_bytes: usize,
     /// Most messages forwarded at the same time.
     pub in_flight: usize,
+    /// Most bytes of lines and diagnostics that may wait to be written. While they fill it,
+    /// nothing more is taken from the service and nothing more is forwarded from the input.
+    pub waiting_bytes: usize,
+    /// How long the messages in flight may still take once the input has ended.
+    pub closing: Duration,
 }
 
 /// What an exchange learned for the messages that follow it.
@@ -72,6 +114,8 @@ struct Outcome {
     session: Option<String>,
 }
 
+/// A text waiting for its writer, with the room it holds until it is written.
+type Queued = (String, Option<OwnedSemaphorePermit>);
 /// Everything one relay run needs.
 #[derive(Debug)]
 pub struct Relay<T, L> {
@@ -110,21 +154,112 @@ const ANSWER_WITHHELD: &str = "The okf-jawn service's answer repeats the connect
     outside a JSON string, so it was not passed on";
 /// What a request is told when the service's answer is no message.
 const NOT_A_MESSAGE: &str = "The okf-jawn service's answer is not a JSON-RPC message";
+/// How many events of one answer may wait for the relay to take them: the fewest a channel
+/// holds, because each may be as long as a whole answer.
+const AHEAD: usize = 1;
+/// How long the messages in flight may still take once the input has ended: what the CLI
+/// gives one operation, so a script that pipes its requests in gets its last answers, and a
+/// client that only closes the input does not keep the relay for longer than that.
+const CLOSING: Duration = Duration::from_secs(120);
 /// How many answers or diagnostics may wait for their writer.
 const QUEUE: usize = 64;
 /// The line the relay writes for a line over the limit.
 const TOO_LONG: &str = "Invalid request: the line is longer than the request limit of";
 
+impl Flight {
+    /// Wait for every message in flight.
+    async fn drain(&mut self, desk: &Desk) {
+        while let Some(joined) = self.tasks.join_next_with_id().await {
+            self.landed(joined, desk).await;
+        }
+    }
+
+    /// Forget one finished message; an exchange that ended abnormally is said.
+    async fn landed(&mut self, joined: Result<(Id, ()), JoinError>, desk: &Desk) {
+        match joined {
+            Ok((id, ())) => {
+                self.names.remove(&id);
+            }
+            Err(error) => {
+                self.names.remove(&error.id());
+                note(
+                    desk,
+                    &format!("a message's exchange ended abnormally: {error}"),
+                )
+                .await;
+            }
+        }
+    }
+
+    fn new() -> Self {
+        Self {
+            tasks: JoinSet::new(),
+            names: HashMap::new(),
+        }
+    }
+
+    /// Forget the messages that have finished, so a long session holds only those in flight.
+    async fn reap(&mut self, desk: &Desk) {
+        while let Some(joined) = self.tasks.try_join_next_with_id() {
+            self.landed(joined, desk).await;
+        }
+    }
+
+    /// Start `work` as the message called `name`.
+    fn start(&mut self, name: String, work: impl Future<Output = ()> + Send + 'static) {
+        let id = self.tasks.spawn(work).id();
+        self.names.insert(id, name);
+    }
+}
+
 impl Default for Limits {
-    /// The contract's request-body limit for a line, four times that for an answer, and
-    /// sixteen messages in flight.
+    /// The contract's request-body limit for a line; four times that for an answer; sixteen
+    /// messages in flight; for what waits to be written, the length of the longest answer,
+    /// which is the least that still lets every answer through; and two minutes to close.
     fn default() -> Self {
         Self {
             line_bytes: MAX_REQUEST_BODY_BYTES,
             answer_bytes: MAX_REQUEST_BODY_BYTES.saturating_mul(4),
             in_flight: 16,
+            waiting_bytes: MAX_REQUEST_BODY_BYTES.saturating_mul(4),
+            closing: CLOSING,
         }
     }
+}
+
+/// What a message in flight is called when the relay has to name it.
+fn called(kind: &Kind) -> String {
+    match kind {
+        Kind::Request { written, .. } => format!("request {written}"),
+        Kind::Notification { method } => format!("notification {method:?}"),
+        Kind::Response => "a response to the service".to_owned(),
+    }
+}
+
+/// Let the messages in flight finish, for at most `limit` after the input has ended.
+///
+/// Returns the exit code: 0 when all finished, 1 when some had not; those are named on the
+/// error stream, and they end with the relay.
+async fn close(mut flight: Flight, limit: Duration, desk: &Desk) -> u8 {
+    if tokio::time::timeout(limit, flight.drain(desk))
+        .await
+        .is_ok()
+    {
+        return 0;
+    }
+    let mut left: Vec<String> = flight.names.into_values().collect();
+    left.sort();
+    note(
+        desk,
+        &format!(
+            "the input ended and {} of its messages had not finished {limit:?} later; the relay \
+             stops and leaves them unanswered: {}",
+            left.len(),
+            left.join(", ")
+        ),
+    )
+    .await;
+    1
 }
 
 /// Write one answer of the service to the client, if it is a JSON-RPC message.
@@ -163,19 +298,6 @@ async fn deliver(
     Ok(())
 }
 
-/// Wait for every message in flight.
-async fn drain(tasks: &mut JoinSet<()>, desk: &Desk) {
-    while let Some(joined) = tasks.join_next().await {
-        if let Err(error) = joined {
-            note(
-                desk,
-                &format!("a message's exchange ended abnormally: {error}"),
-            )
-            .await;
-        }
-    }
-}
-
 /// Send one message and relay its answers; then settle what the relay still owes the client.
 async fn exchange<T: Transport>(transport: &T, outgoing: Outgoing, desk: &Desk) -> Outcome {
     let Outgoing {
@@ -183,7 +305,7 @@ async fn exchange<T: Transport>(transport: &T, outgoing: Outgoing, desk: &Desk) 
         kind,
         initialize,
     } = outgoing;
-    let (events, mut arriving) = mpsc::channel::<String>(QUEUE);
+    let (events, mut arriving) = mpsc::channel::<String>(AHEAD);
     let streamed = async {
         let mut seen = Seen::default();
         while let Some(data) = arriving.recv().await {
@@ -236,10 +358,75 @@ async fn exchange<T: Transport>(transport: &T, outgoing: Outgoing, desk: &Desk) 
     }
 }
 
+/// Read the input to its end, forwarding each message, then let what is in flight finish;
+/// returns the exit code.
+async fn forward<T: Transport, I: AsyncRead + Unpin>(
+    transport: Arc<T>,
+    input: I,
+    limits: Limits,
+    desk: &Desk,
+) -> u8 {
+    let mut frames = Frames::new(BufReader::new(input), limits.line_bytes);
+    let mut flight = Flight::new();
+    let mut lifecycle = Lifecycle::default();
+    let permits = Arc::new(Semaphore::new(limits.in_flight));
+    let mut code = 0;
+    loop {
+        let bytes = match frames.next().await {
+            Ok(Frame::Line(bytes)) => bytes,
+            Ok(Frame::End) => break,
+            Ok(Frame::TooLong) => {
+                let why = format!("{TOO_LONG} {} bytes", limits.line_bytes);
+                line(desk, error_line(None, INVALID_REQUEST, &why)).await;
+                continue;
+            }
+            Err(error) => {
+                note(desk, &format!("the input stream failed: {error}")).await;
+                code = 1;
+                break;
+            }
+        };
+        let outgoing = match prepare(&bytes, &mut lifecycle) {
+            Ok(Some(outgoing)) => outgoing,
+            Ok(None) => continue,
+            Err(Refusal::Answer(answer)) => {
+                line(desk, answer).await;
+                continue;
+            }
+            Err(Refusal::Log(why)) => {
+                note(desk, &why).await;
+                continue;
+            }
+        };
+        drop(bytes);
+        // While what waits to be written fills its room, this one message is held, and
+        // nothing more is read or forwarded.
+        vacancy(desk).await;
+        if outgoing.initialize {
+            flight.drain(desk).await;
+            let outcome = exchange(transport.as_ref(), outgoing, desk).await;
+            lifecycle.version = outcome.negotiated;
+            lifecycle.session = outcome.session;
+        } else {
+            // The semaphore is never closed, so a permit is always granted.
+            let permit = permits.clone().acquire_owned().await.ok();
+            let name = called(&outgoing.kind);
+            let (transport, desk) = (transport.clone(), desk.clone());
+            flight.start(name, async move {
+                let _permit = permit;
+                exchange(transport.as_ref(), outgoing, &desk).await;
+            });
+        }
+        flight.reap(desk).await;
+    }
+    code.max(close(flight, limits.closing, desk).await)
+}
+
 /// Queue one protocol line for the output stream, without the credential.
 ///
-/// Every line the relay writes passes here, the service's own and the relay's alike. Returns
-/// false when the line was withheld because it could not be cleaned.
+/// Every line the relay writes passes here, the service's own and the relay's alike. It waits
+/// until the line has room among what waits to be written. Returns false when the line was
+/// withheld because it could not be cleaned.
 async fn line(desk: &Desk, text: String) -> bool {
     let Some(clean) = desk.secret.redact_line(text) else {
         note(
@@ -249,90 +436,57 @@ async fn line(desk: &Desk, text: String) -> bool {
         .await;
         return false;
     };
-    // The receiver is gone only when the output stream failed; the read loop then ends.
-    let _ = desk.lines.send(clean).await;
+    let held = reserve(desk, clean.len()).await;
+    // The receiver is gone only when the output stream failed; the relay then stops.
+    let _ = desk.lines.send((clean, held)).await;
     true
 }
 
-/// Queue one diagnostic for the error stream.
+/// Queue one diagnostic for the error stream, once it has room.
 async fn note(desk: &Desk, text: &str) {
+    let held = reserve(desk, text.len()).await;
     // The receiver lives until every sender is dropped.
-    let _ = desk.notes.send(text.to_owned()).await;
+    let _ = desk.notes.send((text.to_owned(), held)).await;
 }
 
-/// Read the input to its end, forwarding each message; returns the exit code.
+/// Forward the input until it ends, or until the output stream fails, whichever is first.
+///
+/// A failed output is noticed at any moment: while a line is awaited, while `initialize` is
+/// exchanged, while a message waits for its turn or for room, and while the relay closes.
+/// The messages in flight then end with the relay.
 async fn read<T: Transport, I: AsyncRead + Unpin>(
     transport: Arc<T>,
     input: I,
     limits: Limits,
     desk: Desk,
 ) -> u8 {
-    let mut frames = Frames::new(BufReader::new(input), limits.line_bytes);
-    let mut tasks = JoinSet::new();
-    let mut lifecycle = Lifecycle::default();
-    let permits = Arc::new(Semaphore::new(limits.in_flight));
-    let mut code = 0;
-    loop {
-        let frame = tokio::select! {
-            frame = frames.next() => frame,
-            () = desk.lines.closed() => {
-                note(&desk, "the output stream failed; the relay stops").await;
-                return 1;
-            }
-        };
-        let bytes = match frame {
-            Ok(Frame::Line(bytes)) => bytes,
-            Ok(Frame::End) => break,
-            Ok(Frame::TooLong) => {
-                let why = format!("{TOO_LONG} {} bytes", limits.line_bytes);
-                line(&desk, error_line(None, INVALID_REQUEST, &why)).await;
-                continue;
-            }
-            Err(error) => {
-                note(&desk, &format!("the input stream failed: {error}")).await;
-                code = 1;
-                break;
-            }
-        };
-        let outgoing = match prepare(&bytes, &mut lifecycle) {
-            Ok(Some(outgoing)) => outgoing,
-            Ok(None) => continue,
-            Err(Refusal::Answer(answer)) => {
-                line(&desk, answer).await;
-                continue;
-            }
-            Err(Refusal::Log(why)) => {
-                note(&desk, &why).await;
-                continue;
-            }
-        };
-        if outgoing.initialize {
-            drain(&mut tasks, &desk).await;
-            let outcome = exchange(transport.as_ref(), outgoing, &desk).await;
-            lifecycle.version = outcome.negotiated;
-            lifecycle.session = outcome.session;
-        } else {
-            // The semaphore is never closed, so a permit is always granted.
-            let permit = permits.clone().acquire_owned().await.ok();
-            let (transport, desk) = (transport.clone(), desk.clone());
-            tasks.spawn(async move {
-                let _permit = permit;
-                exchange(transport.as_ref(), outgoing, &desk).await;
-            });
-        }
-        // Forget the exchanges that have finished, so a long session holds only those in flight.
-        while let Some(joined) = tasks.try_join_next() {
-            if let Err(error) = joined {
-                note(
-                    &desk,
-                    &format!("a message's exchange ended abnormally: {error}"),
-                )
-                .await;
-            }
+    tokio::select! {
+        code = forward(transport, input, limits, &desk) => code,
+        () = desk.lines.closed() => {
+            note(&desk, "the output stream failed; the relay stops").await;
+            1
         }
     }
-    drain(&mut tasks, &desk).await;
-    code
+}
+
+/// Take the room `length` bytes need among what waits to be written, waiting until it is free.
+///
+/// The room is given back when the permit is dropped, which the writer does once the text is
+/// written. A text longer than the whole room takes all of it.
+async fn reserve(desk: &Desk, length: usize) -> Option<OwnedSemaphorePermit> {
+    let wanted = u32::try_from(length)
+        .unwrap_or(u32::MAX)
+        .min(desk.budget)
+        .max(1);
+    // The semaphore is never closed, so the room is always granted in the end.
+    desk.room.clone().acquire_many_owned(wanted).await.ok()
+}
+
+/// Wait until what waits to be written leaves room: one byte free, and no text that asked
+/// for room before this call still waiting for it.
+async fn vacancy(desk: &Desk) {
+    // The semaphore is never closed. The permit is given back at once: this only waits.
+    drop(desk.room.acquire().await);
 }
 
 /// Run the relay: reach the service, then forward messages until the input ends.
@@ -376,16 +530,23 @@ where
             return 1;
         }
     }
-    let (lines, queued_lines) = mpsc::channel::<String>(QUEUE);
-    let (notes, mut queued_notes) = mpsc::channel::<String>(QUEUE);
+    // A semaphore holds no more permits than this, and one text asks for no more than a `u32`.
+    let most = Semaphore::MAX_PERMITS.min(usize::try_from(u32::MAX).unwrap_or(usize::MAX));
+    let room = limits.waiting_bytes.min(most).max(1);
+    let (lines, queued_lines) = mpsc::channel::<Queued>(QUEUE);
+    let (notes, mut queued_notes) = mpsc::channel::<Queued>(QUEUE);
     let desk = Desk {
         lines,
         notes,
         secret: secret.clone(),
+        room: Arc::new(Semaphore::new(room)),
+        budget: u32::try_from(room).unwrap_or(u32::MAX),
     };
     let noting = async {
-        while let Some(text) = queued_notes.recv().await {
+        while let Some((text, held)) = queued_notes.recv().await {
             say(&mut stderr, &secret, &text).await;
+            // Written: its room is free again.
+            drop(held);
         }
     };
     let (code, written, ()) = tokio::join!(
@@ -500,13 +661,15 @@ fn with_id(text: &str, id: &str) -> Option<String> {
 
 /// Write each queued line whole, followed by a line feed, until every sender is gone.
 async fn write<O: AsyncWrite + Unpin>(
-    mut queued: mpsc::Receiver<String>,
+    mut queued: mpsc::Receiver<Queued>,
     mut output: O,
 ) -> std::io::Result<()> {
-    while let Some(mut text) = queued.recv().await {
+    while let Some((mut text, held)) = queued.recv().await {
         text.push('\n');
         output.write_all(text.as_bytes()).await?;
         output.flush().await?;
+        // Written: its room is free again.
+        drop(held);
     }
     Ok(())
 }

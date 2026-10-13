@@ -297,8 +297,19 @@ pub async fn relay_over<I: AsyncRead + Unpin, O: AsyncWrite + Unpin>(
     stdout: O,
 ) -> Outcome<(u8, String)> {
     let mut stderr = Vec::new();
+    let code = relay_on(setup, stdin, stdout, &mut stderr).await?;
+    Ok((code, String::from_utf8(stderr)?))
+}
+
+/// Run the relay over the three given streams; returns its exit code.
+pub async fn relay_on<I: AsyncRead + Unpin, O: AsyncWrite + Unpin, E: AsyncWrite + Unpin>(
+    setup: Setup,
+    stdin: I,
+    stdout: O,
+    stderr: E,
+) -> Outcome<u8> {
     let secret = some(Credential::parse(setup.token, "the test")?, "a credential")?;
-    let code = serve(
+    Ok(serve(
         Relay {
             transport: setup.transport,
             launcher: setup.launcher,
@@ -310,11 +321,10 @@ pub async fn relay_over<I: AsyncRead + Unpin, O: AsyncWrite + Unpin>(
         Streams {
             stdin,
             stdout,
-            stderr: &mut stderr,
+            stderr,
         },
     )
-    .await;
-    Ok((code, String::from_utf8(stderr)?))
+    .await)
 }
 
 /// The service answered with `status` and `body`.

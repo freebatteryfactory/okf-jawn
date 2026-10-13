@@ -256,6 +256,8 @@ fn mcp_stdio_default_bounds_are_the_stated_ones() {
     assert_eq!(limits.line_bytes, MAX_REQUEST_BODY_BYTES);
     assert_eq!(limits.answer_bytes, 67_108_864);
     assert_eq!(limits.in_flight, 16);
+    assert_eq!(limits.waiting_bytes, 67_108_864);
+    assert_eq!(limits.closing, Duration::from_secs(120));
 }
 
 /// B7: the token file is read up to its bound and no further. A first line of exactly the

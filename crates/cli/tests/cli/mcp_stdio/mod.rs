@@ -27,6 +27,7 @@ pub fn response(id: &Value, result: &Value) -> Value {
 mod answers;
 mod credential;
 mod errors;
+mod flow;
 mod forwarding;
 mod framing;
 mod review;
