@@ -484,6 +484,15 @@ fn comment_request(
 /// Create the target and the survivor, draft in the target, comment in each citing the other,
 /// purge the target through dispatch and carry the purge out as its tenant job does.
 async fn purged(directory: &Path) -> Fallible<Purged> {
+    purged_after(directory, |_| Ok(())).await
+}
+
+/// `purged`, with `before_job` run on the records database after the purge is requested and
+/// before its tenant job runs, to set the ledger's clock.
+async fn purged_after(
+    directory: &Path,
+    before_job: impl FnOnce(&Path) -> TestResult,
+) -> Fallible<Purged> {
     let harness = Harness::new(Storage::open(directory)?);
     let create_target = first(
         &harness,
@@ -544,6 +553,7 @@ async fn purged(directory: &Path) -> Fallible<Purged> {
         json!({ "workspace_id": target, "base_revision": head, "idempotency_key": key(4) }),
     )
     .await?;
+    before_job(&directory.join("records.sqlite"))?;
     let recorded: Purge = serde_json::from_value(purge_request.1.clone())?;
     let records = harness.storage.records();
     let claimed = some(records.claim_job(recorded.job_id).await?, "the purge job")?;
@@ -739,6 +749,61 @@ async fn purge_ledger_a_comment_citing_the_purged_workspace_still_replays() -> T
         purged.harness.runs_of("add_comment")?.len(),
         2,
         "the two comments ran once each; the retry is a replay"
+    );
+    Ok(())
+}
+
+/// Round 2, B2: the purge keeps an emptied row's `finished_ms`, so it expires when the completed
+/// row would have, seven days after it completed, not seven days after the purge. The rows
+/// completed six days ago; the purge leaves that time as it was; two days later a `begin` drops
+/// them. A purge that cleared the time would leave rows no sweep ever reaches.
+#[tokio::test]
+async fn purge_ledger_an_emptied_row_expires_on_the_clock_of_the_completed_one() -> TestResult {
+    const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("records.sqlite");
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis(),
+    )?;
+    let six_days_ago = now - 6 * DAY_MS;
+    let purged = purged_after(directory.path(), |records| {
+        rusqlite::Connection::open(records)?
+            .execute("UPDATE mutations SET finished_ms = ?1", [six_days_ago])?;
+        Ok(())
+    })
+    .await?;
+    let finished = |state: &str| -> Fallible<Vec<Option<i64>>> {
+        let connection = rusqlite::Connection::open(&records)?;
+        let mut statement = connection
+            .prepare("SELECT finished_ms FROM mutations WHERE workspace_id = ?1 AND state = ?2")?;
+        let times = statement
+            .query_map([purged.target.0.to_string(), state.to_owned()], |row| {
+                row.get(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(times)
+    };
+    assert_eq!(
+        finished("released")?,
+        vec![Some(six_days_ago); 3],
+        "the create, the draft and the comment, emptied, keep the time they completed"
+    );
+    rusqlite::Connection::open(&records)?.execute(
+        "UPDATE mutations SET finished_ms = finished_ms - ?1",
+        [2 * DAY_MS],
+    )?;
+    call(
+        &purged.harness,
+        "create_workspace",
+        json!({ "name": "Another", "description": "", "idempotency_key": key(9) }),
+    )
+    .await?;
+    assert_eq!(
+        ledger_rows(directory.path(), purged.target, "released")?,
+        Vec::<String>::new(),
+        "eight days after they completed, the next begin dropped the emptied rows"
     );
     Ok(())
 }
