@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MAX_DROP_DEPTH, MAX_DROP_FILES, PROGRESS_EVERY } from '../../src/features/imports/files';
 import { resetUploads } from '../../src/features/imports/uploading';
 import { mockApi, ok } from './support/api';
-import { type DroppedEntry, droppedFile, droppedFolder, dropOf, fileOf } from './support/imports';
+import { type DroppedEntry, dropOf, droppedFile, droppedFolder, fileOf } from './support/imports';
 import { explorerHandlers, renderAt, WS, writableWorkspace } from './support/workspace';
 
 configure({ asyncUtilTimeout: 10_000 });
