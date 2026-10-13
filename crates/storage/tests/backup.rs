@@ -5292,6 +5292,103 @@ async fn backup_a_records_schema_1_archive_restores_by_replacement() -> TestResu
     Ok(())
 }
 
+/// Records schema 3 and older archives: a backup set written from a data directory at records
+/// schema 2 restores on this build, by replacement and by import. The live records are put
+/// back as schema 2 left them (schema 3 only adds the table of kept warnings), and opening the
+/// directory writes the pre-migration set from that schema-2 database before it migrates. That
+/// set's workspace archive holds records at `user_version` 2 with no `commit_warnings` table.
+/// It restores by replacement into an emptied directory, where a restored commit replays with
+/// the unavailable warning, and by import into a blank workspace.
+///
+/// The limit of this test: the archive is written by this build's writer from a schema-2
+/// database, not by a build that stopped at schema 2. It needs no committed fixture.
+/// (Reviewer probe PB1, adopted.)
+#[tokio::test]
+async fn backup_a_records_schema_2_backup_set_restores_by_replacement_and_by_import() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let workspace = fixture.workspace.clone();
+    drop(fixture);
+    rusqlite::Connection::open(directory.path().join("records.sqlite"))?
+        .execute_batch("DROP TABLE commit_warnings; PRAGMA user_version = 2;")?;
+    let (installation, archive) = {
+        let storage = Storage::open(directory.path())?;
+        let sets: Vec<_> = std::fs::read_dir(storage.data().pre_migration_path())?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect();
+        let (installation, archive) =
+            set_of(some(sets.first(), "the pre-migration set")?, &workspace);
+        let copies = (
+            output.path().join("installation.zip"),
+            output.path().join("workspace.zip"),
+        );
+        std::fs::copy(installation, &copies.0)?;
+        std::fs::copy(archive, &copies.1)?;
+        copies
+    };
+    let staged = output.path().join("records.sqlite");
+    std::fs::write(
+        &staged,
+        entry_bytes_of(&std::fs::read(&archive)?, "records.sqlite")?,
+    )?;
+    assert_eq!(
+        count(&staged, "PRAGMA user_version")?,
+        2,
+        "a schema-2 archive"
+    );
+    assert_eq!(
+        count(
+            &staged,
+            "SELECT count(*) FROM sqlite_schema WHERE name = 'commit_warnings'"
+        )?,
+        0,
+        "with no table of kept warnings"
+    );
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    restored
+        .backups()
+        .restore_replacement(&installation, std::slice::from_ref(&archive))
+        .await?;
+    let live = directory.path().join("records.sqlite");
+    assert_eq!(count(&live, "PRAGMA user_version")?, 3);
+    assert_eq!(count(&live, "SELECT count(*) FROM workspaces")?, 1);
+    assert!(
+        count(&live, "SELECT count(*) FROM drafts")? > 0,
+        "its drafts are restored"
+    );
+    assert_eq!(count(&live, "SELECT count(*) FROM commit_warnings")?, 0);
+    // A commit of the restored history (the fixture's, mutation 3) has no kept warnings.
+    let versions = restored.versions();
+    let archived = versions.find_commit(&workspace, uuid!(3)?, None).await?;
+    let archived = some(archived, "a commit of the restored history")?;
+    assert_eq!(codes(&archived.warnings), [REPLAY_WARNINGS_UNAVAILABLE]);
+    // By import, into a blank workspace of another tenant of the restored installation.
+    let (target, _) = create(&restored, "elsewhere", 80, "Copy").await?;
+    let uploaded = restored
+        .blobs()
+        .put(
+            &target,
+            Box::pin(std::io::Cursor::new(std::fs::read(&archive)?)),
+            1 << 30,
+            None,
+        )
+        .await?
+        .digest;
+    restored
+        .backups()
+        .restore_import(&target, uploaded, uuid!(84)?, vec!["ana".to_owned()])
+        .await?;
+    let imported = versions.find_commit(&target, uuid!(84)?, None).await?;
+    let imported = some(imported, "the import's commit")?;
+    assert_eq!(imported.revision, versions.head(&target).await?);
+    Ok(())
+}
+
 /// Gap 2: a `records.sqlite` that is not a database is refused as invalid input.
 #[tokio::test]
 async fn rr5_a_records_entry_that_is_not_a_database_is_invalid_input() -> TestResult {
