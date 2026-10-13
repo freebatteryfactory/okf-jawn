@@ -1,10 +1,16 @@
 /**
- * The naming rules of the workspace: a form over them, saving them, a preview of what they would
- * rename, and applying a preview the person has seen (SPEC section 6).
+ * The naming rules of the workspace: a form over them and an advanced YAML view of the same rules,
+ * saving them, a preview of what they would rename, and applying a preview the person has seen
+ * (SPEC section 6).
  *
- * One value is edited: the rules as the form holds them, starting from the saved rules of the
- * version the workspace shows. Nothing is sent while that value has a problem: the problems are
- * shown at their fields and in a list, and Save and Preview say so instead of asking the service.
+ * One value is edited, starting from the saved rules of the version the workspace shows. The form
+ * and the YAML view are two views of it, one on screen at a time: a change in the form is written
+ * into the YAML, and YAML that can be read becomes what the form shows. The value is kept as it
+ * is: a key neither view knows is never dropped. YAML that cannot be read changes nothing: the
+ * value stays the last one that could, the text stays as typed (through a change of view too),
+ * and its problems are listed with their lines. Nothing is sent while the YAML cannot be read or
+ * the value has a problem by the service's schema: the problems are shown at their fields and in
+ * a list, and Save and Preview say so instead of asking the service.
  *
  * A preview writes nothing. It lists each item that would be renamed with its name now and its
  * name after, as a table (read row by row with a screen reader's table keys; the column it is in
@@ -19,12 +25,16 @@
  * button that opened it; after the renaming focus is on the panel's heading. Buttons that can
  * become unavailable with focus use `aria-disabled`.
  */
+
+import { Tabs } from '@base-ui/react/tabs';
 import type { RJSFSchema } from '@rjsf/utils';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useId, useLayoutEffect, useRef, useState } from 'react';
 import { z } from 'zod';
 import type { NamingRules, RenamePlan, Revision } from '../../api/generated/types.gen';
 import { keyed } from '../../lib/keys';
+import { YamlEditor, YamlFindings } from '../../lib/YamlEditor';
+import { readYaml, writeYaml, type YamlRead } from '../../lib/yaml';
 import { short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
@@ -114,11 +124,17 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
   // The rules being edited: undefined while they are the saved ones, untouched.
   const [edited, setEdited] = useState<unknown>(undefined);
   const value = edited === undefined ? saved.data : edited;
+  // Which view is on screen, and the YAML as typed: null while it is the value written out.
+  const [view, setView] = useState<'form' | 'yaml'>('form');
+  const [typed, setTyped] = useState<{ text: string; read: YamlRead } | null>(null);
+  const unreadable = typed !== null && !typed.read.ok;
+  const findingsId = useId();
   const shape = zSchema.safeParse(schema.data);
   const form: RJSFSchema | null = shape.success ? shape.data : null;
   const problems = form === null || value === undefined ? [] : rulesProblems(form, value);
   // Without a problem by the service's own schema, the value is rules that can be sent.
-  const rules = form !== null && problems.length === 0 && formHolds(value) ? value : null;
+  const rules =
+    form !== null && !unreadable && problems.length === 0 && formHolds(value) ? value : null;
   const changed =
     edited !== undefined && saved.data !== undefined && !sameRules(edited, saved.data);
 
@@ -274,19 +290,64 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
       )}
       {form !== null && value !== undefined && (
         <>
-          {formHolds(value) ? (
-            <RulesForm schema={form} value={value} onChange={setEdited} />
-          ) : (
-            <p role="note" className="notice">
-              What is held here is not a set of rules, so there is no form for it.
-            </p>
-          )}
+          <Tabs.Root
+            value={view}
+            onValueChange={(next) => {
+              if (next === 'form' || next === 'yaml') setView(next);
+            }}
+          >
+            <Tabs.List aria-label="How the rules are shown" className="tab-list">
+              <Tabs.Tab value="form" className="tab">
+                Form
+              </Tabs.Tab>
+              <Tabs.Tab value="yaml" className="tab">
+                YAML
+              </Tabs.Tab>
+            </Tabs.List>
+            <Tabs.Panel value="form">
+              {unreadable && (
+                <p role="note" className="notice">
+                  The YAML view holds text that cannot be read. Below are the last rules that could
+                  be. A change made here replaces that text.
+                </p>
+              )}
+              {formHolds(value) ? (
+                <RulesForm
+                  schema={form}
+                  value={value}
+                  onChange={(next) => {
+                    // The form is one view of the value: the YAML is written from it again.
+                    setEdited(next);
+                    setTyped(null);
+                  }}
+                />
+              ) : (
+                <p role="note" className="notice">
+                  What the YAML view holds is not a set of rules, so there is no form for it.
+                </p>
+              )}
+            </Tabs.Panel>
+            <Tabs.Panel value="yaml">
+              <YamlEditor
+                label="The naming rules as YAML"
+                initialText={typed?.text ?? writeYaml(value)}
+                describedBy={findingsId}
+                onChange={(text) => {
+                  const read = readYaml(text);
+                  setTyped({ text, read });
+                  // Only YAML that can be read becomes the rules; otherwise they stay as they were.
+                  if (read.ok) setEdited(read.value);
+                }}
+              />
+            </Tabs.Panel>
+          </Tabs.Root>
           <div
             ref={problemsRef}
             tabIndex={-1}
-            className={problems.length > 0 ? 'failure-notice' : undefined}
+            className={problems.length > 0 && !unreadable ? 'failure-notice' : undefined}
           >
-            {problems.length > 0 && (
+            <YamlFindings id={findingsId} read={typed?.read ?? null} />
+            {problems.length > 0 && !unreadable && (
               <div role="alert">
                 <p>
                   <strong>

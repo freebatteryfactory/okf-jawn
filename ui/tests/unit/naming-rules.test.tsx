@@ -14,6 +14,7 @@ import { RulesForm, rulesProblems } from '../../src/features/conventions/RulesFo
 import { type Preview, sameRules } from '../../src/features/conventions/rules';
 import { resetDraftSessions } from '../../src/features/drafts/saving';
 import { type Handler, type Json, mockApi, ok, type Reply } from './support/api';
+import { findTextBox, replaceText, textIn } from './support/editor';
 import {
   DIGEST,
   HEAD,
@@ -610,6 +611,89 @@ describe('the naming rules', () => {
     await userEvent.click(button('Try again'));
     await waitFor(() => expect(own.api.callsTo(PREVIEW)).toHaveLength(3));
     expect(own.api.callsTo(PREVIEW).at(2)).toEqual(own.api.callsTo(PREVIEW).at(1));
+  });
+
+  it('shows the same rules as YAML: a change in the form shows in the YAML, and the reverse', async () => {
+    const { api } = service();
+    await openRules();
+    await setPrefix('2025-');
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const box = await findTextBox('The naming rules as YAML');
+    expect(textIn(box)).toContain('schema_version: 1');
+    expect(textIn(box)).toContain('prefix: 2025-');
+    // Text another YAML reader would take for a date or a boolean is written in quotes.
+    expect(textIn(box)).toContain('date_order: ymd');
+    replaceText(box, textIn(box).replace('prefix: 2025-', 'prefix: draft-'));
+    await userEvent.click(screen.getByRole('tab', { name: 'Form' }));
+    expect(prefix()).toHaveProperty('value', 'draft-');
+    await userEvent.click(button('Save the rules'));
+    await waitFor(() => expect(api.callsTo(SET)).toHaveLength(1));
+    expect(api.callsTo(SET).at(0)?.rules).toEqual({
+      schema_version: 1,
+      rules: [{ ...rule, prefix: 'draft-' }],
+    });
+    expect(api.violations).toEqual([]);
+  });
+
+  it('keeps a key typed in the YAML through an edit in the form, exactly, and sends nothing with it', async () => {
+    const { api } = service();
+    await openRules();
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const box = await findTextBox('The naming rules as YAML');
+    replaceText(box, `${textIn(box)}x-team:\n  owner: ada\n  tags: [a, b]\n`);
+    expect(within(panel()).getByRole('alert').textContent).toContain('“x-team”');
+    await userEvent.click(screen.getByRole('tab', { name: 'Form' }));
+    await setPrefix('2025-');
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const again = await findTextBox('The naming rules as YAML');
+    expect(textIn(again)).toContain('prefix: 2025-');
+    expect(textIn(again)).toContain('x-team:\n  owner: ada\n  tags:\n    - a\n    - b\n');
+    await userEvent.click(button('Save the rules'));
+    await userEvent.click(button('Preview the renames'));
+    expect(writes(api)).toEqual([]);
+    expect(api.callsTo(PREVIEW)).toEqual([]);
+  });
+
+  it('never sends YAML that cannot be read: the problem is at its line, the rules stay, the text stays', async () => {
+    const { api } = service();
+    await openRules();
+    await setPrefix('2025-');
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const box = await findTextBox('The naming rules as YAML');
+    const broken = 'schema_version: 1\nrules: [\n';
+    replaceText(box, broken);
+    const alert = within(panel()).getByRole('alert');
+    expect(alert.textContent).toContain('This YAML cannot be read. Nothing of it is sent.');
+    expect(alert.textContent).toMatch(/Line 3, column 1: /);
+    // The text box is described by what is wrong with it.
+    const described = box.getAttribute('aria-describedby') ?? '';
+    expect(document.getElementById(described)?.contains(alert)).toBe(true);
+    await userEvent.click(button('Save the rules'));
+    await userEvent.click(button('Preview the renames'));
+    expect(writes(api)).toEqual([]);
+    expect(api.callsTo(PREVIEW)).toEqual([]);
+    expect(document.activeElement?.textContent).toContain('This YAML cannot be read');
+    // The form shows the last rules that could be read, and says so; the text is kept as typed.
+    await userEvent.click(screen.getByRole('tab', { name: 'Form' }));
+    expect(prefix()).toHaveProperty('value', '2025-');
+    expect(panel().textContent).toContain('The YAML view holds text that cannot be read.');
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    expect(textIn(await findTextBox('The naming rules as YAML'))).toBe(broken);
+  });
+
+  it('names what is wrong with readable YAML that is not valid rules, and sends nothing', async () => {
+    const { api } = service();
+    await openRules();
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const box = await findTextBox('The naming rules as YAML');
+    replaceText(box, textIn(box).replace('case: kebab', 'case: shouting'));
+    expect(within(panel()).getByRole('alert').textContent).toContain('.rules.0.case must');
+    replaceText(box, '- just\n- a list\n');
+    expect(within(panel()).getByRole('alert').textContent).toMatch(/must be object/);
+    await userEvent.click(button('Save the rules'));
+    expect(writes(api)).toEqual([]);
+    await userEvent.click(screen.getByRole('tab', { name: 'Form' }));
+    expect(panel().textContent).toContain('What the YAML view holds is not a set of rules');
   });
 
   it('lets a person who may only read preview, and offers them neither Save nor Apply', async () => {
