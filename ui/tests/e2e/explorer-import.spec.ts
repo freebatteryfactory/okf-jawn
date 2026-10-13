@@ -336,6 +336,34 @@ test.describe('bringing files in', () => {
     await expectNoAxeViolations(page, 'the list after a removal');
   });
 
+  test('files dropped on the page are listed, beside the tree’s own drag and drop', async ({
+    page,
+  }) => {
+    const service = await play(page, sink.origin());
+    await page.goto(`${server.origin()}/w/${WS}/import`);
+    // The folder tree is on the page: its drag-and-drop listens on the window for every drag.
+    await expect(page.getByRole('treeitem', { name: 'notes' })).toBeVisible();
+    const errors: string[] = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    await page.evaluate(() => {
+      const target = document.querySelector('.drop-target');
+      const carried = new DataTransfer();
+      carried.items.add(new File(['abc'], 'dropped.txt', { type: 'text/plain' }));
+      carried.items.add(new File(['abcd'], 'second.txt', { type: 'text/plain' }));
+      for (const type of ['dragenter', 'dragover', 'drop']) {
+        target?.dispatchEvent(
+          new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: carried }),
+        );
+      }
+    });
+    await expect(page.getByText('2 files added.')).toBeVisible();
+    expect(await listedPaths(page)).toEqual(['dropped.txt', 'second.txt']);
+    await expect(rowOf(page, 'second.txt')).toContainText('4 bytes');
+    expect(service.slots).toEqual([]);
+    expect(errors).toEqual([]);
+    await expectNoAxeViolations(page, 'the files dropped for import');
+  });
+
   test('an upload that fails once and is retried', async ({ page, context }) => {
     const service = await play(page, sink.origin());
     service.failUploads = 1;

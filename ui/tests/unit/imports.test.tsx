@@ -92,6 +92,19 @@ function choose(button: string, files: File[]) {
   return picker;
 }
 
+/**
+ * Drop files on the import page as a browser delivers a drop: the drag enters, moves over, and is
+ * dropped. The folder tree is on the page with its own drag-and-drop listening on the window, as
+ * in the real page, so the drop is one the two must both live with.
+ */
+async function dropOn(drop: ReturnType<typeof dropOf>) {
+  await screen.findByRole('treeitem', { name: 'notes' });
+  const target = screen.getByRole('group', { name: 'Choose what to import' });
+  fireEvent.dragEnter(target, { dataTransfer: drop });
+  fireEvent.dragOver(target, { dataTransfer: drop });
+  fireEvent.drop(target, { dataTransfer: drop });
+}
+
 const rows = () =>
   within(screen.getByRole('list', { name: /^Files to import/ })).getAllByRole('listitem');
 const rowOf = (path: string) => {
@@ -168,9 +181,7 @@ describe('choosing files', () => {
         ]),
       ]),
     ]);
-    fireEvent.drop(screen.getByRole('group', { name: 'Choose what to import' }), {
-      dataTransfer: drop,
-    });
+    await dropOn(drop);
     await screen.findByText('4 files added.');
     expect(rows().map((row) => row.textContent?.split(' ').at(0))).toEqual([
       'x.txt',
@@ -187,9 +198,7 @@ describe('choosing files', () => {
       droppedFile(fileOf('x.txt', 'abc')),
       droppedFolder('locked', [droppedFile(fileOf('a.txt', 'abc'))], true),
     ]);
-    fireEvent.drop(screen.getByRole('group', { name: 'Choose what to import' }), {
-      dataTransfer: drop,
-    });
+    await dropOn(drop);
     await screen.findByText('1 file added. 1 dropped entry could not be read and is not listed.');
     expect(rows()).toHaveLength(1);
   });

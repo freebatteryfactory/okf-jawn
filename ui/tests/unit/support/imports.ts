@@ -104,11 +104,21 @@ export function droppedFolder(name: string, children: unknown[], unreadable = fa
   };
 }
 
-/** What a drop carries: one item for each thing dropped. */
+/**
+ * What a drag of files from the computer carries: one item for each thing dragged, and "Files"
+ * among its types, which is how a page (and the tree's own drag-and-drop) knows it for one.
+ */
 export function dropOf(entries: unknown[]) {
   return {
-    items: entries.map((entry) => ({ webkitGetAsEntry: () => entry, getAsFile: () => null })),
+    types: ['Files'],
+    items: entries.map((entry) => ({
+      kind: 'file',
+      webkitGetAsEntry: () => entry,
+      getAsFile: () => null,
+    })),
     files: [],
+    dropEffect: 'none',
+    effectAllowed: 'all',
   };
 }
 
