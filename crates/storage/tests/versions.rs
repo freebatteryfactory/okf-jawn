@@ -254,7 +254,10 @@ async fn mutation_crash_reconcile_retry_returns_the_first_commit_and_writes_no_s
         key: uuid!(90)?,
     };
     let digest = okf_jawn_contract::identity::Digest::try_from("a".repeat(64))?;
-    let BeginOutcome::New(lease) = ledger.begin(&key, &digest).await? else {
+    let BeginOutcome::New(lease) = ledger
+        .begin(&key, &digest, Some(scope.workspace_id))
+        .await?
+    else {
         return Err("expected a new mutation".into());
     };
     let item: ItemId = uuid!(10)?;
@@ -279,7 +282,10 @@ async fn mutation_crash_reconcile_retry_returns_the_first_commit_and_writes_no_s
     // The process dies here: `MutationStore::complete` is never written. The lease runs out.
     let connection = rusqlite::Connection::open(storage.data().records_path())?;
     connection.execute("UPDATE mutations SET lease_expires_ms = 0", [])?;
-    let BeginOutcome::Abandoned { lease: resumed } = ledger.begin(&key, &digest).await? else {
+    let BeginOutcome::Abandoned { lease: resumed } = ledger
+        .begin(&key, &digest, Some(scope.workspace_id))
+        .await?
+    else {
         return Err("expected the crashed mutation to resume".into());
     };
     assert_eq!(resumed.mutation_id, lease.mutation_id);

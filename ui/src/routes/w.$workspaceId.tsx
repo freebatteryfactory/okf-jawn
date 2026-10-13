@@ -1,0 +1,122 @@
+/**
+ * One workspace: the Explorer shell over the workspace head the server resolved.
+ *
+ * The workspace id in the path is checked with the generated schema before anything is sent: a
+ * malformed one gets a plain-language message and no request.
+ *
+ * The shell lists the head resolved when the workspace opened, "as of" that moment, and moves to
+ * another head only on Refresh: tree, unpinned reads and search pages stay on the revision they
+ * were opened at (SPEC section 7: "pagination stays tied to the same revision and
+ * representation"). Whether a newer head exists is checked apart, on window focus (the shell's
+ * head line). A failed refresh keeps the Explorer and says so there. A workspace that failed to
+ * open keeps its notice through a retry, which ends with focus on the workspace's name.
+ */
+import { useQuery } from '@tanstack/react-query';
+import { createFileRoute, Link } from '@tanstack/react-router';
+import { type ReactNode, type RefCallback, useLayoutEffect, useRef } from 'react';
+import { openWorkspaceOptions } from '../api/generated/@tanstack/react-query.gen';
+import { zWorkspaceId } from '../api/generated/zod.gen';
+import { FailureNotice } from '../features/errors/FailureNotice';
+import { useRetry } from '../features/errors/retry';
+import { ExplorerShell } from '../features/explorer/ExplorerShell';
+import { validateWorkspaceSearch } from '../features/explorer/search-params';
+import { pageHeading, takeHeld, useWatchedPart } from '../lib/focus';
+
+export const Route = createFileRoute('/w/$workspaceId')({
+  validateSearch: validateWorkspaceSearch,
+  component: WorkspaceRoute,
+});
+
+/**
+ * The page while there is no Explorer: the workspace is opening, did not open, or the link is not
+ * valid. Like every page it has a level-one heading, read out but not drawn; the Explorer's is the
+ * workspace's name. It takes focus from script: where keyboard focus goes when it was in a failure
+ * notice that left with nothing loaded in its place (`useRetry`).
+ */
+function BeforeTheExplorer({
+  children,
+  headingRef,
+}: {
+  children: ReactNode;
+  headingRef: RefCallback<HTMLHeadingElement>;
+}) {
+  return (
+    <div className="page-status">
+      <h1 className="sr-only" tabIndex={-1} ref={headingRef}>
+        Workspace
+      </h1>
+      {children}
+    </div>
+  );
+}
+
+function WorkspaceRoute() {
+  const { workspaceId } = Route.useParams();
+  const valid = zWorkspaceId.safeParse(workspaceId).success;
+  // The pinned head: resolved once when the workspace opens, again only on Refresh.
+  const workspace = useQuery({
+    ...openWorkspaceOptions({ body: { workspace_id: workspaceId } }),
+    enabled: valid,
+    staleTime: Number.POSITIVE_INFINITY,
+    refetchOnWindowFocus: false,
+  });
+  const nameRef = useRef<HTMLHeadingElement | null>(null);
+  const opening = useRetry({
+    request: workspaceId,
+    failed: workspace.data === undefined && workspace.isError,
+    error: workspace.error,
+    run: () => workspace.refetch(),
+    loaded: () => nameRef.current,
+  });
+  // The heading of the page before the Explorer can hold keyboard focus: a navigation ended on it,
+  // or a failure left nothing nearer to focus. When the Explorer replaces that page the heading
+  // goes, and focus that was on it goes on to the page's heading as it then is: the workspace's
+  // name.
+  const heldFocus = useRef<HTMLElement | null>(null);
+  const [, headingRef] = useWatchedPart<HTMLHeadingElement>(heldFocus);
+  useLayoutEffect(() => {
+    if (takeHeld(heldFocus)) pageHeading()?.focus();
+  });
+  if (!valid) {
+    return (
+      <BeforeTheExplorer headingRef={headingRef}>
+        <div role="alert" className="failure-notice">
+          <p>
+            <strong>This link is not valid.</strong>
+          </p>
+          <p>The address does not name a workspace. Nothing was requested.</p>
+          <Link to="/">Go to your workspaces</Link>
+        </div>
+      </BeforeTheExplorer>
+    );
+  }
+  if (workspace.data === undefined) {
+    if (opening.shown) {
+      return (
+        <BeforeTheExplorer headingRef={headingRef}>
+          <FailureNotice context="Opening this workspace" error={opening.error} retry={opening} />
+        </BeforeTheExplorer>
+      );
+    }
+    return (
+      <BeforeTheExplorer headingRef={headingRef}>
+        <p role="status">Opening the workspace…</p>
+      </BeforeTheExplorer>
+    );
+  }
+  return (
+    <ExplorerShell
+      workspace={workspace.data}
+      nameRef={nameRef}
+      head={{
+        resolvedAt: workspace.dataUpdatedAt,
+        refreshing: workspace.isFetching,
+        refreshError: workspace.isError ? workspace.error : null,
+        refresh: async () => {
+          const result = await workspace.refetch();
+          return result.isError ? null : (result.data?.head ?? null);
+        },
+      }}
+    />
+  );
+}

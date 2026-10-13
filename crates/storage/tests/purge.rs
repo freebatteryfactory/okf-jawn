@@ -58,6 +58,9 @@ macro_rules! uuid {
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 
+/// A ledger row as the table holds it: state, token, lease expiry, response and finish time.
+type RowState = (String, i64, i64, Option<String>, Option<i64>);
+
 /// Accepts every candidate.
 struct Accept;
 
@@ -409,7 +412,7 @@ async fn connect(
     }
 }
 
-/// A completed mutation whose stored response names the workspace and shows its name.
+/// A completed mutation of the workspace whose stored response shows its name.
 async fn remember(storage: &Storage, workspace: &StorageScope) -> Fallible<()> {
     let ledger = storage.mutations();
     let key = MutationKey {
@@ -420,13 +423,17 @@ async fn remember(storage: &Storage, workspace: &StorageScope) -> Fallible<()> {
         key: uuid!(42)?,
     };
     let BeginOutcome::New(lease) = ledger
-        .begin(&key, &Digest::try_from("a".repeat(64))?)
+        .begin(
+            &key,
+            &Digest::try_from("a".repeat(64))?,
+            Some(workspace.workspace_id),
+        )
         .await?
     else {
         return Err("expected a new mutation".into());
     };
-    let response = json!({ "id": workspace.workspace_id, "name": "zanzibar trip" });
-    ledger.complete(lease, response).await?;
+    let response = json!({ "name": "zanzibar trip" });
+    ledger.complete(lease, response, None).await?;
     Ok(())
 }
 
@@ -891,6 +898,259 @@ async fn purge_reaches_a_pre_migration_set_written_after_a_failed_attempt() -> T
         .await?;
     assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
     assert!(report.backups_removed >= 2, "{report:?}");
+    Ok(())
+}
+
+/// A completed ledger row of `tenant` for `operation` under key `n`, recording `workspace`.
+async fn completed_row(
+    storage: &Storage,
+    (tenant, operation, n): (&str, OperationName, u32),
+    workspace: Option<okf_jawn_contract::identity::WorkspaceId>,
+    response: serde_json::Value,
+) -> Fallible<()> {
+    let ledger = storage.mutations();
+    let key = MutationKey {
+        tenant_id: TenantId::try_from(tenant.to_owned())?,
+        subject: "ana".to_owned(),
+        client_id: None,
+        operation,
+        key: uuid!(n)?,
+    };
+    let BeginOutcome::New(lease) = ledger
+        .begin(&key, &Digest::try_from("a".repeat(64))?, workspace)
+        .await?
+    else {
+        return Err("expected a new mutation".into());
+    };
+    ledger.complete(lease, response, None).await?;
+    Ok(())
+}
+
+/// Put a records database back as records schema 1 left it: without the tables schema 2 adds,
+/// without the ledger's workspace column, and with the events table as it was before event keys.
+fn as_records_schema_1(records: &Path) -> TestResult {
+    let connection = rusqlite::Connection::open(records)?;
+    connection.execute_batch(
+        "DROP TABLE purge_progress; DROP TABLE backup_archives; DROP TABLE restores;
+         DROP TABLE pending_puts; DROP TABLE replacement_restores;
+         DROP INDEX mutations_by_workspace; ALTER TABLE mutations DROP COLUMN workspace_id;
+         CREATE TABLE unkeyed_events (
+             seq INTEGER PRIMARY KEY AUTOINCREMENT,
+             tenant_id TEXT NOT NULL,
+             workspace_id TEXT,
+             replay_key TEXT UNIQUE,
+             record TEXT NOT NULL
+         ) STRICT;
+         INSERT INTO unkeyed_events SELECT seq, tenant_id, workspace_id, replay_key, record
+             FROM events;
+         DROP TABLE events;
+         ALTER TABLE unkeyed_events RENAME TO events;
+         CREATE INDEX events_by_log ON events (tenant_id, workspace_id, seq);
+         PRAGMA user_version = 1;",
+    )?;
+    Ok(())
+}
+
+/// The ledger rows of the records database at `records`, in key order: tenant, operation,
+/// state, and whether the row holds a response.
+fn ledger_of(records: &Path) -> Fallible<Vec<(String, String, String, bool)>> {
+    let connection = rusqlite::Connection::open(records)?;
+    let mut statement = connection.prepare(
+        "SELECT tenant_id, operation, state, response IS NOT NULL FROM mutations
+         ORDER BY idempotency_key",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Round 1, item 2: a pre-migration copy from before records schema 2 has a ledger without the
+/// workspace column, so no row of it can be attributed to a workspace. There the purge empties
+/// every completed row of the tenant except a purge's; the fixture's own row (`remember`) holds
+/// the target's name and not its identity, so nothing short of that reaches it.
+#[tokio::test]
+async fn purge_empties_the_ledger_of_a_copy_that_records_no_workspace() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let storage = &fixture.storage;
+    let (target, survivor) = (fixture.target.workspace_id, fixture.survivor.workspace_id);
+    let update = OperationName::UpdateWorkspace;
+    let purge_record = json!({ "id": uuid_text(60), "state": "requested" });
+    completed_row(
+        storage,
+        ("local", update, 43),
+        Some(survivor),
+        json!({ "name": "Garden" }),
+    )
+    .await?;
+    completed_row(
+        storage,
+        ("elsewhere", update, 44),
+        None,
+        json!({ "name": "Orchard" }),
+    )
+    .await?;
+    completed_row(
+        storage,
+        ("local", OperationName::PurgeWorkspace, 45),
+        Some(target),
+        purge_record,
+    )
+    .await?;
+    pre_migration_copy(directory.path(), "records.sqlite", "records-v1-1.sqlite")?;
+    let copy = directory
+        .path()
+        .join("backups/pre-migration/records-v1-1.sqlite");
+    as_records_schema_1(&copy)?;
+    purge_target(&fixture).await?;
+    assert_eq!(
+        marked_files(directory.path())?,
+        Vec::<String>::new(),
+        "no byte of the copy holds the target's name"
+    );
+    let row = |tenant: &str, operation: OperationName, state: &str, response: bool| {
+        (
+            tenant.to_owned(),
+            operation.as_str().to_owned(),
+            state.to_owned(),
+            response,
+        )
+    };
+    let purge = OperationName::PurgeWorkspace;
+    // In the copy no row names a workspace: the tenant's rows are emptied, the survivor's too.
+    assert_eq!(
+        ledger_of(&copy)?,
+        [
+            row("local", update, "released", false),
+            row("local", update, "released", false),
+            row("elsewhere", update, "completed", true),
+            row("local", purge, "completed", true),
+        ]
+    );
+    // The live ledger records each row's workspace, so only the target's row is emptied.
+    assert_eq!(
+        ledger_of(&directory.path().join("records.sqlite"))?,
+        [
+            row("local", update, "released", false),
+            row("local", update, "completed", true),
+            row("elsewhere", update, "completed", true),
+            row("local", purge, "completed", true),
+        ]
+    );
+    Ok(())
+}
+
+/// The row under the idempotency key numbered `n`.
+fn ledger_row(records: &Path, n: u32) -> Fallible<RowState> {
+    let connection = rusqlite::Connection::open(records)?;
+    Ok(connection.query_row(
+        "SELECT state, token, lease_expires_ms, response, finished_ms FROM mutations
+         WHERE idempotency_key = ?1",
+        [uuid_text(n)],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        },
+    )?)
+}
+
+/// The key of a ledger row of `tenant` for `operation` numbered `n`.
+fn ledger_key(tenant: &str, operation: OperationName, n: u32) -> Fallible<MutationKey> {
+    Ok(MutationKey {
+        tenant_id: TenantId::try_from(tenant.to_owned())?,
+        subject: "ana".to_owned(),
+        client_id: None,
+        operation,
+        key: uuid!(n)?,
+    })
+}
+
+/// Round 2, B1: a row of the purged workspace that is still leased is an attempt in flight. The
+/// purge leaves its state, lease and token alone, so its holder can still complete or release it
+/// (SPEC section 8: a superseded attempt can neither complete nor release the mutation, and
+/// this one was not superseded).
+#[tokio::test]
+async fn purge_leaves_a_leased_ledger_row_of_the_workspace_to_its_holder() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let (ledger, target) = (fixture.storage.mutations(), fixture.target.workspace_id);
+    let digest = Digest::try_from("a".repeat(64))?;
+    let update = OperationName::UpdateWorkspace;
+    let mut leases = Vec::new();
+    for n in [50, 51] {
+        let BeginOutcome::New(lease) = ledger
+            .begin(&ledger_key("local", update, n)?, &digest, Some(target))
+            .await?
+        else {
+            return Err("expected a new mutation".into());
+        };
+        leases.push(lease);
+    }
+    let records = directory.path().join("records.sqlite");
+    let (completing, releasing) = (ledger_row(&records, 50)?, ledger_row(&records, 51)?);
+    assert_eq!(completing.0, "leased");
+    purge_target(&fixture).await?;
+    assert_eq!(ledger_row(&records, 50)?, completing, "state, lease, token");
+    assert_eq!(ledger_row(&records, 51)?, releasing, "state, lease, token");
+    let (first, second) = (
+        *some(leases.first(), "the first lease")?,
+        *some(leases.get(1), "the second lease")?,
+    );
+    ledger
+        .complete(first, json!({ "name": "Late" }), None)
+        .await?;
+    ledger.release(second).await?;
+    let done = ledger_row(&records, 50)?;
+    assert_eq!((done.0.as_str(), done.3.is_some()), ("completed", true));
+    assert_eq!(ledger_row(&records, 51)?.0, "released");
+    Ok(())
+}
+
+/// Round 2, B1: a completed `purge_item` row recorded under the purged workspace keeps its
+/// response, which is a purge record, as the `purge_workspace` row does.
+#[tokio::test]
+async fn purge_keeps_a_completed_purge_item_row_of_the_workspace() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    completed_row(
+        &fixture.storage,
+        ("local", OperationName::PurgeItem, 52),
+        Some(fixture.target.workspace_id),
+        json!({ "id": uuid_text(62), "state": "requested" }),
+    )
+    .await?;
+    purge_target(&fixture).await?;
+    let row = ledger_row(&directory.path().join("records.sqlite"), 52)?;
+    assert_eq!(row.0, "completed");
+    assert!(row.3.is_some(), "the purge record is kept");
+    Ok(())
+}
+
+/// Round 2, B1: another tenant's completed row that names a workspace of the same id keeps its
+/// response; a purge empties its own tenant's rows only.
+#[tokio::test]
+async fn purge_keeps_another_tenant_s_ledger_row_that_names_the_same_workspace_id() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    completed_row(
+        &fixture.storage,
+        ("elsewhere", OperationName::UpdateWorkspace, 53),
+        Some(fixture.target.workspace_id),
+        json!({ "name": "Orchard" }),
+    )
+    .await?;
+    purge_target(&fixture).await?;
+    let row = ledger_row(&directory.path().join("records.sqlite"), 53)?;
+    assert_eq!(row.0, "completed");
+    assert!(row.3.is_some(), "the other tenant's response is kept");
     Ok(())
 }
 

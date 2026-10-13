@@ -78,7 +78,8 @@ pub struct Principal {
 pub struct SessionResponse {
     /// Authenticated caller.
     pub principal: Principal,
-    /// Browser writes require a same-origin anti-CSRF token.
+    /// Browser writes require a same-origin anti-CSRF token: the double-submit pair published
+    /// as the `csrfCookie` and `csrfHeader` security schemes.
     pub csrf_required: bool,
 }
 
@@ -164,3 +165,17 @@ pub struct ResourceMetadata {
     /// Bearer methods accepted by the protected resource.
     pub bearer_methods_supported: Vec<String>,
 }
+
+/// The anti-CSRF cookie of a browser session (`SessionResponse::csrf_required`).
+///
+/// The server sets it at sign-in beside the session cookie: not `HttpOnly`, so the workspace UI
+/// can read it, `SameSite=Strict`, and `Secure` under HTTPS. Double-submit rule: every
+/// cookie-authenticated mutation sends [`CSRF_HEADER`] with a value equal to this cookie's, in
+/// addition to the server's `Origin` and `Sec-Fetch-Site` check. At the HTTP layer a mutation
+/// is any method but GET, HEAD and OPTIONS, and every canonical operation is a POST, so the
+/// published API asks for the pair on every route that is not a GET.
+pub const CSRF_COOKIE: &str = "okf-csrf";
+
+/// The request header that echoes [`CSRF_COOKIE`]'s value on a cookie-authenticated mutation;
+/// a missing header, or one that differs from the cookie, is refused.
+pub const CSRF_HEADER: &str = "x-okf-csrf";

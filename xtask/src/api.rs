@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::Path;
 
-use okf_jawn_contract::access::{Permission, ResourceMetadata};
+use okf_jawn_contract::access::{CSRF_COOKIE, CSRF_HEADER, Permission, ResourceMetadata};
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::health::HealthResponse;
 use okf_jawn_contract::import::Upload;
@@ -186,7 +186,7 @@ fn openapi_document(
             "description": "Complete intended API. A declared route is not a claim of implemented application behavior."
         },
         "paths": paths,
-        "security": [{"bearerAuth": []}, {"browserSession": []}],
+        "security": security_requirement(true),
         "components": {
             "schemas": schemas,
             "securitySchemes": {
@@ -199,11 +199,36 @@ fn openapi_document(
                     "type": "apiKey",
                     "in": "cookie",
                     "name": "okf-session",
-                    "description": "Local-owner or WorkOS browser session; cookie-authenticated writes also require the CSRF token."
+                    "description": "Local-owner or WorkOS browser session. A cookie-authenticated request that is not a GET also carries the csrfCookie and csrfHeader pair."
+                },
+                "csrfCookie": {
+                    "type": "apiKey",
+                    "in": "cookie",
+                    "name": CSRF_COOKIE,
+                    "description": "Anti-CSRF token the server sets at sign-in beside the session cookie: not HttpOnly, SameSite=Strict, Secure under HTTPS. Double-submit rule: every cookie-authenticated mutation sends its value in the csrfHeader header, in addition to the server's Origin and Sec-Fetch-Site check. Every canonical operation is a POST, so every route that is not a GET asks for the pair."
+                },
+                "csrfHeader": {
+                    "type": "apiKey",
+                    "in": "header",
+                    "name": CSRF_HEADER,
+                    "description": "The csrfCookie value, sent back on every cookie-authenticated request that is not a GET; a missing header, or one that differs from the cookie, is refused."
                 }
             }
         }
     }))
+}
+
+/// Who may call a route: a bearer token, or the browser session cookie, which on every route
+/// that is not a GET (`csrf`) comes with the double-submit CSRF pair.
+///
+/// The pair is one requirement object with the session, so OpenAPI reads it as all three
+/// together; GET routes are safe and need the session cookie alone.
+fn security_requirement(csrf: bool) -> Value {
+    if csrf {
+        json!([{"bearerAuth": []}, {"browserSession": [], "csrfCookie": [], "csrfHeader": []}])
+    } else {
+        json!([{"bearerAuth": []}, {"browserSession": []}])
+    }
 }
 
 /// The MCP App resources this build declares, in the shape `rmcp::model::Resource` reads.
@@ -481,8 +506,11 @@ fn transport_operation(operation: &TransportOperation, shared: &SharedTypes) -> 
             "content":{(operation.response_media):{"schema":transport_response_schema(operation, shared)}}}},
         "x-agent-tool":false,"x-transport-binding":true});
     if let Some(map) = result.as_object_mut() {
+        // Every other route takes the document's requirement, CSRF pair included.
         if matches!(operation.auth, TransportAuth::Public) {
             map.insert("security".to_owned(), json!([]));
+        } else if operation.method == "get" {
+            map.insert("security".to_owned(), security_requirement(false));
         }
         if let Some(media) = operation.request_media {
             let schema = if media == "application/octet-stream" {
@@ -516,6 +544,7 @@ mod tests {
     use std::error::Error;
     use std::path::Path;
 
+    use okf_jawn_contract::access::{CSRF_COOKIE, CSRF_HEADER};
     use okf_jawn_contract::metadata::operations;
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
@@ -745,6 +774,61 @@ mod tests {
             destructive = destructive.saturating_add(usize::from(operation.destructive));
         }
         assert!(destructive > 0, "the table marks destructive operations");
+        Ok(())
+    }
+
+    /// The CSRF names come from the contract, and the session cookie needs the pair on every
+    /// route that is not a GET; a GET needs the session alone, and a public route nothing.
+    #[test]
+    fn every_route_that_is_not_a_get_asks_for_the_csrf_pair_with_the_session() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        super::generate(directory.path())?;
+        let api = read(&directory.path().join("openapi.json"))?;
+        let schemes = api
+            .pointer("/components/securitySchemes")
+            .ok_or("securitySchemes")?;
+        for (scheme, location, name) in [
+            ("csrfCookie", "cookie", CSRF_COOKIE),
+            ("csrfHeader", "header", CSRF_HEADER),
+        ] {
+            assert_eq!(
+                schemes.pointer(&format!("/{scheme}/type")),
+                Some(&json!("apiKey"))
+            );
+            assert_eq!(
+                schemes.pointer(&format!("/{scheme}/in")),
+                Some(&json!(location))
+            );
+            assert_eq!(
+                schemes.pointer(&format!("/{scheme}/name")),
+                Some(&json!(name))
+            );
+        }
+        let paired = json!([
+            {"bearerAuth": []},
+            {"browserSession": [], "csrfCookie": [], "csrfHeader": []}
+        ]);
+        let session = json!([{"bearerAuth": []}, {"browserSession": []}]);
+        assert_eq!(api.get("security"), Some(&paired));
+        let paths = api.get("paths").and_then(Value::as_object).ok_or("paths")?;
+        let mut unsafe_routes = 0_usize;
+        for (path, item) in paths {
+            for (method, operation) in item.as_object().ok_or("a path item is an object")? {
+                let effective = operation.get("security").unwrap_or(&paired);
+                if effective == &json!([]) {
+                    assert_eq!(method, "get", "{path}: only GET routes are public");
+                } else if method == "get" {
+                    assert_eq!(effective, &session, "GET {path}");
+                } else {
+                    assert_eq!(effective, &paired, "{method} {path}");
+                    unsafe_routes = unsafe_routes.saturating_add(1);
+                }
+            }
+        }
+        assert!(
+            unsafe_routes > operations().len(),
+            "every canonical operation and the transports that are not GET ask for the pair"
+        );
         Ok(())
     }
 

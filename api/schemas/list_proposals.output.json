@@ -33,7 +33,8 @@
           "description": "Create a note or View with retained properties.",
           "properties": {
             "body": {
-              "description": "Body.",
+              "description": "Body, at most 8 MiB in UTF-8.",
+              "maxLength": 8388608,
               "type": "string"
             },
             "kind": {
@@ -68,7 +69,8 @@
           "description": "Replace authored content with preconditions.",
           "properties": {
             "body": {
-              "description": "Body.",
+              "description": "Body, at most 8 MiB in UTF-8.",
+              "maxLength": 8388608,
               "type": "string"
             },
             "item_id": {
@@ -160,7 +162,8 @@
               "type": "string"
             },
             "markdown": {
-              "description": "The complete proposed text, Markdown.",
+              "description": "The complete proposed text, Markdown, at most 8 MiB in UTF-8.",
+              "maxLength": 8388608,
               "type": "string"
             },
             "pages": {

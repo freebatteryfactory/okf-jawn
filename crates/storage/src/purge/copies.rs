@@ -9,7 +9,9 @@
 //!
 //! - a records copy that holds anything of it is rewritten: its rows are removed and scrubbed
 //!   exactly as in the live database (`rows::remove`), then the copy is vacuumed so the removed
-//!   bytes are not left in free pages, and checked;
+//!   bytes are not left in free pages, and checked. A copy older than records schema 2 has a
+//!   mutation ledger that records no workspace, so it holds the workspace while any completed
+//!   row of the tenant but a purge's keeps a response, and the rewrite empties them all;
 //! - an index copy (or any other database copy) that holds it is deleted: the index is rebuilt
 //!   from Git, so the copy is not needed to restore anything;
 //! - its archive in every backup set is deleted;

@@ -281,8 +281,9 @@ CREATE TABLE sessions (
 
 /// Records schema, version 2: each event's permanent key; the progress of each purge, so a
 /// purge resumes by repeating; the archive each backup mutation wrote; the report of each
-/// restore mutation; the archive each replacement restore restored a workspace from; and the
-/// object puts of a workspace whose referencing record has not landed yet (`puts`).
+/// restore mutation; the archive each replacement restore restored a workspace from; the
+/// object puts of a workspace whose referencing record has not landed yet (`puts`); and the
+/// workspace of each mutation-ledger row.
 ///
 /// `event_key` names an event wherever it travels: a fresh UUID assigned once, when the event is
 /// first appended, and copied verbatim by every archive and restore, so a restore never
@@ -302,7 +303,14 @@ CREATE TABLE sessions (
 /// of the archive file it restored and the report it gave, written in the transaction of the
 /// workspace's rows: the same restore run again accepts only a workspace this same archive
 /// restored.
+///
+/// `mutations.workspace_id` is the workspace a ledger row's mutation writes
+/// (`core::mutations`, "Workspace"), or `NULL`; a workspace purge empties that workspace's
+/// completed rows by it (`purge::rows`). A row from before this step has none.
 const RECORDS_V2: &str = r"
+ALTER TABLE mutations ADD COLUMN workspace_id TEXT;
+CREATE INDEX mutations_by_workspace ON mutations (tenant_id, workspace_id);
+
 CREATE TABLE keyed_events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id TEXT NOT NULL,

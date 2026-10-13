@@ -201,6 +201,15 @@ pub const TRANSPORTS: &[TransportOperation] = &[
     },
 ];
 
+/// The one request-body limit, in bytes (16 MiB), of the JSON API and the MCP transport.
+///
+/// The server's JSON routes and the MCP Streamable HTTP endpoint (`mcp_request`) both refuse a
+/// larger body with `too_large` (HTTP 413) before any handler runs. It is the outer bound: a
+/// request whose texts are each within `item::MAX_ITEM_TEXT_BYTES` can still exceed it, through
+/// several changes in one proposal or through JSON escaping. It bounds JSON bodies; the raw
+/// bytes `upload_content` streams are not one.
+pub const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+
 /// Enumerate the additional transport bindings the server lane must implement.
 #[must_use]
 pub fn operations() -> Vec<TransportOperation> {
