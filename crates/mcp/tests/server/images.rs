@@ -3,14 +3,14 @@
 //! The fake application answers the read with configured `media`, and `get_object` per object
 //! digest; every fetch passes through dispatch, so the fake access decides it like any call.
 
-use okf_jawn_contract::access::Permission;
+use okf_jawn_contract::access::{AccessRoute, DelegationCeiling, Permission};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::EventKind;
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::read::ReadItemResponse;
 use okf_jawn_mcp::{McpServer, read_result};
 use rmcp::model::{CallToolResult, ImageContent};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::check::{TestResult, some};
 use crate::support::fakes::{Call, FakeAccess, World};
@@ -437,6 +437,113 @@ async fn a_fetch_dispatch_refuses_is_reported_never_bypassed() -> TestResult {
     let (_, event) = some(appended.first(), "the refusal")?;
     assert_eq!(event.kind, EventKind::PermissionDenied);
     assert_eq!(event.operation, Some(OperationName::GetObject));
+    Ok(())
+}
+
+/// Each fetch runs on the reader's own route (the review's mutant O1). The read cites a
+/// workspace dispatch refuses, so every fetch's refusal is recorded; its actor must be the
+/// reader on the reader's own route, never a copy of the reader on a route of the server's
+/// choosing. The fake access decides by subject and workspace only, so the recorded actor is
+/// what tells the routes apart.
+#[tokio::test]
+async fn each_fetch_is_dispatched_on_the_reads_own_route() -> TestResult {
+    let world = World::new(
+        FakeAccess::default()
+            .granting("alice", &[Permission::Read])
+            .refusing(OTHER_WORKSPACE),
+    );
+    let (first, second) = (digest_of('c'), digest_of('d'));
+    world.application.answer_with(
+        "read_item",
+        image_read_response(
+            OTHER_WORKSPACE,
+            "multimodal",
+            &[
+                media(&first, "image/png", None, &on_page(1)),
+                media(&second, "image/png", None, &on_page(2)),
+            ],
+        ),
+    )?;
+    for image in [&first, &second] {
+        world
+            .application
+            .serve_object(image, Ok(object_block(image, "image/png", PNG, 8, false)))?;
+    }
+    let result = show(
+        &world,
+        "images-route-refused.html",
+        image_read_input("multimodal", 1024, 2),
+    )
+    .await?;
+    assert_eq!(images_of(&result)?.len(), 0);
+    let appended = world.events.appended()?;
+    assert_eq!(appended.len(), 2, "one refusal for each fetch");
+    for (_, event) in &appended {
+        assert_eq!(event.kind, EventKind::PermissionDenied);
+        assert_eq!(event.operation, Some(OperationName::GetObject));
+        let actor = some(event.actor.as_ref(), "the refused actor")?;
+        assert_eq!(
+            (
+                actor.subject.as_str(),
+                &actor.route,
+                actor.client_id.as_deref()
+            ),
+            ("alice", &AccessRoute::McpDelegation, Some("client-test"))
+        );
+    }
+    Ok(())
+}
+
+/// A served fetch reaches the application with the read's whole principal: the subject, the
+/// tenant, the route, the client and the delegation ceiling the read itself ran with.
+#[tokio::test]
+async fn each_served_fetch_carries_the_reads_whole_principal() -> TestResult {
+    let world = reader();
+    let mut alice = agent("alice")?;
+    alice.delegation = Some(DelegationCeiling {
+        permissions: vec![Permission::Read],
+        workspace_ids: None,
+    });
+    let (first, second) = (digest_of('c'), digest_of('d'));
+    world.application.answer_with(
+        "read_item",
+        image_read_response(
+            WORKSPACE,
+            "multimodal",
+            &[
+                media(&first, "image/png", None, &on_page(1)),
+                media(&second, "image/png", None, &on_page(2)),
+            ],
+        ),
+    )?;
+    for image in [&first, &second] {
+        world
+            .application
+            .serve_object(image, Ok(object_block(image, "image/png", PNG, 8, false)))?;
+    }
+    let server = McpServer::new(
+        world.ports.clone(),
+        bundle("images-route-served.html", "<p>app</p>")?,
+    )?;
+    let result = server
+        .call_tool_as(
+            Some(&alice),
+            "show",
+            Some(arguments(image_read_input("multimodal", 1024, 2))?),
+        )
+        .await?;
+    assert_eq!(result.is_error, Some(false), "{result:?}");
+    assert_eq!(images_of(&result)?.len(), 2);
+    let expected = serde_json::to_value(&alice)?;
+    assert_eq!(expected.get("route"), Some(&json!("mcp_delegation")));
+    assert_eq!(
+        world.application.callers("read_item")?,
+        vec![expected.clone()]
+    );
+    assert_eq!(
+        world.application.callers("get_object")?,
+        vec![expected.clone(), expected]
+    );
     Ok(())
 }
 
