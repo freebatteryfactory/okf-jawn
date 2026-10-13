@@ -82,6 +82,7 @@ describe('the CSRF header', () => {
     await screen.findByRole('heading', { name: 'Sources' });
     const paths = new Set(api.calls.map((call) => call.path));
     expect([...paths].sort()).toEqual([
+      '/api/attention/get-attention',
       '/api/items/get-item',
       '/api/items/list-drafts',
       '/api/items/list-items',
