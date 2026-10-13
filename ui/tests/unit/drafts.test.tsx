@@ -3,9 +3,11 @@
  * `save_draft` with the base revision, the save state always said, typed text never lost, the
  * person's draft shown when an item is reopened, the drafts listed and marked, and discarding.
  */
+import { QueryObserver } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { REQUEST_TIMEOUT_MS } from '../../src/app/api-client';
+import { createQueryClient } from '../../src/app/query-client';
 import { itemOptions } from '../../src/features/documents/DocumentView';
 import { draftsOptions, rememberDraft } from '../../src/features/drafts/drafts-list';
 import {
@@ -769,6 +771,22 @@ describe('the same item in two panes', () => {
     expect(document.querySelectorAll('.save-state')).toHaveLength(1);
   });
 
+  it('reads the committed text for the second pane when the first opened on the draft and never read it', async () => {
+    const api = writable({
+      [ITEM]: (body) => (body.item_id === NOTE ? ok(withDraft()) : ok(itemDocument(otherSummary))),
+    });
+    renderAt(`/w/${WS}/i/${NOTE}`);
+    await findTextBox('Text of Meeting notes');
+    // The pane opened on the draft: the committed text was not read.
+    expect(api.callsTo('/api/reads/read-item')).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Split right' }));
+    await waitFor(() =>
+      expect(within(pane(2, 2)).getByText('Text of Meeting notes')).toBeDefined(),
+    );
+    expect(boxes()).toHaveLength(1);
+    expect(within(pane(2, 2)).getByRole('button', { name: 'Edit here' })).toBeDefined();
+  });
+
   it('"Edit here" moves the editor, with its text, its save state and keyboard focus', async () => {
     const { api, box } = await editedAndSplit();
     const here = within(pane(2, 2)).getByRole('button', { name: 'Edit here' });
@@ -1114,6 +1132,39 @@ describe('discarding a draft', () => {
     expect(await screen.findByRole('button', { name: 'Edit' })).toBeDefined();
     // The item was read again after the discard: that answer has the discard in it.
     expect(api.callsTo(ITEM).length).toBeGreaterThan(reads);
+  });
+
+  it('takes back a first read of the item that is in flight when the cache is told of the discard', async () => {
+    // A draft is not bound to a revision: a read of the item at another one carries it too. This
+    // one has no answer yet, and nothing before it to fall back on.
+    let held = true;
+    const read: { answer?: () => void } = {};
+    const api = writable({
+      [ITEM]: () => {
+        const reply = ok(held ? withDraft() : itemDocument(noteSummary));
+        if (read.answer !== undefined) return reply;
+        return new Promise<Reply>((resolve) => {
+          read.answer = () => resolve(reply);
+        });
+      },
+    });
+    const client = createQueryClient();
+    const options = itemOptions(WS, NOTE, OLD);
+    const observer = new QueryObserver(client, options);
+    const stop = observer.subscribe(() => {});
+    await waitFor(() => expect(read.answer).toBeDefined());
+    // The draft is discarded; the cache is told.
+    held = false;
+    rememberDraft(client, WS, NOTE, null);
+    // The old answer arrives now, with the draft in it.
+    read.answer?.();
+    await waitFor(() => expect(client.getQueryData(options.queryKey)).toBeDefined());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(client.getQueryData(options.queryKey)?.draft ?? null).toBeNull();
+    // What is shown came from a read asked after the discard.
+    expect(api.callsTo(ITEM)).toHaveLength(2);
+    stop();
+    client.clear();
   });
 
   // A discard's key belongs to the item's draft, not to the editor that asked.
