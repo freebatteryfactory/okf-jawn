@@ -132,6 +132,10 @@ export function mockApi(handlers: Record<string, Handler>): MockedApi {
       if (signal.aborted) abort();
       else signal.addEventListener('abort', abort, { once: true });
     });
+    // An abort that comes once the answer is given (or for an operation with no handler, which
+    // is answered at once) changes nothing, as with `fetch`: it is not left as a rejection
+    // nobody handles.
+    aborted.catch(() => undefined);
     const reply =
       handler === undefined ? notImplemented(path) : await Promise.race([handler(body), aborted]);
     if (reply.status === 200 && contract !== undefined) {
