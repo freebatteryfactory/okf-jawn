@@ -183,6 +183,32 @@ describe('the list of warnings', () => {
   });
 });
 
+describe('a check that fails after the list was read', () => {
+  it('keeps the warnings and their marks on screen, with the failure beside them', async () => {
+    let fails = false;
+    setup(() => (fails ? fail(500, 'internal', 'the index could not be read') : answer(THREE)));
+    await openAttention();
+    await waitFor(() => expect(rows()).toHaveLength(3));
+    fails = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    await screen.findByText('Listing the warnings again: Something went wrong in the service.');
+    expect(rows()).toHaveLength(3);
+    expect(screen.getByText('3 warnings shown.')).toBeDefined();
+    expect(screen.getByRole('link', { name: 'Attention (3)' })).toBeDefined();
+  });
+
+  it('keeps an empty answer as it was answered, with the failure beside it', async () => {
+    let fails = false;
+    setup(() => (fails ? fail(500, 'internal', 'the index could not be read') : answer([])));
+    await openAttention();
+    await screen.findByText('No warnings found.');
+    fails = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    await screen.findByText('Listing the warnings again: Something went wrong in the service.');
+    expect(screen.getByText('No warnings found.')).toBeDefined();
+  });
+});
+
 describe('a long list', () => {
   /** Six pages of twenty warnings; each names the note. */
   const PAGES = 6;

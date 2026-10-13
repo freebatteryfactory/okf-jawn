@@ -149,7 +149,7 @@ export function JobsPage({ workspaceId, canWrite }: JobsPageProps) {
           workspaceId={workspaceId}
         />
       )}
-      {jobs.isSuccess && listed.length === 0 && (
+      {pages !== undefined && listed.length === 0 && (
         <p>This workspace has no jobs yet. An import started here will be listed.</p>
       )}
       {listed.length > 0 && (

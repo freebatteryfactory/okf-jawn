@@ -4,7 +4,9 @@
  * What the list is stands above it, always: the warnings are advisory and false alarms are
  * expected. An empty answer reads "No warnings found", with beside it that this does not make the
  * workspace safe or correct (SPEC section 11: "no clean scan becomes a safe-for-AI certificate").
- * A list that could not be read is a failure notice, never "no warnings".
+ * A list that could not be read is a failure notice, never "no warnings". A check that fails
+ * after the list was read replaces nothing on screen: what was last answered stays, the empty
+ * answer included, with the failure in a notice beside it.
  *
  * Each warning says its kind in words, the service's own explanation, the item it names as a link
  * pinned to the revision that was inspected, and the next step the service suggests. The wire
@@ -131,7 +133,7 @@ export function AttentionPage({ workspaceId, head }: AttentionPageProps) {
           workspaceId={workspaceId}
         />
       )}
-      {attention.isSuccess && warnings.length === 0 && (
+      {pages !== undefined && warnings.length === 0 && (
         <p>
           <strong>No warnings found.</strong> {NOT_A_CERTIFICATE}
         </p>
@@ -150,7 +152,7 @@ export function AttentionPage({ workspaceId, head }: AttentionPageProps) {
       )}
       {/* Present from the start, so how many are shown is announced when it changes. */}
       <p role="status" className="meta">
-        {attention.isSuccess && warnings.length > 0
+        {warnings.length > 0
           ? `${count(rows.length, 'warning', 'warnings')} shown${more ? '; more exist' : ''}.${
               attention.hasNextPage
                 ? ' The marks in the folders and on the tabs cover the warnings listed so far.'
