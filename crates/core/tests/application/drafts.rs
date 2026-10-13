@@ -534,6 +534,59 @@ async fn a_source_draft_is_measured_against_its_base_not_the_head() -> TestResul
     Ok(())
 }
 
+/// The kept base of a source draft is read at, so a purge that invalidated it since the draft was
+/// saved is met before the read, as the request's own revision is.
+#[tokio::test]
+async fn a_source_drafts_kept_base_is_checked_against_the_purge_map_before_it_is_read() -> TestResult
+{
+    let world = world_with_a_card_a_view_and_the_note()?;
+    for fill in ['b', 'c'] {
+        let at = revision(fill)?;
+        world.versions.put_document(
+            &at,
+            source_card(
+                CARD,
+                &at,
+                "sources/report-pdf.md",
+                CARD_BODY,
+                converted(&digest('b')?),
+            )?,
+        )?;
+    }
+    world.versions.set_head(revision('c')?)?;
+    // A draft saved earlier on base `a`, which a purge has since invalidated.
+    world
+        .drafts
+        .put_draft(draft_of(CARD, ALICE, &revision('a')?, CARD_BODY)?)?;
+    let purge_id = PurgeId(Uuid::from_u128(5));
+    world.records.put_mapping(
+        revision('a')?,
+        RevisionMapping {
+            purge_id,
+            replacement: None,
+        },
+    )?;
+    // The request names `b`: neither the head nor the draft's base, and not invalidated.
+    let refused = err_of(
+        world
+            .service
+            .save_draft(
+                &alice(OperationName::SaveDraft, Some(mutation(1)))?,
+                card_save(revision('b')?, CARD_BODY, json!({ "type": "Source" }))?,
+            )
+            .await,
+    )?;
+    assert_eq!(
+        refused.detail.as_deref(),
+        Some(&ErrorDetail::Invalidated {
+            purge_id,
+            replacement: None
+        })
+    );
+    assert!(world.drafts.saves()?.is_empty());
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_draft_of_a_view_is_refused_and_nothing_is_saved() -> TestResult {
     let world = world_with_a_card_a_view_and_the_note()?;

@@ -79,6 +79,9 @@ pub(super) async fn save_draft(
         let at_base = if base_revision == head {
             current.body.clone()
         } else {
+            // The kept base is checked as the request's revision is: a purge may have
+            // invalidated it since the draft was saved.
+            check_named(service, &scope, &base_revision).await?;
             ports
                 .versions
                 .show(&scope, &base_revision, request.item_id)
