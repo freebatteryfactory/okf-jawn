@@ -509,6 +509,64 @@ async fn the_relay_ends_when_its_output_takes_nothing_after_the_input_ended() ->
     Ok(())
 }
 
+/// The read loop reads on while messages wait for room, which is how it sees the end of the
+/// input (the re-review's F2). Requests arrive one at a time, each after the relay has done
+/// what it can with the one before, and the output takes nothing. The shared part holds one
+/// answer: the first answer waits there, the second in the place beside it, and the third
+/// and fourth requests wait for that place and are not forwarded. They are read all the
+/// same, so when the input ends the closing time starts, and the relay ends and names them.
+/// A relay that held the third request and read no further would never see the end.
+#[tokio::test]
+async fn the_end_of_the_input_is_seen_while_messages_wait_for_room() -> TestResult {
+    let one = relay(
+        Setup::new(&FakeTransport::echoing()),
+        request(&json!(0), "tools/call", &json!({})).as_bytes(),
+    )
+    .await?;
+    let transport = FakeTransport::echoing();
+    let setup = Setup {
+        limits: Limits {
+            waiting_bytes: one.stdout.len().saturating_sub(1),
+            closing: Duration::from_millis(300),
+            ..Limits::default()
+        },
+        ..Setup::new(&transport)
+    };
+    let (mut client_in, stdin) = tokio::io::duplex(65_536);
+    let mut stderr = Vec::new();
+    let mut running = Box::pin(relay_on(setup, stdin, Stuck, &mut stderr));
+    for id in 0..4 {
+        client_in
+            .write_all(request(&json!(id), "tools/call", &json!({})).as_bytes())
+            .await?;
+        for _ in 0..TURNS {
+            tokio::select! {
+                biased;
+                early = &mut running => {
+                    return Err(format!("the relay returned while its input was open: {early:?}").into());
+                }
+                () = tokio::task::yield_now() => {}
+            }
+        }
+    }
+    assert_eq!(transport.posts()?.len(), 2);
+    drop(client_in);
+    let code = tokio::time::timeout(PATIENCE, running)
+        .await
+        .map_err(|_| "the relay never saw that its input had ended")??;
+    assert_eq!(
+        (code, String::from_utf8(stderr)?.as_str()),
+        (
+            1,
+            "okf-jawn mcp: the input ended and 2 of its messages had not finished 300ms later; \
+             the relay stops and leaves them unanswered: request 2, request 3\n\
+             okf-jawn mcp: the input ended and 2 of the lines for the output had not been \
+             written 300ms later; the relay stops without writing them\n"
+        )
+    );
+    Ok(())
+}
+
 /// An error stream that takes nothing does not keep the relay either: its last words have
 /// a bounded time of their own, and then it returns 1 having said nothing.
 #[tokio::test]
