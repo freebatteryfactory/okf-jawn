@@ -15,7 +15,8 @@
  * What bounds an upload. It may take as long as it keeps moving. It fails as `RequestTimedOut` when
  * no byte has been sent for `REQUEST_TIMEOUT_MS`, and when no answer has come within
  * `REQUEST_TIMEOUT_MS` of the last byte sent: the JSON wait's value, measured from the last
- * progress instead of from the start. The answer is complete when the request settles, so the wait
+ * progress instead of from the start. A browser reports the last byte as progress too, so the
+ * wait for the answer starts there. The answer is complete when the request settles, so the wait
  * covers the answer's body too.
  *
  * The bytes are handed to the browser as the Blob itself, which reads them as it sends them; they
@@ -83,7 +84,6 @@ export function sendBytes(
       moved();
       onProgress(event.loaded);
     };
-    xhr.upload.onload = moved;
     xhr.onload = () =>
       settle(() => {
         try {

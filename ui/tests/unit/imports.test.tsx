@@ -429,11 +429,15 @@ describe('uploading', () => {
     });
     const { sent } = setup(service);
     await openImport();
-    choose('Choose files…', [fileOf('a.txt', 'abc')]);
+    const file = fileOf('a.txt', 'abc');
+    const read = vi.spyOn(file, 'arrayBuffer');
+    choose('Choose files…', [file]);
     upload();
     await notUploaded('a.txt');
     fireEvent.click(within(rowOf('a.txt')).getByRole('button', { name: 'Try again' }));
     await uploaded('a.txt');
+    // The same slot: the file was read once, for its hash, and not again.
+    expect(read).toHaveBeenCalledTimes(1);
     // The slot said it holds the whole file: no byte was sent a second time.
     expect(sent.transfers).toHaveLength(1);
     expect(service.slots).toHaveLength(1);
@@ -447,9 +451,12 @@ describe('uploading', () => {
     );
     const { api } = setup(service);
     await openImport();
-    choose('Choose files…', [fileOf('a.txt', 'abc')]);
+    const file = fileOf('a.txt', 'abc');
+    const read = vi.spyOn(file, 'arrayBuffer');
+    choose('Choose files…', [file]);
     upload();
     await notUploaded('a.txt');
+    expect(read).toHaveBeenCalledTimes(1);
     const row = rowOf('a.txt');
     expect(row.textContent).toContain('Uploading a.txt: The service did not accept this file.');
     expect(row.textContent).toContain(
@@ -465,6 +472,8 @@ describe('uploading', () => {
     const finishes = api.callsTo(COMPLETE);
     expect(finishes.at(1)?.idempotency_key).not.toBe(finishes.at(0)?.idempotency_key);
     expect(finishes.at(1)?.upload_id).toBe(service.slots.at(1)?.id);
+    // The file was read a second time for the new slot.
+    expect(read).toHaveBeenCalledTimes(2);
   });
 
   it('reads a file the service finds too large as too large, with no retry', async () => {
