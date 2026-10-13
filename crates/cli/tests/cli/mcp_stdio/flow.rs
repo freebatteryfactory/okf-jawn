@@ -1262,3 +1262,83 @@ async fn the_relay_s_last_words_stay_under_eight_kib_for_sixteen_long_ids() -> T
     );
     Ok(())
 }
+
+/// A message whose exchange ends abnormally while the output is stuck and the room is full:
+/// what the relay says of it has to wait for room, and the read loop must go on meanwhile, so
+/// that it sees the end of the input and the closing time gives the wait up. (The double
+/// breaks its exchange with a failed `assert!`: the idiom has no `panic!`, and a double that
+/// returns an error is not the same case, because the task does not end abnormally.)
+#[tokio::test]
+async fn a_message_whose_exchange_ends_abnormally_does_not_keep_the_relay() -> TestResult {
+    let go = Arc::new(tokio::sync::Notify::new());
+    let held = go.clone();
+    let transport = FakeTransport::new(move |post, _events| {
+        let go = held.clone();
+        Box::pin(async move {
+            let message: Value = serde_json::from_slice(&post.body).unwrap_or(Value::Null);
+            if message.get("id") == Some(&json!("p")) {
+                go.notified().await;
+                assert!(
+                    message.is_null(),
+                    "this exchange ends abnormally on purpose"
+                );
+            }
+            match message.get("id") {
+                Some(id) => answered(&json!({"jsonrpc": "2.0", "id": id, "result": {}})).reply,
+                None => accepted().reply,
+            }
+        })
+    });
+    let mut setup = Setup::new(&transport);
+    setup.limits = Limits {
+        waiting_bytes: 64,
+        closing: Duration::from_millis(300),
+        ..Limits::default()
+    };
+    let (mut client, input) = tokio::io::duplex(65_536);
+    let mut stderr = Vec::new();
+    let watched = transport.clone();
+    let mut feeding = Box::pin(async move {
+        let _ = client
+            .write_all(request(&json!("p"), "tools/call", &json!({})).as_bytes())
+            .await;
+        for id in 0..2_usize {
+            let _ = client
+                .write_all(request(&json!(id), "tools/call", &json!({})).as_bytes())
+                .await;
+            for _ in 0..PATIENCE.as_millis() {
+                if watched.handed() > id {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+        go.notify_one();
+        for _ in 0..TURNS {
+            tokio::task::yield_now().await;
+        }
+        // One more line, so that the loop comes round and finds the abnormal end.
+        let _ = client
+            .write_all(notification("notifications/x").as_bytes())
+            .await;
+        for _ in 0..TURNS {
+            tokio::task::yield_now().await;
+        }
+        drop(client);
+    });
+    let mut relaying = Box::pin(relay_on(setup, input, Stuck, &mut stderr));
+    tokio::select! {
+        () = &mut feeding => {}
+        ended = &mut relaying => {
+            return Err(format!("the relay ended before its input did: {ended:?}").into());
+        }
+    }
+    let code = tokio::time::timeout(PATIENCE, &mut relaying)
+        .await
+        .map_err(|_| "the relay did not end after a message ended abnormally")??;
+    drop(relaying);
+    let said = String::from_utf8_lossy(&stderr).into_owned();
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("had not been written"), "{said}");
+    Ok(())
+}
