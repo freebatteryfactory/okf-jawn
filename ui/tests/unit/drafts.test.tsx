@@ -674,6 +674,39 @@ describe('who may edit, and where', () => {
         await eventuallyGet(() => screen.getByRole('button', { name: 'Keep mine' }));
         expect(screen.getByRole('button', { name: 'Take theirs' })).toBeDefined();
       }, 20_000);
+
+      // The fourth re-check's probe P8, and its control. The switch of a refused item leads to the
+      // kept text, which has no text box: it must leave no request for one that the lift serves.
+      it('leaves focus where the person put it, after "Show your draft" was pressed before the lift', async () => {
+        const { held } = await refused();
+        fireEvent.click(screen.getByRole('button', { name: 'Read the committed text' }));
+        const show = await eventuallyGet(() =>
+          screen.getByRole('button', { name: 'Show your draft' }),
+        );
+        act(() => show.focus());
+        fireEvent.click(show);
+        await eventuallyGet(keptText);
+        await pass(0);
+        // The switch led to read-only text: focus stays on it.
+        expect(document.activeElement).toBe(show);
+        // The person goes to Refresh with the keyboard, and the item is a Note again.
+        const refresh = screen.getByRole('button', { name: 'Refresh' });
+        act(() => refresh.focus());
+        await refreshTo(held, AGAIN);
+        await eventuallyGet(() => textBox('Text of Meeting notes'));
+        await pass(0);
+        expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Refresh' }));
+      }, 20_000);
+
+      it('leaves focus where the person put it (the control: the switch was not pressed)', async () => {
+        const { held } = await refused();
+        const refresh = screen.getByRole('button', { name: 'Refresh' });
+        act(() => refresh.focus());
+        await refreshTo(held, AGAIN);
+        await eventuallyGet(() => textBox('Text of Meeting notes'));
+        await pass(0);
+        expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Refresh' }));
+      }, 20_000);
     });
   });
 });

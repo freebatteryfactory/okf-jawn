@@ -444,7 +444,9 @@ export function DocumentView({
   // still in flight is no longer shown.
   const articleRef = useRef<HTMLElement | null>(null);
   // Where keyboard focus goes once the pane has switched: into the text box after "Edit", onto
-  // the switch after a discard (the editor and its buttons are gone then).
+  // the switch after a discard (the editor and its buttons are gone then). A request is made only
+  // for a drawing that has its target: one that found none would wait for a later drawing that
+  // has it, and take focus from where the person had put it by then.
   const switchRef = useRef<HTMLButtonElement | null>(null);
   const focusNext = useRef<'text' | 'switch' | null>(null);
   useEffect(() => {
@@ -575,7 +577,9 @@ export function DocumentView({
                 }
                 // "Edit here" moves the editor from the pane that has it to this one.
                 claimEditor(workspaceId, itemId, pane, true);
-                focusNext.current = 'text';
+                // Into the text box, which the next drawing has unless the session is refused:
+                // that drawing shows the kept text ("Show your draft"), and focus stays here.
+                if (notANote === null) focusNext.current = 'text';
                 setChosen('edit');
               }
             }}
