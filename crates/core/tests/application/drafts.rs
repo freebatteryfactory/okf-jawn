@@ -315,6 +315,15 @@ async fn a_draft_of_a_source_card_may_not_change_its_text() -> TestResult {
         "{}",
         refused.message
     );
+    // Both causes are named: the draft changed the text, or the card's text changed since the
+    // draft's base (a caller that changed no text is told to take the current one).
+    assert!(
+        refused
+            .message
+            .contains("text changed since the draft's base: take the current text"),
+        "{}",
+        refused.message
+    );
     assert!(world.drafts.saves()?.is_empty());
     // A body that differs in one character is refused whatever its line ends and final newline.
     for body in [

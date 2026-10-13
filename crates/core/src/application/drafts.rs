@@ -137,7 +137,8 @@ fn view_has_no_draft(item: ItemId) -> ApiError {
 /// Both texts are compared as a read shows them (`as_a_read_shows`). A card's text is generated
 /// extraction or a recorded correction, and only `correct_digest` records the second (SPEC
 /// section 5); a draft would replace the shown text with no record and the next re-extraction
-/// would erase it.
+/// would erase it. The refusal has two causes, so its message names both: the draft changed the
+/// text, or the card's text changed since the draft's base.
 fn refuse_source_text_change(item: ItemId, at_base: &str, drafted: &str) -> Result<(), ApiError> {
     if as_a_read_shows(at_base) == as_a_read_shows(drafted) {
         return Ok(());
@@ -145,7 +146,8 @@ fn refuse_source_text_change(item: ItemId, at_base: &str, drafted: &str) -> Resu
     Err(invalid(
         format!(
             "item {} is a source card; its text is changed by a correction \
-             (correct_digest), not by a draft",
+             (correct_digest), not by a draft. If the draft did not change the text, the \
+             card's text changed since the draft's base: take the current text",
             item.0
         ),
         "/body",
