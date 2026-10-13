@@ -354,7 +354,10 @@ export function DocumentView({
   const editable = atShown && isNote;
   const hasDraft = session !== undefined || (document?.draft ?? null) !== null;
   const [chosen, setChosen] = useState<'read' | 'edit' | null>(null);
-  const wantsEdit = editable && (chosen ?? (hasDraft ? 'edit' : 'read')) === 'edit';
+  // Editing is wanted only of a draft: a pane that chose to edit and whose session then ended by
+  // another hand (a Snapshot elsewhere, or a read that says the item is not a Note while nothing
+  // was typed) reads the committed text again, and "Edit" starts a new session.
+  const wantsEdit = editable && hasDraft && (chosen ?? 'edit') === 'edit';
   // A draft the service holds is opened as it arrives. Without one, a session starts only when
   // the person presses "Edit": a discarded draft is not started again behind their back.
   const heldDraft = document?.draft ?? null;

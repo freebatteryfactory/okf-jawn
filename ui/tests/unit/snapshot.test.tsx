@@ -411,6 +411,25 @@ describe('taking a Snapshot', () => {
       expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Edit' }));
     });
 
+    it('leaves a pane that had pressed "Edit" reading the committed text, not waiting for an editor', async () => {
+      // No draft to open on: the person presses "Edit", so the pane has chosen to edit.
+      const made = heldSnapshot([]);
+      renderAt(`/w/${WS}/i/${NOTE}`);
+      fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+      const box = await findTextBox('Text of Meeting notes');
+      typeInto(box, ' and more');
+      await screen.findByRole('region', { name: 'Drafts (1)' });
+      await pressSnapshot('Tidy');
+      await eventuallyReal(() => expect(made.api.callsTo(COMMIT)).toHaveLength(1));
+      made.answer();
+      await eventuallyReal(() => expect(said()).toMatch(/^Snapshot “Tidy” taken/));
+      await eventuallyReal(() => expect(box.isConnected).toBe(false));
+      // The session ended by the panel's hand: the pane reads, and "Edit" starts a new one.
+      await eventuallyReal(() => expect(screen.getByText('Text of Meeting notes')).toBeDefined());
+      expect(screen.getByRole('button', { name: 'Edit' })).toBeDefined();
+      expect(screen.queryByText('Reading…')).toBeNull();
+    });
+
     it.each([
       [
         'the row now in its place',
