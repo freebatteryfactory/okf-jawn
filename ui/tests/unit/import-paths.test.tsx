@@ -95,8 +95,11 @@ describe('a path the page can see is wrong', () => {
     ['a root', '/abs/b.txt', 'absolute'],
     ['a network share', '//server/share/b.txt', 'absolute'],
     ['a disk drive', 'C:/Users/x/c.txt', 'drive'],
+    ['a disk drive in a small letter', 'c:/Users/x/c.txt', 'drive'],
     ['a line feed', 'f/line\nfeed.txt', 'control'],
     ['a tab', 'f/a\tb.txt', 'control'],
+    ['a line feed in a folder’s name', 'line\nfeed/a.txt', 'control'],
+    ['a control character in the second folder’s name', 'ok/a\u0007b/c.txt', 'control'],
     ['a delete character', 'f/a\u007Fb.txt', 'control'],
     ['a C1 control', 'f/a\u0085b.txt', 'control'],
   ])('is a problem for %s', (_what, path, kind) => {
@@ -109,6 +112,7 @@ describe('a path the page can see is wrong', () => {
     ['a single dot step', './a.txt'],
     ['a colon inside a name', 'notes/12:30 call.txt'],
     ['a name that only starts like a drive', 'C:notes.txt'],
+    ['a step that looks like a drive below the first', 'docs/C:/x.txt'],
     ['letters of other scripts and a space', 'заметки/会議 メモ.txt'],
   ])('is none for %s', (_what, path) => {
     expect(pathProblem(tidyPath(path))).toBeNull();
