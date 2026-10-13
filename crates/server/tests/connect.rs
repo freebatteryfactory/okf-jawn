@@ -793,5 +793,45 @@ async fn a_key_source_that_panics_judges_nothing() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn the_503_says_which_case_it_is_and_the_wait_is_short_while_a_fetch_is_under_way()
+-> TestResult {
+    const UNKNOWN_KEY: &str = "The token names a key this server does not have yet";
+    let setup = Setup::new(Some(KEY_SET))?;
+    setup.verifier.verify(&sign(&claims()?, Some(KID))?).await?;
+    // The issuer rotates its key. A minute later a request starts the fetch that will bring it.
+    setup.issuer.publish(Some(SECOND_KEY_SET))?;
+    setup.clock.advance(Duration::from_secs(60))?;
+    let rotated = sign_with(&claims()?, Some(SECOND_KID), SECOND_PRIVATE_KEY)?;
+    let gate = setup.issuer.hold_next()?;
+    let asking = setup.verifying(sign(&claims()?, Some("unknown-a"))?);
+    setup.issuer.held().await?;
+    // A good token of the new key during that fetch: come back in two seconds, not in sixty.
+    let during = err_of(timeout(AT_ONCE, setup.verifier.verify(&rotated)).await?)?;
+    assert_eq!(during.error.code, ErrorCode::Unavailable);
+    assert_eq!(during.retry_after, Some(2));
+    assert_eq!(during.error.message, UNKNOWN_KEY);
+    gate.notify_one();
+    assert_eq!(asking.await?, Some(ErrorCode::Unauthenticated));
+    // The fetch is over and brought the key.
+    setup.verifier.verify(&rotated).await?;
+    // Inside the minute after it, a key still unknown is told the seconds left again.
+    setup.clock.advance(Duration::from_secs(10))?;
+    let unknown = sign(&claims()?, Some("unknown-b"))?;
+    let after = err_of(setup.verifier.verify(&unknown).await)?;
+    assert_eq!(after.retry_after, Some(50));
+    assert_eq!(after.error.message, UNKNOWN_KEY);
+    // With no key set at all the words say so.
+    let down = Setup::new(None)?;
+    let none = err_of(down.verifier.verify(&rotated).await)?;
+    assert_eq!(none.error.code, ErrorCode::Unavailable);
+    assert_eq!(none.retry_after, Some(60));
+    assert_eq!(
+        none.error.message,
+        "The token issuer's keys could not be fetched"
+    );
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;

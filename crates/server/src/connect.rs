@@ -35,17 +35,35 @@
 //! task of its own, so a caller that goes away after taking the minute's attempt does not take
 //! the refresh with it.
 //!
-//! A token the server cannot judge yet is not called false. When a token's `kid` is not in the
-//! cached set and the issuer may not be asked (inside the minute after an attempt, or while one
-//! is under way), and when there is no usable set at all, the answer is `Unavailable` with the
-//! whole seconds, rounded up, until the issuer may be asked again (`Unverified::retry_after`,
-//! sent as `Retry-After`): after a key rotation a good token would otherwise be refused as bad
-//! for up to a minute and send its client back to sign in for nothing. Only the request whose
-//! own fetch just succeeded without bringing the `kid` is told the token is false; a fetch that
-//! failed or ran out of time judged nothing. A token that fails for any other reason
-//! (algorithm, signature, claims) is `Unauthenticated` as before. An attacker gains nothing by
-//! this answer: it says only that a key id is not in a key set the issuer publishes to
-//! everyone, it carries no secret, and it causes no fetch.
+//! A token the server cannot judge yet is not called false. It is refused as `Unavailable`
+//! with a wait (`Unverified::retry_after`, sent as `Retry-After`), in two cases the words tell
+//! apart:
+//! - the token names a key this server does not have yet: its `kid` is not in the cached set
+//!   and the issuer may not be asked. While a fetch is under way the wait is
+//!   [`FETCH_RETRY_SECONDS`]: an ordinary fetch answers in well under a second, so the retry
+//!   finds its answer, and a fetch lasts ten seconds at most, so a client is told this at most
+//!   five times. Inside the minute after a fetch the wait is the whole seconds, rounded up,
+//!   until the issuer may be asked again;
+//! - the issuer's keys could not be fetched: there is no usable set at all, with the same wait.
+//!
+//! After a key rotation a good token would otherwise be refused as bad for up to a minute and
+//! send its client back to sign in for nothing. Only the request whose own fetch just succeeded
+//! without bringing the `kid` is told the token is false; a fetch that failed, ran out of time
+//! or did not finish judged nothing. A token that fails for any other reason (algorithm,
+//! signature, claims) is `Unauthenticated` as before.
+//!
+//! What this costs, by ruling: under a flood of forged tokens each minute's attempt is taken by
+//! the flood, so a false token that names an unknown key is told "cannot judge yet" for as long
+//! as the flood lasts, never "false". It is never accepted, and a good token is never refused;
+//! the cost is a client that keeps retrying. The answer carries no secret (a key id is or is not
+//! in a set the issuer publishes to everyone) and causes no fetch. The cure is a rate limit at
+//! the ingress, carried to the next server package.
+//!
+//! Also by ruling: the request that takes the attempt on a set ten minutes old waits for that
+//! fetch, at most ten seconds, though its own key is cached, so that a key the issuer withdrew
+//! is refused at the first request after ten minutes. And one known wart: if a key source
+//! panics after the caller that asked went away, the short wait is told until the next fetch
+//! ends.
 //!
 //! Known limit: the fetch follows whatever redirect policy the transport it is given has.
 //! [`IssuerKeys`] cannot see or refuse a redirect through the `workos` transport interface; the
@@ -107,6 +125,8 @@ struct KeyCache {
     fetched_at: Option<Instant>,
     /// The last fetch that was tried, whether or not it succeeded.
     attempted_at: Option<Instant>,
+    /// A fetch is under way: set when an attempt is taken, cleared when its fetch ends.
+    fetching: bool,
 }
 
 /// The claims a Connect access token must carry for this service.
@@ -134,6 +154,11 @@ pub const KEY_SET_KEPT: Duration = Duration::from_secs(3600);
 /// that exceeds it is a failed fetch.
 pub const FETCH_TIME_LIMIT: Duration = Duration::from_secs(10);
 
+/// The `Retry-After`, in seconds, of a token that cannot be judged while a fetch is under way.
+/// An ordinary fetch answers in well under a second, so two seconds is after it; a fetch lasts
+/// [`FETCH_TIME_LIMIT`] at most, so a client is told this at most five times.
+pub const FETCH_RETRY_SECONDS: u32 = 2;
+
 impl KeyCache {
     /// Whether a request naming `kid` at `now` is the one that asks the issuer: the minute's
     /// attempt is still free, and the set is stale or does not hold the key.
@@ -151,24 +176,29 @@ impl KeyCache {
     fn key(&self, kid: &str, now: Instant, fetched: bool) -> Result<DecodingKey, Unverified> {
         let kept = since(self.fetched_at, now).is_some_and(|age| age < KEY_SET_KEPT);
         let Some(set) = self.set.as_ref().filter(|_| kept) else {
-            return Err(self.not_yet(now));
+            return Err(self.not_yet(now, unavailable()));
         };
         match set.find(kid) {
             Some(jwk) => DecodingKey::from_jwk(jwk).map_err(|_| refused().into()),
             None if fetched => Err(refused().into()),
-            None => Err(self.not_yet(now)),
+            None => Err(self.not_yet(now, unknown_key())),
         }
     }
 
-    /// The refusal of a token that cannot be judged at `now`: `Unavailable`, with the whole
-    /// seconds, rounded up, until the issuer may be asked again.
-    fn not_yet(&self, now: Instant) -> Unverified {
+    /// The refusal `error` of a token that cannot be judged at `now`, with its wait:
+    /// [`FETCH_RETRY_SECONDS`] while a fetch is under way, else the whole seconds, rounded up,
+    /// until the issuer may be asked again.
+    fn not_yet(&self, now: Instant, error: ApiError) -> Unverified {
         let waited = since(self.attempted_at, now).unwrap_or_default();
         let left = REFRESH_INTERVAL.saturating_sub(waited);
-        let seconds = left.as_nanos().div_ceil(1_000_000_000);
+        let seconds = u32::try_from(left.as_nanos().div_ceil(1_000_000_000)).unwrap_or(u32::MAX);
         Unverified {
-            error: unavailable(),
-            retry_after: Some(u32::try_from(seconds).unwrap_or(u32::MAX)),
+            error,
+            retry_after: Some(if self.fetching {
+                FETCH_RETRY_SECONDS
+            } else {
+                seconds
+            }),
         }
     }
 }
@@ -239,14 +269,20 @@ impl ConnectTokens {
             // Taken under the lock, before the issuer is asked: every other request of this
             // minute, also one that arrives while the fetch runs, answers from the cache.
             cache.attempted_at = Some(now);
+            cache.fetching = true;
             now
         };
         // The lock is released. The fetch runs in a task of its own, so it and what it brings
         // outlive this request if its caller goes away.
         let fetching = tokio::spawn(refresh(self.keys.clone(), self.cache.clone(), began));
-        // A task that did not finish is a failed fetch, tolerated like any other.
-        let fetched = fetching.await.unwrap_or(false);
-        let cache = self.cache.lock().await;
+        let finished = fetching.await;
+        let mut cache = self.cache.lock().await;
+        // A task that did not finish is a failed fetch, tolerated like any other; it could not
+        // say itself that the fetch is over.
+        let fetched = finished.unwrap_or_else(|_| {
+            cache.fetching = false;
+            false
+        });
         cache.key(kid, self.clock.now(), fetched)
     }
 
@@ -311,10 +347,12 @@ pub fn install_crypto() -> Result<(), ApiError> {
 async fn refresh(keys: Arc<dyn KeySource>, cache: Arc<Mutex<KeyCache>>, began: Instant) -> bool {
     // The one error tolerated here: a fetch that fails, or that exceeds the time limit, leaves
     // the cached set in use, for as long as `KEY_SET_KEPT` allows.
-    let Ok(Ok(set)) = timeout(FETCH_TIME_LIMIT, keys.fetch()).await else {
+    let answer = timeout(FETCH_TIME_LIMIT, keys.fetch()).await;
+    let mut cache = cache.lock().await;
+    cache.fetching = false;
+    let Ok(Ok(set)) = answer else {
         return false;
     };
-    let mut cache = cache.lock().await;
     // An answer never replaces a set whose fetch began later.
     if cache.fetched_at.is_none_or(|held| held <= began) {
         cache.set = Some(set);
@@ -337,9 +375,18 @@ fn refused() -> ApiError {
     )
 }
 
+/// There is no usable key set: none was ever fetched, or the last is older than the hour.
 fn unavailable() -> ApiError {
     ApiError::new(
         ErrorCode::Unavailable,
-        "The token issuer's keys are unavailable",
+        "The token issuer's keys could not be fetched",
+    )
+}
+
+/// There is a key set, the token's key is not in it, and the issuer may not be asked yet.
+fn unknown_key() -> ApiError {
+    ApiError::new(
+        ErrorCode::Unavailable,
+        "The token names a key this server does not have yet",
     )
 }
