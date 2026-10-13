@@ -385,6 +385,13 @@ async fn a_session_the_service_issues_is_carried_on_later_messages() -> TestResu
         if message.get("method") != Some(&json!("initialize")) {
             return answered(&response(&json!(1), &json!({})));
         }
+        if message.pointer("/params/refused") == Some(&json!(true)) {
+            return answered(&json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "error": {"code": -32602, "message": "Unsupported protocol version"}
+            }));
+        }
         if message.pointer("/params/first") != Some(&json!(true)) {
             return answered(&response(
                 &json!(0),
@@ -402,10 +409,12 @@ async fn a_session_the_service_issues_is_carried_on_later_messages() -> TestResu
         script
     });
     let input = format!(
-        "{}{}{}{}",
+        "{}{}{}{}{}{}",
         request(&json!(0), "initialize", &json!({"first": true})),
         request(&json!(1), "tools/list", &json!({})),
         request(&json!(0), "initialize", &json!({})),
+        request(&json!(1), "tools/list", &json!({})),
+        request(&json!(0), "initialize", &json!({"refused": true})),
         request(&json!(1), "tools/list", &json!({})),
     );
     relay(Setup::new(&transport), input.as_bytes()).await?;
@@ -414,14 +423,22 @@ async fn a_session_the_service_issues_is_carried_on_later_messages() -> TestResu
         .iter()
         .map(|post| header(post, "Mcp-Session-Id"))
         .collect();
-    assert_eq!(sessions, [None, Some("session-7"), None, None]);
+    assert_eq!(sessions, [None, Some("session-7"), None, None, None, None]);
     let versions: Vec<Option<&str>> = posts
         .iter()
         .map(|post| header(post, "MCP-Protocol-Version"))
         .collect();
     assert_eq!(
         versions,
-        [None, Some("2025-06-18"), None, Some("2025-03-26")]
+        [
+            None,
+            Some("2025-06-18"),
+            None,
+            Some("2025-03-26"),
+            None,
+            None
+        ],
+        "after a handshake the service refused, no version is in force"
     );
     assert_eq!(id_of(&some(posts.get(1), "the second POST")?.body)?, "1");
     Ok(())
