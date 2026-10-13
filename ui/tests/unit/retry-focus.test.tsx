@@ -5,6 +5,7 @@
  * and the tree's failed row, which is a row of the tree, not a notice.
  */
 
+import { focusManager } from '@tanstack/react-query';
 import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -129,6 +130,32 @@ interface Caller {
 /** The element around these words that script can focus (`tabindex="-1"`): a part, a notice. */
 const focusableAround = (words: HTMLElement | null) =>
   words?.closest<HTMLElement>('[tabindex="-1"]') ?? null;
+
+/**
+ * Whether a browser lets script focus this element: a link, a button, a disclosure's summary, the
+ * tree's tab-stop row, or an element that carries `tabindex="-1"`. On anything else `focus()` does
+ * nothing in a browser and focus stays on the page body, while happy-dom focuses any element; so
+ * where focus is moved to is checked for this as well as for being the focused element.
+ */
+const takesFocus = (element: Element | null) =>
+  element?.matches('a[href], button, summary, [role="treeitem"][tabindex="0"], [tabindex="-1"]') ??
+  false;
+
+/** A short name for an element in a failure message. */
+const named = (element: Element | null) =>
+  element === null
+    ? 'nothing'
+    : `<${element.tagName.toLowerCase()}> "${(element.textContent ?? '').slice(0, 40)}"`;
+
+/** Keyboard focus is on `element`, and a browser would have let script put it there. */
+function expectFocusOn(element: HTMLElement | null | undefined) {
+  expect(element).toBeTruthy();
+  expect(document.activeElement).toBe(element);
+  expect(
+    takesFocus(document.activeElement),
+    `${named(document.activeElement)} cannot take focus from script in a browser`,
+  ).toBe(true);
+}
 
 /** The words of every status on the page, or of every note. */
 const linesOf = (role: 'status' | 'note') =>
@@ -343,11 +370,7 @@ describe.each(callers)('a keyboard retry at $name', (caller) => {
 
     operation.end('answers');
     await waitFor(() => expect(notice.isConnected).toBe(false));
-    await waitFor(() => {
-      const loaded = caller.loaded();
-      expect(loaded).toBeTruthy();
-      expect(document.activeElement).toBe(loaded);
-    });
+    await waitFor(() => expectFocusOn(caller.loaded()));
     expect(document.activeElement).not.toBe(document.body);
     // The operation's own status says what the retry brought, as it does without a retry.
     const after = caller.saidAfter;
@@ -454,6 +477,30 @@ const nothingNew: Caller[] = [
     context: 'Listing this workspace',
     loaded: () => screen.queryByText('This workspace has no folders or items yet.'),
   },
+  // Nothing is named: no entry was ever listed, and the page that came leaves no control behind.
+  {
+    name: 'more workspaces, when the listing ends with no workspace at all: the page’s level-one heading',
+    url: '/',
+    path: WORKSPACES,
+    good: firstOfMore(ok({ items: [], next_cursor: 'more' }), ok({ items: [], next_cursor: null })),
+    isStudied: () => (body) => cursorOf(body) === 'more',
+    reach: () => press('Show more workspaces'),
+    context: 'Listing more workspaces',
+    loaded: () => screen.queryByRole('heading', { level: 1, name: 'Your workspaces' }),
+  },
+  {
+    name: 'more search results, when the search ends with no result at all: the page’s level-one heading',
+    url: `/w/${WS}?q=budget`,
+    path: SEARCH,
+    good: firstOfMore(
+      ok({ hits: [], revision: HEAD, next_cursor: 'more' }),
+      ok({ hits: [], revision: HEAD }),
+    ),
+    isStudied: () => (body) => cursorOf(body) === 'more',
+    reach: () => press('Show more results'),
+    context: 'Loading more results',
+    loaded: () => screen.queryByRole('heading', { level: 1, name: 'Workshop notes' }),
+  },
 ];
 
 describe('a keyboard retry that loads nothing new', () => {
@@ -461,11 +508,32 @@ describe('a keyboard retry that loads nothing new', () => {
     const { operation, notice } = await retryFromTheKeyboard(caller);
     operation.end('answers');
     await waitFor(() => expect(notice.isConnected).toBe(false));
-    await waitFor(() => {
-      const loaded = caller.loaded();
-      expect(loaded).toBeTruthy();
-      expect(document.activeElement).toBe(loaded);
+    await waitFor(() => expectFocusOn(caller.loaded()));
+  });
+
+  it('ends on the application’s level-one heading, not on the one a document brings, when nothing is named beside an open document', async () => {
+    const { operation, notice } = await retryFromTheKeyboard({
+      name: 'more search results that end an empty search, beside an open document',
+      url: `/w/${WS}/i/${NOTE}?q=budget`,
+      path: SEARCH,
+      good: firstOfMore(
+        ok({ hits: [], revision: HEAD, next_cursor: 'more' }),
+        ok({ hits: [], revision: HEAD }),
+      ),
+      isStudied: () => (body) => cursorOf(body) === 'more',
+      reach: () => press('Show more results'),
+      context: 'Loading more results',
     });
+    // The document's own `# Meeting notes` is rendered as a level-one heading too.
+    await screen.findByRole('heading', { level: 1, name: 'Meeting notes' });
+    operation.end('answers');
+    await waitFor(() => expect(notice.isConnected).toBe(false));
+    const headings = screen.getAllByRole('heading', { level: 1 });
+    expect(headings.map((heading) => heading.textContent)).toEqual([
+      'Workshop notes',
+      'Meeting notes',
+    ]);
+    await waitFor(() => expectFocusOn(headings[0]));
   });
 });
 
@@ -624,6 +692,153 @@ describe('a retry in flight belongs to the request it repeats', () => {
       const said = linesOf(caller.loadingLineIsNote ? 'note' : 'status');
       expect(said.filter((words) => words.includes(line))).toHaveLength(1);
     }
+  });
+});
+
+/** The window loses and regains focus, as TanStack Query's focus manager sees it. */
+function windowRefocus() {
+  act(() => {
+    focusManager.setFocused(false);
+    focusManager.setFocused(true);
+  });
+  act(() => focusManager.setFocused(undefined));
+}
+
+describe('a failure that goes away without a retry', () => {
+  // The reader's check of a cited revision is made again whenever the window regains focus. Its
+  // query has nothing loaded, so it leaves its failed state at once and the notice goes with it.
+  it.each(['answers', 'fails again'] as const)(
+    'keeps focus in the reader’s revision notice when the failed check is made again as the window regains focus, and %s',
+    async (outcome) => {
+      // The first request opens the workspace; the reader's own check comes after it.
+      const check = studied(() => ok(workspace), afterTheFirst());
+      mockApi(explorerHandlers({ [OPEN]: check.handler }));
+      renderAt(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+      const words = await screen.findByText(
+        'Checking for the latest version: Something went wrong in the service.',
+      );
+      const notice = words.closest<HTMLElement>('[role="alert"]')?.parentElement;
+      const revisionNotice = focusableAround(notice?.parentElement ?? null);
+      if (notice === null || notice === undefined || revisionNotice === null) {
+        throw new Error('the failure is not shown in a notice inside the revision notice');
+      }
+      act(() => within(notice).getByRole('button', { name: 'Try again' }).focus());
+      check.hold();
+
+      // Two checks are made again: the shell's, for a newer head, and the reader's.
+      windowRefocus();
+      await waitFor(() => expect(check.inFlight()).toBe(2));
+      await waitFor(() => expect(notice.isConnected).toBe(false));
+      expect(revisionNotice.textContent).toContain('Checking whether it is the latest version…');
+      expect(revisionNotice.getAttribute('tabindex')).toBe('-1');
+      expect(document.activeElement).toBe(revisionNotice);
+
+      check.end(outcome);
+      check.end(outcome);
+      await within(revisionNotice).findByText(
+        outcome === 'answers' ? /it is not the latest version/ : /storage stumbled again/,
+      );
+      expect(document.activeElement).toBe(revisionNotice);
+    },
+  );
+
+  it('keeps focus in the reader’s revision notice when the check that failed allowed no retry and focus was on its way out', async () => {
+    // The first request opens the workspace, the second is the reader's check, the rest answer.
+    let opens = 0;
+    mockApi(
+      explorerHandlers({
+        [OPEN]: () => {
+          opens += 1;
+          return opens === 2 ? fail(404, 'not_found', 'gone') : ok(workspace);
+        },
+      }),
+    );
+    renderAt(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+    const words = await screen.findByText(
+      'Checking for the latest version: This could not be found.',
+    );
+    const notice = words.closest<HTMLElement>('[role="alert"]')?.parentElement;
+    const revisionNotice = focusableAround(notice?.parentElement ?? null);
+    if (notice === null || notice === undefined || revisionNotice === null) {
+      throw new Error('the failure is not shown in a notice inside the revision notice');
+    }
+    // The failure allows no retry: its way out is the only control in the notice.
+    expect(within(notice).queryByRole('button')).toBeNull();
+    const wayOut = within(notice).getByRole('link', { name: 'Go to this workspace' });
+    act(() => wayOut.focus());
+
+    windowRefocus();
+    await waitFor(() => expect(wayOut.isConnected).toBe(false));
+    await within(revisionNotice).findByText(/it is not the latest version/);
+    expectFocusOn(revisionNotice);
+  });
+
+  it('keeps focus in the reader’s revision notice when the notice of a failed "Read the latest version" is replaced by the failed check', async () => {
+    // The reader shows one of two notices: the failed check takes the place of everything else,
+    // the failed latest read with it. That read is still failed when its notice goes.
+    let opens = 0;
+    const read = explorerHandlers()[READ];
+    mockApi(
+      explorerHandlers({
+        // The route opens the workspace, the reader's check finds a newer head, later checks fail.
+        [OPEN]: () => {
+          opens += 1;
+          if (opens === 1) return ok(workspace);
+          if (opens === 2) return ok({ ...workspace, head: NEW });
+          return fail(500, 'internal', 'storage stumbled');
+        },
+        [READ]: (body) => {
+          const at = body.at;
+          const latest =
+            typeof at === 'object' && at !== null && 'kind' in at && at.kind === 'latest';
+          if (latest || read === undefined) return fail(500, 'internal', 'latest failed');
+          return read(body);
+        },
+      }),
+    );
+    renderAt(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+    await press('Read the latest version');
+    const words = await screen.findByText(
+      'Reading the latest version: Something went wrong in the service.',
+    );
+    const notice = words.closest<HTMLElement>('[role="alert"]')?.parentElement;
+    const revisionNotice = focusableAround(notice?.parentElement ?? null);
+    if (notice === null || notice === undefined || revisionNotice === null) {
+      throw new Error('the failure is not shown in a notice inside the revision notice');
+    }
+    act(() => within(notice).getByRole('button', { name: 'Try again' }).focus());
+
+    windowRefocus();
+    await waitFor(() => expect(notice.isConnected).toBe(false));
+    await within(revisionNotice).findByText(
+      'Checking for the latest version: Something went wrong in the service.',
+    );
+    expectFocusOn(revisionNotice);
+  });
+
+  it('moves focus to the page’s level-one heading when another workspace is opened while focus is on the retry button of the one that did not open', async () => {
+    const opening = studied(() => ok(workspace));
+    mockApi(explorerHandlers({ [OPEN]: opening.handler }));
+    const { router } = renderAt(`/w/${WS}`);
+    const button = await screen.findByRole('button', { name: 'Try again' });
+    opening.hold();
+    act(() => button.focus());
+    // The address changes under the page (Back or Forward): focus is still on the button.
+    await act(() => router.navigate({ to: '/w/$workspaceId', params: { workspaceId: OTHER_WS } }));
+    await waitFor(() => expect(opening.inFlight()).toBe(1));
+    await waitFor(() => expect(button.isConnected).toBe(false));
+    // Nothing is loaded in the notice's place yet: there is no workspace name to go to.
+    expect(screen.getByText('Opening the workspace…')).toBeTruthy();
+    const heading = screen.getByRole('heading', { level: 1, name: 'Workspace' });
+    expect(heading.getAttribute('tabindex')).toBe('-1');
+    expect(document.activeElement).toBe(heading);
+
+    // That workspace opens: the heading goes with the page before the Explorer, and focus goes on
+    // to the heading that takes its place, the workspace's name.
+    opening.end('answers');
+    await screen.findByRole('tree', { name: 'Folders' });
+    expect(heading.isConnected).toBe(false);
+    expectFocusOn(screen.getByRole('heading', { level: 1, name: 'Workshop notes' }));
   });
 });
 

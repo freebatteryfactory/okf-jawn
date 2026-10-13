@@ -12,7 +12,7 @@
  */
 import { useQuery } from '@tanstack/react-query';
 import { Outlet, useNavigate, useParams, useSearch } from '@tanstack/react-router';
-import { type Ref, useEffect, useState } from 'react';
+import { type Ref, useEffect, useRef, useState } from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import { openWorkspaceQueryKey } from '../../api/generated/@tanstack/react-query.gen';
 import { openWorkspace } from '../../api/generated/sdk.gen';
@@ -23,6 +23,7 @@ import { itemOptions } from '../documents/DocumentView';
 import { short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, messageFor } from '../errors/failure';
+import { useRetry } from '../errors/retry';
 import { SearchForm, SearchResults } from '../search/SearchPanel';
 import { DocumentPanes, matchingLayout } from './DocumentPanes';
 import { FolderTree } from './FolderTree';
@@ -273,6 +274,17 @@ function HeadLine({ workspace, state }: { workspace: Workspace; state: HeadState
       ? messageFor(classifyFailure(check.error)).title
       : null;
   const [outcome, setOutcome] = useState('');
+  // A failed refresh is said in a notice with no retry of its own: Refresh is the retry. The
+  // failure can still leave while this line stays (a refresh that succeeds, or the workspace being
+  // asked again when the network returns), and its notice can hold keyboard focus on its way out
+  // (the workspace is gone). The hook follows that focus; with the failure gone it goes to Refresh.
+  const refreshRef = useRef<HTMLButtonElement | null>(null);
+  const refreshFailure = useRetry({
+    request: workspace.id,
+    failed: state.refreshError !== null,
+    error: state.refreshError,
+    loaded: () => refreshRef.current,
+  });
   const refresh = async () => {
     if (state.refreshing) return;
     setOutcome('Refreshing…');
@@ -303,14 +315,23 @@ function HeadLine({ workspace, state }: { workspace: Workspace; state: HeadState
         {newer !== null && checkFailed !== null ? ' ' : null}
         {checkFailed === null ? null : <>Could not check for a newer version: {checkFailed}</>}
       </p>
-      <button type="button" aria-disabled={state.refreshing} onClick={() => void refresh()}>
+      <button
+        type="button"
+        ref={refreshRef}
+        aria-disabled={state.refreshing}
+        onClick={() => void refresh()}
+      >
         {state.refreshing ? 'Refreshing…' : 'Refresh'}
       </button>
       <p role="status" className="sr-only">
         {outcome}
       </p>
-      {state.refreshError !== null && (
-        <FailureNotice context="Refreshing this workspace" error={state.refreshError} />
+      {refreshFailure.shown && (
+        <FailureNotice
+          context="Refreshing this workspace"
+          error={refreshFailure.error}
+          retry={refreshFailure}
+        />
       )}
     </div>
   );
