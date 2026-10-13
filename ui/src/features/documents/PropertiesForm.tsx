@@ -25,7 +25,9 @@
  * sent: the form keeps what was typed, the draft keeps its last properties, and a line above the
  * form says the input is held back. A misfit at a field the form draws is shown at that field by
  * the form library; every other one (a required property with no field, a property a strict type
- * does not allow, a rule about the properties together) is listed above the form. A map that did
+ * does not allow, a rule about the properties together) is listed above the form, and only
+ * there: the library is not given the errors about the map as a whole, which it would draw under
+ * the form in the validator's words. A map that did
  * not fit before anything was entered is listed the same way, and nothing is held back by it
  * until the person enters something.
  *
@@ -131,6 +133,10 @@ export function drawnProperties(schema: PropertyMap, data: PropertyMap): string[
   return named.success ? Object.keys(named.data.properties) : [];
 }
 
+/** The top-level property a validation error's path is in; '' for the map as a whole. */
+const topProperty = (path: string | undefined) =>
+  (path ?? '').replace(/^\./, '').split('.').at(0) ?? '';
+
 /** One way the properties do not fit the type: the property it is about ('' for the whole map). */
 export interface Misfit {
   property: string;
@@ -162,7 +168,7 @@ export function misfits(schema: PropertyMap, properties: PropertyMap): Misfit[] 
         const property = additional.data.additionalProperty;
         return { property, words: `“${property}” is not a property this type allows.` };
       }
-      const property = (error.property ?? '').replace(/^\./, '').split('.').at(0) ?? '';
+      const property = topProperty(error.property);
       const said = error.message ?? error.stack;
       return {
         property,
@@ -413,6 +419,10 @@ function TypedForm({
         formData={data}
         validator={validator}
         liveValidate="onChange"
+        // The library draws an error about the map as a whole under the form, in the validator's
+        // words. Such a misfit is said above the form already, once and in plain words, so the
+        // library is left the errors that are about a property: it draws those of its own fields.
+        transformErrors={(errors) => errors.filter((error) => topProperty(error.property) !== '')}
         showErrorList={false}
         noHtml5Validate
         experimental_defaultFormStateBehavior={NO_DEFAULTS}

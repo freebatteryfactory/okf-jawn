@@ -526,12 +526,16 @@ describe('the properties form', () => {
       expect(saidAbove()).toContain('“type” is not a property this type allows.');
       expect(saidAbove()).toContain('“reviewed” is not a property this type allows.');
       expect(saidAbove()).not.toContain('okf_jawn');
-      // Said once: the form library does not say it a second time in its own words.
-      expect(document.querySelector('.properties-form')?.textContent).not.toMatch(/must NOT/);
       set('Owner', 'Grace');
       await pass(AUTOSAVE_DELAY_MS * 3);
       expect(api.callsTo(SAVE)).toHaveLength(0);
       expect(saidAbove()).toContain(HELD_BACK);
+      // Said once. The form library validates at a change: it does not then say the same misfit a
+      // second time, under the form and in the validator's words.
+      expect(document.querySelector('.properties-form')?.textContent).not.toMatch(/must NOT/);
+      expect(
+        document.querySelector('.properties')?.textContent?.match(/not a property this type/g),
+      ).toHaveLength(2);
     });
 
     it('keeps every key in its place through each kind of edit', async () => {
