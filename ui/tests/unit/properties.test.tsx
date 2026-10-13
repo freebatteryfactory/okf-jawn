@@ -326,6 +326,53 @@ describe('the properties form', () => {
     });
   });
 
+  // A type's schema and UI schema are the service's data: the page never falls to them.
+  describe('a type whose definition the form library cannot draw', () => {
+    const undrawable = {
+      ...meetingNote,
+      ui_schema: { owner: { 'ui:widget': 'no-such-widget' } },
+    };
+
+    it('keeps the Explorer, shows the properties as they are, and saves them with the text', async () => {
+      const api = typed({ [TYPES]: () => ok({ items: [undrawable] }) });
+      await pressEdit();
+      expect(await screen.findByText(/cannot be shown here: its definition asks/)).toBeDefined();
+      // The page is still the Explorer, with the editor in it.
+      expect(screen.getByRole('tree', { name: 'Folders' })).toBeDefined();
+      const box = textBox('Text of Meeting notes');
+      const properties = screen.getByText('Properties (7)').closest('details');
+      expect(properties?.textContent).toContain('owner');
+      expect(properties?.textContent).toContain('Ada');
+      expect(properties?.textContent).toContain('x-okf-review');
+      vi.useFakeTimers();
+      typeInto(box, ' more');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      expect(api.callsTo(SAVE).at(0)?.properties).toEqual(stored);
+    });
+
+    it('opens an item of that type that already has a draft', async () => {
+      typed({
+        [TYPES]: () => ok({ items: [undrawable] }),
+        [ITEM]: () =>
+          ok({
+            ...itemDocument(noteSummary),
+            properties: stored,
+            draft: {
+              body: '# Meeting notes\n\nMy draft',
+              properties: stored,
+              draft: draftOf(NOTE, HEAD, LATER),
+            },
+          }),
+      });
+      renderAt(`/w/${WS}/i/${NOTE}`);
+      const box = await screen.findByRole('textbox', { name: 'Text of Meeting notes' });
+      expect(box.textContent).toContain('My draft');
+      expect(await screen.findByText(/cannot be shown here: its definition asks/)).toBeDefined();
+      expect(screen.getByRole('tab', { name: 'Meeting notes (draft)' })).toBeDefined();
+    });
+  });
+
   it('does not send a required property emptied', async () => {
     const api = typed();
     await editNote();

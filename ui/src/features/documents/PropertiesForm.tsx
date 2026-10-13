@@ -22,14 +22,16 @@
  * valid again.
  *
  * Without a schema there is no form, and the properties are shown as they are: when the
- * workspace has no definition of the item's type, when the definition names no properties, or
- * when the types could not be read (shown in plain words, with its retry).
+ * workspace has no definition of the item's type, when the definition names no properties, when
+ * the types could not be read (shown in plain words, with its retry), or when the form library
+ * cannot draw the definition (it throws; `FormBoundary` catches it). In each case the properties
+ * still travel with every save.
  */
 import Form from '@rjsf/core';
 import type { RJSFSchema, UiSchema } from '@rjsf/utils';
 import { customizeValidator } from '@rjsf/validator-ajv8';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useRef, useState } from 'react';
+import { Component, type ReactNode, useRef, useState } from 'react';
 import { z } from 'zod';
 import { listTypesOptions } from '../../api/generated/@tanstack/react-query.gen';
 import { editSession } from '../drafts/saving';
@@ -88,6 +90,26 @@ export function mergeProperties(
   return next;
 }
 
+/**
+ * Whatever the form library throws while it draws a type's schema or UI schema stops here. The
+ * schema is the service's data, so the page must not fall to it: the caller shows the properties
+ * as they are instead. A new type gets a new boundary (its `key`).
+ */
+class FormBoundary extends Component<
+  { fallback: ReactNode; children: ReactNode },
+  { failed: boolean }
+> {
+  override state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  override render() {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}
+
 /** The properties whose value differs between two states of the form's data. */
 export function changedKeys(before: PropertyMap, after: PropertyMap): string[] {
   return [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(
@@ -137,13 +159,30 @@ export function PropertiesForm({ session, typeName }: PropertiesFormProps) {
           ones below are kept as they are.
         </p>
       ) : (
-        <TypedForm
+        <FormBoundary
           key={typeName}
-          session={session}
-          schema={schema.data}
-          uiSchema={uiSchema.success ? uiSchema.data : {}}
-          held={held}
-        />
+          fallback={
+            <>
+              <p role="note" className="notice">
+                The form of the type <span className="type-name">{typeName}</span> cannot be shown
+                here: its definition asks for something this workspace cannot draw. The properties
+                are kept as they are and are saved with the text.
+              </p>
+              <PropertyList
+                properties={Object.fromEntries(
+                  Object.entries(session.properties).filter(([key]) => held.includes(key)),
+                )}
+              />
+            </>
+          }
+        >
+          <TypedForm
+            session={session}
+            schema={schema.data}
+            uiSchema={uiSchema.success ? uiSchema.data : {}}
+            held={held}
+          />
+        </FormBoundary>
       )}
       {Object.keys(others).length > 0 && (
         <>
