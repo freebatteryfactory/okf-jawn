@@ -11,7 +11,9 @@
  * A draft of a Source or a View can only have been made elsewhere: this workspace edits Notes as
  * drafts. The service takes no such draft into a Snapshot, so its row says its kind and why, its
  * box is unticked and cannot be ticked, and it offers "Discard draft", which asks first. Until a
- * row's item has been read its kind is not known, and the row is offered like any other.
+ * row's item has been read its kind is not known: the row says "checking…", is not ticked and is
+ * not in the Snapshot or its count, so a Snapshot pressed then never includes a Source's or a
+ * View's draft. If the read never answers the row stays so.
  *
  * This panel asks for the list's further pages by itself, one after another, so the marks in the
  * tree and on the tabs cover every draft. A page that fails stops that, says so here and offers
@@ -99,12 +101,15 @@ const savedDraft = (row: Row) => row.session?.confirmed?.draft ?? row.draft;
 const nothingSaved = (row: Row) =>
   row.session !== null && saveStateOf(row.session) === 'held-back' && savedDraft(row) === null;
 
+/** The row's item has not been read yet, so whether it is a Note is not known. */
+const kindUnknown = (row: Row) => row.summary === undefined;
+
 /**
- * The draft is offered for a Snapshot: it has no open conflict, something of it is saved, and it
- * is not known to be a draft of a Source or a View.
+ * The draft is offered for a Snapshot: its item has been read and is a Note, it has no open
+ * conflict, and something of it is saved.
  */
 const offered = (row: Row) =>
-  row.conflict === null && !nothingSaved(row) && otherKind(row) === null;
+  row.conflict === null && !nothingSaved(row) && !kindUnknown(row) && otherKind(row) === null;
 
 export function DraftsPanel({
   workspaceId,
@@ -444,7 +449,7 @@ function DraftRow({
       </button>{' '}
       <span className="meta">
         {kind === null ? null : `${kind} · `}
-        <Standing row={row} />
+        {kindUnknown(row) ? <>checking…</> : <Standing row={row} />}
       </span>
       {kind !== null && (
         <OtherKindDraft

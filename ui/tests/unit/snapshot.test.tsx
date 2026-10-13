@@ -1268,6 +1268,33 @@ describe('a draft of a Source or a View made elsewhere', () => {
     },
   );
 
+  it('does not count or tick a draft whose item has not been read yet: a Snapshot then never has it', async () => {
+    const release: Array<() => void> = [];
+    const item = summary(SOURCE, 'things/it.md', 'Annual report', 'report', 'source');
+    const { api } = withOther('source', {
+      [ITEM]: (body) => {
+        const itemId = String(body.item_id);
+        if (itemId === NOTE) return ok(itemDocument(noteSummary));
+        // The Source's read is held until the test lets it answer.
+        return new Promise<Reply>((resolve) => release.push(() => resolve(ok(itemDocument(item)))));
+      },
+    });
+    renderAt(`/w/${WS}`);
+    await screen.findByRole('region', { name: 'Drafts (2)' });
+    await eventuallyReal(() => expect(snapshotButton().textContent).toBe('Snapshot 1 draft'));
+    const checking = within(panel()).getByRole('checkbox', {
+      name: 'Include Item 44444444 in the Snapshot',
+    });
+    expect(checking.closest('li')?.textContent).toContain('checking…');
+    expect(checking).toHaveProperty('checked', false);
+    expect(checking.getAttribute('aria-disabled')).toBe('true');
+    await pressSnapshot('Early');
+    await eventuallyReal(() => expect(said()).toMatch(/^Snapshot “Early” taken: 1 item\./));
+    expect(api.callsTo(COMMIT).map((sent) => sent.item_ids)).toEqual([[NOTE]]);
+    for (const answer of release) answer();
+    await eventuallyReal(() => expect(row()).toContain('cannot be snapshotted'));
+  });
+
   it('offers "Discard draft", which asks first; then the draft is gone and focus is on a row', async () => {
     const { api, state } = await listed('source');
     act(() => discardButton().focus());
