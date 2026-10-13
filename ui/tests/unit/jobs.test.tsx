@@ -298,6 +298,24 @@ describe('what a job’s row says', () => {
     );
   });
 
+  it('does not take a state named like a member of every object for one it has words for', async () => {
+    // "constructor" and "toString" are found on any table by a plain look-up.
+    await openJobs({
+      [JOBS]: () =>
+        listOf([
+          { ...jobOf('running'), state: fromNewerService('constructor') },
+          { ...jobOf('running'), id: SECOND, state: fromNewerService('toString') },
+        ]),
+    });
+    await listed();
+    expect(rowOf().textContent).toBe(
+      'Import, job 88888888In a state this page does not know (“constructor”).',
+    );
+    expect(rowOf(SECOND).textContent).toBe(
+      'Import, job 99999999In a state this page does not know (“toString”).',
+    );
+  });
+
   it('names a job of a kind this page does not know as unknown, with the service’s word', async () => {
     await openJobs({
       [JOBS]: () =>
