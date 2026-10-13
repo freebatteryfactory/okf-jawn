@@ -97,6 +97,45 @@ impl Repositories {
         durable(&path)
     }
 
+    /// Delete a workspace's repository and its staging directories under its write lock, so
+    /// no write is half done in it; `true` when a repository was there.
+    pub(crate) fn remove(&self, scope: &StorageScope) -> Result<bool, ApiError> {
+        self.locked(scope, || {
+            let staging = self
+                .staging
+                .join(scope.tenant_id.as_str())
+                .join(scope.workspace_id.0.to_string());
+            remove_tree(&staging)?;
+            remove_tree(&self.path(scope))
+        })
+    }
+
+    /// The repository directory of every workspace of `tenant` except `except`.
+    pub(crate) fn others(
+        &self,
+        tenant: &okf_jawn_contract::identity::TenantId,
+        except: &StorageScope,
+    ) -> Result<Vec<PathBuf>, ApiError> {
+        let directory = self.root.join(tenant.as_str());
+        let excluded = self.path(except);
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(io_error("read", &directory, &error)),
+        };
+        let mut found = Vec::new();
+        for entry in entries {
+            let path = entry
+                .map_err(|error| io_error("read", &directory, &error))?
+                .path();
+            if path != excluded && path.extension().is_some_and(|extension| extension == "git") {
+                found.push(path);
+            }
+        }
+        found.sort();
+        Ok(found)
+    }
+
     /// Hold the workspace's write lock while `work` runs.
     pub(crate) fn locked<T>(
         &self,
@@ -115,6 +154,23 @@ impl Repositories {
             .lock()
             .map_err(|_| internal("a workspace lock was poisoned"))?;
         work()
+    }
+
+    /// How many hold the workspace's write lock or wait for it (or are about to): the callers
+    /// of `locked` that took the lock's handle and have not ended. A test that holds the lock
+    /// itself sees a second caller as 2, once that caller passed every check it makes before
+    /// `locked`.
+    #[cfg(test)]
+    pub(crate) fn lock_users(&self, scope: &StorageScope) -> Result<usize, ApiError> {
+        let key = format!("{}/{}", scope.tenant_id.as_str(), scope.workspace_id.0);
+        let locks = self
+            .locks
+            .lock()
+            .map_err(|_| internal("the workspace lock table was poisoned"))?;
+        // The table holds one handle of its own.
+        Ok(locks
+            .get(&key)
+            .map_or(0, |lock| Arc::strong_count(lock).saturating_sub(1)))
     }
 
     /// A fresh staging directory for one mutation, removed when the guard drops.
@@ -464,6 +520,15 @@ pub(crate) fn git(error: &git2::Error) -> ApiError {
 
 pub(crate) fn internal(message: impl Into<String>) -> ApiError {
     ApiError::new(ErrorCode::Internal, message)
+}
+
+/// Remove a directory tree; `true` when it was there.
+fn remove_tree(path: &Path) -> Result<bool, ApiError> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(io_error("remove", path, &error)),
+    }
 }
 
 /// A signature field without the characters Git refuses in one.

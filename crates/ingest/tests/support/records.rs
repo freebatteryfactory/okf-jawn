@@ -2,7 +2,8 @@
 //! `EventLog` that records what the job writes announce.
 //!
 //! It encodes what the `RecordStore` docs state about jobs:
-//! - `claim_job` claims a queued job under a new lease token and returns `None` otherwise;
+//! - `claim_job` claims a queued job under a new lease token and returns `None` otherwise, and
+//!   refuses with `Conflict` a job of a workspace a purge is recorded for (`purge_workspace_of`);
 //! - progress, completion and failure need the current, unexpired claim;
 //! - completion and failure also need the job to be running, as storage's `complete` and
 //!   `fail_job` refuse a row another writer cancelled (`lost_claim`);
@@ -65,6 +66,8 @@ pub struct FakeRecords {
     renewals: std::sync::atomic::AtomicUsize,
     /// A job cancelled the moment it is claimed, as a cancel landing right after the claim.
     cancel_on_claim: Mutex<Option<JobId>>,
+    /// Jobs of a workspace a purge is recorded for: their claim is refused with `Conflict`.
+    purged: Mutex<Vec<JobId>>,
 }
 
 /// One notification as the fake log keeps it: its log, its mutation identity and the event.
@@ -285,6 +288,16 @@ impl FakeRecords {
         Ok(())
     }
 
+    /// Record a purge of `id`'s workspace: from now on its claim is refused with `Conflict`
+    /// naming the purge and the job is left as it is, as storage's `claim_job` does.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn purge_workspace_of(&self, id: JobId) -> Result<(), ApiError> {
+        self.purged.lock().map_err(|_| poisoned())?.push(id);
+        Ok(())
+    }
+
     /// Cancel a running job, as `cancel_job` would: the state is `Cancelled` and the claim is
     /// left as it was, so the handler learns it from the next `update_progress`.
     ///
@@ -350,6 +363,14 @@ impl RecordStore for FakeRecords {
     }
 
     fn claim_job(&self, job: JobId) -> PortFuture<'_, Option<ClaimedJob>> {
+        if self.purged.lock().is_ok_and(|purged| purged.contains(&job)) {
+            return Box::pin(async {
+                Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "the workspace has a recorded purge",
+                ))
+            });
+        }
         let cancel = self
             .cancel_on_claim
             .lock()
@@ -697,6 +718,7 @@ mod tests {
         records.set_progress(id, 40)?;
         records.cancel_when_claimed(id)?;
         assert_eq!(records.entry(id)?.job.progress, 40);
+        records.purge_workspace_of(id)?;
         Ok(())
     }
 }
