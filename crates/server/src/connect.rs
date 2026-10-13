@@ -52,12 +52,16 @@
 //! or did not finish judged nothing. A token that fails for any other reason (algorithm,
 //! signature, claims) is `Unauthenticated` as before.
 //!
-//! What this costs, by ruling: under a flood of forged tokens each minute's attempt is taken by
-//! the flood, so a false token that names an unknown key is told "cannot judge yet" for as long
-//! as the flood lasts, never "false". It is never accepted, and a good token is never refused;
-//! the cost is a client that keeps retrying. The answer carries no secret (a key id is or is not
-//! in a set the issuer publishes to everyone) and causes no fetch. The cure is a rate limit at
-//! the ingress, carried to the next server package.
+//! What this costs, by ruling. An attacker needs no credential and one request a minute: a
+//! forged token that names an unknown key, sent when the minute's attempt is free, takes that
+//! attempt. For as long as that goes on, a false token that names an unknown key is told to
+//! retry and is never told it is false. No token is ever wrongly accepted, and no good token is
+//! called false: a good token whose key is not fetched yet is told to retry, as above, and
+//! verifies once a fetch brings its key, whoever caused that fetch. The answer carries no
+//! secret (a key id is or is not in a set the issuer publishes to everyone) and causes no
+//! fetch. A rate limit at the ingress lessens this and does not cure it, because one request a
+//! minute is enough. A cure would need the server to refresh its keys on its own clock, not on
+//! a request's; that is for the next server package to weigh.
 //!
 //! Also by ruling: the request that takes the attempt on a set ten minutes old waits for that
 //! fetch, at most ten seconds, though its own key is cached, so that a key the issuer withdrew
