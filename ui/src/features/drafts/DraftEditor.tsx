@@ -25,10 +25,18 @@ import { takeHeld, useWatchedPart } from '../../lib/focus';
 import { Instant } from '../../lib/instant';
 import { short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
+import type { FailureMessage } from '../errors/failure';
 import { useRetry } from '../errors/retry';
 import { DiscardDraft } from './DiscardDraft';
 import { MarkdownEditor } from './MarkdownEditor';
-import { editSession, flushSession, leaveSession, MAX_BODY_BYTES, stopSaving } from './saving';
+import {
+  editSession,
+  flushSession,
+  headerBehind,
+  leaveSession,
+  MAX_BODY_BYTES,
+  stopSaving,
+} from './saving';
 import { type DraftSession, saveStateOf } from './sessions';
 
 export interface DraftEditorProps {
@@ -40,6 +48,18 @@ export interface DraftEditorProps {
 }
 
 const MEBIBYTE = 1024 * 1024;
+
+/**
+ * Said of a save the service refused at the application's header: the page shows the item as it
+ * was before someone else archived, unarchived, moved or renamed it. Not "the request was not
+ * valid": nothing the person entered is wrong, and Refresh is the way on.
+ */
+const ITEM_CHANGED_ELSEWHERE: FailureMessage = {
+  title: 'This item was changed in the workspace since this page was refreshed.',
+  advice:
+    'Someone archived, unarchived, moved or renamed it, and a draft is saved only on the item as it is now. Nothing was saved; your text is kept here. Press “Refresh” at the top of the page, then “Try again” here: the save then goes on.',
+  action: { kind: 'retry', label: 'Try again' },
+};
 
 function megabytes(bytes: number): string {
   return (bytes / MEBIBYTE).toFixed(1);
@@ -145,6 +165,7 @@ export function DraftEditor({ session, title, onDiscarded }: DraftEditorProps) {
           error={saveFailure.error}
           retry={saveFailure}
           workspaceId={workspaceId}
+          {...(headerBehind(saveFailure.error) ? { said: ITEM_CHANGED_ELSEWHERE } : {})}
         />
       )}
       <DiscardDraft session={session} onDiscarded={onDiscarded} />

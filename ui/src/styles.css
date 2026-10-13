@@ -576,6 +576,86 @@ main.app-main:has(.explorer) {
 .patch-lines > span {
   padding-left: calc(0.25rem + 3px);
 }
+/* Changing the tree. A form opens in place, in the same bordered group as a confirmation. */
+.tree-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+.tree-bar button,
+.item-actions button,
+.item-actions select,
+.change-form button {
+  font: inherit;
+  padding: 0.2rem 0.6rem;
+}
+.tree-said,
+.item-actions > [role="status"] {
+  margin: 0.25rem 0;
+}
+.change-form {
+  margin: 0.25rem 0;
+}
+.change-field {
+  display: grid;
+  gap: 0.15rem;
+  margin-bottom: 0.5rem;
+}
+.change-field label {
+  font-size: 0.85rem;
+}
+.change-field p,
+.change-buttons {
+  margin: 0;
+}
+.documents-area {
+  height: 100%;
+}
+.explorer-bar > button {
+  font: inherit;
+  padding: 0.2rem 0.6rem;
+}
+/* The naming rules: the form library's plain markup, and the preview as a table. */
+.naming-rules button {
+  font: inherit;
+  padding: 0.2rem 0.6rem;
+}
+.naming-rules fieldset {
+  border: 1px solid GrayText;
+  border-radius: 0.25rem;
+  margin: 0.5rem 0;
+}
+.naming-rules input[type="number"],
+.naming-rules select {
+  font: inherit;
+}
+.rename-list table {
+  border-collapse: collapse;
+  width: 100%;
+}
+.rename-list caption {
+  text-align: start;
+  font-weight: 700;
+}
+.rename-list th,
+.rename-list td {
+  border: 1px solid GrayText;
+  padding: 0.25rem 0.5rem;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+.item-actions select[aria-disabled="true"] {
+  color: GrayText;
+}
+
+/* The draft of a deleted item: read-only text, as wide as its column, like the editor's. */
+.left-draft {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: ui-monospace, monospace;
+  line-height: 1.5;
+  padding: 0.5rem;
+}
 .kept-text {
   display: block;
   width: 100%;

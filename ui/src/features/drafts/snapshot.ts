@@ -11,9 +11,8 @@
  * Snapshot waits for another save.
  *
  * On success the shell shows the returned revision as its head at once, because the person made
- * that change: the cached answer of `open_workspace` is given that head (the cache owns it;
- * nothing is copied elsewhere). `open_workspace` is not asked again, so a newer head someone else
- * made after it is still only announced and waits for Refresh. What the commit changed is told to
+ * that change (`adoptHead` in `explorer/head.ts`, shared with every other change of the tree). A
+ * newer head someone else made after it is still only announced and waits for Refresh. What the commit changed is told to
  * the cache where the cache is not bound to a revision: the committed items have no draft (each
  * cached `get_item` of them, and the drafts list), and the checks that compare the shown head or a
  * cited revision with the latest run again. Listings, reads and search are keyed by the revision
@@ -56,12 +55,11 @@
  * a new Snapshot.
  */
 import type { QueryClient } from '@tanstack/react-query';
-import { z } from 'zod';
-import { openWorkspaceQueryKey } from '../../api/generated/@tanstack/react-query.gen';
 import { commitItems } from '../../api/generated/sdk.gen';
-import type { Draft, Revision, Warning, Workspace } from '../../api/generated/types.gen';
+import type { Draft, Revision, Warning } from '../../api/generated/types.gen';
 import { short } from '../documents/describe';
 import { classifyFailure } from '../errors/failure';
+import { adoptHead, checkHeadsAgain } from '../explorer/head';
 import { forgetDrafts, listedDraft } from './drafts-list';
 import { endSession, flushSession } from './saving';
 import {
@@ -173,24 +171,6 @@ export function draftConflictsOf(thrown: unknown): ConflictItem[] | null {
   return failure.error.detail.items;
 }
 
-const zHeadCheck = z.object({
-  _id: z.literal('openWorkspace'),
-  body: z.object({ workspace_id: z.string() }),
-});
-
-/** A query that compares the shown head, or a cited revision, with the latest head. */
-function checksHead(queryKey: readonly unknown[], workspaceId: string): boolean {
-  const key = queryKey.at(0);
-  const parsed = zHeadCheck.safeParse(key);
-  if (!parsed.success || parsed.data.body.workspace_id !== workspaceId) return false;
-  return key !== null && typeof key === 'object' && ('_check' in key || '_comparedWith' in key);
-}
-
-/** Run the head checks of a workspace again. */
-function checkHeadsAgain(client: QueryClient, workspaceId: string) {
-  void client.invalidateQueries({ predicate: (query) => checksHead(query.queryKey, workspaceId) });
-}
-
 /**
  * Take a Snapshot. Resolves with what it did. Rejects with `UnsavedSelection` before anything is
  * asked, or with what `commit_items` threw; a `draft_conflict` among it is kept for each item.
@@ -253,11 +233,7 @@ export async function takeSnapshot(
   // Taken: the same drafts under the same name again would be a new Snapshot.
   useDraftSessions.getState().ask(workspaceId, null);
 
-  const headKey = openWorkspaceQueryKey({ body: { workspace_id: workspaceId } });
-  const previousHead = client.getQueryData<Workspace>(headKey)?.head ?? null;
-  client.setQueryData<Workspace>(headKey, (workspace) =>
-    workspace === undefined ? workspace : { ...workspace, head: result.revision },
-  );
+  const previousHead = adoptHead(client, workspaceId, result.revision);
   const stillDrafts: string[] = [];
   const heldBack: string[] = [];
   /** Of those, the ones the service still holds a draft of: it was saved in between. */

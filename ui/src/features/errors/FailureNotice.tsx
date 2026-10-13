@@ -21,7 +21,7 @@
  * nothing follows focus out of it.
  */
 import { Link } from '@tanstack/react-router';
-import { classifyFailure, messageFor } from './failure';
+import { classifyFailure, type FailureMessage, messageFor } from './failure';
 import type { FailureRetry } from './retry';
 
 export interface FailureNoticeProps {
@@ -36,11 +36,16 @@ export interface FailureNoticeProps {
   retry?: FailureRetry;
   /** The workspace the failed operation belonged to, when the workspace itself is still there. */
   workspaceId?: string;
+  /**
+   * What to say of this failure in place of the words for its code, when the caller knows what
+   * the failure means where it happened. The service's own words are still shown under it.
+   */
+  said?: FailureMessage;
 }
 
-export function FailureNotice({ context, error, retry, workspaceId }: FailureNoticeProps) {
+export function FailureNotice({ context, error, retry, workspaceId, said }: FailureNoticeProps) {
   const failure = classifyFailure(error);
-  const message = messageFor(failure);
+  const message = said ?? messageFor(failure);
   const api = failure.kind === 'api' ? failure.error : null;
   const words = (
     <>

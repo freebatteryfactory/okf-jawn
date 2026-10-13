@@ -42,6 +42,7 @@ import { keyed } from '../../lib/keys';
 import { itemOptions } from '../documents/DocumentView';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
+import { useDeleted, useExplorerStore } from '../explorer/store';
 import { draftsByItem, useDrafts } from './drafts-list';
 import { discardSession } from './saving';
 import {
@@ -166,9 +167,14 @@ export function DraftsPanel({
       });
     }
   }
-  // Each row's item, read at the head shown: its title, and what kind of item it is.
+  // Each row's item, read at the head shown: its title, and what kind of item it is. An item the
+  // person deleted in this page is not at that head, and is not asked for there.
+  const deletedHere = useExplorerStore((state) => state.deleted);
   const items = useQueries({
-    queries: unread.map((row) => itemOptions(workspaceId, row.itemId, head)),
+    queries: unread.map((row) => ({
+      ...itemOptions(workspaceId, row.itemId, head),
+      enabled: deletedHere[`${workspaceId}/${row.itemId}`] === undefined,
+    })),
   });
   const rows: Row[] = unread.map((row, index) => {
     const read = items.at(index);
@@ -441,8 +447,16 @@ function DraftRow({
   onSelect: (include: boolean) => void;
   onOpenItem: (itemId: string) => void;
 }) {
+  // An item the person deleted in this page is not at the head: its draft is named by the title
+  // the item had, as its tab is.
+  const deleted = useDeleted(workspaceId, row.itemId);
   const summary = row.summary;
-  const name = summary ? summary.title || summary.path : `Item ${row.itemId.slice(0, 8)}`;
+  const name =
+    deleted !== undefined
+      ? `${deleted} (deleted)`
+      : summary
+        ? summary.title || summary.path
+        : `Item ${row.itemId.slice(0, 8)}`;
   const kind = otherKind(row);
   const [, rowRef] = useWatchedPart<HTMLLIElement>(held);
   const openRef = useRef<HTMLButtonElement | null>(null);
@@ -488,7 +502,15 @@ function DraftRow({
       </button>{' '}
       <span className="meta">
         {kind === null ? null : `${kind} · `}
-        {!unread ? <Standing row={row} /> : notRead ? <>not read</> : <>checking…</>}
+        {deleted !== undefined ? (
+          <>its item was deleted: open it to copy from the draft or discard it</>
+        ) : !unread ? (
+          <Standing row={row} />
+        ) : notRead ? (
+          <>not read</>
+        ) : (
+          <>checking…</>
+        )}
       </span>
       {kind !== null && (
         <p className="meta">

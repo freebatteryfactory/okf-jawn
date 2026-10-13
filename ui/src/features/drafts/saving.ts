@@ -33,6 +33,26 @@
  *
  * A body larger than the service accepts is not sent; the session says so until it is shortened.
  *
+ * The application's header (`okf_jawn`) and the status word are the service's and the item's, not
+ * the draft's to carry (the service keeps `archived` in the header, and refuses a save whose
+ * header is not exactly the stored one: `crates/core/src/application/drafts.rs`):
+ * - every save carries the header as the item has it at the head the workspace shows, read from
+ *   `get_item` at that head (its cached answer, else asked), never the copy from when the session
+ *   began. A session with nothing to save asks nothing. When the header cannot be read, the save
+ *   fails with what the read threw, and nothing is sent. When the page shows no head for the
+ *   workspace, the header is left as the session has it;
+ * - after the person's own change of an item (its status word, Archive or Unarchive, a move or a
+ *   rename), `followOwnChange` gives the draft the returned item's header, and its status word
+ *   when the change set one, keeps everything else of the draft, and saves it once. A draft that
+ *   was on the revision the change was made on is saved on the revision the change made (the
+ *   explicit rebase), so its next Snapshot does not conflict with the person's own change. A draft
+ *   on an older revision keeps its base: what changed before the person's own change is still
+ *   asked about at its Snapshot. A draft whose last save the person stopped is not sent by this
+ *   either (see "Stop" below): it takes the word and the new base, and its notice has the retry;
+ * - a save the service refuses at the header (`headerBehind`) means the item was changed in the
+ *   workspace since this page refreshed: the page shows a header the service no longer holds.
+ *   The draft's notice says that, and that a Refresh lets the save go on.
+ *
  * A save that has been under way for 30 seconds is said to be still sending, and the person may
  * stop it (`stopSaving`): the request is aborted, and since it may have been applied, the session
  * is then as after any save with no answer, but for one thing. After "Stop" nothing of the
@@ -72,15 +92,20 @@
  * nothing reads its kind for the session: a save sent then (the page is hidden) is the service's
  * to refuse, and is shown as a failed save.
  */
-import type { QueryClient } from '@tanstack/react-query';
+import { isCancelledError, type QueryClient } from '@tanstack/react-query';
+import {
+  getItemOptions,
+  openWorkspaceQueryKey,
+} from '../../api/generated/@tanstack/react-query.gen';
 import { discardDraft, saveDraft } from '../../api/generated/sdk.gen';
-import type { ItemDocument, ItemSummary, Revision } from '../../api/generated/types.gen';
+import type { ItemDocument, ItemSummary, Revision, Workspace } from '../../api/generated/types.gen';
 import { zSaveDraftRequest } from '../../api/generated/zod.gen';
 import { REQUEST_TIMEOUT_MS, RequestStopped } from '../../app/api-client';
 import { classifyFailure } from '../errors/failure';
 import { rememberDraft } from './drafts-list';
 import {
   atRisk,
+  type DraftSession,
   type DraftText,
   type HeldProperties,
   needsSave,
@@ -139,6 +164,60 @@ export class DraftNotKept extends Error {
 
 const sessions = () => useDraftSessions.getState();
 
+/** The application's own header among an item's properties, and the item's status word. */
+const APP_HEADER_KEY = 'okf_jawn';
+const STATUS_KEY = 'status';
+
+/** `properties` with `value` under `key`, at the place the key had (else last); without it when undefined. */
+function withProperty(
+  properties: Record<string, unknown>,
+  key: string,
+  value: unknown,
+): Record<string, unknown> {
+  if (JSON.stringify(properties[key]) === JSON.stringify(value)) return properties;
+  const { [key]: _old, ...rest } = properties;
+  if (value === undefined) return rest;
+  return key in properties
+    ? Object.fromEntries(Object.entries(properties).map(([k, v]) => [k, k === key ? value : v]))
+    : { ...properties, [key]: value };
+}
+
+/** How often a read that was stopped under this one is asked again. */
+const READ_AGAIN = 2;
+
+/**
+ * `get_item` at `revision`: its cached answer when there is one, else asked now. A read of the
+ * item that is in flight is stopped when the cache is told of a draft (`drafts-list.ts`) and asked
+ * again right after; one stopped under this call is waited for again, not taken for a failure.
+ */
+async function itemAt(
+  client: QueryClient,
+  workspaceId: string,
+  itemId: string,
+  revision: Revision,
+): Promise<ItemDocument> {
+  const options = {
+    ...getItemOptions({
+      body: { workspace_id: workspaceId, item_id: itemId, at: { kind: 'revision', revision } },
+    }),
+    staleTime: Number.POSITIVE_INFINITY,
+  };
+  for (let stopped = 0; ; stopped += 1) {
+    try {
+      return await client.fetchQuery(options);
+    } catch (error) {
+      if (!isCancelledError(error) || stopped >= READ_AGAIN) throw error;
+    }
+  }
+}
+
+/** The head the workspace shows, as the cache holds it; undefined when the page shows none. */
+function shownHead(client: QueryClient, workspaceId: string): Revision | undefined {
+  return client.getQueryData<Workspace>(
+    openWorkspaceQueryKey({ body: { workspace_id: workspaceId } }),
+  )?.head;
+}
+
 /**
  * Start editing an item from what `get_item` answered at `revision`: the person's draft when it
  * carries one, otherwise the committed content. A session already there is left as it is.
@@ -147,7 +226,7 @@ export function beginSession(
   workspaceId: string,
   revision: Revision,
   document: ItemDocument,
-  pane: string,
+  pane: string | null,
 ) {
   const itemId = document.summary.id;
   if (sessions().sessions[sessionKey(workspaceId, itemId)] !== undefined) return;
@@ -337,12 +416,29 @@ async function send(client: QueryClient, key: string): Promise<void> {
     sessions().change(key, { tooLong: bytes });
     return;
   }
-  const text: DraftText = { body: session.body, properties: session.properties };
-  const last = session.attempt;
+  // The header is the service's: this save carries it as the item has it at the head shown.
+  const head = shownHead(client, session.workspaceId);
+  let properties = session.properties;
+  if (head !== undefined) {
+    try {
+      const shown = await itemAt(client, session.workspaceId, session.itemId, head);
+      const typed = sessions().sessions[key];
+      if (typed === undefined) return;
+      properties = withProperty(typed.properties, APP_HEADER_KEY, shown.properties[APP_HEADER_KEY]);
+      if (properties !== typed.properties) sessions().change(key, { properties });
+    } catch (error) {
+      sessions().change(key, { failure: error });
+      return;
+    }
+  }
+  const now = sessions().sessions[key];
+  if (now === undefined) return;
+  const text: DraftText = { body: now.body, properties };
+  const last = now.attempt;
   const attempt: SaveAttempt =
-    last !== null && last.baseRevision === session.baseRevision && sameText(last, text)
+    last !== null && last.baseRevision === now.baseRevision && sameText(last, text)
       ? last
-      : { key: crypto.randomUUID(), baseRevision: session.baseRevision, ...text };
+      : { key: crypto.randomUUID(), baseRevision: now.baseRevision, ...text };
   // A save that is sent ends a stop: whoever sent it, the person asked for it.
   sessions().change(key, {
     saving: true,
@@ -516,6 +612,115 @@ export async function discardSession(
   // A conflict of this draft is over with it: there is nothing left to keep.
   sessions().clearConflict(key);
   rememberDraft(client, workspaceId, itemId, null);
+}
+
+/** How a draft stands after the person's own change of its item. */
+export type DraftAfterChange =
+  /** The person has no draft of the item. */
+  | 'none'
+  /** The draft is on the revision the change made: its next Snapshot does not ask about it. */
+  | 'follows'
+  /** The draft keeps an older base: its next Snapshot asks, about what changed before. */
+  | 'asks'
+  /** The draft could not be read or saved; its own notice says why. */
+  | 'not-saved'
+  /**
+   * The change is not on this page (its answer was not adopted as the head shown), so the draft
+   * is still on the older version the page shows, until a Refresh.
+   */
+  | 'behind';
+
+/** A session that holds a draft: something was saved, a save failed, or the text was changed. */
+const holdsDraft = (session: DraftSession) =>
+  session.confirmed !== null || session.failure !== null || !sameText(session, session.committed);
+
+/**
+ * How the person's draft of an item stands after a change of theirs that this page does not
+ * show: left behind on the older version when the page holds a draft of the item, and nothing to
+ * say when it holds none.
+ */
+export function draftLeftBehind(workspaceId: string, itemId: string): DraftAfterChange {
+  const session = sessions().sessions[sessionKey(workspaceId, itemId)];
+  return session !== undefined && holdsDraft(session) ? 'behind' : 'none';
+}
+
+/**
+ * Whether a save was refused because of the application's header: the service refuses a draft
+ * whose header is not exactly the stored one, and every save carries the header of the head the
+ * page shows, so this is the answer when someone else archived, unarchived, moved or renamed
+ * the item and the page has not refreshed since.
+ */
+export function headerBehind(thrown: unknown): boolean {
+  const failure = classifyFailure(thrown);
+  return (
+    failure.kind === 'api' &&
+    failure.error.code === 'invalid_input' &&
+    failure.error.field === `/properties/${APP_HEADER_KEY}`
+  );
+}
+
+/**
+ * The person changed an item themselves, on `base`, and the service made `revision`: their draft
+ * of it follows. It takes, when the change set the status word (`took.status`), the returned
+ * item's word; its save carries the returned item's header, as every save carries the header of
+ * the head shown; everything else of the draft is kept. It is saved once: on
+ * `revision` when it was on `base` (the explicit rebase), else on the base it has. A draft the
+ * page did not hold yet (the service's, carried by `get_item`) becomes a session, as when its tab
+ * opens. A draft whose last save the person stopped takes all of that and is not sent: nothing of
+ * a stopped session is sent until the person acts on the draft, and changing the item is not
+ * that. Never rejects: the outcome says how the draft stands.
+ *
+ * It waits for a save of the draft that is in flight, which can take as long as that save may
+ * (a large text). The change itself is done before this is called; callers do not hold the
+ * change open for it, and say its outcome when it comes.
+ */
+export async function followOwnChange(
+  client: QueryClient,
+  workspaceId: string,
+  itemId: string,
+  base: Revision,
+  revision: Revision,
+  took: { status: boolean },
+): Promise<DraftAfterChange> {
+  const key = sessionKey(workspaceId, itemId);
+  let document: ItemDocument;
+  try {
+    document = await itemAt(client, workspaceId, itemId, revision);
+  } catch {
+    return sessions().sessions[key] === undefined ? 'none' : 'not-saved';
+  }
+  if (sessions().sessions[key] === undefined) {
+    if ((document.draft ?? null) === null) return 'none';
+    beginSession(workspaceId, revision, document, null);
+  }
+  cancelTimer(key);
+  // A save in flight answers first: what the service holds, and on which base, is known then.
+  await inFlight.get(key);
+  const session = sessions().sessions[key];
+  if (session === undefined) return 'none';
+  const committed: DraftText = { body: document.body, properties: document.properties };
+  if (!holdsDraft(session)) {
+    // Editing was started and nothing typed: there is no draft, and none is made of the change.
+    sessions().change(key, { ...committed, committed, baseRevision: revision });
+    return 'none';
+  }
+  // The header is taken by the save itself, like every save: from the head shown, which is the
+  // revision this change made.
+  const properties = took.status
+    ? withProperty(session.properties, STATUS_KEY, document.properties[STATUS_KEY])
+    : session.properties;
+  const onBase = session.baseRevision === base;
+  sessions().change(key, {
+    properties,
+    ...(onBase ? { committed, baseRevision: revision } : {}),
+  });
+  // Not sent by itself after "Stop": the notice of the stopped save has the retry.
+  if (session.stopped) return 'not-saved';
+  await save(client, key);
+  const after = sessions().sessions[key];
+  if (after === undefined) return 'none';
+  if (needsSave(after)) return 'not-saved';
+  return onBase ? 'follows' : 'asks';
 }
 
 /** End a session whose draft the service no longer holds (it was snapshotted or discarded). */

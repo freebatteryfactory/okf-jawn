@@ -13,7 +13,9 @@
  * the workspace shows. So a tab opened from a pinned link has the title its text has, whatever the
  * item is called, or whether it exists, at the head. The name also carries how the item's draft
  * stands, in brackets after the title: "(draft)", "(unsaved)" or "(not saved)". The mark is the
- * item's, read at the head, so a tab that shows a cited revision has it too.
+ * item's, read at the head, so a tab that shows a cited revision has it too. The tab of an item the
+ * person deleted in this page reads "(deleted)" after the title it had, and asks nothing at the
+ * head.
  */
 import { Tabs } from '@base-ui/react/tabs';
 import { useQuery } from '@tanstack/react-query';
@@ -30,6 +32,7 @@ import {
   type PaneLocation,
   type PanelLayout,
   tabLocation,
+  useDeleted,
   useExplorerStore,
 } from './store';
 
@@ -272,6 +275,7 @@ function DocumentPane({
                 canWrite={canWrite}
                 onOpenCurrent={() => onOpenCurrent(active)}
                 onSnapshotted={onSnapshotted}
+                onClose={() => onClose(pane.id, active)}
               />
             </Tabs.Panel>
           )}
@@ -298,10 +302,25 @@ function TabLabel({
   head: Revision;
   cited: Revision | undefined;
 }) {
-  const shown = useQuery(itemOptions(workspaceId, itemId, cited ?? head));
-  const item = useQuery(itemOptions(workspaceId, itemId, head));
+  // An item the person deleted in this page is not at the head: its tab says so, by the title
+  // it had, and nothing is asked at the head. A revision the tab cites is still read (the pane
+  // shows it under the notice).
+  const deleted = useDeleted(workspaceId, itemId);
+  const shown = useQuery({
+    ...itemOptions(workspaceId, itemId, cited ?? head),
+    enabled: deleted === undefined || cited !== undefined,
+  });
+  const item = useQuery({
+    ...itemOptions(workspaceId, itemId, head),
+    enabled: deleted === undefined,
+  });
   const summary = shown.data?.summary;
-  const name = summary ? summary.title || summary.path : `Item ${itemId.slice(0, 8)}`;
+  const name =
+    deleted !== undefined
+      ? `${deleted} (deleted)`
+      : summary
+        ? summary.title || summary.path
+        : `Item ${itemId.slice(0, 8)}`;
   // The service holds a draft when `get_item` carries one or `list_drafts` lists the item.
   const listed = useDraftMarks(workspaceId)(itemId);
   const mark = listed ?? ((item.data?.draft ?? null) !== null ? 'draft' : null);

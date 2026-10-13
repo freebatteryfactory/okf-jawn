@@ -14,6 +14,13 @@
  * or its scrolling list, a click, a screen reader), arborist is told which entry has it, because
  * its arrow keys move from the entry it knows is focused. Entering the tree lands on the selected
  * entry when the tree shows it, otherwise the first (the WAI-ARIA tree pattern).
+ *
+ * A person who may write gets the tree's changes above it (`tree/TreeActions.tsx`): a new note, a
+ * new folder, and for the current item a rename or move and a delete; F2 and Delete on an item's
+ * row open the last two. After a change the tree lists the head the change made, and keyboard
+ * focus that rested on the bar goes to the row of what was created or moved, or to the entry now
+ * where the deleted one was (`TreeReveal`). A row also shows an item's status word when it is not
+ * "stable", as "status draft", which is not the mark of the person's own draft.
  */
 import { type UseQueryResult, useQueries, useQueryClient } from '@tanstack/react-query';
 import { ChartColumn, FileBox, FileText, Folder, FolderOpen } from 'lucide-react';
@@ -44,6 +51,14 @@ import { type DraftMark, useDraftMarks } from '../drafts/marks';
 import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, messageFor } from '../errors/failure';
 import { useRetry } from '../errors/retry';
+import { useWorkspaceChanges } from '../tree/context';
+import { splitPath } from '../tree/names';
+import {
+  NO_FOLDER_CHANGES,
+  type OpenForm,
+  TreeActions,
+  type TreeTarget,
+} from '../tree/TreeActions';
 import {
   ancestorFolders,
   type FolderListing,
@@ -188,6 +203,15 @@ function contains(entries: readonly TreeEntry[], id: string): boolean {
   return entries.some((entry) => entry.id === id || contains(entry.children ?? [], id));
 }
 
+function findEntry(entries: readonly TreeEntry[], id: string): TreeEntry | null {
+  for (const entry of entries) {
+    if (entry.id === id) return entry;
+    const found = findEntry(entry.children ?? [], id);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
 function statusRowId(folder: string, status: StatusKind): string {
   return status === 'loading' || status === 'error' ? `listing:${folder}` : `more:${folder}`;
 }
@@ -207,8 +231,8 @@ function childrenOf(entries: readonly TreeEntry[], folder: string): readonly Tre
  * The entry keyboard focus enters the tree on, as the WAI-ARIA tree pattern says: the selected
  * entry (the open item's row) when the tree shows it, otherwise the first entry.
  */
-function tabStopOf(tree: TreeApi<TreeEntry>): NodeApi<TreeEntry> | null {
-  return tree.selectedNodes.at(0) ?? tree.firstNode;
+function tabStopOf(tree: TreeApi<TreeEntry> | null): NodeApi<TreeEntry> | null {
+  return tree === null ? null : (tree.selectedNodes.at(0) ?? tree.firstNode);
 }
 
 /** A listing the person asked for ("Show more entries", or a retry), awaiting its answer. */
@@ -237,6 +261,13 @@ export function FolderTree({
   const boxRef = useRef<HTMLDivElement | null>(null);
   const height = useElementHeight(boxRef);
   const heading = useId();
+  const { canWrite } = useWorkspaceChanges();
+  // The tree's current entry: the one keyboard focus was last on. The bar above acts on it.
+  const [currentId, setCurrentId] = useState<string | null>(null);
+  const [form, setForm] = useState<OpenForm | null>(null);
+  const barRef = useRef<HTMLDivElement | null>(null);
+  const reveal = useExplorerStore((state) => state.treeReveal);
+  const revealInTree = useExplorerStore((state) => state.revealInTree);
 
   // Measured row heights by entry id: a wrapped name makes its row taller. The list keeps
   // virtualizing; a changed height re-lays out the list from that row on.
@@ -253,7 +284,15 @@ export function FolderTree({
     treeRef.current?.redrawList(index);
   }, []);
 
-  const rowContext = useMemo(() => ({ measure: measureRow }), [measureRow]);
+  // F2 and Delete on a row, for a person who may write: the form opens for that row's item.
+  const rowKey = useRef<(node: NodeApi<TreeEntry>, key: string) => boolean>(() => false);
+  const rowContext = useMemo(
+    () => ({
+      measure: measureRow,
+      onKey: (node: NodeApi<TreeEntry>, key: string) => rowKey.current(node, key),
+    }),
+    [measureRow],
+  );
 
   // Keyboard focus on a row that a newer listing no longer holds would drop to the page when the
   // row goes (a Refresh lands while focus is in the tree). It moves to the entry now at that
@@ -333,6 +372,97 @@ export function FolderTree({
       boxRef.current?.querySelector<HTMLElement>('[role="treeitem"][tabindex="0"]') ??
       emptyRef.current,
   });
+  // Put keyboard focus on an entry's row. Arborist focuses the row of an entry that becomes its
+  // focused one; an entry that already is (focus went to a form and comes back) is focused here.
+  const focusRow = (tree: TreeApi<TreeEntry>, id: string) => {
+    tree.focus(id);
+    for (const element of boxRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') ??
+      []) {
+      if (element.dataset.entry === id) element.focus();
+    }
+  };
+  // A form opened from a row gives keyboard focus back to that row when it is left. The bar asks
+  // for it in its own layout effect, which runs before the tree has its handle again in the same
+  // commit (a child's layout effects run first), so the row is focused here, in this component's.
+  const returnToRow = useRef(false);
+  useLayoutEffect(() => {
+    if (!returnToRow.current) return;
+    returnToRow.current = false;
+    const tree = treeRef.current ?? null;
+    const row = current !== null ? current.id : tabStopOf(tree)?.id;
+    if (tree !== null && row !== undefined) focusRow(tree, row);
+    else barRef.current?.querySelector('button')?.focus();
+  });
+  const targetOf = (entry: TreeEntry | null, index: number): TreeTarget | null => {
+    if (entry === null || entry.kind === 'status') return null;
+    return entry.item === null
+      ? { kind: 'folder', folder: entry.folder }
+      : { kind: 'item', item: entry.item, folder: entry.folder, mark: entry.mark, index };
+  };
+  const current = currentId === null ? null : findEntry(entries, currentId);
+  rowKey.current = (node, key) => {
+    if (!canWrite || (key !== 'F2' && key !== 'Delete')) return false;
+    const target = targetOf(node.data, node.rowIndex ?? 0);
+    if (target === null) return false;
+    if (target.kind === 'folder') setLoadNote(NO_FOLDER_CHANGES);
+    else {
+      setCurrentId(node.id);
+      setForm({
+        what: key === 'F2' ? 'move' : 'delete',
+        folder: target.folder,
+        item: target,
+        fromRow: true,
+      });
+    }
+    return true;
+  };
+
+  // A change names what the tree shows focused next: its folders are opened, and once every
+  // folder on screen is listed at the head the change made, focus that rested on the bar (or fell
+  // to the page) goes to that row. Focus the person has put elsewhere is left there.
+  useEffect(() => {
+    if (reveal === null || reveal.workspaceId !== workspaceId || reveal.kind === 'place') return;
+    const above = reveal.kind === 'item' ? reveal.path : reveal.folder;
+    for (const folder of ancestorFolders(above)) setExpanded(workspaceId, folder, true);
+  }, [reveal, setExpanded, workspaceId]);
+  useEffect(() => {
+    if (reveal === null || reveal.workspaceId !== workspaceId) return;
+    // The shell shows the head a change made a moment after the change answers.
+    if (reveal.revision !== revision) return;
+    const wanted =
+      reveal.kind === 'place'
+        ? []
+        : ancestorFolders(reveal.kind === 'item' ? reveal.path : reveal.folder);
+    if (wanted.some((folder) => !folders.includes(folder))) return;
+    const listed = folders.every((folder) => {
+      const result = listings.get(folder);
+      if (result === undefined) return false;
+      return (
+        result.isError ||
+        (result.isSuccess && !result.isPlaceholderData && result.data.revision === revision)
+      );
+    });
+    if (!listed) return;
+    revealInTree(null);
+    const active = document.activeElement;
+    const resting = active === null || active === document.body || barRef.current?.contains(active);
+    if (!resting) return;
+    // React clears the ref when the tree leaves the page (an emptied workspace).
+    const tree = treeRef.current ?? null;
+    if (reveal.kind === 'place') {
+      const near = tree?.at(Math.min(reveal.index, tree.visibleNodes.length - 1)) ?? null;
+      if (tree !== null && near !== null) focusRow(tree, near.id);
+      else emptyRef.current?.focus();
+      return;
+    }
+    const id = reveal.kind === 'item' ? itemNodeId(reveal.itemId) : folderId(reveal.folder);
+    if (tree !== null && contains(entries, id)) focusRow(tree, id);
+    else {
+      const name = splitPath(reveal.kind === 'item' ? reveal.path : reveal.folder).name;
+      setLoadNote(`“${name}” is not among the entries shown yet. Show more entries to find it.`);
+    }
+  });
+
   const selected =
     selectedItemId !== null && contains(entries, itemNodeId(selectedItemId))
       ? itemNodeId(selectedItemId)
@@ -444,6 +574,21 @@ export function FolderTree({
       <h2 id={heading} className="panel-heading">
         Folders
       </h2>
+      {canWrite && (
+        <TreeActions
+          target={targetOf(
+            current,
+            current === null ? 0 : (treeRef.current?.indexOf(current.id) ?? 0),
+          )}
+          form={form}
+          onForm={setForm}
+          onReturnToRow={() => {
+            returnToRow.current = true;
+          }}
+          onOpenItem={onOpenItem}
+          barRef={barRef}
+        />
+      )}
       {root?.isPending && !rootFailure.retrying && <p role="status">Loading folders…</p>}
       {rootFailure.shown && (
         <FailureNotice
@@ -487,6 +632,7 @@ export function FolderTree({
               onActivate={activate}
               onFocus={(node) => {
                 lastFocusIndex.current = node.rowIndex;
+                setCurrentId(node.id);
               }}
               rowHeight={rowHeight}
               indent={16}
@@ -510,13 +656,20 @@ function extractionWord(item: ItemSummary | null): string | null {
     : null;
 }
 
+/** An item's status word when it is not the ordinary one: "status draft", never just "draft". */
+function statusWord(item: ItemSummary | null): string | null {
+  return item === null || item.status === 'stable' ? null : `status ${item.status}`;
+}
+
 /** The row's accessible name: the label, then the type name and any conversion state. */
 function entryLabel(entry: TreeEntry): string {
   if (entry.item === null) return entry.name;
   const extraction = extractionWord(entry.item);
   const type = `${entry.name}, type ${entry.item.type_name}`;
   const converted = extraction === null ? type : `${type}, ${extraction}`;
-  return entry.mark === null ? converted : `${converted}, ${entry.mark}`;
+  const status = statusWord(entry.item);
+  const stated = status === null ? converted : `${converted}, ${status}`;
+  return entry.mark === null ? stated : `${stated}, ${entry.mark}`;
 }
 
 /**
@@ -533,6 +686,7 @@ function TreeRow({ node, attrs, innerRef, children }: RowRendererProps<TreeEntry
   const siblings = node.parent?.children?.length ?? 1;
   const tree = node.tree;
   const stop = tabStopOf(tree);
+  const { onKey } = useContext(TreeRowContext);
   return (
     <div
       {...rest}
@@ -540,6 +694,7 @@ function TreeRow({ node, attrs, innerRef, children }: RowRendererProps<TreeEntry
       // hides a long name from the keyboard. Rows stay as wide as the column and wrap instead.
       style={{ ...style, minWidth: 0 }}
       role="treeitem"
+      data-entry={node.id}
       tabIndex={stop?.id === node.id ? 0 : -1}
       aria-label={entryLabel(node.data)}
       aria-expanded={node.data.kind === 'folder' ? node.isOpen : undefined}
@@ -553,9 +708,14 @@ function TreeRow({ node, attrs, innerRef, children }: RowRendererProps<TreeEntry
       }}
       onClick={node.handleClick}
       onKeyDown={(event) => {
-        if (event.key !== 'Enter') return;
-        event.preventDefault();
-        node.activate();
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          node.activate();
+        } else if (onKey(node, event.key)) {
+          // The key opened a form: arborist's own handling of it (Delete) is not wanted as well.
+          event.preventDefault();
+          event.stopPropagation();
+        }
       }}
     >
       {children}
@@ -583,7 +743,9 @@ const TreeScroller = forwardRef<HTMLDivElement, HTMLProps<HTMLDivElement>>(
  */
 const TreeRowContext = createContext<{
   measure: (id: string, index: number, height: number) => void;
-}>({ measure: () => {} });
+  /** A key pressed on a row; true when it opened a form. */
+  onKey: (node: NodeApi<TreeEntry>, key: string) => boolean;
+}>({ measure: () => {}, onKey: () => false });
 
 function TreeEntryContent({ node, style }: NodeRendererProps<TreeEntry>) {
   const { measure } = useContext(TreeRowContext);
@@ -617,6 +779,7 @@ function TreeEntryContent({ node, style }: NodeRendererProps<TreeEntry>) {
         <span className="tree-name">{entry.name}</span>
         {item === null ? null : <span className="tree-type">{item.type_name}</span>}
         {extraction === null ? null : <span className="tree-flag">{extraction}</span>}
+        {statusWord(item) === null ? null : <span className="tree-flag">{statusWord(item)}</span>}
         {entry.mark === null ? null : <span className="tree-flag">{entry.mark}</span>}
       </span>
     </div>

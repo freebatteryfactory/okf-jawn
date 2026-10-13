@@ -167,7 +167,7 @@ const TEMPLATES = { MultiSchemaFieldTemplate: ChoiceTemplate };
 const NOTHING_MORE = () => {};
 
 /** The application's own header among an item's properties: the service's, never a type's. */
-const APP_HEADER_KEY = 'okf_jawn';
+export const APP_HEADER_KEY = 'okf_jawn';
 
 /** A property map without the application's header: what the service judges against a type. */
 export function withoutHeader(properties: PropertyMap): PropertyMap {
@@ -544,7 +544,8 @@ const TypedForm = memo(function TypedForm({
       {heldBack && (
         <p className="notice">
           What you changed in the properties is held back, and is not saved until the properties fit
-          the type.
+          the type. It can be repaired in the YAML view, which shows the properties as you left
+          them.
         </p>
       )}
     </div>
