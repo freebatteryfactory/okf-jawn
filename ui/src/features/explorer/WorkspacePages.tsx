@@ -8,7 +8,7 @@
  * shown, so following one never takes the element that has keyboard focus off the page. A page's
  * own heading is a level-two heading: the page's level-one heading stays the workspace's name.
  */
-import { Link, useMatchRoute } from '@tanstack/react-router';
+import { Link, useMatches } from '@tanstack/react-router';
 import type { Revision } from '../../api/generated/types.gen';
 import { AttentionLink } from '../attention/AttentionLink';
 import { AttentionPage } from '../attention/AttentionPage';
@@ -19,12 +19,18 @@ import { type Pane, tabLocation } from './store';
 
 export type WorkspacePage = 'import' | 'jobs' | 'attention';
 
-/** The page the URL names; null when it names the documents. */
+/**
+ * The page the URL names; null when it names the documents.
+ *
+ * Read from the routes matched now, which change in the commit that renders a navigation. (The
+ * router's "does this route match" answers from the location it has finished with, a commit later:
+ * a page that left then would take keyboard focus with it after the router's own focus rule ran.)
+ */
 export function useWorkspacePage(): WorkspacePage | null {
-  const matchRoute = useMatchRoute();
-  if (matchRoute({ to: '/w/$workspaceId/import' }) !== false) return 'import';
-  if (matchRoute({ to: '/w/$workspaceId/jobs' }) !== false) return 'jobs';
-  if (matchRoute({ to: '/w/$workspaceId/attention' }) !== false) return 'attention';
+  const route = useMatches({ select: (matches) => matches.at(-1)?.routeId });
+  if (route === '/w/$workspaceId/import') return 'import';
+  if (route === '/w/$workspaceId/jobs') return 'jobs';
+  if (route === '/w/$workspaceId/attention') return 'attention';
   return null;
 }
 

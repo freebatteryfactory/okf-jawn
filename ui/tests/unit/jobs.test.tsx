@@ -199,6 +199,22 @@ describe('what a job’s row says', () => {
     expect(api.violations).toEqual([]);
   });
 
+  it('ends on the page’s heading when an item’s link is followed and its page leaves', async () => {
+    await openJobs({
+      [JOBS]: () => listOf([jobOf('succeeded', { item_ids: [NOTE], revision: IMPORTED })]),
+    });
+    const link = () => screen.getByRole('link', { name: 'Meeting notes' });
+    await eventually(link);
+    link().focus();
+    fireEvent.click(link());
+    await eventually(() => screen.getByRole('tab', { name: 'Meeting notes' }));
+    expect(screen.queryByRole('heading', { name: 'Jobs' })).toBeNull();
+    // The link went with its page: focus is on the workspace's name, not on the page body.
+    expect(document.activeElement).toBe(
+      screen.getByRole('heading', { name: 'Workshop notes', level: 1 }),
+    );
+  });
+
   it('links no item of a job that reports no revision', async () => {
     await openJobs({ [JOBS]: () => listOf([jobOf('succeeded', { item_ids: [NOTE, SOURCE] })]) });
     await listed();
