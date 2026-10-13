@@ -109,14 +109,36 @@ interface Place {
   search: object;
 }
 
-/** A place without its search query: the query changes what the sidebar lists, nothing else. */
-const apartFromQuery = (place: Place) =>
+/**
+ * A place as one text: its path, and its search parameters as a set, in one order whatever order
+ * an address has them in. `apart` leaves one parameter out.
+ */
+const written = (place: Place, apart?: string) =>
   JSON.stringify([
     place.pathname,
     Object.entries(place.search)
-      .filter(([key]) => key !== 'q')
+      .filter(([key]) => key !== apart)
       .sort(([a], [b]) => a.localeCompare(b)),
   ]);
+
+/** A place without its search query: the query changes what the sidebar lists, nothing else. */
+const apartFromQuery = (place: Place) => written(place, 'q');
+
+/**
+ * The place an address names: its path and its search, read as the router reads a search
+ * (`parseSearch`). Where on the page it points (`#…`) is not part of the place. Only the path
+ * and the search are read, so any origin serves to read a path written without one.
+ */
+export const placeOf = (href: string, parseSearch: (search: string) => object): Place => {
+  const url = new URL(href, 'http://any.origin');
+  return { pathname: url.pathname, search: parseSearch(url.search) };
+};
+
+/**
+ * Whether two places are the same one. Never decided on two addresses as text: the page itself
+ * writes one place in two orders (a search puts `q` last, the "Documents" link puts it first).
+ */
+export const samePlace = (a: Place, b: Place) => written(a) === written(b);
 
 /**
  * Whether a navigation takes the naming rules off the page: it goes to another page, or to an
@@ -215,7 +237,9 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
   const followBar = (event: MouseEvent<HTMLAnchorElement>) => {
     if (!rulesOpen || event.defaultPrevented || event.button !== 0) return;
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    if (event.currentTarget.getAttribute('href') !== router.state.location.href) return;
+    const read = router.options.parseSearch;
+    const asked = placeOf(event.currentTarget.getAttribute('href') ?? '', read);
+    if (!samePlace(asked, placeOf(router.state.location.href, read))) return;
     const asker = event.currentTarget;
     leaveRules(() => showDocuments(asker));
   };

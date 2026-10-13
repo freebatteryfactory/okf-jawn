@@ -15,6 +15,7 @@ import { staleReason } from '../../src/features/conventions/NamingRules';
 import { formHolds, RulesForm, rulesProblems } from '../../src/features/conventions/RulesForm';
 import { keepOrder, type Preview, sameRules } from '../../src/features/conventions/rules';
 import { resetDraftSessions } from '../../src/features/drafts/saving';
+import { placeOf, samePlace } from '../../src/features/explorer/ExplorerShell';
 import { YAML_PAUSE_MS } from '../../src/lib/yaml';
 import { setYamlEngine, TOO_COMPLEX_WORDS, YAML_LIMIT_MS } from '../../src/lib/yaml-reading';
 import { type Handler, type Json, mockApi, ok, type Reply } from './support/api';
@@ -2153,6 +2154,105 @@ describe('the naming rules and the workspace’s own pages', () => {
     expect(rulesPanel()).toBeNull();
     expect(page('Import files')).not.toBeNull();
     expect(document.activeElement).toBe(link('Import'));
+  });
+
+  /** A search that finds the note, cited at lines of the head. */
+  const hits = () =>
+    ok({
+      revision: HEAD,
+      hits: [
+        {
+          title: 'Meeting notes',
+          snippet: '…matching words…',
+          score: 1,
+          source: {
+            workspace_id: WS,
+            item_id: NOTE,
+            path: 'notes/meeting.md',
+            revision: HEAD,
+            selection: { kind: 'lines', range: { start: 1, end: 2 } },
+            locations: [],
+          },
+        },
+      ],
+    });
+
+  it('gives the documents back for "Documents" when the page itself wrote the address in another order: a search result opened, then another search', async () => {
+    service({ '/api/search/search-items': hits });
+    const { router } = renderAt(`/w/${WS}?q=budget`);
+    const result = await within(
+      await screen.findByRole('region', { name: /^Results for/ }),
+    ).findByRole('link', { name: /Meeting notes/ });
+    await userEvent.click(result);
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`));
+    const box = screen.getByRole('searchbox', { name: 'Search this workspace' });
+    await userEvent.clear(box);
+    await userEvent.type(box, 'review{Enter}');
+    await waitFor(() => expect(router.state.location.search).toMatchObject({ q: 'review' }));
+    await settle();
+    await userEvent.click(button('Naming rules'));
+    await within(panel()).findByRole('textbox', { name: /^prefix/ });
+    // The same place, written two ways: the search put `q` last, the link puts it first.
+    const documents = link('Documents');
+    const written = documents.getAttribute('href') ?? '';
+    expect(written).not.toBe(router.state.location.href);
+    expect(written.split('?').at(0)).toBe(router.state.location.pathname);
+    expect(written.split('?').at(1)?.split('&').sort()).toEqual(
+      router.state.location.href.split('?').at(1)?.split('&').sort(),
+    );
+    // One press closes the rules, as it does where the two are written alike.
+    await userEvent.click(documents);
+    await settle();
+    expect(rulesPanel()).toBeNull();
+    expect(screen.getByRole('region', { name: /^Documents/ })).toBeTruthy();
+    expect(document.activeElement).toBe(link('Documents'));
+    expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`);
+    expect(router.state.location.search).toMatchObject({ q: 'review', rev: HEAD });
+  });
+
+  it('asks the rules’ question for "Documents" when an address given from outside has its search in another order', async () => {
+    service();
+    const { router } = renderAt(`/w/${WS}/i/${NOTE}?rev=${HEAD}&q=meeting`);
+    await userEvent.click(await screen.findByRole('button', { name: 'Naming rules' }));
+    await within(panel()).findByRole('textbox', { name: /^prefix/ });
+    await setPrefix('unsaved-');
+    const documents = link('Documents');
+    expect(documents.getAttribute('href')).not.toBe(router.state.location.href);
+    await userEvent.click(documents);
+    expect(question()).not.toBeNull();
+    await userEvent.click(button('Keep editing'));
+    await settle();
+    expect(rulesPanel()).not.toBeNull();
+    expect(prefix()).toHaveProperty('value', 'unsaved-');
+    expect(document.activeElement).toBe(documents);
+    await userEvent.click(documents);
+    await userEvent.click(button('Discard my changes'));
+    await settle();
+    expect(rulesPanel()).toBeNull();
+    expect(document.activeElement).toBe(link('Documents'));
+    expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`);
+    expect(router.state.location.search).toMatchObject({ q: 'meeting', rev: HEAD });
+  });
+});
+
+describe('whether two addresses name the same place', () => {
+  const read = (search: string) =>
+    Object.fromEntries(
+      [...new URLSearchParams(search)].map(([key, value]) => [key, JSON.parse(value) as unknown]),
+    );
+  const same = (a: string, b: string) => samePlace(placeOf(a, read), placeOf(b, read));
+
+  it('holds whatever order the search parameters are written in, and not for another path or parameter', () => {
+    expect(same('/w/a/i/b?q="x"&rev="c"', '/w/a/i/b?rev="c"&q="x"')).toBe(true);
+    expect(same('/w/a/i/b?q="x"&rev="c"', '/w/a/i/b?q="x"&rev="c"')).toBe(true);
+    expect(same('/w/a', '/w/a')).toBe(true);
+    // Where on the page an address points is not another place.
+    expect(same('/w/a?q="x"#top', '/w/a?q="x"')).toBe(true);
+    expect(same('/w/a/i/b?q="x"&rev="c"', '/w/a/i/b?q="x"&rev="d"')).toBe(false);
+    expect(same('/w/a/i/b?q="x"&rev="c"', '/w/a/i/b?q="x"')).toBe(false);
+    expect(same('/w/a/i/b?q="x"', '/w/a/i/b?q="x"&rev="c"')).toBe(false);
+    expect(same('/w/a/import?q="x"', '/w/a?q="x"')).toBe(false);
+    expect(same('/w/a?q="x"', '/w/a')).toBe(false);
   });
 });
 
