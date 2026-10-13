@@ -34,7 +34,7 @@ mod job_handler {
     use okf_jawn_core::events::EventScope;
     use okf_jawn_core::jobs::{JobHandler, JobScope, JobSpec, NewJob, RecordStore};
     use okf_jawn_core::storage::{
-        CandidateCheck, ObjectInfo, Provenance, SourceCard, StorageScope, TreeEdit,
+        CandidateCheck, ObjectInfo, Provenance, SourceCard, StorageScope, TreeEdit, VersionStore,
         derive_commit_mutation_id, derive_item_id,
     };
     use okf_jawn_core::uploads::UploadRecord;
@@ -943,6 +943,54 @@ mod job_handler {
         );
         // Announced again, with no second event.
         assert_eq!(events_of(&world, &EventKind::Changed)?.len(), 1);
+        Ok(())
+    }
+
+    /// Review B1: a restore's completion carries no warning. No check runs for a restore's
+    /// commit, so the store keeps no warnings for it and `find_commit` answers it with the one
+    /// `replay_warnings_unavailable` warning, as real storage does and as this fake does (it is
+    /// asserted here, so the handler is shown to be given one). The handler reads the revision
+    /// only: on a first attempt, and on a resumed attempt that finds the commit its first
+    /// attempt wrote.
+    #[tokio::test]
+    async fn a_restores_completion_carries_no_warning_on_a_first_or_a_resumed_attempt() -> TestResult
+    {
+        let world = world()?;
+        let id = restore_job(&world, 125)?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let completion = some(entry.completions.first(), "the completion")?;
+        let restored = some(completion.revision.clone(), "the restore's revision")?;
+        // The store answers the restore's commit with the unavailable warning.
+        let found = world
+            .versions
+            .find_commit(&storage_scope()?, entry.created.mutation_id, None)
+            .await?;
+        let found = some(found, "the restore's commit")?;
+        assert_eq!(found.revision, restored);
+        assert_eq!(
+            found
+                .warnings
+                .iter()
+                .map(|warning| warning.code.as_str())
+                .collect::<Vec<_>>(),
+            ["replay_warnings_unavailable"]
+        );
+        assert!(completion.warnings.is_empty(), "{:?}", completion.warnings);
+
+        // The completion is lost: the attempt that runs again finds the commit, and completes
+        // with its revision and still no warning.
+        world
+            .records
+            .insert(id, entry.scope.clone(), entry.created.clone())?;
+        assert!(run(&world, id).await?);
+        let again = world.records.entry(id)?;
+        assert_eq!(again.job.state, JobState::Succeeded, "{:?}", again.failures);
+        assert_eq!(world.versions.written()?.len(), 1, "no second commit");
+        let resumed = some(again.completions.first(), "the resumed completion")?;
+        assert_eq!(resumed.revision.as_ref(), Some(&restored));
+        assert!(resumed.warnings.is_empty(), "{:?}", resumed.warnings);
         Ok(())
     }
 
