@@ -15,9 +15,9 @@ use serde_json::{Value, json};
 use crate::check::{TestResult, some};
 use crate::support::fakes::{Call, FakeAccess, World};
 use crate::support::fixtures::{
-    OTHER_WORKSPACE, Outcome, REPORT_MARKDOWN, WORKSPACE, agent, arguments, bundle, digest_of,
-    image_read_input, image_read_response, in_region, media, object_block, object_request, on_page,
-    text_of, zeros_base64,
+    OTHER_WORKSPACE, Outcome, PNG_SIGNATURE, REPORT_MARKDOWN, WORKSPACE, agent, arguments,
+    base64_of, bundle, digest_of, image_read_input, image_read_response, in_region, media,
+    object_block, object_request, on_page, png_base64, text_of, zeros_base64,
 };
 
 /// Base64 of the eight-byte PNG signature.
@@ -136,7 +136,7 @@ async fn images_over_the_budget_are_described_not_inlined() -> TestResult {
             ],
         ),
     )?;
-    let first = zeros_base64(900);
+    let first = png_base64(900);
     world.application.serve_object(
         &fits,
         Ok(object_block(&fits, "image/png", &first, 900, false)),
@@ -216,7 +216,7 @@ async fn once_the_image_budget_is_spent_no_image_is_fetched() -> TestResult {
         Ok(object_block(
             &whole,
             "image/png",
-            &zeros_base64(256),
+            &png_base64(256),
             256,
             false,
         )),
@@ -437,6 +437,323 @@ async fn a_fetch_dispatch_refuses_is_reported_never_bypassed() -> TestResult {
     let (_, event) = some(appended.first(), "the refusal")?;
     assert_eq!(event.kind, EventKind::PermissionDenied);
     assert_eq!(event.operation, Some(OperationName::GetObject));
+    Ok(())
+}
+
+/// Read one image whose object is `bytes`, declared and served as `served`, within a 1024-byte
+/// budget (on a server whose bundle file is `name`), and check what becomes of it: an image block of exactly those bytes and that type
+/// when `shown`, and otherwise no block and the one line that says the content is not the type
+/// it claims. Either way the structured content is the read's response and one fetch was made.
+async fn check_served(name: &str, served: &str, bytes: &[u8], shown: bool) -> TestResult {
+    let case = format!("{bytes:02x?} served as {served}");
+    let world = reader();
+    let image = digest_of('c');
+    let response = image_read_response(
+        WORKSPACE,
+        "multimodal",
+        &[media(&image, served, None, &on_page(1))],
+    );
+    world
+        .application
+        .answer_with("read_item", response.clone())?;
+    let data = base64_of(bytes);
+    world.application.serve_object(
+        &image,
+        Ok(object_block(&image, served, &data, bytes.len(), false)),
+    )?;
+    let result = show(&world, name, image_read_input("multimodal", 1024, 1)).await?;
+    let images = images_of(&result)?;
+    if shown {
+        assert_eq!(images.len(), 1, "{case}");
+        let block = some(images.first(), "the image")?;
+        assert_eq!(
+            (block.data.as_str(), block.mime_type.as_str()),
+            (data.as_str(), served),
+            "{case}"
+        );
+        assert_eq!(text_of(&result)?, REPORT_MARKDOWN, "{case}");
+    } else {
+        assert_eq!(images.len(), 0, "{case}");
+        assert_eq!(
+            text_of(&result)?,
+            described(&[format!(
+                "[Image not inlined: picture, page 1, object {image}: \
+                 the content is not the type it claims ({served})]"
+            )]),
+            "{case}"
+        );
+    }
+    assert_eq!(result.structured_content, Some(response), "{case}");
+    assert_eq!(
+        world.application.requests("get_object")?,
+        vec![object_request(WORKSPACE, &image, 1024)],
+        "{case}"
+    );
+    Ok(())
+}
+
+/// The fixtures' encoder is written apart from the server's reading of base64; it agrees with
+/// RFC 4648's vectors and with the constants this file states by hand.
+#[test]
+fn the_test_encoder_writes_standard_padded_base64() {
+    let vectors: [(&[u8], &str); 7] = [
+        (b"", ""),
+        (b"f", "Zg=="),
+        (b"fo", "Zm8="),
+        (b"foo", "Zm9v"),
+        (b"foob", "Zm9vYg=="),
+        (b"fooba", "Zm9vYmE="),
+        (b"foobar", "Zm9vYmFy"),
+    ];
+    for (bytes, text) in vectors {
+        assert_eq!(base64_of(bytes), text);
+    }
+    assert_eq!(base64_of(&PNG_SIGNATURE), PNG);
+    assert_eq!(base64_of(b"\xff\xd8\xff\xe0\x00\x10JFIF"), JPEG);
+    assert_eq!(base64_of(b"<svg/>"), SVG);
+    assert_eq!(base64_of(&[0; 124]), zeros_base64(124));
+    assert_eq!(base64_of(&[0xFB, 0xFF, 0xBF]), "+/+/");
+}
+
+/// Bytes that begin with the signature of the type they are served as become an image block:
+/// PNG's eight bytes, JPEG's three, either GIF version, and a RIFF container of form `WEBP`
+/// whatever its four size bytes are.
+#[tokio::test]
+async fn an_image_whose_bytes_begin_with_its_types_signature_is_shown() -> TestResult {
+    let cases: [(&str, &[u8]); 11] = [
+        ("image/png", &PNG_SIGNATURE),
+        ("image/png", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"),
+        ("image/jpeg", b"\xff\xd8\xff"),
+        ("image/jpeg", b"\xff\xd8\xff\xe0\x00\x10JFIF"),
+        ("image/jpeg", b"\xff\xd8\xff\xdb\x00\x43"),
+        ("image/gif", b"GIF87a"),
+        ("image/gif", b"GIF89a\x01\x00\x01\x00"),
+        ("image/webp", b"RIFF\x24\x00\x00\x00WEBP"),
+        ("image/webp", b"RIFF\xff\xff\xff\xffWEBPVP8 "),
+        // The type is matched as the inline rule matches it: by its essence, whatever its case.
+        ("Image/PNG; charset=binary", &PNG_SIGNATURE),
+        ("IMAGE/WEBP", b"RIFF\x00\x00\x00\x00WEBP"),
+    ];
+    for (served, bytes) in cases {
+        check_served("images-signature-right.html", served, bytes, true).await?;
+    }
+    Ok(())
+}
+
+/// Bytes with a wrong signature are described, for each type: a signature wrong only in its
+/// last byte, wrong after its first byte, and (WebP) wrong in either half.
+#[tokio::test]
+async fn an_image_whose_bytes_do_not_begin_with_its_types_signature_is_described() -> TestResult {
+    let cases: [(&str, &[u8]); 17] = [
+        ("image/png", b"\x89PNG\r\n\x1a\x0b\x00\x00\x00\rIHDR"),
+        ("image/png", b"\x89QNG\r\n\x1a\n"),
+        ("image/png", b"\x89\x00\x00\x00\x00\x00\x00\x00"),
+        ("image/png", &[0; 64]),
+        ("image/jpeg", b"\xff\xd8\xfe\xe0\x00\x10JFIF"),
+        ("image/jpeg", b"\xff\xd9\xff\xe0"),
+        ("image/jpeg", b"\xff\x00\x00\x00"),
+        ("image/gif", b"GIF88a\x01\x00\x01\x00"),
+        ("image/gif", b"GIF89b\x01\x00\x01\x00"),
+        ("image/gif", b"G\x00\x00\x00\x00\x00"),
+        ("image/webp", b"RIFF\x24\x00\x00\x00WAVE"),
+        ("image/webp", b"RIFF\x24\x00\x00\x00WEBQ"),
+        ("image/webp", b"RIFX\x24\x00\x00\x00WEBP"),
+        ("image/webp", b"R\x00\x00\x00\x24\x00\x00\x00WEBP"),
+        // `WEBP` straight after `RIFF`, where the size belongs.
+        ("image/webp", b"RIFFWEBP\x00\x00\x00\x00"),
+        ("IMAGE/WEBP", b"RIFF\x24\x00\x00\x00WAVE"),
+        ("Image/PNG; charset=binary", b"\x89PNG\r\n\x1a\x0b"),
+    ];
+    for (served, bytes) in cases {
+        check_served("images-signature-wrong.html", served, bytes, false).await?;
+    }
+    Ok(())
+}
+
+/// Bytes that end before the signature does are described: one byte short for each type, and
+/// no bytes at all.
+#[tokio::test]
+async fn bytes_shorter_than_a_signature_are_described() -> TestResult {
+    let cases: [(&str, &[u8]); 9] = [
+        ("image/png", b"\x89PNG\r\n\x1a"),
+        ("image/jpeg", b"\xff\xd8"),
+        ("image/gif", b"GIF89"),
+        ("image/webp", b"RIFF\x24\x00\x00\x00WEB"),
+        ("image/webp", b"RIFF"),
+        ("image/png", b""),
+        ("image/jpeg", b""),
+        ("image/gif", b""),
+        ("image/webp", b""),
+    ];
+    for (served, bytes) in cases {
+        check_served("images-signature-short.html", served, bytes, false).await?;
+    }
+    Ok(())
+}
+
+/// The type is never guessed from the bytes: a real image of one raster type served as another
+/// is described under the type it claims, not shown as the type it is.
+#[tokio::test]
+async fn an_image_of_one_type_served_as_another_is_described_not_shown_as_what_it_is() -> TestResult
+{
+    let cases: [(&str, &[u8]); 8] = [
+        ("image/jpeg", &PNG_SIGNATURE),
+        ("image/gif", &PNG_SIGNATURE),
+        ("image/webp", &PNG_SIGNATURE),
+        ("image/png", b"\xff\xd8\xff\xe0\x00\x10JFIF"),
+        ("image/png", b"GIF89a\x01\x00\x01\x00"),
+        ("image/png", b"RIFF\x24\x00\x00\x00WEBP"),
+        ("image/webp", b"GIF89a\x01\x00\x01\x00"),
+        ("image/gif", b"RIFF\x24\x00\x00\x00WEBP"),
+    ];
+    for (served, bytes) in cases {
+        check_served("images-signature-other.html", served, bytes, false).await?;
+    }
+    Ok(())
+}
+
+/// The read declares a PNG and the application serves the bytes as `image/jpeg`: they are a
+/// PNG, so they are not a JPEG, and no block is made, of either type.
+#[tokio::test]
+async fn a_png_served_as_jpeg_is_described() -> TestResult {
+    let world = reader();
+    let image = digest_of('c');
+    world.application.answer_with(
+        "read_item",
+        image_read_response(
+            WORKSPACE,
+            "multimodal",
+            &[media(&image, "image/png", Some("Chart"), &on_page(4))],
+        ),
+    )?;
+    world.application.serve_object(
+        &image,
+        Ok(object_block(&image, "image/jpeg", PNG, 8, false)),
+    )?;
+    let result = show(
+        &world,
+        "images-png-as-jpeg.html",
+        image_read_input("multimodal", 1024, 1),
+    )
+    .await?;
+    assert_eq!(result.content.len(), 1, "{result:?}");
+    assert_eq!(
+        text_of(&result)?,
+        described(&[format!(
+            "[Image not inlined: picture \"Chart\", page 4, object {image}: \
+             the content is not the type it claims (image/jpeg)]"
+        )])
+    );
+    Ok(())
+}
+
+/// The type string says PNG, declared and served, and the bytes are an SVG document: the
+/// raster rule on the type strings passes, and the bytes do not.
+#[tokio::test]
+async fn an_svg_served_as_png_is_described() -> TestResult {
+    let world = reader();
+    let image = digest_of('c');
+    let document = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>";
+    world.application.answer_with(
+        "read_item",
+        image_read_response(
+            WORKSPACE,
+            "multimodal",
+            &[media(&image, "image/png", Some("Logo"), &on_page(1))],
+        ),
+    )?;
+    world.application.serve_object(
+        &image,
+        Ok(object_block(
+            &image,
+            "image/png",
+            &base64_of(document),
+            document.len(),
+            false,
+        )),
+    )?;
+    let result = show(
+        &world,
+        "images-svg-as-png.html",
+        image_read_input("multimodal", 1024, 1),
+    )
+    .await?;
+    assert_eq!(result.content.len(), 1, "{result:?}");
+    assert_eq!(
+        text_of(&result)?,
+        described(&[format!(
+            "[Image not inlined: picture \"Logo\", page 1, object {image}: \
+             the content is not the type it claims (image/png)]"
+        )])
+    );
+    Ok(())
+}
+
+/// An image that is not its type takes nothing from the image budget: the next fetch asks for
+/// all that was left before it, and an image that fits is still inlined.
+#[tokio::test]
+async fn an_image_that_is_not_its_type_takes_nothing_from_the_image_budget() -> TestResult {
+    let world = reader();
+    let (wrong, large, small) = (digest_of('c'), digest_of('d'), digest_of('e'));
+    world.application.answer_with(
+        "read_item",
+        image_read_response(
+            WORKSPACE,
+            "multimodal",
+            &[
+                media(&wrong, "image/png", None, &on_page(1)),
+                media(&large, "image/png", None, &on_page(2)),
+                media(&small, "image/png", None, &on_page(3)),
+            ],
+        ),
+    )?;
+    world.application.serve_object(
+        &wrong,
+        Ok(object_block(
+            &wrong,
+            "image/png",
+            &zeros_base64(500),
+            500,
+            false,
+        )),
+    )?;
+    let whole = png_base64(1000);
+    world.application.serve_object(
+        &large,
+        Ok(object_block(&large, "image/png", &whole, 1000, false)),
+    )?;
+    world
+        .application
+        .serve_object(&small, Ok(object_block(&small, "image/png", PNG, 8, false)))?;
+    let result = show(
+        &world,
+        "images-signature-budget.html",
+        image_read_input("multimodal", 1024, 3),
+    )
+    .await?;
+    let images = images_of(&result)?;
+    assert_eq!(
+        images
+            .iter()
+            .map(|block| block.data.as_str())
+            .collect::<Vec<_>>(),
+        vec![whole.as_str(), PNG]
+    );
+    assert_eq!(
+        text_of(&result)?,
+        described(&[format!(
+            "[Image not inlined: picture, page 1, object {wrong}: \
+             the content is not the type it claims (image/png)]"
+        )])
+    );
+    assert_eq!(
+        world.application.requests("get_object")?,
+        vec![
+            object_request(WORKSPACE, &wrong, 1024),
+            object_request(WORKSPACE, &large, 1024),
+            object_request(WORKSPACE, &small, 24),
+        ]
+    );
     Ok(())
 }
 

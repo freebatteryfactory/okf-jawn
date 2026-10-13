@@ -53,6 +53,9 @@ pub const REPORT_MARKDOWN: &str = "# Q3 report\n\nRevenue grew in every region."
 /// The `Host` the test services accept.
 pub const HOST: &str = "localhost";
 
+/// The eight bytes a PNG file begins with.
+pub const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
 /// A principal of `subject` that arrived through `route`.
 ///
 /// # Errors
@@ -267,6 +270,38 @@ pub fn zeros_base64(bytes: usize) -> String {
         _ => "",
     };
     format!("{}{tail}", "AAAA".repeat(bytes / 3))
+}
+
+/// Standard padded base64 (RFC 4648 section 4) of `bytes`, written here independently of the
+/// server's own reading of it.
+#[must_use]
+pub fn base64_of(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut text = String::new();
+    for group in bytes.chunks(3) {
+        let word = (0..3).fold(0_u32, |word, at| {
+            (word << 8) | u32::from(group.get(at).copied().unwrap_or(0))
+        });
+        // One, two or three bytes fill two, three or four characters; the rest is padding.
+        let sextets = [word >> 18, word >> 12, word >> 6, word];
+        for (place, sextet) in sextets.into_iter().enumerate() {
+            let letter = usize::try_from(sextet & 63)
+                .ok()
+                .and_then(|at| ALPHABET.get(at))
+                .filter(|_| place <= group.len());
+            text.push(letter.map_or('=', |letter| char::from(*letter)));
+        }
+    }
+    text
+}
+
+/// Padded base64 of a `bytes`-byte object that begins as a PNG file does (its eight-byte
+/// signature) and is zero bytes after that; never fewer than the eight bytes.
+#[must_use]
+pub fn png_base64(bytes: usize) -> String {
+    let mut object = PNG_SIGNATURE.to_vec();
+    object.resize(bytes.max(PNG_SIGNATURE.len()), 0);
+    base64_of(&object)
 }
 
 /// A distinct object digest spelled with the hex digit `digit`.
