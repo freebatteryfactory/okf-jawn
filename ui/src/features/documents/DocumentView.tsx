@@ -586,10 +586,10 @@ export function DocumentView({
           >
             {editing
               ? 'Read the committed text'
-              : elsewhere
-                ? 'Edit here'
-                : notANote !== null
-                  ? 'Show your draft'
+              : notANote !== null
+                ? 'Show your draft'
+                : elsewhere
+                  ? 'Edit here'
                   : hasDraft
                     ? 'Edit your draft'
                     : 'Edit'}

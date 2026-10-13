@@ -395,6 +395,31 @@ describe('who may edit, and where', () => {
       expect(keptText()).toHaveProperty('value', `${COMMITTED} and more`);
     }, 20_000);
 
+    // Re-check 4, note 2: in a pane that does not hold the editor, the switch of a refused item
+    // leads to the kept text too, so it does not read "Edit here" there.
+    it('reads "Show your draft" in a pane that does not hold the editor, and moves the kept text there', async () => {
+      const { held } = becomesSource();
+      const { box } = await startEditing();
+      typeInto(box, ' and more');
+      await pass(100);
+      fireEvent.click(screen.getByRole('button', { name: 'Split right' }));
+      const two = await eventuallyGet(() =>
+        screen.getByRole('region', { name: 'Documents, pane 2 of 2, focused' }),
+      );
+      await eventuallyGet(() => within(two).getByRole('button', { name: 'Edit here' }));
+      await refreshTo(held, NEWER);
+      const kept = await eventuallyGet(keptText);
+      const one = screen.getByRole('region', { name: /^Documents, pane 1 of 2/ });
+      expect(one.contains(kept)).toBe(true);
+      expect(within(two).queryByRole('button', { name: /^Edit/ })).toBeNull();
+      const show = within(two).getByRole('button', { name: 'Show your draft' });
+      act(() => show.focus());
+      fireEvent.click(show);
+      await eventually(() => expect(two.contains(keptText())).toBe(true));
+      // The switch led to read-only text: focus stays on it.
+      expect(document.activeElement).toBe(show);
+    }, 20_000);
+
     it('ends a session in which nothing was typed instead of refusing it: nothing is kept, and "Edit" starts afresh once it is a Note again', async () => {
       const { api, held } = becomesSource();
       const { box } = await startEditing();
