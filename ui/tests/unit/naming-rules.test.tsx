@@ -1419,16 +1419,18 @@ describe('saving over rules someone else saved meanwhile', () => {
 
   it('takes the saved rules and drops the edits when the person chooses so', async () => {
     const { api } = await refusedThenRefreshed();
+    // With the YAML view on screen: its text starts again from the saved rules too.
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    expect(textIn(await findTextBox('The naming rules as YAML'))).toContain('prefix: mine-');
     await userEvent.click(button('Take the saved rules, and drop mine'));
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Naming rules' }));
+    expect(textIn(await findTextBox('The naming rules as YAML'))).toContain('prefix: theirs-');
+    await userEvent.click(screen.getByRole('tab', { name: 'Form' }));
     expect(prefix()).toHaveProperty('value', 'theirs-');
     expect(savedNow()).toBeNull();
     expect(said()).toBe('These are the saved rules now. Your changes were dropped.');
-    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Naming rules' }));
     expect(panel().textContent).toContain('These are the saved rules, unchanged.');
     expect(api.callsTo(SET)).toHaveLength(1);
-    // The YAML view starts again from them too.
-    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
-    expect(textIn(await findTextBox('The naming rules as YAML'))).toContain('prefix: theirs-');
   });
 
   it('is an ordinary save when the version shown moved and the saved rules did not', async () => {
