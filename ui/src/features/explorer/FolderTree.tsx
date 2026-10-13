@@ -1,6 +1,9 @@
 /**
  * The folder tree: react-arborist over the listing operation, loaded folder by folder.
  *
+ * An item that the listed Attention warnings name says how many, in words, after its other marks
+ * ("2 warnings"; read out as advisory). A row without that mark has not been found safe.
+ *
  * Folders and items appear as the workspace organizes them. Each item shows its title and its
  * user type name (an open vocabulary); its rendering role (Note, Source or View) picks the icon.
  * Arborist supplies the tree semantics and keyboard model (arrows, Home/End, type-ahead, Space);
@@ -47,6 +50,8 @@ import {
   type TreeApi,
 } from 'react-arborist';
 import type { ItemSummary, Revision } from '../../api/generated/types.gen';
+import { attentionMark, useAttentionMarks } from '../attention/attention';
+import { conversionWord } from '../documents/describe';
 import { type DraftMark, useDraftMarks } from '../drafts/marks';
 import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, messageFor } from '../errors/failure';
@@ -79,6 +84,8 @@ interface TreeEntry {
   item: ItemSummary | null;
   /** How the item's draft stands, when it has one. */
   mark: DraftMark | null;
+  /** How many listed Attention warnings name the item. */
+  warnings: number;
   status: StatusKind | null;
   error: unknown;
   children: TreeEntry[] | null;
@@ -97,12 +104,6 @@ export interface FolderTreeProps {
 /** The height of a one-line row; a row whose name wraps measures taller. */
 const ROW_HEIGHT = 30;
 const ROLE_ICON = { note: FileText, source: FileBox, view: ChartColumn } as const;
-const EXTRACTION_WORD = {
-  pending: 'conversion pending',
-  partial: 'partly converted',
-  failed: 'conversion failed',
-  unsupported: 'format not supported',
-} as const;
 
 const folderId = (folder: string) => `folder:${folder}`;
 const itemNodeId = (itemId: string) => `item:${itemId}`;
@@ -142,6 +143,7 @@ function statusEntry(folder: string, status: StatusKind, error: unknown = null):
     folder,
     item: null,
     mark: null,
+    warnings: 0,
     status,
     error,
     children: null,
@@ -154,6 +156,7 @@ function entriesOf(
   expanded: Record<string, true>,
   revision: Revision,
   markOf: (itemId: string) => DraftMark | null,
+  warningsOf: (itemId: string) => number,
 ): TreeEntry[] {
   const result = listings.get(folder);
   if (result === undefined) return [];
@@ -169,9 +172,12 @@ function entriesOf(
         folder: child,
         item: null,
         mark: null,
+        warnings: 0,
         status: null,
         error: null,
-        children: expanded[child] ? entriesOf(child, listings, expanded, revision, markOf) : [],
+        children: expanded[child]
+          ? entriesOf(child, listings, expanded, revision, markOf, warningsOf)
+          : [],
       });
     }
     for (const item of page.items) {
@@ -182,6 +188,7 @@ function entriesOf(
         folder,
         item,
         mark: markOf(item.id),
+        warnings: warningsOf(item.id),
         status: null,
         error: null,
         children: null,
@@ -259,6 +266,13 @@ export function FolderTree({
   const showMore = useExplorerStore((state) => state.showMore);
   const treeRef = useRef<TreeApi<TreeEntry> | undefined>(undefined);
   const boxRef = useRef<HTMLDivElement | null>(null);
+  // The tree's box as state: the drag backend is scoped to it, and the tree mounts only once the
+  // element is known (a ref read during render is null on a mount whose listing is cached).
+  const [box, setBox] = useState<HTMLDivElement | null>(null);
+  const boxCallback = useCallback((element: HTMLDivElement | null) => {
+    boxRef.current = element;
+    setBox(element);
+  }, []);
   const height = useElementHeight(boxRef);
   const heading = useId();
   const { canWrite } = useWorkspaceChanges();
@@ -360,7 +374,8 @@ export function FolderTree({
   });
   const root = listings.get('');
   const markOf = useDraftMarks(workspaceId);
-  const entries = entriesOf('', listings, view.expanded, revision, markOf);
+  const warningsOf = useAttentionMarks(workspaceId, revision);
+  const entries = entriesOf('', listings, view.expanded, revision, markOf, warningsOf);
   // A root listing that failed keeps its notice through a retry, which ends with keyboard focus
   // on the tree's tab-stop entry (the empty-workspace line, when it listed nothing).
   const rootFailure = useRetry({
@@ -605,8 +620,8 @@ export function FolderTree({
       <p role="status" className="sr-only">
         {loadNote}
       </p>
-      <div ref={boxRef} className="tree-box">
-        {root?.isSuccess && entries.length > 0 && (
+      <div ref={boxCallback} className="tree-box">
+        {box !== null && root?.isSuccess && entries.length > 0 && (
           <TreeRowContext.Provider value={rowContext}>
             <Tree<TreeEntry>
               ref={treeRef}
@@ -620,6 +635,10 @@ export function FolderTree({
               disableEdit
               disableDrag
               disableDrop
+              // The tree takes no drag, so its drag backend is kept to the tree's own box: left on the
+              // window it cancels every dragged text on the page (a drop on the draft editor among
+              // them), and the page's one answer to a drag of files is the root guard's.
+              dndRootElement={box}
               disableSelect={(entry) => entry.kind === 'status'}
               // Arborist memoizes on its props as a list, so every prop is always passed: no
               // selection is the empty string.
@@ -651,9 +670,7 @@ export function FolderTree({
 }
 
 function extractionWord(item: ItemSummary | null): string | null {
-  return item?.extraction && item.extraction.status !== 'completed'
-    ? EXTRACTION_WORD[item.extraction.status]
-    : null;
+  return conversionWord(item?.extraction);
 }
 
 /** An item's status word when it is not the ordinary one: "status draft", never just "draft". */
@@ -669,7 +686,9 @@ function entryLabel(entry: TreeEntry): string {
   const converted = extraction === null ? type : `${type}, ${extraction}`;
   const status = statusWord(entry.item);
   const stated = status === null ? converted : `${converted}, ${status}`;
-  return entry.mark === null ? stated : `${stated}, ${entry.mark}`;
+  const drafted = entry.mark === null ? stated : `${stated}, ${entry.mark}`;
+  const attention = attentionMark(entry.warnings);
+  return attention === null ? drafted : `${drafted}, ${attention} (advisory)`;
 }
 
 /**
@@ -781,6 +800,9 @@ function TreeEntryContent({ node, style }: NodeRendererProps<TreeEntry>) {
         {extraction === null ? null : <span className="tree-flag">{extraction}</span>}
         {statusWord(item) === null ? null : <span className="tree-flag">{statusWord(item)}</span>}
         {entry.mark === null ? null : <span className="tree-flag">{entry.mark}</span>}
+        {entry.warnings === 0 ? null : (
+          <span className="tree-flag">{attentionMark(entry.warnings)}</span>
+        )}
       </span>
     </div>
   );

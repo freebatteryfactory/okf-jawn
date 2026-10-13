@@ -19,6 +19,10 @@
  * when the failure it then shows has neither. A failure that offers no retry here is shown with
  * no retry button and no status. Without the hook's result the notice is the alert alone, and
  * nothing follows focus out of it.
+ *
+ * A caller may give the notice words of its own for a failure (`words`), with the action they
+ * allow; the general words of `failure.ts` are used wherever it gives none. `said` is the same
+ * thing under the name another package gave it, and is asked first; no caller passes both.
  */
 import { Link } from '@tanstack/react-router';
 import { classifyFailure, type FailureMessage, messageFor } from './failure';
@@ -41,11 +45,24 @@ export interface FailureNoticeProps {
    * the failure means where it happened. The service's own words are still shown under it.
    */
   said?: FailureMessage;
+  /**
+   * Words of this place for this failure, where the general ones would mislead: `too_large` for an
+   * upload is not "too large to show", and a failure the page found by itself is not the service
+   * being out of reach. The service's own message and reference are still shown.
+   */
+  words?: FailureMessage | undefined;
 }
 
-export function FailureNotice({ context, error, retry, workspaceId, said }: FailureNoticeProps) {
+export function FailureNotice({
+  context,
+  error,
+  retry,
+  workspaceId,
+  said,
+  words: own,
+}: FailureNoticeProps) {
   const failure = classifyFailure(error);
-  const message = said ?? messageFor(failure);
+  const message = said ?? own ?? messageFor(failure);
   const api = failure.kind === 'api' ? failure.error : null;
   const words = (
     <>

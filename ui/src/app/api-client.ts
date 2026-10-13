@@ -22,7 +22,9 @@
  * (`UPLOAD_BYTES_PER_SECOND`), so a large draft on a slow uplink is not cut every time.
  *
  * Limit: a body that is not JSON (an upload's bytes) gets no allowance here; its size cannot be
- * read without holding all of it.
+ * read without holding all of it. A file's bytes are not sent here: `upload-transport.ts` sends
+ * them, bounded by progress instead of by a total time, under the same CSRF rule
+ * (`csrfHeaderFor`).
  */
 import { client } from '../api/generated/client.gen';
 
@@ -87,10 +89,16 @@ export function csrfToken(): string | null {
   return null;
 }
 
-function needsCsrfHeader(request: Request): boolean {
-  // A Request's method is already in upper case, and its URL absolute.
-  if (SAFE_METHODS.has(request.method)) return false;
-  return new URL(request.url).origin === window.location.origin;
+/**
+ * The CSRF header's value for a request of this method to this URL; null when the request carries
+ * none: a method the server accepts without it, another origin, or no cookie. The one rule for
+ * every request the workspace sends, whichever part of the transport sends it (`sendRequest` here,
+ * the byte upload in `upload-transport.ts`).
+ */
+export function csrfHeaderFor(method: string, url: string): string | null {
+  if (SAFE_METHODS.has(method.toUpperCase())) return null;
+  if (new URL(url, window.location.href).origin !== window.location.origin) return null;
+  return csrfToken();
 }
 
 function isJson(message: Request | Response): boolean {
@@ -110,10 +118,8 @@ async function waitWithBody(request: Request): Promise<number> {
 /** `fetch` for the generated client: the CSRF header, then the bounded wait. */
 export async function sendRequest(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const request = input instanceof Request && init === undefined ? input : new Request(input, init);
-  if (needsCsrfHeader(request)) {
-    const token = csrfToken();
-    if (token !== null) request.headers.set(CSRF_HEADER, token);
-  }
+  const token = csrfHeaderFor(request.method, request.url);
+  if (token !== null) request.headers.set(CSRF_HEADER, token);
 
   // A request with no JSON body is sent in this same turn, as before; measuring one takes a turn.
   const wait =

@@ -5,7 +5,8 @@
  *
  * A partial read says so and offers its continuation, which resumes the same resolved read;
  * continuing moves keyboard focus to the part it loaded, and a live region says what happened.
- * Warnings, partial extraction and agent-supplied text are shown, never smoothed over. Each
+ * Warnings, partial extraction and agent-supplied text are shown, never smoothed over. A source
+ * says how its conversion stands, whatever the state (`ConversionState`). Each
  * operation's failure is shown where its content would have been when there is none to show, and
  * beside the content when there is: a read that fails when it is asked again never takes the
  * properties, the form, the editor or the text off the screen. The notice stays while the read is
@@ -65,6 +66,7 @@ import type {
 import { pageHeading, takeHeld, useWatchedPart } from '../../lib/focus';
 import { Instant } from '../../lib/instant';
 import { keyed } from '../../lib/keys';
+import { ItemAttention } from '../attention/ItemAttention';
 import { ConflictNotice } from '../drafts/ConflictNotice';
 import { DraftEditor } from '../drafts/DraftEditor';
 import { KeptText } from '../drafts/KeptText';
@@ -77,7 +79,8 @@ import { type FailureRetry, useRetry } from '../errors/retry';
 import type { ItemSelection } from '../explorer/search-params';
 import { useDeletedItem, useExplorerStore } from '../explorer/store';
 import { ItemActions } from '../tree/ItemActions';
-import { describeSelection, extractionLabels, short } from './describe';
+import { ConversionState } from './ConversionState';
+import { describeSelection, short, textLabels } from './describe';
 import { LeftDraft } from './LeftDraft';
 import { Properties } from './Properties';
 import { PropertiesViews } from './PropertiesYaml';
@@ -675,6 +678,12 @@ export function DocumentView({
           />
         </div>
       )}
+      <ConversionState
+        workspaceId={workspaceId}
+        outcome={document?.source?.extraction.outcome ?? null}
+        status={summary?.extraction?.status ?? extraction?.status ?? null}
+      />
+      <ItemAttention workspaceId={workspaceId} itemId={itemId} head={head} />
       {pinned && (
         <PinnedRevision
           workspaceId={workspaceId}
@@ -826,7 +835,7 @@ export function DocumentView({
             </details>
           )}
 
-          {extractionLabels(extraction).map((label) => (
+          {textLabels(extraction).map((label) => (
             <p key={label} role="note" className="notice">
               {label}
             </p>

@@ -16,13 +16,22 @@
  * item's, read at the head, so a tab that shows a cited revision has it too. The tab of an item the
  * person deleted in this page reads "(deleted)" after the title it had, and asks nothing at the
  * head.
+ *
+ * A tab also carries what is said of its item besides its name, in brackets after the title: for
+ * a source that is anything but converted, its conversion mark at the revision the tab shows
+ * ("(conversion pending)", "(format not supported)"), as its row of the tree has it, and how many
+ * listed Attention warnings name it ("(2 warnings, advisory)"). These words are the tab's
+ * description (`aria-describedby`), not part of its name: the name stays the item's title, and
+ * the words are read after it.
  */
 import { Tabs } from '@base-ui/react/tabs';
 import { useQuery } from '@tanstack/react-query';
 import { Fragment, useEffect, useRef } from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import type { Revision } from '../../api/generated/types.gen';
+import { attentionMark, useAttentionMarks } from '../attention/attention';
 import { DocumentView, itemOptions } from '../documents/DocumentView';
+import { conversionWord } from '../documents/describe';
 import { useDraftMarks } from '../drafts/marks';
 import type { Snapshotted } from '../drafts/snapshot';
 import type { ItemSelection } from './search-params';
@@ -203,6 +212,7 @@ function DocumentPane({
                   key={itemId}
                   value={itemId}
                   data-item-id={itemId}
+                  aria-describedby={tabStateId(pane.id, itemId)}
                   className="tab"
                   onKeyDown={(event) => {
                     if (event.key !== 'Delete') return;
@@ -214,6 +224,7 @@ function DocumentPane({
                     workspaceId={workspaceId}
                     itemId={itemId}
                     head={head}
+                    stateId={tabStateId(pane.id, itemId)}
                     // The focused pane's open tab cites what the URL does; every other tab, what
                     // its own link last named.
                     cited={focused && itemId === active ? revision : tabLocation(pane, itemId).rev}
@@ -285,21 +296,32 @@ function DocumentPane({
   );
 }
 
+/** The identity of the element that describes a tab: one for each tab of each pane. */
+const tabStateId = (paneId: string, itemId: string) => `tab-state-${paneId}-${itemId}`;
+
 /**
  * A tab's name is the item's title (until it is known, a short identity), then how the item's
  * draft stands. The title is read at the revision the tab shows: `cited` when the tab cites one,
  * else the head. The draft's mark is read at the head the workspace shows, whatever the tab reads.
  * For a tab that cites nothing the two are one read.
+ *
+ * The Attention mark counts the warnings found at the head, so only a tab that shows the head
+ * carries it. A tab that cites another revision carries none: the count would be of a revision
+ * the tab does not show. The reader's notice, which names the revision the warnings were found
+ * at, stands for it there.
  */
 function TabLabel({
   workspaceId,
   itemId,
   head,
+  stateId,
   cited,
 }: {
   workspaceId: string;
   itemId: string;
   head: Revision;
+  /** The identity of the element that holds the tab's description. */
+  stateId: string;
   cited: Revision | undefined;
 }) {
   // An item the person deleted in this page is not at the head: its tab says so, by the title
@@ -324,10 +346,20 @@ function TabLabel({
   // The service holds a draft when `get_item` carries one or `list_drafts` lists the item.
   const listed = useDraftMarks(workspaceId)(itemId);
   const mark = listed ?? ((item.data?.draft ?? null) !== null ? 'draft' : null);
+  const conversion = conversionWord(summary?.extraction);
+  const warnings = useAttentionMarks(workspaceId, head)(itemId);
+  const attention = cited === undefined || cited === head ? attentionMark(warnings) : null;
+  const said = [conversion, attention === null ? null : `${attention}, advisory`].filter(
+    (word) => word !== null,
+  );
   return (
     <span className="tab-label">
       {name}
       {mark === null ? null : <span className="tab-mark"> ({mark})</span>}
+      {/* Always there, so the tab's description always names an element; hidden from the name. */}
+      <span id={stateId} aria-hidden="true" className="tab-mark">
+        {said.map((word) => ` (${word})`).join('')}
+      </span>
     </span>
   );
 }
