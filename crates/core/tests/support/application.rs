@@ -12,7 +12,11 @@
 //! `Conflict` for a destination whose collision key is taken) and a `RestoreItem` (the item as
 //! `from` holds it, its source appearance included, with the port's `NotFound` and
 //! `Conflict`). The fake does NOT rewrite links: a move or a restore changes no other item, so
-//! a rule about what links say after a write is proven only against real storage. It applies no
+//! a rule about what links say after a write is proven only against real storage. Its `MoveItem`
+//! and restore are also kinder than storage's about a destination: they do not refuse a folder
+//! at the destination (a file under `destination/`), a file standing where a folder of the
+//! destination is needed, or a reserved or non-Markdown destination (`check_item_path`'s
+//! `InvalidInput`), so a rule about those is proven only against real storage. It applies no
 //! other edit (a delete, a status change, a folder), and only the items an applied edit wrote
 //! are readable at the new revision. A test may make the next `show` fail with a code it
 //! names (`fail_next_show`, `fail_show_number`), as a store fault would, and so may the next `log` and the next `list` (`fail_next_log`, `fail_next_list`). `item_at_path` answers from the scripted documents as its port documents it: `None` when no item is at the path at

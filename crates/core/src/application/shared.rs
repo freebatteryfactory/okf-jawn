@@ -201,7 +201,11 @@ pub(super) async fn resolve(
 /// writes in this shape with this operation's name is accepted, and reads what `at` naming
 /// that tip would read, from a position the store checks; and a cursor given to another
 /// query of the same operation (another item, folder, text or direction) reads that query at
-/// the tip from the position.
+/// the tip from the position. A written cursor can also set a folder listing's "current" answer
+/// to `false`, so the head is listed with its archived items; that shows nothing an explicit
+/// revision would not (`at` naming an earlier revision, `search_items` with `include_archived`
+/// and `get_item` show the same items under the same permission), because hiding archived items
+/// is how a current listing looks, not an access rule.
 ///
 /// # Errors
 /// Returns `InvalidInput` on `/page/cursor` for a cursor that is not base64url JSON of this
