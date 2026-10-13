@@ -12,6 +12,11 @@
  * does hold, keys its schema does not describe are kept by the form library (it drops none
  * unless told to).
  *
+ * Opening the form is not an edit. A property the item does not hold is shown empty; a default its
+ * schema names is not written into the draft unless the person enters it. Only the properties the
+ * person changed in a field go from the form into the draft: a value the library puts into its
+ * own data (one the schema fixes with `const`) stays out until the person changes that field.
+ *
  * Invalid input is never put into the draft, so it is never sent: the form shows the error at the
  * field, keeps what was typed, and the draft keeps its last valid properties until the form is
  * valid again.
@@ -45,6 +50,14 @@ const validator = customizeValidator<PropertyMap>();
 const zObject = z.record(z.string(), z.unknown());
 /** A schema that names properties: an object's. */
 const zNaming = z.object({ properties: zObject });
+/**
+ * The form fills in nothing by itself: a property the item does not hold is shown empty, whatever
+ * default its schema names, and an absent list or group is not made an empty one.
+ */
+const NO_DEFAULTS = {
+  emptyObjectFields: 'skipDefaults',
+  arrayMinItems: { populate: 'never' },
+} as const;
 /** No submit button: a change is saved with the draft, not submitted. */
 const NO_SUBMIT: UiSchema<PropertyMap> = { 'ui:submitButtonOptions': { norender: true } };
 
@@ -73,6 +86,13 @@ export function mergeProperties(
     if (!(key in next) && form[key] !== undefined) next[key] = form[key];
   }
   return next;
+}
+
+/** The properties whose value differs between two states of the form's data. */
+export function changedKeys(before: PropertyMap, after: PropertyMap): string[] {
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(
+    (key) => JSON.stringify(before[key]) !== JSON.stringify(after[key]),
+  );
 }
 
 export function PropertiesForm({ session, typeName }: PropertiesFormProps) {
@@ -151,6 +171,9 @@ function TypedForm({
   const [data, setData] = useState<PropertyMap>(() =>
     Object.fromEntries(Object.entries(session.properties).filter(([key]) => held.includes(key))),
   );
+  // The properties the person has changed in a field since the form opened: these, and no other,
+  // go from the form into the draft.
+  const entered = useRef(new Set<string>());
   const rules: RJSFSchema = schema;
   return (
     <Form<PropertyMap>
@@ -162,12 +185,17 @@ function TypedForm({
       liveValidate="onChange"
       showErrorList={false}
       noHtml5Validate
-      onChange={(event) => {
+      experimental_defaultFormStateBehavior={NO_DEFAULTS}
+      onChange={(event, id) => {
         const next = event.formData ?? {};
         setData(next);
+        // The library also reports what it made of the data itself (a value its schema fixes,
+        // when it mounts); that names no field. Only what a person entered in a field is an edit.
+        if (id === undefined) return;
+        for (const key of changedKeys(data, next)) entered.current.add(key);
         if (!validator.isValid(rules, next, rules)) return;
         editSession(client, session.workspaceId, session.itemId, {
-          properties: mergeProperties(session.properties, held, next),
+          properties: mergeProperties(session.properties, [...entered.current], next),
         });
       }}
     />

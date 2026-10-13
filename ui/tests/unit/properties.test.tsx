@@ -242,6 +242,90 @@ describe('the properties form', () => {
     expect(api.callsTo(SAVE).at(0)?.properties).toEqual({ ...stored, owner: 'Grace' });
   });
 
+  // Opening the editor is not an edit, whatever the type's schema would fill in.
+  describe('a type whose schema names defaults', () => {
+    const withDefaults = {
+      ...meetingNote,
+      properties_schema: {
+        type: 'object',
+        required: ['owner'],
+        properties: {
+          owner: { type: 'string', title: 'Owner', minLength: 1 },
+          priority: { type: 'string', title: 'Priority', default: 'normal' },
+          tags: { type: 'array', title: 'Tags', items: { type: 'string' } },
+          place: {
+            type: 'object',
+            title: 'Place',
+            properties: { room: { type: 'string', title: 'Room', default: 'Hall' } },
+          },
+        },
+      },
+    };
+    const held = { type: 'meeting-note', owner: 'Ada', okf_jawn: { id: NOTE } };
+    const service = () =>
+      typed({
+        [TYPES]: () => ok({ items: [withDefaults] }),
+        [ITEM]: () => ok({ ...itemDocument(noteSummary), properties: held }),
+      });
+
+    it('pressing "Edit" sends nothing and marks nothing', async () => {
+      const api = service();
+      await editNote();
+      // A property the item does not hold is shown empty, not as its default.
+      expect(field('Priority')).toHaveProperty('value', '');
+      expect(field('Room')).toHaveProperty('value', '');
+      expect(document.querySelector('.save-state')?.textContent).toBe('No changes to save.');
+      await pass(AUTOSAVE_DELAY_MS * 3);
+      expect(api.callsTo(SAVE)).toHaveLength(0);
+      expect(document.querySelector('.save-state')?.textContent).toBe('No changes to save.');
+      expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
+      expect(screen.getByRole('region', { name: 'Drafts (0)' })).toBeDefined();
+    });
+
+    it('a value the schema fixes is not written by the form itself, with or without an edit', async () => {
+      const fixed = {
+        ...meetingNote,
+        properties_schema: {
+          type: 'object',
+          properties: {
+            owner: { type: 'string', title: 'Owner' },
+            format: { type: 'string', title: 'Format', const: 'minutes' },
+          },
+        },
+      };
+      const api = typed({
+        [TYPES]: () => ok({ items: [fixed] }),
+        [ITEM]: () => ok({ ...itemDocument(noteSummary), properties: held }),
+      });
+      await editNote();
+      await pass(AUTOSAVE_DELAY_MS * 3);
+      expect(api.callsTo(SAVE)).toHaveLength(0);
+      expect(document.querySelector('.save-state')?.textContent).toBe('No changes to save.');
+      set('Owner', 'Grace');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      expect(api.callsTo(SAVE).at(0)?.properties).toEqual({ ...held, owner: 'Grace' });
+    });
+
+    it('a change of one property sends that change, and no default beside it', async () => {
+      const api = service();
+      await editNote();
+      set('Owner', 'Grace');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      expect(api.callsTo(SAVE).at(0)?.properties).toEqual({ ...held, owner: 'Grace' });
+      // A default the person enters is theirs, and is sent.
+      set('Priority', 'normal');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+      expect(api.callsTo(SAVE).at(1)?.properties).toEqual({
+        ...held,
+        owner: 'Grace',
+        priority: 'normal',
+      });
+    });
+  });
+
   it('does not send a required property emptied', async () => {
     const api = typed();
     await editNote();
