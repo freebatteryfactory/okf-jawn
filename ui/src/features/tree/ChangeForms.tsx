@@ -721,8 +721,8 @@ export function DeleteQuestion({ item, mark, onDone, onCancel }: DeleteQuestionP
       </p>
       <DraftWarning mark={mark}>
         {mark === 'draft'
-          ? 'You have a draft of this item. Deleting the item does not delete your draft: it stays in your Drafts, but it can no longer become part of the workspace through a Snapshot, only be discarded. Copy what you want to keep first.'
-          : 'You have text of this item that is not saved. Deleting the item does not remove that text from this page, but it can no longer become part of the workspace through a Snapshot. Copy what you want to keep first.'}
+          ? 'You have a draft of this item. Deleting the item does not delete your draft, but it can no longer become part of the workspace through a Snapshot. The deleted item’s tab, which the Drafts list opens too, shows the draft read-only, to copy from, and offers to discard it.'
+          : 'You have text of this item that is not saved as a draft. After the delete it can no longer be saved, nor become part of the workspace through a Snapshot. The deleted item’s tab shows it read-only, to copy from, until you discard it or leave this page.'}
       </DraftWarning>
       <p className="change-buttons">
         <button type="button" ref={keepRef} onClick={onCancel}>

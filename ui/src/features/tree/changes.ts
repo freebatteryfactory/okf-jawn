@@ -173,7 +173,9 @@ export async function deleteItemNow(
     },
     throwOnError: true,
   });
-  useExplorerStore.getState().markDeleted(workspaceId, itemId, title);
+  useExplorerStore
+    .getState()
+    .markDeleted(workspaceId, itemId, { title, at: attempt.base, made: data.revision });
   // No tab is moved to the new head: the item is not there. A tab that cites a revision keeps it.
   return changed(client, workspaceId, data.revision, []);
 }

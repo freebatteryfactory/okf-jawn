@@ -15,6 +15,7 @@
  * later (Rewind, a later package) must be taken out of it.
  */
 import { create } from 'zustand';
+import type { Revision } from '../../api/generated/types.gen';
 import type { ItemSelection } from './search-params';
 
 /** What a pane's URL names besides the item: a selection inside it and a cited revision. */
@@ -89,13 +90,13 @@ interface ExplorerState {
   /** The note just created: its pane opens on its editor, with keyboard focus in the text. */
   editRequest: { workspaceId: string; itemId: string } | null;
   /**
-   * The items the person deleted in this page, by workspace and item, with the title each had: a
-   * tab of one says so. It is what the person did here, not a copy of what the service holds.
+   * The items the person deleted in this page, by workspace and item: a tab of one says so. It is
+   * what the person did here, not a copy of what the service holds.
    */
-  deleted: Record<string, string>;
+  deleted: Record<string, DeletedItem>;
   revealInTree: (reveal: TreeReveal | null) => void;
   requestEdit: (request: { workspaceId: string; itemId: string } | null) => void;
-  markDeleted: (workspaceId: string, itemId: string, title: string) => void;
+  markDeleted: (workspaceId: string, itemId: string, deleted: DeletedItem) => void;
   /** Show `itemId` at `location` in the focused pane, adding a tab when it has none. */
   openItem: (workspaceId: string, itemId: string, location?: PaneLocation) => void;
   focusPane: (workspaceId: string, paneId: string) => void;
@@ -128,6 +129,16 @@ export function emptyView(): WorkspaceView {
     expanded: {},
     folderPages: {},
   };
+}
+
+/** An item the person deleted in this page. */
+export interface DeletedItem {
+  /** The title it had. */
+  title: string;
+  /** The revision the delete was made on: the last one that holds the item. */
+  at: Revision;
+  /** The revision the delete made: the first one without it. */
+  made: Revision;
 }
 
 /** Where a pane's tab for `itemId` reads: its selection and cited revision ({} for none). */
@@ -167,8 +178,8 @@ export const useExplorerStore = create<ExplorerState>()((set, get) => {
     deleted: {},
     revealInTree: (reveal) => set({ treeReveal: reveal }),
     requestEdit: (request) => set({ editRequest: request }),
-    markDeleted: (workspaceId, itemId, title) =>
-      set((state) => ({ deleted: { ...state.deleted, [`${workspaceId}/${itemId}`]: title } })),
+    markDeleted: (workspaceId, itemId, deleted) =>
+      set((state) => ({ deleted: { ...state.deleted, [`${workspaceId}/${itemId}`]: deleted } })),
     openItem: (workspaceId, itemId, location = {}) => {
       const current = view(workspaceId);
       const pane = current.panes.find((candidate) => candidate.id === current.focusedPaneId);
@@ -302,5 +313,10 @@ const EMPTY = emptyView();
 
 /** The title an item had when the person deleted it in this page; undefined when they did not. */
 export function useDeleted(workspaceId: string, itemId: string): string | undefined {
+  return useExplorerStore((state) => state.deleted[`${workspaceId}/${itemId}`]?.title);
+}
+
+/** What the page remembers of an item the person deleted in it; undefined when they did not. */
+export function useDeletedItem(workspaceId: string, itemId: string): DeletedItem | undefined {
   return useExplorerStore((state) => state.deleted[`${workspaceId}/${itemId}`]);
 }

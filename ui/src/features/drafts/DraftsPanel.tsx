@@ -28,6 +28,7 @@ import { keyed } from '../../lib/keys';
 import { itemOptions } from '../documents/DocumentView';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
+import { useDeleted } from '../explorer/store';
 import { draftsByItem, useDrafts } from './drafts-list';
 import {
   type DraftSession,
@@ -363,9 +364,20 @@ function DraftRow({
   onSelect: (include: boolean) => void;
   onOpenItem: (itemId: string) => void;
 }) {
-  const item = useQuery(itemOptions(workspaceId, row.itemId, head));
+  // An item the person deleted in this page is not at the head: its draft is named by the title
+  // the item had, as its tab is, and nothing is asked.
+  const deleted = useDeleted(workspaceId, row.itemId);
+  const item = useQuery({
+    ...itemOptions(workspaceId, row.itemId, head),
+    enabled: deleted === undefined,
+  });
   const summary = item.data?.summary;
-  const name = summary ? summary.title || summary.path : `Item ${row.itemId.slice(0, 8)}`;
+  const name =
+    deleted !== undefined
+      ? `${deleted} (deleted)`
+      : summary
+        ? summary.title || summary.path
+        : `Item ${row.itemId.slice(0, 8)}`;
   const conflicting = row.conflict !== null;
   const [, rowRef] = useWatchedPart<HTMLLIElement>(held);
   return (

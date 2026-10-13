@@ -770,21 +770,6 @@ describe('a delete', () => {
     expect(screen.getByText('Text of Meeting notes')).toBeTruthy();
   });
 
-  it('warns what happens to a draft, by what the service does with it', async () => {
-    service({}, [NOTE]);
-    await openTree(`/w/${WS}/i/${NOTE}`);
-    await findTextBox('Text of Meeting notes');
-    await userEvent.click(within(pane()).getByRole('button', { name: 'Delete' }));
-    const question = screen.getByRole('group', { name: 'Delete “Meeting notes”?' });
-    expect(question.textContent).toContain('Deleting the item does not delete your draft');
-    expect(question.textContent).toContain('only be discarded');
-    await userEvent.click(button('Delete it'));
-    await within(pane()).findByText(/You deleted this item/);
-    expect(deletedNotice(pane())?.textContent).toContain(
-      'Your draft of it is still in your Drafts',
-    );
-  });
-
   it('never shows a refused delete as done, and repeats it under the same key', async () => {
     let fails = 1;
     const made = { revision: FIRST, receipt_id: RECEIPT, warnings: [] };
@@ -1067,5 +1052,175 @@ describe('a refusal that names a field', () => {
     expect(screen.getByRole('combobox', { name: 'Status' })).toHaveProperty('value', 'stable');
     expect(screen.queryByText(/The status is now/)).toBeNull();
     expect(api.callsTo(LIFE)).toHaveLength(1);
+  });
+});
+
+describe('the draft of an item the person deleted', () => {
+  const DISCARD = '/api/items/discard-draft';
+  const SAVE = '/api/items/save-draft';
+  const leftText = () =>
+    screen.queryByRole('textbox', { name: 'Text of your draft of “Meeting notes” (read-only)' });
+  const draftsPanel = () => screen.getByRole('region', { name: /^Drafts/ });
+  /** A service that holds a draft of the note until it is discarded. */
+  const withDraft = (overrides: Record<string, Handler> = {}) => {
+    const held = [NOTE];
+    return service(
+      {
+        [DISCARD]: () => {
+          held.length = 0;
+          return ok(draftOf(NOTE));
+        },
+        ...overrides,
+      },
+      held,
+    );
+  };
+
+  it('says in the question what the tab then shows, and the tab shows the draft read-only', async () => {
+    const { api } = withDraft();
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await findTextBox('Text of Meeting notes');
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Delete' }));
+    const question = screen.getByRole('group', { name: 'Delete “Meeting notes”?' });
+    expect(question.textContent).toContain('Deleting the item does not delete your draft');
+    expect(question.textContent).toContain(
+      'The deleted item’s tab, which the Drafts list opens too, shows the draft read-only, to copy from, and offers to discard it.',
+    );
+    await userEvent.click(button('Delete it'));
+    await within(pane()).findByText(/You deleted this item/);
+    // What the question said: the draft's text is on the page, and cannot be changed there.
+    const text = leftText();
+    expect(text).toHaveProperty('value', 'My draft');
+    expect(text).toHaveProperty('readOnly', true);
+    expect(deletedNotice(pane())?.textContent).toContain(
+      'Your draft of it is below, read-only: it can be copied from and discarded, but not snapshotted.',
+    );
+    expect(within(pane()).getByText(/This is the draft the service holds for you\./)).toBeTruthy();
+    // The editor is gone: nothing here can be typed into or saved.
+    expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull();
+    // The Drafts list names the draft as the tab does, not by a piece of its identity.
+    expect(
+      within(draftsPanel()).getByRole('button', { name: 'Meeting notes (deleted)' }),
+    ).toBeTruthy();
+    expect(api.callsTo(DISCARD)).toEqual([]);
+  });
+
+  it('discards the draft after its question, and puts focus on "Close this tab"', async () => {
+    const { api } = withDraft();
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await findTextBox('Text of Meeting notes');
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Delete' }));
+    await userEvent.click(button('Delete it'));
+    await within(pane()).findByText(/You deleted this item/);
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Discard draft' }));
+    expect(document.activeElement).toBe(button('Keep the draft'));
+    await userEvent.keyboard('{Enter}');
+    expect(document.activeElement).toBe(
+      within(pane()).getByRole('button', { name: 'Discard draft' }),
+    );
+    expect(api.callsTo(DISCARD)).toEqual([]);
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Discard draft' }));
+    await userEvent.click(button('Discard the draft'));
+    await waitFor(() => expect(leftText()).toBeNull());
+    expect(api.callsTo(DISCARD)).toEqual([
+      { workspace_id: WS, item_id: NOTE, idempotency_key: expect.stringMatching(UUID) },
+    ]);
+    expect(document.activeElement).toBe(
+      within(pane()).getByRole('button', { name: 'Close this tab' }),
+    );
+    expect(deletedNotice(pane())?.textContent).not.toContain('Your draft');
+    expect(screen.getByRole('tab', { name: 'Meeting notes (deleted)' })).toBeTruthy();
+  });
+
+  it('keeps text that was typed and never saved on the page, read-only, and says it is only there', async () => {
+    const { typeInto } = await import('./support/editor');
+    service({ [SAVE]: () => refuse(404, 'not_found', 'no such item at the head') });
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Edit' }));
+    typeInto(await findTextBox(/Text of Meeting notes/), '\nWORDS-I-TYPED');
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Delete' }));
+    const question = screen.getByRole('group', { name: 'Delete “Meeting notes”?' });
+    expect(question.textContent).toContain(
+      'You have text of this item that is not saved as a draft. After the delete it can no longer be saved',
+    );
+    expect(question.textContent).toContain('The deleted item’s tab shows it read-only');
+    await userEvent.click(button('Delete it'));
+    await within(pane()).findByText(/You deleted this item/);
+    const text = leftText();
+    expect(text).toHaveProperty('readOnly', true);
+    expect((text as HTMLTextAreaElement).value).toContain('WORDS-I-TYPED');
+    expect(
+      within(pane()).getByText(/Not all of it is saved as a draft, and it can no longer be saved/),
+    ).toBeTruthy();
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Discard draft' }));
+    await userEvent.click(button('Discard the draft'));
+    await waitFor(() => expect(leftText()).toBeNull());
+    expect(document.body.textContent).not.toContain('WORDS-I-TYPED');
+    expect(document.activeElement).toBe(
+      within(pane()).getByRole('button', { name: 'Close this tab' }),
+    );
+  });
+
+  it('shows a draft that was not open when its item was deleted, read where the item last was', async () => {
+    // The item cannot be read at first: the Drafts list could not learn its title, nor its draft.
+    let failing = true;
+    const own = withDraft({
+      [ITEM]: (body) => {
+        if (failing) return refuse(500, 'internal', 'the store broke');
+        const item = { ...noteSummary, revision: revisionAsked(body, HEAD) };
+        return body.item_id === NOTE && revisionAsked(body, HEAD) === HEAD
+          ? ok({
+              ...itemDocument(item),
+              draft: {
+                body: 'My draft',
+                properties: itemDocument(item).properties,
+                draft: draftOf(NOTE),
+              },
+            })
+          : refuse(404, 'not_found', 'no such item at this revision');
+      },
+    });
+    await openTree();
+    const note = await row(/Meeting notes/);
+    act(() => note.focus());
+    await userEvent.keyboard('{Delete}');
+    await userEvent.click(button('Delete it'));
+    await waitFor(() =>
+      expect(within(tree()).queryByRole('treeitem', { name: /Meeting notes/ })).toBeNull(),
+    );
+    // The Drafts list still holds the draft, and opens the deleted item's tab.
+    await userEvent.click(
+      await within(draftsPanel()).findByRole('button', { name: 'Meeting notes (deleted)' }),
+    );
+    await within(pane()).findByText(/You deleted this item/);
+    // Whether there is a draft could not be read: that is said, with its retry.
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Looking for your draft of this item');
+    expect(leftText()).toBeNull();
+    failing = false;
+    await userEvent.click(button('Try again'));
+    await waitFor(() => expect(leftText()).toHaveProperty('value', 'My draft'));
+    // Asked where the item last was, never at the head that no longer holds it.
+    const asked = own.api
+      .callsTo(ITEM)
+      .filter((body) => body.item_id === NOTE)
+      .map((body) => revisionAsked(body, ''));
+    expect(asked.every((revision) => revision === HEAD)).toBe(true);
+  });
+
+  it('shows no draft part for a deleted item the person has no draft of', async () => {
+    service();
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Edit' }));
+    await findTextBox(/Text of Meeting notes/);
+    // Editing was started and nothing typed: there is no draft to speak of.
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Delete' }));
+    await userEvent.click(button('Delete it'));
+    await within(pane()).findByText(/You deleted this item/);
+    expect(leftText()).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Discard draft' })).toBeNull();
+    expect(deletedNotice(pane())?.textContent).not.toContain('Your draft');
   });
 });

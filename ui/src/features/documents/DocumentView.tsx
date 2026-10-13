@@ -29,10 +29,16 @@
  * keyboard focus. A note the person has just created opens on its editor, with focus in its text.
  *
  * An item the person deleted in this page is said to be deleted, and its tab offers to close. A
- * tab that reads the workspace's head then shows nothing else and asks the service nothing: there
- * is no current text. A tab that cites a revision goes on showing that revision, under the same
- * notice, which says that what is below is how the item was. When the delete was made from this
- * pane, keyboard focus goes to "Close this tab".
+ * tab that reads the workspace's head then shows no current text and asks the service nothing
+ * about the item at that head: there is none. A tab that cites a revision goes on showing that
+ * revision, under the same notice, which says that what is below is how the item was. When the
+ * delete was made from this pane, keyboard focus goes to "Close this tab".
+ *
+ * The person's draft of a deleted item stays readable: the tab that reads the head shows it
+ * read-only, with "Discard draft" (`LeftDraft`). It is the text this page holds when the item
+ * was being edited here, saved or not; else the draft the service holds, which `get_item` answers
+ * beside the item at the revision the delete was made on (the last one that holds it). After the
+ * discard, keyboard focus is on "Close this tab".
  */
 import {
   type UseQueryResult,
@@ -67,9 +73,10 @@ import type { Snapshotted } from '../drafts/snapshot';
 import { FailureNotice } from '../errors/FailureNotice';
 import { type FailureRetry, useRetry } from '../errors/retry';
 import type { ItemSelection } from '../explorer/search-params';
-import { useDeleted, useExplorerStore } from '../explorer/store';
+import { useDeletedItem, useExplorerStore } from '../explorer/store';
 import { ItemActions } from '../tree/ItemActions';
 import { describeSelection, extractionLabels, short } from './describe';
+import { LeftDraft } from './LeftDraft';
 import { Properties } from './Properties';
 import { PropertiesViews } from './PropertiesYaml';
 import { SafeMarkdown } from './SafeMarkdown';
@@ -334,8 +341,9 @@ export function DocumentView({
 }: DocumentViewProps) {
   const titleId = useId();
   // The person deleted this item in this page: at the head there is nothing of it to read.
-  const deletedTitle = useDeleted(workspaceId, itemId);
-  const gone = deletedTitle !== undefined && revision === head;
+  const deleted = useDeletedItem(workspaceId, itemId);
+  const deletedTitle = deleted?.title;
+  const gone = deleted !== undefined && revision === head;
   const item = useQuery({ ...itemOptions(workspaceId, itemId, revision), enabled: !gone });
   const document = item.data;
   // The item as this pane last read it: its controls stay while it is read again at a new head.
@@ -476,6 +484,25 @@ export function DocumentView({
     focusNext.current = 'text';
     setChosen('edit');
   }, [editRequest, requestEdit, workspaceId, itemId, editable, document, revision, pane]);
+  // The person's draft of a deleted item: what this page holds of it, else what the service does.
+  const lastHeld = useQuery({
+    ...itemOptions(workspaceId, itemId, deleted?.at ?? revision),
+    enabled: gone && session === undefined,
+  });
+  const heldBefore = lastHeld.data?.draft ?? null;
+  const leftDraft = !gone
+    ? null
+    : session !== undefined
+      ? saveStateOf(session) === 'unchanged'
+        ? null
+        : {
+            body: session.body,
+            properties: session.properties,
+            onPageOnly: saveStateOf(session) !== 'saved',
+          }
+      : heldBefore === null
+        ? null
+        : { body: heldBefore.body, properties: heldBefore.properties, onPageOnly: false };
   // The item's own controls leave with a deleted item. When keyboard focus was in them (the
   // delete was confirmed here), it goes to the way out of the notice that takes their place.
   const heldInActions = useRef<HTMLElement | null>(null);
@@ -483,6 +510,19 @@ export function DocumentView({
   const closeRef = useRef<HTMLButtonElement | null>(null);
   useLayoutEffect(() => {
     if (takeHeld(heldInActions) && deletedTitle !== undefined) closeRef.current?.focus();
+  });
+  // The draft of a deleted item leaves when it is discarded: focus that was in it goes there too.
+  const heldInLeft = useRef<HTMLElement | null>(null);
+  const [, leftRef] = useWatchedPart<HTMLDivElement>(heldInLeft);
+  useLayoutEffect(() => {
+    if (takeHeld(heldInLeft)) (closeRef.current ?? pageHeading())?.focus();
+  });
+  const heldFailure = useRetry({
+    request: `${workspaceId}/${itemId}`,
+    failed: gone && lastHeld.isError,
+    error: lastHeld.error,
+    run: () => lastHeld.refetch(),
+    loaded: () => closeRef.current,
   });
   // The editor and the form leave when the session ends by another hand than this pane's own
   // buttons (a Snapshot taken in the Drafts panel). Keyboard focus that was in them goes to the
@@ -546,13 +586,33 @@ export function DocumentView({
             {gone
               ? 'There is no current text to show here.'
               : 'What is below is how it was at the revision this tab cites, not something current.'}
-            {hasDraft
-              ? ' Your draft of it is still in your Drafts: it can be copied from or discarded, but not snapshotted.'
+            {leftDraft !== null
+              ? ' Your draft of it is below, read-only: it can be copied from and discarded, but not snapshotted.'
               : ''}
           </p>
           <button type="button" ref={closeRef} onClick={onClose}>
             Close this tab
           </button>
+        </div>
+      )}
+      {heldFailure.shown && (
+        <FailureNotice
+          context="Looking for your draft of this item"
+          error={heldFailure.error}
+          retry={heldFailure}
+          workspaceId={workspaceId}
+        />
+      )}
+      {leftDraft !== null && (
+        <div ref={leftRef}>
+          <LeftDraft
+            workspaceId={workspaceId}
+            itemId={itemId}
+            title={title}
+            body={leftDraft.body}
+            properties={leftDraft.properties}
+            onPageOnly={leftDraft.onPageOnly}
+          />
         </div>
       )}
       {/* Every kind of item can be moved, deleted and given a status; only a Note is edited. */}

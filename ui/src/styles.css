@@ -647,3 +647,12 @@ main.app-main:has(.explorer) {
 .item-actions select[aria-disabled="true"] {
   color: GrayText;
 }
+
+/* The draft of a deleted item: read-only text, as wide as its column, like the editor's. */
+.left-draft {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: ui-monospace, monospace;
+  line-height: 1.5;
+  padding: 0.5rem;
+}
