@@ -288,7 +288,11 @@ describe('who may edit, and where', () => {
       await screen.findByText(/Source · type/);
       expect(screen.queryByRole('button', { name: /Edit/ })).toBeNull();
       expect(edit.isConnected).toBe(false);
-      expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1 }));
+      // The page's heading, by its name: once the item's text is read at the new revision the
+      // reader shows the document's own level-one heading as well.
+      expect(document.activeElement).toBe(
+        screen.getByRole('heading', { level: 1, name: 'Workshop notes' }),
+      );
       expect(document.activeElement).not.toBe(document.body);
     });
 
