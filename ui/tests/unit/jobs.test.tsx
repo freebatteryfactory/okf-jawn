@@ -669,6 +669,20 @@ describe('cancelling a job, and trying a failed one again', () => {
     expect(api.violations).toEqual([]);
   });
 
+  it('puts focus on the job when another try is accepted and its button leaves', async () => {
+    await openJobs({
+      [JOBS]: () => listOf([jobOf('failed')]),
+      [RETRY]: () => accepted(jobOf('queued', { attempt: 2 })),
+    });
+    await listed();
+    const press = button('Try the job again');
+    press?.focus();
+    if (press) fireEvent.click(press);
+    await eventually(() => expect(rowOf().textContent).toContain('Waiting to start, attempt 2.'));
+    expect(button('Try the job again')).toBeNull();
+    expect(document.activeElement).toBe(rowOf());
+  });
+
   it('reads a refused retry in plain words, never as queued', async () => {
     await openJobs({ [JOBS]: () => listOf([jobOf('failed')]) });
     await listed();

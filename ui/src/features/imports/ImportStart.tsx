@@ -13,7 +13,8 @@
  *
  * A `conflict` here most often means the workspace has moved on from the version on screen, which
  * the import is based on: the notice says to refresh and start again, and shows the service's own
- * words. It offers no retry of its own, because the same request would be refused again.
+ * words. Those words allow no retry, so the notice shows none: the same request would be refused
+ * again.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
@@ -99,11 +100,7 @@ export function ImportStart({ workspaceId, head, entries }: ImportStartProps) {
     request: workspaceId,
     failed: start.isError,
     error: start.error,
-    ...(stale
-      ? {}
-      : {
-          run: () => (last.current === null ? Promise.resolve() : start.mutateAsync(last.current)),
-        }),
+    run: () => (last.current === null ? Promise.resolve() : start.mutateAsync(last.current)),
     loaded: () => buttonRef.current,
   });
 

@@ -224,7 +224,7 @@ describe('starting the import', () => {
     const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {
       [START]: () => {
         answers += 1;
-        return answers < 3 ? fail(503, 'unavailable', 'busy') : accepted(jobOf('queued'));
+        return answers < 4 ? fail(503, 'unavailable', 'busy') : accepted(jobOf('queued'));
       },
       [JOB]: () => ok(jobOf('queued')),
     });
@@ -243,13 +243,18 @@ describe('starting the import', () => {
         'false',
       ),
     );
+    // The button pressed again with nothing changed is the same request too.
+    fireEvent.click(importButton());
+    await eventually(() => expect(api.callsTo(START)).toHaveLength(3));
+    expect(api.callsTo(START).at(2)).toEqual(api.callsTo(START).at(0));
+    await eventually(() => expect(importButton().getAttribute('aria-disabled')).toBe('false'));
     fireEvent.change(folder(), { target: { value: 'elsewhere' } });
     fireEvent.click(importButton());
     await eventually(() => jobRow());
     const sent = api.callsTo(START);
-    expect(sent).toHaveLength(3);
-    expect(sent.at(2)?.destination).toBe('elsewhere');
-    expect(sent.at(2)?.idempotency_key).not.toBe(sent.at(0)?.idempotency_key);
+    expect(sent).toHaveLength(4);
+    expect(sent.at(3)?.destination).toBe('elsewhere');
+    expect(sent.at(3)?.idempotency_key).not.toBe(sent.at(0)?.idempotency_key);
   });
 
   it('says to refresh when the version shown is not the one to import onto, with no retry of its own', async () => {
