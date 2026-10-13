@@ -309,9 +309,13 @@ export function ConflictNotice({
             <strong>Your draft was not kept.</strong>
           </p>
           <p>
+            {/* The pane takes this notice away while the item is refused, so the words for that
+                are for a pane that draws it otherwise. */}
             {notKept === 'too-long'
               ? 'Its text is too long to save, and a draft has to be saved before it can be kept. Shorten the text, then keep it again.'
-              : 'This page has no draft of this item to keep: it may have been discarded or snapshotted elsewhere. Take theirs to close this notice.'}
+              : notKept === 'refused'
+                ? 'This item is not a Note any more, so nothing of your draft of it is saved.'
+                : 'This page has no draft of this item to keep: it may have been discarded or snapshotted elsewhere. Take theirs to close this notice.'}
           </p>
         </div>
       )}

@@ -341,15 +341,15 @@ export function DocumentView({
     setTypeName(document.summary.type_name);
   }
   const isNote = session !== undefined || kind === 'note';
-  // A session whose item a later read says is not a Note: nothing of it is saved from then on
-  // (the service would refuse it), and its text stays on screen, read-only. Set in a layout
-  // effect, so it holds before the editor's own cleanup saves what it holds on its way out.
-  const notANote = session !== undefined && kind !== null && kind !== 'note' ? kind : null;
+  // The session is told what each read says the item is: one that is not a Note refuses it, and a
+  // Note lifts that (`saving.ts` says what a refused session is). What this pane draws follows the
+  // session, not the read: the editor leaves only once the session is refused, so the save the
+  // editor sends on its way out finds it refused, in whatever order the effects run.
   const sessionHere = session !== undefined;
-  useLayoutEffect(() => {
-    if (!sessionHere) return;
-    refuseSaving(workspaceId, itemId, notANote !== null);
-  }, [sessionHere, notANote, workspaceId, itemId]);
+  useEffect(() => {
+    if (sessionHere && kind !== null) refuseSaving(workspaceId, itemId, kind);
+  }, [sessionHere, kind, workspaceId, itemId]);
+  const notANote = session?.refused ?? null;
   const editable = atShown && isNote;
   const hasDraft = session !== undefined || (document?.draft ?? null) !== null;
   const [chosen, setChosen] = useState<'read' | 'edit' | null>(null);
@@ -568,7 +568,9 @@ export function DocumentView({
           </button>
         </p>
       )}
-      {editable && conflict !== undefined && (
+      {/* Not for a refused session: "Keep mine" would save, and nothing of it is saved. The
+          conflict stays with the item, and its notice is back when the refusal is lifted. */}
+      {editable && conflict !== undefined && notANote === null && (
         <ConflictNotice
           workspaceId={workspaceId}
           itemId={itemId}

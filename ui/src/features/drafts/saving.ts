@@ -37,12 +37,31 @@
  * stop it (`stopSaving`): the request is aborted, and since it may have been applied, the session
  * is then as after any save with no answer.
  *
- * An item that a later read says is not a Note is refused (`refuseSaving`): nothing of its session
- * is sent from then on, its text stays in the session, and the page shows it read-only.
+ * A refused session. A session is refused while the last answer of `get_item` that a pane of its
+ * item read says the item is not a Note (it is a Source or a View): the service takes no draft of
+ * such an item. The pane tells the session at each read (`refuseSaving`, from `DocumentView`) and
+ * the session carries it (`refused`: what the item is, or null). This is the one place that says
+ * what follows; every function here and in `snapshot.ts` that sends or waits asks that field.
+ * - Nothing of it is sent. Every `save_draft` goes through `save` (the autosave's timer, leaving
+ *   the editor, a hidden page, a Snapshot's save, "Keep mine"), and `save` returns at once, with
+ *   no request, for a refused session. A request already under way when the refusal comes is let
+ *   to answer. The text and what was entered in the properties stay in the session.
+ * - No control that would send for it is drawn: in place of the editor and of the conflict notice
+ *   the pane shows what was typed, read-only (`KeptText`).
+ * - Nothing waits on it. `rebaseSession` ("Keep mine") rejects with `DraftNotKept('refused')`
+ *   instead of saving until the text is saved: a result its caller can tell from "saved".
+ *   `flushSession` settles at once, and its outcome is the session's state, as ever.
+ * - A discard is still sent: it is the way out, and the refusal ends with the session.
+ * - When a later read says the item is a Note, the refusal is lifted: the editor is drawn again
+ *   with the text the session kept.
+ * Limits. The refusal is per item, whichever pane read it: a pane that reads the item at another
+ * revision, where it is a Note, lifts what another pane set. And with no pane of the item open
+ * nothing reads its kind for the session: a save sent then (the page is hidden) is the service's
+ * to refuse, and is shown as a failed save.
  */
 import type { QueryClient } from '@tanstack/react-query';
 import { discardDraft, saveDraft } from '../../api/generated/sdk.gen';
-import type { ItemDocument, Revision } from '../../api/generated/types.gen';
+import type { ItemDocument, ItemSummary, Revision } from '../../api/generated/types.gen';
 import { zSaveDraftRequest } from '../../api/generated/zod.gen';
 import { REQUEST_TIMEOUT_MS, RequestStopped } from '../../app/api-client';
 import { classifyFailure } from '../errors/failure';
@@ -88,15 +107,16 @@ const changedMeanwhile = new Set<string>();
 const discardKeys = new Map<string, string>();
 /** What stops the save in flight, by session. */
 const stoppers = new Map<string, AbortController>();
-/** Items whose draft is not saved: a read says the item is not a Note, and the service refuses it. */
-const refused = new Set<string>();
 
 /** Why a draft could not be kept on a newer revision, when no request failed. */
 export class DraftNotKept extends Error {
-  /** This page holds no draft of the item (get_item carried none); or its text is too long to save. */
-  readonly reason: 'no-draft' | 'too-long';
+  /**
+   * This page holds no draft of the item (get_item carried none); its text is too long to save;
+   * or its session is refused (the item is not a Note), so nothing of it is saved.
+   */
+  readonly reason: 'no-draft' | 'too-long' | 'refused';
 
-  constructor(reason: 'no-draft' | 'too-long') {
+  constructor(reason: 'no-draft' | 'too-long' | 'refused') {
     super(`The draft was not kept: ${reason}`);
     this.name = 'DraftNotKept';
     this.reason = reason;
@@ -135,6 +155,7 @@ export function beginSession(
     attempt: null,
     tooLong: null,
     heldBack: null,
+    refused: null,
   });
 }
 
@@ -156,18 +177,16 @@ export function releaseEditor(workspaceId: string, itemId: string, pane: string)
 }
 
 /**
- * Save nothing of this item's session, or save again: the item is no longer a Note, so a draft of
- * it would be refused. The text stays in the session, and what was waiting to be sent is not.
+ * A pane read the item, and this is what the answer says it is. Anything but a Note refuses the
+ * item's session (see the header: nothing of it is sent, and nothing waits on it); a Note lifts
+ * the refusal. An item with no session has nothing to refuse.
  */
-export function refuseSaving(workspaceId: string, itemId: string, refuse: boolean) {
+export function refuseSaving(workspaceId: string, itemId: string, kind: ItemSummary['kind']) {
   const key = sessionKey(workspaceId, itemId);
-  if (!refuse) {
-    refused.delete(key);
-    return;
-  }
-  refused.add(key);
-  cancelTimer(key);
-  changedMeanwhile.delete(key);
+  const session = sessions().sessions[key];
+  const refused = kind === 'note' ? null : kind;
+  if (session === undefined || session.refused === refused) return;
+  sessions().change(key, { refused });
 }
 
 function cancelTimer(key: string) {
@@ -237,7 +256,8 @@ export function anySessionAtRisk(): boolean {
 }
 
 function save(client: QueryClient, key: string): Promise<void> {
-  if (refused.has(key)) return Promise.resolve();
+  // A refused session sends nothing, whoever asks; what it holds stays as it is.
+  if (sessions().sessions[key]?.refused != null) return Promise.resolve();
   const running = inFlight.get(key);
   if (running !== undefined) {
     changedMeanwhile.add(key);
@@ -335,12 +355,15 @@ export function stopSaving(workspaceId: string, itemId: string) {
 }
 
 /**
- * Throw why the session's text is not saved, if it is not: what its save threw, or that it is too
- * long. A session that is saved, or that is not there, passes.
+ * Throw why the session's draft is not kept, if it is not: its session is refused, so nothing of
+ * it is saved; or its text is not saved, and then what its save threw, or that it is too long. A
+ * session that is saved and not refused, or that is not there, passes.
  */
 export function assertSaved(workspaceId: string, itemId: string) {
   const session = sessions().sessions[sessionKey(workspaceId, itemId)];
-  if (session === undefined || !needsSave(session)) return;
+  if (session === undefined) return;
+  if (session.refused !== null) throw new DraftNotKept('refused');
+  if (!needsSave(session)) return;
   throw session.failure ?? new DraftNotKept('too-long');
 }
 
@@ -351,6 +374,15 @@ export function assertSaved(workspaceId: string, itemId: string) {
  * typed while that save is in flight is saved after it, so this settles with the text on screen
  * saved. A draft already on that base, with that text, is not sent again. Rejects with what a
  * save threw, or with `DraftNotKept`.
+ *
+ * A refused session is not kept: this rejects with `DraftNotKept('refused')` at once, before it
+ * waits for anything or names the base. A session refused while this waits ends the wait the same
+ * way (`save` sends nothing for it, so asking again would never end); the base named by then
+ * stays named, and the save sent once the refusal is lifted carries it.
+ *
+ * Why each wait ends. A save in flight answers, times out (the client's bounded wait) or is
+ * stopped. Each turn of the loop either sends a request, which ends likewise, or leaves: the
+ * session is gone or refused, nothing is left to save, a save failed, or the text is too long.
  */
 export async function rebaseSession(
   client: QueryClient,
@@ -359,7 +391,9 @@ export async function rebaseSession(
   revision: Revision,
 ): Promise<void> {
   const key = sessionKey(workspaceId, itemId);
-  if (sessions().sessions[key] === undefined) throw new DraftNotKept('no-draft');
+  const session = sessions().sessions[key];
+  if (session === undefined) throw new DraftNotKept('no-draft');
+  if (session.refused !== null) throw new DraftNotKept('refused');
   cancelTimer(key);
   // A save in flight answers with the base it was sent on: the new base is named after it.
   await inFlight.get(key);
@@ -370,7 +404,8 @@ export async function rebaseSession(
     cancelTimer(key);
     await save(client, key);
     const now = sessions().sessions[key];
-    if (now === undefined || !needsSave(now) || now.failure !== null || now.tooLong !== null) break;
+    if (now === undefined || now.refused !== null) break;
+    if (!needsSave(now) || now.failure !== null || now.tooLong !== null) break;
   }
   assertSaved(workspaceId, itemId);
 }
@@ -428,7 +463,6 @@ export function endSession(workspaceId: string, itemId: string) {
   const key = sessionKey(workspaceId, itemId);
   cancelTimer(key);
   changedMeanwhile.delete(key);
-  refused.delete(key);
   sessions().remove(key);
 }
 
@@ -439,7 +473,6 @@ export function resetDraftSessions() {
   changedMeanwhile.clear();
   inFlight.clear();
   discardKeys.clear();
-  refused.clear();
   // A save still in flight is let go, not stopped: its answer finds no session.
   stoppers.clear();
   useDraftSessions.setState({ sessions: {}, conflicts: {}, said: {}, asked: {} });
