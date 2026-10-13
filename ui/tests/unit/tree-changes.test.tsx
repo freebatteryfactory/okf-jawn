@@ -29,6 +29,7 @@ import {
   splitPath,
 } from '../../src/features/tree/names';
 import { type Handler, type Json, mockApi, ok, type Reply } from './support/api';
+import { CANCELLED, handed, TAKEN } from './support/drags';
 import { findTextBox, textIn } from './support/editor';
 import {
   draftOf,
@@ -2128,4 +2129,51 @@ describe('two rules whose mutants survived the re-review', () => {
     const view = useExplorerStore.getState().views[WS];
     expect(JSON.stringify(view)).not.toContain(MADE.at(1));
   }, 20000);
+});
+
+describe('a drag onto the forms that change the tree', () => {
+  it('of files is cancelled before a field of the bar’s form is handed it and one of text is not, and the bar works, on a first mount of the tree and on one with its listing cached', async () => {
+    const { api } = service();
+    const { router } = await openTree();
+    await userEvent.click(button('New note'));
+    expect(handed(field('Title'))).toEqual({ text: TAKEN, files: CANCELLED });
+    expect(handed(field('In folder'))).toEqual({ text: TAKEN, files: CANCELLED });
+    // Leave the workspace and come back: the tree mounts again, its listing already in the cache.
+    await act(async () => {
+      await router.navigate({ to: '/' as never });
+    });
+    expect(screen.queryAllByRole('treeitem')).toHaveLength(0);
+    await act(async () => {
+      await router.navigate({ to: `/w/${WS}` as never });
+    });
+    await row('notes');
+    // The bar above that tree opens its form, the form takes dragged text, and it still creates.
+    await userEvent.click(button('New folder'));
+    expect(document.activeElement).toBe(field('Folder name'));
+    expect(handed(field('Folder name'))).toEqual({ text: TAKEN, files: CANCELLED });
+    await userEvent.type(field('Folder name'), 'archive');
+    await userEvent.keyboard('{Enter}');
+    const made = await row('archive');
+    await waitFor(() => expect(document.activeElement).toBe(made));
+    expect(api.callsTo(FOLDER)).toHaveLength(1);
+    // No row of the tree became something that is dragged.
+    for (const entry of screen.getAllByRole('treeitem')) {
+      expect(entry.getAttribute('draggable')).not.toBe('true');
+    }
+  });
+
+  it('of files is cancelled before a field of the item’s own form in the pane is handed it, and one of text is not', async () => {
+    service();
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Rename or move' }));
+    expect(handed(within(pane()).getByRole('textbox', { name: 'File name' }))).toEqual({
+      text: TAKEN,
+      files: CANCELLED,
+    });
+    expect(handed(within(pane()).getByRole('textbox', { name: 'In folder' }))).toEqual({
+      text: TAKEN,
+      files: CANCELLED,
+    });
+  });
 });

@@ -17,6 +17,7 @@ import { resetDraftSessions } from '../../src/features/drafts/saving';
 import { YAML_PAUSE_MS } from '../../src/lib/yaml';
 import { setYamlEngine, TOO_COMPLEX_WORDS, YAML_LIMIT_MS } from '../../src/lib/yaml-reading';
 import { type Handler, type Json, mockApi, ok, type Reply } from './support/api';
+import { CANCELLED, handed, TAKEN } from './support/drags';
 import { findTextBox, replaceText, textIn } from './support/editor';
 import {
   DIGEST,
@@ -2143,5 +2144,18 @@ describe('the naming rules and the workspace’s own pages', () => {
     expect(rulesPanel()).toBeNull();
     expect(page('Import files')).not.toBeNull();
     expect(document.activeElement).toBe(link('Import'));
+  });
+});
+
+describe('a drag onto the naming rules', () => {
+  it('of files is cancelled before a field of the form or the YAML text box is handed it, and one of text is not', async () => {
+    service();
+    await openRules();
+    // The folders are listed beside the rules: the tree's own drag backend is on the page too.
+    expect(screen.getAllByRole('treeitem').length).toBeGreaterThan(0);
+    expect(handed(prefix())).toEqual({ text: TAKEN, files: CANCELLED });
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const box = await findTextBox('The naming rules as YAML');
+    expect(handed(box)).toEqual({ text: TAKEN, files: CANCELLED });
   });
 });

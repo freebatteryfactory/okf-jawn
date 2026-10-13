@@ -10,6 +10,7 @@ import { AUTOSAVE_DELAY_MS, resetDraftSessions } from '../../src/features/drafts
 import { YAML_PAUSE_MS } from '../../src/lib/yaml';
 import { setYamlEngine, TOO_COMPLEX_WORDS, YAML_LIMIT_MS } from '../../src/lib/yaml-reading';
 import { type Handler, mockApi, ok } from './support/api';
+import { CANCELLED, handed, TAKEN } from './support/drags';
 import { findTextBox, replaceText, textBox, textIn } from './support/editor';
 import {
   draftOf,
@@ -467,5 +468,19 @@ describe('a YAML reading under way when the draft is discarded', () => {
     fireEvent.click(tab('YAML'));
     await pass(0);
     expect(textIn(textBox(YAML))).toBe(storedYaml);
+  });
+});
+
+describe('a drag onto the properties of a draft', () => {
+  it('of files is cancelled before the YAML text box or a field of the form is handed it, and one of text is not', async () => {
+    service();
+    const box = await openYaml();
+    expect(handed(box)).toEqual({ text: TAKEN, files: CANCELLED });
+    fireEvent.click(tab('Form'));
+    await pass(0);
+    const fields = [screen.getByLabelText(/^Owner\*?$/), screen.getByLabelText(/^Attendees/)];
+    for (const each of fields) {
+      expect(handed(each)).toEqual({ text: TAKEN, files: CANCELLED });
+    }
   });
 });
