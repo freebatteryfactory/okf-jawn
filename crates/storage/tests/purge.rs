@@ -1040,6 +1040,120 @@ async fn purge_empties_the_ledger_of_a_copy_that_records_no_workspace() -> TestR
     Ok(())
 }
 
+/// A ledger row as the table holds it: state, token, lease expiry, response and finish time.
+type RowState = (String, i64, i64, Option<String>, Option<i64>);
+
+/// The row under the idempotency key numbered `n`.
+fn ledger_row(records: &Path, n: u32) -> Fallible<RowState> {
+    let connection = rusqlite::Connection::open(records)?;
+    Ok(connection.query_row(
+        "SELECT state, token, lease_expires_ms, response, finished_ms FROM mutations
+         WHERE idempotency_key = ?1",
+        [uuid_text(n)],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        },
+    )?)
+}
+
+/// The key of a ledger row of `tenant` for `operation` numbered `n`.
+fn ledger_key(tenant: &str, operation: OperationName, n: u32) -> Fallible<MutationKey> {
+    Ok(MutationKey {
+        tenant_id: TenantId::try_from(tenant.to_owned())?,
+        subject: "ana".to_owned(),
+        client_id: None,
+        operation,
+        key: uuid!(n)?,
+    })
+}
+
+/// Round 2, B1: a row of the purged workspace that is still leased is an attempt in flight. The
+/// purge leaves its state, lease and token alone, so its holder can still complete or release it
+/// (SPEC section 8: a superseded attempt can neither complete nor release the mutation, and
+/// this one was not superseded).
+#[tokio::test]
+async fn purge_leaves_a_leased_ledger_row_of_the_workspace_to_its_holder() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let (ledger, target) = (fixture.storage.mutations(), fixture.target.workspace_id);
+    let digest = Digest::try_from("a".repeat(64))?;
+    let update = OperationName::UpdateWorkspace;
+    let mut leases = Vec::new();
+    for n in [50, 51] {
+        let BeginOutcome::New(lease) = ledger
+            .begin(&ledger_key("local", update, n)?, &digest, Some(target))
+            .await?
+        else {
+            return Err("expected a new mutation".into());
+        };
+        leases.push(lease);
+    }
+    let records = directory.path().join("records.sqlite");
+    let (completing, releasing) = (ledger_row(&records, 50)?, ledger_row(&records, 51)?);
+    assert_eq!(completing.0, "leased");
+    purge_target(&fixture).await?;
+    assert_eq!(ledger_row(&records, 50)?, completing, "state, lease, token");
+    assert_eq!(ledger_row(&records, 51)?, releasing, "state, lease, token");
+    let (first, second) = (
+        *some(leases.first(), "the first lease")?,
+        *some(leases.get(1), "the second lease")?,
+    );
+    ledger
+        .complete(first, json!({ "name": "Late" }), None)
+        .await?;
+    ledger.release(second).await?;
+    let done = ledger_row(&records, 50)?;
+    assert_eq!((done.0.as_str(), done.3.is_some()), ("completed", true));
+    assert_eq!(ledger_row(&records, 51)?.0, "released");
+    Ok(())
+}
+
+/// Round 2, B1: a completed `purge_item` row recorded under the purged workspace keeps its
+/// response, which is a purge record, as the `purge_workspace` row does.
+#[tokio::test]
+async fn purge_keeps_a_completed_purge_item_row_of_the_workspace() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    completed_row(
+        &fixture.storage,
+        ("local", OperationName::PurgeItem, 52),
+        Some(fixture.target.workspace_id),
+        json!({ "id": uuid_text(62), "state": "requested" }),
+    )
+    .await?;
+    purge_target(&fixture).await?;
+    let row = ledger_row(&directory.path().join("records.sqlite"), 52)?;
+    assert_eq!(row.0, "completed");
+    assert!(row.3.is_some(), "the purge record is kept");
+    Ok(())
+}
+
+/// Round 2, B1: another tenant's completed row that names a workspace of the same id keeps its
+/// response; a purge empties its own tenant's rows only.
+#[tokio::test]
+async fn purge_keeps_another_tenant_s_ledger_row_that_names_the_same_workspace_id() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    completed_row(
+        &fixture.storage,
+        ("elsewhere", OperationName::UpdateWorkspace, 53),
+        Some(fixture.target.workspace_id),
+        json!({ "name": "Orchard" }),
+    )
+    .await?;
+    purge_target(&fixture).await?;
+    let row = ledger_row(&directory.path().join("records.sqlite"), 53)?;
+    assert_eq!(row.0, "completed");
+    assert!(row.3.is_some(), "the other tenant's response is kept");
+    Ok(())
+}
+
 /// Assert that `result` is the refusal of a write to a workspace purge 60 names.
 fn refused<T: std::fmt::Debug>(result: Result<T, ApiError>, what: &str) -> TestResult {
     let error = err_of(result)?;
