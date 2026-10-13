@@ -9,15 +9,18 @@
  * are `ins` and `del`, each also marked with a sign, so the difference does not rest on color.
  *
  * - "Keep mine" saves the draft again on the current revision (`save_draft` with `base_revision`
- *   set to `current_revision`) and then takes the Snapshot of this item under the name the
- *   Snapshot had. If the item changed yet again, the service answers a new conflict, shown here.
+ *   set to `current_revision`, sent by the session's own save) and then takes the Snapshot of this
+ *   item under the name the Snapshot had. If the item changed yet again, the service answers a new
+ *   conflict, shown here.
  * - "Take theirs" discards the draft (`discard_draft`), after the person confirms in place. The
  *   newer version is someone else's head: it is shown once the workspace is refreshed.
  * - An item that was deleted cannot be kept: `save_draft` needs the item at the head. Its text
  *   stays in the editor to copy until the draft is discarded.
  *
  * Either way out ends with the notice gone; the caller says where keyboard focus goes. A failure
- * of either is shown here with its retry, which repeats the same requests under the same keys.
+ * of either is shown here with its retry. No key is held here: a save's belongs to its session,
+ * a discard's to its item and a Snapshot's to its workspace, so a retry is the same request under
+ * the same key exactly while it says the same thing, wherever it is pressed from.
  */
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useId, useRef, useState } from 'react';
@@ -26,16 +29,10 @@ import { short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
 import { MAX_DIFF_LINES, type PatchHunk, readPatch } from './patch';
-import { discardSession } from './saving';
-import {
-  type ConflictItem,
-  type DraftText,
-  type SnapshotConflict,
-  useDraftSessions,
-} from './sessions';
+import { assertSaved, DraftNotKept, discardSession, rebaseSession } from './saving';
+import { type ConflictItem, type SnapshotConflict, useDraftSessions } from './sessions';
 import {
   draftConflictsOf,
-  rebaseDraft,
   type Snapshotted,
   saySnapshotted,
   takeSnapshot,
@@ -47,8 +44,6 @@ export interface ConflictNoticeProps {
   itemId: string;
   title: string;
   conflict: SnapshotConflict;
-  /** The draft's content, when it is known: the editor's, or what `get_item` carried. */
-  text: DraftText | null;
   /** "Keep mine" took the Snapshot of this item. */
   onSnapshotted: (snapshotted: Snapshotted) => void;
   /** The conflict is over, either way: the notice is about to go. */
@@ -124,7 +119,6 @@ export function ConflictNotice({
   itemId,
   title,
   conflict,
-  text,
   onSnapshotted,
   onResolved,
 }: ConflictNoticeProps) {
@@ -145,31 +139,28 @@ export function ConflictNotice({
   const theirsRef = useRef<HTMLButtonElement | null>(null);
   const keepDraftRef = useRef<HTMLButtonElement | null>(null);
 
-  // One key for every attempt to keep this draft on this revision.
-  const keys = useRef<{ revision: string; rebase: string } | null>(null);
   const keep = useMutation({
     mutationFn: async () => {
-      if (text === null) throw new UnsavedSelection([itemId]);
-      const held =
-        keys.current !== null && keys.current.revision === item.current_revision
-          ? keys.current
-          : { revision: item.current_revision, rebase: crypto.randomUUID() };
-      keys.current = held;
-      await rebaseDraft(client, workspaceId, itemId, item.current_revision, text, held.rebase);
-      return takeSnapshot(client, workspaceId, [itemId], conflict.message);
+      await rebaseSession(client, workspaceId, itemId, item.current_revision);
+      try {
+        return await takeSnapshot(client, workspaceId, [itemId], conflict.message);
+      } catch (error) {
+        // Text typed meanwhile could not be saved: the reason is the save's, and is said as such.
+        if (error instanceof UnsavedSelection) assertSaved(workspaceId, itemId);
+        throw error;
+      }
     },
     onSuccess: (snapshotted) => {
-      keys.current = null;
       saySnapshotted(workspaceId, conflict.message, snapshotted);
       onResolved();
       onSnapshotted(snapshotted);
     },
   });
-  // A new conflict for this item is shown as the conflict it is, not as a failure; text that is
-  // not saved has its own words.
+  // A new conflict for this item is shown as the conflict it is, not as a failure; a draft that
+  // could not be kept without any request failing has its own words.
   const changedAgain = keep.isError && draftConflictsOf(keep.error) !== null;
-  const notSaved = keep.isError && keep.error instanceof UnsavedSelection;
-  const keepFailed = keep.isError && !changedAgain && !notSaved;
+  const notKept = keep.isError && keep.error instanceof DraftNotKept ? keep.error.reason : null;
+  const keepFailed = keep.isError && !changedAgain && notKept === null;
   const keepFailure = useRetry({
     request: `${workspaceId}/${itemId}/${item.current_revision}`,
     failed: keepFailed,
@@ -186,15 +177,9 @@ export function ConflictNotice({
     if (target === 'keep-draft') keepDraftRef.current?.focus();
     else if (target === 'theirs') theirsRef.current?.focus();
   });
-  const discardKey = useRef<string | null>(null);
   const theirs = useMutation({
-    mutationFn: async () => {
-      const key = discardKey.current ?? crypto.randomUUID();
-      discardKey.current = key;
-      await discardSession(client, workspaceId, itemId, key);
-    },
+    mutationFn: () => discardSession(client, workspaceId, itemId),
     onSuccess: () => {
-      discardKey.current = null;
       useDraftSessions
         .getState()
         .say(
@@ -317,12 +302,16 @@ export function ConflictNotice({
           ? 'Take theirs: your draft is discarded.'
           : 'Keep mine: your draft is saved on the newer version and snapshotted under the same name. Take theirs: your draft is discarded.'}
       </p>
-      {notSaved && (
+      {notKept !== null && (
         <div role="alert" className="failure-notice">
           <p>
-            <strong>Your text is not saved yet.</strong>
+            <strong>Your draft was not kept.</strong>
           </p>
-          <p>It has to be saved before it can be kept. The editor below says why.</p>
+          <p>
+            {notKept === 'too-long'
+              ? 'Its text is too long to save, and a draft has to be saved before it can be kept. Shorten the text, then keep it again.'
+              : 'Its text has not been read in this page yet. Keep it again once this item is shown.'}
+          </p>
         </div>
       )}
       {keepFailure.shown && (

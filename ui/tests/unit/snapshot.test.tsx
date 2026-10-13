@@ -8,7 +8,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { REQUEST_TIMEOUT_MS } from '../../src/app/api-client';
 import { itemOptions } from '../../src/features/documents/DocumentView';
 import { MAX_DIFF_LINES, MAX_LINE_CHARS, readPatch } from '../../src/features/drafts/patch';
-import { AUTOSAVE_DELAY_MS, resetDraftSessions } from '../../src/features/drafts/saving';
+import {
+  AUTOSAVE_DELAY_MS,
+  MAX_BODY_BYTES,
+  resetDraftSessions,
+} from '../../src/features/drafts/saving';
 import { fail, type Handler, type Json, mockApi, ok, type Reply } from './support/api';
 import { findTextBox, replaceText, textBox, textIn, typeInto } from './support/editor';
 import {
@@ -1029,8 +1033,155 @@ describe('a Snapshot that conflicts', () => {
     const commits = api.callsTo(COMMIT);
     expect(commits.map((sent) => sent.item_ids)).toEqual([[NOTE], [NOTE], [NOTE]]);
     expect(new Set(commits.map((sent) => sent.idempotency_key)).size).toBe(3);
-    // Each "Keep mine" saved the draft on the revision the item was at then.
+    // Each "Keep mine" saved the draft on the revision the item was at then, as a request of its own.
     expect(api.callsTo(SAVE).map((sent) => sent.base_revision)).toEqual([THEIRS, AGAIN]);
+    expect(new Set(api.callsTo(SAVE).map((sent) => sent.idempotency_key)).size).toBe(2);
+  });
+
+  // "Keep mine" saves through the session's own save: one request per item at a time, and a key
+  // that belongs to exactly one text on one base.
+  describe('keep mine and the session’s own save', () => {
+    /** A digest that differs with the text, as the service's does. */
+    const digestOf = (text: string) => text.length.toString(16).padStart(64, '0');
+    const savedAs = (body: Json): Reply =>
+      ok({
+        ...draftOf(NOTE, String(body.base_revision), LATER),
+        content_digest: digestOf(String(body.body)),
+      });
+    /** The Snapshot from the panel conflicts; each one after it does what `then` says. */
+    const commits = (then: (nth: number) => Reply): Handler => {
+      let nth = 0;
+      return () => {
+        nth += 1;
+        return nth === 1 ? conflict([conflictOf(NOTE)]) : then(nth);
+      };
+    };
+    /** No key was sent with two requests that differ. */
+    const reusedKeys = (sent: Json[]) => {
+      const byKey = new Map<string, Set<string>>();
+      for (const call of sent) {
+        const key = String(call.idempotency_key);
+        const said = byKey.get(key) ?? new Set<string>();
+        said.add(JSON.stringify({ ...call, idempotency_key: null }));
+        byKey.set(key, said);
+      }
+      return [...byKey.entries()].filter(([, said]) => said.size > 1).map(([key]) => key);
+    };
+
+    it('tried again after more was typed, sends no key with two different requests', async () => {
+      const { api, notice } = await openConflict(
+        {},
+        {
+          [SAVE]: savedAs,
+          [COMMIT]: commits((nth) => (nth === 2 ? fail(503, 'unavailable', 'busy') : committed())),
+        },
+      );
+      fireEvent.click(within(notice).getByRole('button', { name: 'Keep mine' }));
+      await within(notice).findByRole('button', { name: 'Try again' });
+      // The first half was applied: the draft is on the newer revision. The person goes on typing.
+      vi.useFakeTimers();
+      typeInto(textBox('Text of Meeting notes'), ' and one more thought');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+      fireEvent.click(within(notice).getByRole('button', { name: 'Try again' }));
+      await eventually(() => expect(api.callsTo(COMMIT)).toHaveLength(3));
+      // The draft is already on that revision with that text: it is not sent a third time.
+      expect(api.callsTo(SAVE).map((sent) => [sent.base_revision, sent.body])).toEqual([
+        [THEIRS, DRAFT_BODY],
+        [THEIRS, `${DRAFT_BODY} and one more thought`],
+      ]);
+      expect(reusedKeys(api.callsTo(SAVE))).toEqual([]);
+      expect(new Set(api.callsTo(SAVE).map((sent) => sent.idempotency_key)).size).toBe(2);
+      // The Snapshot tried again commits another text than the one that failed: another request.
+      expect(new Set(api.callsTo(COMMIT).map((sent) => sent.idempotency_key)).size).toBe(3);
+    });
+
+    it('never puts two saves of the item in flight when text is typed while the draft is kept', async () => {
+      let flying = 0;
+      let most = 0;
+      const answers: Array<() => void> = [];
+      const { api, notice } = await openConflict(
+        {},
+        {
+          [SAVE]: (body) => {
+            flying += 1;
+            most = Math.max(most, flying);
+            return new Promise<Reply>((resolve) => {
+              answers.push(() => {
+                flying -= 1;
+                resolve(savedAs(body));
+              });
+            });
+          },
+          [COMMIT]: commits(() => committed()),
+        },
+      );
+      const answerOne = () =>
+        act(() => {
+          answers.shift()?.();
+        });
+      vi.useFakeTimers();
+      fireEvent.click(within(notice).getByRole('button', { name: 'Keep mine' }));
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      typeInto(textBox('Text of Meeting notes'), ' and more');
+      // The autosave's moment passes while the first save has no answer: it waits its turn.
+      await pass(AUTOSAVE_DELAY_MS * 3);
+      expect(api.callsTo(SAVE)).toHaveLength(1);
+      answerOne();
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+      // Nothing is committed before the text on screen is saved.
+      expect(api.callsTo(COMMIT)).toHaveLength(1);
+      answerOne();
+      await eventually(() => expect(api.callsTo(COMMIT)).toHaveLength(2));
+      expect(most).toBe(1);
+      expect(api.callsTo(SAVE).map((sent) => [sent.base_revision, sent.body])).toEqual([
+        [THEIRS, DRAFT_BODY],
+        [THEIRS, `${DRAFT_BODY} and more`],
+      ]);
+      expect(reusedKeys(api.callsTo(SAVE))).toEqual([]);
+    });
+
+    it('sends a save that failed on the old base under a new key on the new one', async () => {
+      let failing = false;
+      const { api, notice } = await openConflict(
+        {},
+        {
+          [SAVE]: (body) => (failing ? fail(503, 'unavailable', 'busy') : savedAs(body)),
+          [COMMIT]: commits(() => committed()),
+        },
+      );
+      vi.useFakeTimers();
+      failing = true;
+      typeInto(textBox('Text of Meeting notes'), ' and more');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() =>
+        expect(screen.getByText(/^Saving this draft: The service is temporarily/)).toBeDefined(),
+      );
+      failing = false;
+      fireEvent.click(within(notice).getByRole('button', { name: 'Keep mine' }));
+      await eventually(() => expect(api.callsTo(COMMIT)).toHaveLength(2));
+      const [failed, kept] = api.callsTo(SAVE);
+      expect(api.callsTo(SAVE)).toHaveLength(2);
+      expect(failed).toMatchObject({ base_revision: HEAD, body: `${DRAFT_BODY} and more` });
+      expect(kept).toMatchObject({ base_revision: THEIRS, body: `${DRAFT_BODY} and more` });
+      expect(kept?.idempotency_key).not.toBe(failed?.idempotency_key);
+    });
+
+    it('says why a draft too long to save was not kept, and asks nothing', async () => {
+      const { api, notice } = await openConflict();
+      vi.useFakeTimers();
+      replaceText(textBox('Text of Meeting notes'), 'x'.repeat(MAX_BODY_BYTES + 1));
+      const before = api.calls.length;
+      fireEvent.click(within(notice).getByRole('button', { name: 'Keep mine' }));
+      await eventually(() => expect(within(notice).getByRole('alert')).toBeDefined());
+      const alert = within(notice).getByRole('alert').textContent ?? '';
+      expect(alert).toContain('Your draft was not kept.');
+      expect(alert).toContain('Its text is too long to save');
+      const asked = api.calls.slice(before).map((call) => call.path);
+      expect(asked.filter((path) => path === SAVE || path === COMMIT)).toEqual([]);
+      // The conflict is still there to resolve.
+      expect(within(notice).getByRole('button', { name: 'Keep mine' })).toBeDefined();
+    });
   });
 
   it('offers only "take theirs" for an item that was deleted', async () => {

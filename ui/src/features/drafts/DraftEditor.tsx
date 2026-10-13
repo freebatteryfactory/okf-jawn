@@ -83,18 +83,9 @@ export function DraftEditor({ session, title, onDiscarded }: DraftEditorProps) {
     if (target === 'keep') keepRef.current?.focus();
     else if (target === 'discard') discardRef.current?.focus();
   });
-  // One key for every attempt of one discard, so a repeat is the same request.
-  const discardKey = useRef<string | null>(null);
   const discard = useMutation({
-    mutationFn: async () => {
-      const key = discardKey.current ?? crypto.randomUUID();
-      discardKey.current = key;
-      await discardSession(client, workspaceId, itemId, key);
-    },
-    onSuccess: () => {
-      discardKey.current = null;
-      onDiscarded();
-    },
+    mutationFn: () => discardSession(client, workspaceId, itemId),
+    onSuccess: onDiscarded,
   });
   const discardFailure = useRetry({
     request: `${workspaceId}/${itemId}`,

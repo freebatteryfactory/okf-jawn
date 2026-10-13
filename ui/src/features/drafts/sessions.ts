@@ -44,7 +44,10 @@ export interface DraftSession extends DraftText {
    * words away: a second pane of the item shows the committed text until it takes the editor over.
    */
   editor: string | null;
-  /** The revision the draft started from; every save carries it. */
+  /**
+   * The revision the draft is on: every save carries it. It is the base the service recorded,
+   * until "keep mine" names the revision the item is at now; the next save then asks for that.
+   */
   baseRevision: Revision;
   /** The committed content the session started from. */
   committed: DraftText;
@@ -194,11 +197,16 @@ export function sameText(a: DraftText, b: DraftText): boolean {
 }
 
 /**
- * The session has something to save: content the service has not confirmed as the draft, or a
- * save that failed, after which the service may hold another text than the one last confirmed.
+ * The session has something to save: content the service has not confirmed as the draft; a save
+ * that failed, after which the service may hold another text than the one last confirmed; or a
+ * base the draft the service holds is not on yet ("keep mine" asked for it).
  */
 export function needsSave(session: DraftSession): boolean {
-  return session.failure !== null || !sameText(session, session.confirmed ?? session.committed);
+  return (
+    session.failure !== null ||
+    !sameText(session, session.confirmed ?? session.committed) ||
+    (session.confirmed !== null && session.confirmed.draft.base_revision !== session.baseRevision)
+  );
 }
 
 export function saveStateOf(session: DraftSession): SaveState {

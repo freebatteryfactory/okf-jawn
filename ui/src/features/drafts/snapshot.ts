@@ -21,7 +21,8 @@
  * Snapshot of all the selected items or of none, and the detail lists every selected item that
  * changed or was deleted since its draft's base. Each is kept (`sessions.ts`) until the person
  * resolves it: keep mine is `save_draft` with `base_revision` set to the item's
- * `current_revision`, then `commit_items` again; take theirs is `discard_draft`. A conflict means
+ * `current_revision` (the session's own save, `rebaseSession` in `saving.ts`), then
+ * `commit_items` again; take theirs is `discard_draft`. A conflict means
  * a newer head exists, so the shell's own check for one runs again and announces it.
  *
  * Idempotency: a Snapshot is repeated under the key it had while it is the same request: the same
@@ -35,15 +36,14 @@
 import type { QueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
 import { openWorkspaceQueryKey } from '../../api/generated/@tanstack/react-query.gen';
-import { commitItems, saveDraft } from '../../api/generated/sdk.gen';
+import { commitItems } from '../../api/generated/sdk.gen';
 import type { Revision, Warning, Workspace } from '../../api/generated/types.gen';
 import { short } from '../documents/describe';
 import { classifyFailure } from '../errors/failure';
-import { forgetDrafts, listedDraft, rememberDraft } from './drafts-list';
+import { forgetDrafts, listedDraft } from './drafts-list';
 import { endSession, flushSession } from './saving';
 import {
   type ConflictItem,
-  type DraftText,
   needsSave,
   type SnapshotAttempt,
   sessionKey,
@@ -221,41 +221,4 @@ export async function takeSnapshot(
     itemIds: attempt.itemIds,
     warnings: result.warnings,
   };
-}
-
-/**
- * The first half of "keep mine": save the draft's content again with `base_revision` set to the
- * item's `current_revision`, which the service takes as the explicit rebase. `text` is the draft's
- * content: the session's when the item is being edited, otherwise what `get_item` carried.
- * Rejects with what `save_draft` threw, or with `UnsavedSelection` when the editor holds text that
- * could not be saved.
- */
-export async function rebaseDraft(
-  client: QueryClient,
-  workspaceId: string,
-  itemId: string,
-  revision: Revision,
-  text: DraftText,
-  idempotencyKey: string,
-): Promise<void> {
-  await flushSession(client, workspaceId, itemId);
-  const key = sessionKey(workspaceId, itemId);
-  const session = useDraftSessions.getState().sessions[key];
-  if (session !== undefined && needsSave(session)) throw new UnsavedSelection([itemId]);
-  const kept: DraftText =
-    session === undefined ? text : { body: session.body, properties: session.properties };
-  const { data } = await saveDraft({
-    body: {
-      workspace_id: workspaceId,
-      item_id: itemId,
-      base_revision: revision,
-      body: kept.body,
-      properties: kept.properties,
-      idempotency_key: idempotencyKey,
-    },
-    throwOnError: true,
-  });
-  const confirmed = { ...kept, draft: data };
-  useDraftSessions.getState().change(key, { confirmed, baseRevision: data.base_revision });
-  rememberDraft(client, workspaceId, itemId, confirmed);
 }

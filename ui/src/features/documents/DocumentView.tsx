@@ -518,13 +518,6 @@ export function DocumentView({
           itemId={itemId}
           title={title}
           conflict={conflict}
-          text={
-            session !== undefined
-              ? { body: session.body, properties: session.properties }
-              : heldDraft !== null
-                ? { body: heldDraft.body, properties: heldDraft.properties }
-                : null
-          }
           onSnapshotted={onSnapshotted}
           onResolved={() => {
             focusNext.current = 'switch';
