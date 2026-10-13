@@ -5,8 +5,10 @@
 //! quotes the client's bytes, so a megabyte of malformed input cannot come back in its own
 //! refusal or travel into logs. A wrong method is `not_found` (404): the published contract
 //! declares no 405, and every status this service sends follows its `ErrorCode`. No refusal
-//! quotes the request's method either, and a path or query the framework cannot read is refused
-//! through `Readable`, as JSON, like everything else.
+//! quotes the request's method either, and a path the framework cannot read is refused through
+//! `Readable`, as JSON, like everything else. A query needs no such wrapper: the routes read it
+//! as a map of strings, which the framework builds from any query string (it splits on `&` and
+//! `=` and percent-decodes lossily), so that extractor has no rejection to render.
 
 use axum::extract::FromRequestParts;
 use axum::extract::rejection::JsonRejection;
@@ -19,9 +21,9 @@ use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 
 /// An extractor whose rejection is an `ApiError` JSON body, never the framework's plain text.
 ///
-/// Every route that reads a path or a query takes it through this wrapper, so a parameter that
-/// cannot be read (bytes that are not UTF-8 after percent-decoding, say) is `invalid_input` in
-/// the same shape as every other refusal, in fixed words that quote none of the request.
+/// Every route that reads a path takes it through this wrapper, so a parameter that cannot be
+/// read (bytes that are not UTF-8 after percent-decoding, say) is `invalid_input` in the same
+/// shape as every other refusal, in fixed words that quote none of the request.
 pub struct Readable<E>(pub E);
 
 impl<S, E> FromRequestParts<S> for Readable<E>
@@ -38,7 +40,7 @@ where
             .map_err(|_| {
                 error_response(ApiError::new(
                     ErrorCode::InvalidInput,
-                    "A path or query parameter of the request could not be read",
+                    "A path parameter of the request could not be read",
                 ))
             })
     }

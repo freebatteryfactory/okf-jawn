@@ -17,6 +17,7 @@
 //! policy must be an origin and nothing else, and the service does not start otherwise. The
 //! token is never logged or echoed.
 
+use std::net::Ipv6Addr;
 use std::str::FromStr as _;
 use std::sync::Arc;
 
@@ -26,7 +27,7 @@ use axum::http::header::{
     CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, HOST, REFERRER_POLICY,
     X_CONTENT_TYPE_OPTIONS,
 };
-use axum::http::{HeaderMap, HeaderName, HeaderValue, Uri};
+use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -91,7 +92,8 @@ pub fn isolated(inner: Router, app_origin: &str) -> Result<Router, ApiError> {
 ///
 /// # Errors
 /// Returns `InvalidInput` naming `app_origin` when it is not `http` or `https`, `://`, a host
-/// and an optional port, in ASCII, with nothing before or after; no header is ever skipped.
+/// (letters, digits, hyphens and dots, or a bracketed IPv6 address) and an optional port, with
+/// nothing before or after; no header is ever skipped.
 pub fn isolation_headers(app_origin: &str) -> Result<HeaderMap, ApiError> {
     let invalid = || {
         ApiError::new(
@@ -130,23 +132,42 @@ pub fn isolation_headers(app_origin: &str) -> Result<HeaderMap, ApiError> {
     Ok(headers)
 }
 
-/// Whether `text` is an origin and nothing else: `http` or `https`, `://`, a host, an optional
-/// port; no user information, path, query or fragment, and no trailing slash. The parser
-/// refuses whitespace, control and non-ASCII characters, and the parsed form must spell exactly
-/// the text, so nothing the parser drops gets through.
+/// Whether `text` is an origin and nothing else: `http` or `https`, `://`, a host, and an
+/// optional `:` and port. A host is ASCII letters, digits, hyphens and dots, or an IPv6 address
+/// in brackets; a port is at most five digits and names a port from 1 to 65535. Every other
+/// character is refused, so nothing that means something in a policy (`;`, `,`, `*`, a quote,
+/// whitespace) can enter the header through the origin.
 fn is_origin(text: &str) -> bool {
-    let Ok(uri) = Uri::from_str(text) else {
+    let Some((scheme, authority)) = text.split_once("://") else {
         return false;
     };
-    let (Some(scheme), Some(authority)) = (uri.scheme_str(), uri.authority()) else {
-        return false;
+    let (host_ok, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let Some((address, after)) = bracketed.split_once(']') else {
+            return false;
+        };
+        let port = match after.strip_prefix(':') {
+            Some(port) => Some(port),
+            None if after.is_empty() => None,
+            None => return false,
+        };
+        (Ipv6Addr::from_str(address).is_ok(), port)
+    } else {
+        let (host, port) = match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        };
+        let named = !host.is_empty()
+            && host
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.'));
+        (named, port)
     };
-    let port_ok = authority.port().is_none_or(|port| port.as_u16() >= 1);
-    matches!(scheme, "http" | "https")
-        && !authority.host().is_empty()
-        && !authority.as_str().contains('@')
-        && port_ok
-        && format!("{scheme}://{authority}") == text
+    let port_ok = port.is_none_or(|port| {
+        port.len() <= 5
+            && port.bytes().all(|byte| byte.is_ascii_digit())
+            && port.parse::<u16>().is_ok_and(|number| number >= 1)
+    });
+    matches!(scheme, "http" | "https") && host_ok && port_ok
 }
 
 /// Serve the representation a capability is bound to.

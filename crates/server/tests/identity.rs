@@ -403,6 +403,48 @@ async fn a_principal_from_outside_the_middleware_is_removed() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_credential_from_outside_the_middleware_is_removed() -> TestResult {
+    let harness = Harness::new()?;
+    harness.connector(false)?;
+    // A route that says which credential, if any, its request carries.
+    let extra = Router::new().route(
+        "/probe",
+        axum::routing::get(|credential: Option<Extension<Credential>>| async move {
+            match credential {
+                None => "none",
+                Some(Extension(Credential::Session { .. })) => "session",
+                Some(Extension(Credential::Connector { .. })) => "connector",
+                Some(Extension(Credential::Connect { .. })) => "connect",
+            }
+        }),
+    );
+    // An outer layer plants a credential that never expires on every request.
+    let forged = Credential::Connect {
+        expires_at: u64::MAX,
+    };
+    let app = harness
+        .service_with(BearerAuth::Local, extra)?
+        .layer(Extension(forged));
+    let anonymous = Request::get("/probe")
+        .header("host", HOST)
+        .body(Body::empty())?;
+    let response = app.clone().oneshot(anonymous).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(to_bytes(response.into_body(), 64).await?.as_ref(), b"none");
+    // An authenticated request carries the credential it authenticated with, not the planted one.
+    let bearer = Request::get("/probe")
+        .header("host", HOST)
+        .header("authorization", format!("Bearer {SECRET}"))
+        .body(Body::empty())?;
+    let response = app.oneshot(bearer).await?;
+    assert_eq!(
+        to_bytes(response.into_body(), 64).await?.as_ref(),
+        b"connector"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_request_for_another_host_is_refused_before_identity() -> TestResult {
     let harness = Harness::new()?;
     harness.connector(false)?;

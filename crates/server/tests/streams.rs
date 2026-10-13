@@ -187,14 +187,14 @@ impl Stream {
             asked: Mutex::new(Vec::new()),
             allowed: Mutex::new(None),
         });
-        let streams = EventStreams {
-            bound: BoundApplication {
+        let streams = EventStreams::new(
+            BoundApplication {
                 application: scripted.clone(),
                 ..base.bound()
             },
-            identity: identity.clone(),
+            identity.clone(),
             interval,
-        };
+        )?;
         let app = service(ServiceParts {
             bound: base.bound(),
             identity,
@@ -960,6 +960,20 @@ async fn a_poll_that_is_refused_ends_the_stream() -> TestResult {
     assert_eq!(seen.matches("\"kind\"").count(), 1);
     // The refused poll was the last: the stream does not ask again.
     assert_eq!(stream.scripted.asked()?.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn an_event_stream_interval_of_zero_is_refused_where_it_is_built() -> TestResult {
+    let base = LocalApp::new()?;
+    let refused = some(
+        EventStreams::new(base.bound(), base.identity(), Duration::ZERO).err(),
+        "the refusal of a zero interval",
+    )?;
+    assert_eq!(refused.code, ErrorCode::InvalidInput);
+    assert_eq!(refused.field.as_deref(), Some("interval"));
+    // The shortest interval that is not zero is accepted.
+    assert!(EventStreams::new(base.bound(), base.identity(), Duration::from_nanos(1)).is_ok());
     Ok(())
 }
 

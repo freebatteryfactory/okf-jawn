@@ -35,7 +35,7 @@ use crate::cookies::{
     CookiePolicy, CrateCookies, cleared_cookies, cleared_login_cookie, login_cookie,
     session_cookies,
 };
-use crate::errors::{Readable, error_response, wrong_method};
+use crate::errors::{error_response, wrong_method};
 use crate::hosted::{HostedLogin, LOGIN_COOKIE, MAX_CALLBACK_PARAMETER_CHARS, PendingLogin};
 use crate::identity::{CookieReader as _, hex, session_id_of};
 use crate::local::{LaunchTokens, SecretSource};
@@ -195,7 +195,7 @@ pub async fn record_sign_in(events: &dyn EventLog, principal: &Principal) -> Res
 async fn begin_local(
     State(sessions): State<Sessions>,
     method: Method,
-    Readable(Query(query)): Readable<Query<BTreeMap<String, String>>>,
+    Query(query): Query<BTreeMap<String, String>>,
 ) -> Response {
     let SessionEntry::Local { tokens } = &sessions.inner.parts.entry else {
         return private(error_response(not_here()));
@@ -269,7 +269,7 @@ async fn begin_login(State(sessions): State<Sessions>) -> Response {
 /// every outcome, success or refusal.
 async fn complete_login(
     State(sessions): State<Sessions>,
-    Readable(Query(query)): Readable<Query<BTreeMap<String, String>>>,
+    Query(query): Query<BTreeMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
     let SessionEntry::Hosted { login } = &sessions.inner.parts.entry else {

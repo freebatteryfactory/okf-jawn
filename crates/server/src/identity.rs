@@ -1,8 +1,8 @@
 //! The identity middleware: the only place a `Principal` or a `SessionId` enters a request.
 //!
 //! It is layered outside every router, and it first removes any such extension already on the
-//! request, so no inner layer or route can supply one. Beside every `Principal` it inserts the
-//! `Credential` the request authenticated with (a route reads one only with the other), and `Identity::still_authenticates` answers,
+//! request, and any `Credential`, so no outer layer can supply one. Beside every `Principal` it
+//! inserts the `Credential` the request authenticated with, and `Identity::still_authenticates` answers,
 //! through the same functions the middleware authenticates with, whether that credential would
 //! authenticate a new request; an event stream asks it before every poll. Each request takes exactly one entry path:
 //!
@@ -412,6 +412,7 @@ pub async fn identify(
 ) -> Response {
     request.extensions_mut().remove::<Principal>();
     request.extensions_mut().remove::<SessionId>();
+    request.extensions_mut().remove::<Credential>();
     let on_mcp = request.uri().path() == MCP_PATH;
     let headers = request.headers().clone();
     let headers = &headers;

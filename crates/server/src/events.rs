@@ -42,16 +42,17 @@ use crate::errors::{Readable, error_response};
 use crate::identity::{Credential, Identity};
 use crate::{BoundApplication, SessionId};
 
-/// What the stream route is built from.
+/// What the stream route is built from; built only by [`EventStreams::new`], which refuses an
+/// interval of zero.
 #[derive(Clone)]
 pub struct EventStreams {
     /// The application and dispatch's ports.
-    pub bound: BoundApplication,
+    bound: BoundApplication,
     /// The identity middleware's state, asked before every poll whether the stream's credential
     /// still authenticates.
-    pub identity: Identity,
-    /// How long an open stream waits after a page that was not full.
-    pub interval: Duration,
+    identity: Identity,
+    /// How long an open stream waits after a page that was not full; never zero.
+    interval: Duration,
 }
 
 /// Where an open stream stands.
@@ -79,6 +80,35 @@ pub const PAGE_LIMIT: u16 = 100;
 
 /// Longest `Last-Event-ID` accepted; a cursor is short and opaque.
 pub const MAX_CURSOR_CHARS: usize = 256;
+
+impl EventStreams {
+    /// The stream route's state: polls run through `bound`, `identity` is the identity
+    /// middleware's own state (asked before every poll whether the stream's credential still
+    /// authenticates), and an open stream waits `interval` after a page that was not full
+    /// ([`POLL_INTERVAL`] in production).
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` naming `interval` when it is zero: a stream with no wait would
+    /// poll the application without pause for as long as it stays open.
+    pub fn new(
+        bound: BoundApplication,
+        identity: Identity,
+        interval: Duration,
+    ) -> Result<Self, ApiError> {
+        if interval.is_zero() {
+            return Err(ApiError::new(
+                ErrorCode::InvalidInput,
+                "The event stream's poll interval must be longer than zero",
+            )
+            .with_field("interval"));
+        }
+        Ok(Self {
+            bound,
+            identity,
+            interval,
+        })
+    }
+}
 
 /// The stream route, for `ServiceParts::extra`.
 pub fn routes(streams: EventStreams) -> Router {

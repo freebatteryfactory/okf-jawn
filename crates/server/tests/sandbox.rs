@@ -313,9 +313,39 @@ fn the_service_does_not_start_with_an_application_origin_that_is_not_an_origin()
         "http://:7711",
         "http://127.0.0.1:7711; script-src *",
         "ftp://127.0.0.1:7711",
+        "HTTP://127.0.0.1:7711",
         "127.0.0.1:7711",
         "*",
         "",
+        // A host is letters, digits, hyphens and dots, or a bracketed IPv6 literal.
+        "http://a;b",
+        "http://h;sandbox",
+        "http://a,b",
+        "http://*",
+        "http://*.example.test",
+        "http://a_b",
+        "http://a'b",
+        "http://",
+        "http://[::1",
+        "http://::1",
+        "http://[zz]",
+        "http://[]",
+        "http://[::1]x",
+        "http://[::1]]",
+        "http://[::1%25eth0]",
+        // A port is one to five digits and a real port.
+        "http://h:",
+        "http://[::1]:",
+        "http://h:8a",
+        "http://h:+80",
+        "http://h:123456",
+        "http://h:000080",
+        "http://h:65536",
+        "http://h:00000",
+        "http://h:80:80",
+        "https://",
+        "http:/h",
+        "http//h",
     ] {
         let refused = err_of(isolation_headers(origin))?;
         assert_eq!(refused.code, ErrorCode::InvalidInput, "{origin:?}");
@@ -326,6 +356,11 @@ fn the_service_does_not_start_with_an_application_origin_that_is_not_an_origin()
         "http://127.0.0.1:7711",
         "https://okf.example.test",
         "http://[::1]:7711",
+        "http://[2001:db8::1]",
+        "https://a-b.example.test:443",
+        "http://h:1",
+        "http://h:65535",
+        "http://LOCALHOST:8080",
     ] {
         let headers = isolation_headers(origin)?;
         assert_eq!(headers.len(), 6, "{origin}");
