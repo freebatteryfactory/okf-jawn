@@ -796,6 +796,43 @@ async fn a_stream_the_caller_may_not_read_is_the_operations_refusal() -> TestRes
     Ok(())
 }
 
+#[tokio::test]
+async fn a_path_that_cannot_be_read_is_an_api_error_on_every_byte_and_event_route() -> TestResult {
+    let stream = Stream::new(NEVER, Vec::new())?;
+    let bytes = byte_service(Arc::new(Bytes::default()))?;
+    let unreadable: [(&Router, &str, &str); 5] = [
+        (&stream.app, "GET", "/api/workspaces/%FF/events"),
+        (&bytes, "GET", "/api/artifacts/%FF"),
+        (&bytes, "GET", "/api/workspaces/%FF/artifacts/%FF"),
+        (&bytes, "PUT", "/api/workspaces/%FF/uploads/%FF/content"),
+        (
+            &bytes,
+            "GET",
+            "/api/workspaces/%FF/items/%FF/revisions/%FF/objects/%FF",
+        ),
+    ];
+    for (app, method, path) in unreadable {
+        let response = app
+            .clone()
+            .oneshot(request(method, path, true, None, Body::empty())?)
+            .await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{method} {path}"
+        );
+        assert_eq!(
+            header(&response, "content-type").as_deref(),
+            Some("application/json"),
+            "{method} {path}"
+        );
+        let error: ApiError =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65_536).await?)?;
+        assert_eq!(error.code, ErrorCode::InvalidInput);
+    }
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
 #[path = "../../core/tests/support/mod.rs"]

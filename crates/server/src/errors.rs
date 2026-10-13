@@ -4,14 +4,45 @@
 //! default. A body that cannot be read as JSON is described in fixed words: the message never
 //! quotes the client's bytes, so a megabyte of malformed input cannot come back in its own
 //! refusal or travel into logs. A wrong method is `not_found` (404): the published contract
-//! declares no 405, and every status this service sends follows its `ErrorCode`.
+//! declares no 405, and every status this service sends follows its `ErrorCode`. No refusal
+//! quotes the request's method either, and a path or query the framework cannot read is refused
+//! through `Readable`, as JSON, like everything else.
 
+use axum::extract::FromRequestParts;
 use axum::extract::rejection::JsonRejection;
 use axum::http::header::RETRY_AFTER;
-use axum::http::{HeaderValue, Method, StatusCode};
+use axum::http::request::Parts;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
+
+/// An extractor whose rejection is an `ApiError` JSON body, never the framework's plain text.
+///
+/// Every route that reads a path or a query takes it through this wrapper, so a parameter that
+/// cannot be read (bytes that are not UTF-8 after percent-decoding, say) is `invalid_input` in
+/// the same shape as every other refusal, in fixed words that quote none of the request.
+pub struct Readable<E>(pub E);
+
+impl<S, E> FromRequestParts<S> for Readable<E>
+where
+    S: Send + Sync,
+    E: FromRequestParts<S>,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        E::from_request_parts(parts, state)
+            .await
+            .map(Self)
+            .map_err(|_| {
+                error_response(ApiError::new(
+                    ErrorCode::InvalidInput,
+                    "A path or query parameter of the request could not be read",
+                ))
+            })
+    }
+}
 
 /// The status an `ErrorCode` is sent with.
 #[must_use]
@@ -95,11 +126,12 @@ pub async fn unknown_path() -> Response {
     ))
 }
 
-/// The answer to a method the path's routes do not accept.
-pub async fn wrong_method(method: Method) -> Response {
+/// The answer to a method the path's routes do not accept. It does not quote the method: a
+/// method is the client's text, of any length the connection allows.
+pub async fn wrong_method() -> Response {
     error_response(ApiError::new(
         ErrorCode::NotFound,
-        format!("No route accepts {method} on this path"),
+        "No route accepts this method on this path",
     ))
 }
 

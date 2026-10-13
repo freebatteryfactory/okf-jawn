@@ -197,6 +197,129 @@ fn the_operating_system_secret_source_yields_fresh_256_bit_secrets() -> TestResu
     Ok(())
 }
 
+/// A read of the liveness route naming `host` in its `Host` header (none when `None`), with the
+/// request target `target`.
+fn health(target: &str, hosts: &[&str]) -> Result<Request<Body>, axum::http::Error> {
+    let mut builder = Request::get(target);
+    for host in hosts {
+        builder = builder.header("host", *host);
+    }
+    builder.body(Body::empty())
+}
+
+#[tokio::test]
+async fn a_request_that_names_no_host_is_refused() -> TestResult {
+    let app = local(Vec::new(), None)?;
+    let response = app.oneshot(health("/healthz", &[])?).await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_host_that_only_begins_or_ends_like_an_allowed_one_is_refused() -> TestResult {
+    let app = local(Vec::new(), None)?;
+    for host in [
+        "127.0.0.1:7711.attacker.example",
+        "127.0.0.1:77110",
+        "127.0.0.1:771",
+        "127.0.0.1",
+        "attacker.example.127.0.0.1:7711",
+        "",
+    ] {
+        let response = app.clone().oneshot(health("/healthz", &[host])?).await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{host:?}");
+    }
+    let exact = app.oneshot(health("/healthz", &[HOST])?).await?;
+    assert_eq!(exact.status(), StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
+async fn two_host_headers_are_refused_whatever_they_name() -> TestResult {
+    let app = local(Vec::new(), None)?;
+    for hosts in [
+        [HOST, "attacker.example:7711"],
+        ["attacker.example:7711", HOST],
+        [HOST, HOST],
+    ] {
+        let response = app.clone().oneshot(health("/healthz", &hosts)?).await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{hosts:?}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_request_targets_authority_must_be_an_allowed_host_too() -> TestResult {
+    let app = local(Vec::new(), None)?;
+    // An absolute-form target: a proxy may route on it, so it is held to the same list.
+    let evil_target = health("http://attacker.example:7711/healthz", &[HOST])?;
+    assert_eq!(
+        app.clone().oneshot(evil_target).await?.status(),
+        StatusCode::FORBIDDEN
+    );
+    let evil_host = health(
+        &format!("http://{HOST}/healthz"),
+        &["attacker.example:7711"],
+    )?;
+    assert_eq!(
+        app.clone().oneshot(evil_host).await?.status(),
+        StatusCode::FORBIDDEN
+    );
+    let both = health(&format!("http://{HOST}/healthz"), &[HOST])?;
+    assert_eq!(app.clone().oneshot(both).await?.status(), StatusCode::OK);
+    // HTTP/2 names the host only in the target's authority.
+    let authority_only = health(&format!("http://{HOST}/healthz"), &[])?;
+    assert_eq!(app.oneshot(authority_only).await?.status(), StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
+async fn no_refusal_quotes_the_method_and_every_refusal_is_under_one_kibibyte() -> TestResult {
+    let app = local(Vec::new(), None)?;
+    let method = "M".repeat(100_000);
+    for path in ["/healthz", "/api/items/list-items", "/nothing/here"] {
+        let request = Request::builder()
+            .method(method.as_str())
+            .uri(path)
+            .header("host", HOST)
+            .body(Body::empty())?;
+        let response = app.clone().oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        let body = text(response).await?;
+        assert!(body.len() < 1024, "{path}: {} bytes", body.len());
+        assert!(!body.contains("MMMM"), "{path}");
+        let error: ApiError = serde_json::from_str(&body)?;
+        assert_eq!(error.code, ErrorCode::NotFound);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_path_or_query_that_cannot_be_read_is_an_api_error_not_plain_text() -> TestResult {
+    let base = LocalApp::new()?;
+    let app = base.service(okf_jawn_server::schemas::routes(), Vec::new(), None)?;
+    for target in ["/api/schemas/%FF", "/api/schemas/%C3%28"] {
+        let request = Request::get(target)
+            .header("host", HOST)
+            .header("authorization", format!("Bearer {SECRET}"))
+            .body(Body::empty())?;
+        let response = app.clone().oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{target}");
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json"),
+            "{target}"
+        );
+        let error: ApiError = serde_json::from_str(&text(response).await?)?;
+        assert_eq!(error.code, ErrorCode::InvalidInput);
+        assert!(!error.message.contains("%FF"));
+    }
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
 #[path = "../../core/tests/support/mod.rs"]

@@ -2,7 +2,8 @@
 //! place, so the order of the layers is reviewed once.
 //!
 //! From the outside in:
-//! 1. the `Host` guard: a request naming a host this service does not answer for is refused
+//! 1. the `Host` guard: a request naming a host this service does not answer for (in its `Host`
+//!    header or in its request target), naming none, or carrying two `Host` headers is refused
 //!    before anything else, which defeats DNS rebinding; loopback grants nothing;
 //! 2. constrained CORS (`tower_http::cors`): only the configured origins, never credentials, so a
 //!    page of another origin can at most present a bearer token it already holds, and by default
@@ -155,20 +156,29 @@ fn invalid_origin() -> ApiError {
     .with_field("cors_origins")
 }
 
+/// Whether every host `request` names is one this service answers for, and it names at least one.
+///
+/// A request names a host in its `Host` header and, for an absolute-form target or over HTTP/2,
+/// in the authority of its request target. Each one present must be on the list, compared whole
+/// and ASCII case-insensitively, so this guard and any proxy that routes on the other value can
+/// never disagree. More than one `Host` header is refused outright, and so is a request that
+/// names no host at all.
+fn names_only_known_hosts(hosts: &Hosts, request: &Request) -> bool {
+    let known = |host: &str| hosts.0.iter().any(|known| known.eq_ignore_ascii_case(host));
+    let mut headers = request.headers().get_all(HOST).iter();
+    let header = headers.next();
+    if headers.next().is_some() {
+        return false;
+    }
+    let authority = request.uri().authority();
+    let header_ok = header.is_none_or(|host| host.to_str().is_ok_and(known));
+    let authority_ok = authority.is_none_or(|authority| known(authority.as_str()));
+    (header.is_some() || authority.is_some()) && header_ok && authority_ok
+}
+
 /// Refuse a request whose `Host` is not one this service answers for.
 async fn guard_host(State(hosts): State<Hosts>, request: Request, next: Next) -> Response {
-    // HTTP/2 names the host in the request target's authority instead of a `Host` header.
-    let named = match request.headers().get(HOST) {
-        Some(host) => host.to_str().ok().map(str::to_owned),
-        None => request.uri().authority().map(ToString::to_string),
-    };
-    let allowed = named.is_some_and(|host| {
-        hosts
-            .0
-            .iter()
-            .any(|known| known.eq_ignore_ascii_case(&host))
-    });
-    if allowed {
+    if names_only_known_hosts(&hosts, &request) {
         next.run(request).await
     } else {
         error_response(ApiError::new(

@@ -35,7 +35,7 @@ use okf_jawn_core::sandbox::{SandboxCapabilityStore, token_hash};
 use okf_jawn_core::storage::BlobStore;
 use tokio::io::AsyncReadExt as _;
 
-use crate::errors::{error_response, with_fallbacks};
+use crate::errors::{Readable, error_response, with_fallbacks};
 
 /// What the sandbox origin's service reads from.
 #[derive(Clone)]
@@ -150,7 +150,10 @@ fn is_origin(text: &str) -> bool {
 }
 
 /// Serve the representation a capability is bound to.
-async fn serve(State(parts): State<SandboxParts>, Path(capability): Path<String>) -> Response {
+async fn serve(
+    State(parts): State<SandboxParts>,
+    Readable(Path(capability)): Readable<Path<String>>,
+) -> Response {
     match representation(&parts, &capability).await {
         Ok((media_type, bytes)) => ([(CONTENT_TYPE, media_type)], bytes).into_response(),
         Err(error) => error_response(error),

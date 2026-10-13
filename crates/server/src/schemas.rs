@@ -13,7 +13,7 @@ use axum::{Extension, Router};
 use okf_jawn_contract::access::Principal;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 
-use crate::errors::error_response;
+use crate::errors::{Readable, error_response};
 
 /// The form schemas, by allowed name.
 const FORMS: [(&str, &str); 4] = [
@@ -39,7 +39,7 @@ pub fn routes() -> Router {
 
 async fn form_schema(
     principal: Option<Extension<Principal>>,
-    Path(name): Path<String>,
+    Readable(Path(name)): Readable<Path<String>>,
 ) -> Response {
     if principal.is_none() {
         return error_response(ApiError::new(

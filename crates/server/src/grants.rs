@@ -14,6 +14,9 @@
 //! - `grants`, `editors` and `grant_creator` always ask the source; `grant_creator` replaces the
 //!   cached grant of that workspace.
 //! - A failed lookup is never cached.
+//! - An entry is stamped with the instant its lookup began, not the instant the answer arrived,
+//!   and an answer never replaces one whose lookup began later: a slow source cannot stretch
+//!   the 60 seconds, and a late, older answer cannot overwrite a newer one.
 //!
 //! The caller is keyed by tenant, subject, route and client: a connector and its owner, or two
 //! clients of one subject, never share an entry. Time comes from a [`Clock`], so the bound is
@@ -101,21 +104,27 @@ impl CachedAccess {
             }))
     }
 
+    /// Keep `grant`, stamped with `began`, the instant its lookup began: the source may have
+    /// read the role at any moment after that, so the 60 seconds count from there, however long
+    /// the answer took. An answer never replaces one whose lookup began later.
     fn remember_workspace(
         &self,
         key: (CallerKey, WorkspaceId),
         grant: &WorkspaceGrant,
+        began: Instant,
     ) -> Result<(), ApiError> {
         let now = self.clock.now();
         let mut entries = lock(&self.workspaces)?;
         entries.retain(|_, fetched| fresh(fetched.at, now));
-        entries.insert(
-            key,
-            Fetched {
-                grant: grant.clone(),
-                at: now,
-            },
-        );
+        if entries.get(&key).is_none_or(|held| held.at <= began) {
+            entries.insert(
+                key,
+                Fetched {
+                    grant: grant.clone(),
+                    at: began,
+                },
+            );
+        }
         Ok(())
     }
 
@@ -137,17 +146,25 @@ impl CachedAccess {
             }))
     }
 
-    fn remember_tenant(&self, key: CallerKey, grant: &TenantGrant) -> Result<(), ApiError> {
+    /// [`Self::remember_workspace`], for a tenant grant.
+    fn remember_tenant(
+        &self,
+        key: CallerKey,
+        grant: &TenantGrant,
+        began: Instant,
+    ) -> Result<(), ApiError> {
         let now = self.clock.now();
         let mut entries = lock(&self.tenants)?;
         entries.retain(|_, fetched| fresh(fetched.at, now));
-        entries.insert(
-            key,
-            Fetched {
-                grant: grant.clone(),
-                at: now,
-            },
-        );
+        if entries.get(&key).is_none_or(|held| held.at <= began) {
+            entries.insert(
+                key,
+                Fetched {
+                    grant: grant.clone(),
+                    at: began,
+                },
+            );
+        }
         Ok(())
     }
 }
@@ -164,11 +181,12 @@ impl AccessControl for CachedAccess {
             if let Some(grant) = self.cached_workspace(&key, permission)? {
                 return Ok(grant);
             }
+            let began = self.clock.now();
             let grant = self
                 .source
                 .authorize(principal, workspace, permission)
                 .await?;
-            self.remember_workspace(key, &grant)?;
+            self.remember_workspace(key, &grant, began)?;
             Ok(grant)
         })
     }
@@ -183,8 +201,9 @@ impl AccessControl for CachedAccess {
             if let Some(grant) = self.cached_tenant(&key, permission)? {
                 return Ok(grant);
             }
+            let began = self.clock.now();
             let grant = self.source.authorize_tenant(principal, permission).await?;
-            self.remember_tenant(key, &grant)?;
+            self.remember_tenant(key, &grant, began)?;
             Ok(grant)
         })
     }
@@ -199,8 +218,9 @@ impl AccessControl for CachedAccess {
         workspace: WorkspaceId,
     ) -> PortFuture<'a, WorkspaceGrant> {
         Box::pin(async move {
+            let began = self.clock.now();
             let grant = self.source.grant_creator(principal, workspace).await?;
-            self.remember_workspace((caller_key(principal), workspace), &grant)?;
+            self.remember_workspace((caller_key(principal), workspace), &grant, began)?;
             Ok(grant)
         })
     }

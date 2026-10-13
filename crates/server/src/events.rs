@@ -38,7 +38,7 @@ use okf_jawn_contract::events::ListEventsResponse;
 use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
 use serde_json::json;
 
-use crate::errors::error_response;
+use crate::errors::{Readable, error_response};
 use crate::identity::{Credential, Identity};
 use crate::{BoundApplication, SessionId};
 
@@ -153,7 +153,7 @@ async fn stream_events(
     principal: Option<Extension<Principal>>,
     credential: Option<Extension<Credential>>,
     session: Option<Extension<SessionId>>,
-    Path(workspace_id): Path<String>,
+    Readable(Path(workspace_id)): Readable<Path<String>>,
     headers: HeaderMap,
 ) -> Response {
     let (Some(Extension(principal)), Some(Extension(credential))) = (principal, credential) else {

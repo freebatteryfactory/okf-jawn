@@ -39,7 +39,7 @@ use serde::de::DeserializeOwned;
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::SessionId;
-use crate::errors::error_response;
+use crate::errors::{Readable, error_response};
 
 /// The application side of the byte transports; each call authorizes as `caller`.
 pub trait Transfers: Send + Sync {
@@ -198,7 +198,7 @@ async fn upload_content(
     State(transfers): State<Arc<dyn Transfers>>,
     principal: Option<Extension<Principal>>,
     session: Option<Extension<SessionId>>,
-    Path((workspace_id, upload_id)): Path<(String, String)>,
+    Readable(Path((workspace_id, upload_id))): Readable<Path<(String, String)>>,
     body: Body,
 ) -> Response {
     let outcome = async {
@@ -220,7 +220,9 @@ async fn download_object(
     State(transfers): State<Arc<dyn Transfers>>,
     principal: Option<Extension<Principal>>,
     session: Option<Extension<SessionId>>,
-    Path((workspace_id, item_id, revision, digest)): Path<(String, String, String, String)>,
+    Readable(Path((workspace_id, item_id, revision, digest))): Readable<
+        Path<(String, String, String, String)>,
+    >,
     headers: HeaderMap,
 ) -> Response {
     let outcome = async {
@@ -246,7 +248,7 @@ async fn download_artifact(
     State(transfers): State<Arc<dyn Transfers>>,
     principal: Option<Extension<Principal>>,
     session: Option<Extension<SessionId>>,
-    Path((workspace_id, artifact_id)): Path<(String, String)>,
+    Readable(Path((workspace_id, artifact_id))): Readable<Path<(String, String)>>,
 ) -> Response {
     let outcome = async {
         let caller = caller_of(principal, session)?;
@@ -263,7 +265,7 @@ async fn download_tenant_artifact(
     State(transfers): State<Arc<dyn Transfers>>,
     principal: Option<Extension<Principal>>,
     session: Option<Extension<SessionId>>,
-    Path(artifact_id): Path<String>,
+    Readable(Path(artifact_id)): Readable<Path<String>>,
 ) -> Response {
     let outcome = async {
         let caller = caller_of(principal, session)?;

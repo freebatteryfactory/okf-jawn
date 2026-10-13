@@ -255,8 +255,22 @@ async fn the_browser_that_began_a_sign_in_completes_it_and_its_cookie_is_cleared
     assert_login_cookie_cleared(&response)?;
     let session = set_cookies(&response, "okf-session");
     let session = some(session.first(), "the session cookie")?;
-    assert!(session.contains("Secure"));
-    assert!(session.contains("HttpOnly"));
+    assert_eq!(
+        attributes(session),
+        vec![
+            "HttpOnly",
+            "Max-Age=3600",
+            "Path=/",
+            "SameSite=Strict",
+            "Secure"
+        ]
+    );
+    let csrf = set_cookies(&response, "okf-csrf");
+    let csrf = some(csrf.first(), "the anti-CSRF cookie")?;
+    assert_eq!(
+        attributes(csrf),
+        vec!["Max-Age=3600", "Path=/", "SameSite=Strict", "Secure"]
+    );
     assert_eq!(hosted.exchanges(), 1);
 
     let stored = some(

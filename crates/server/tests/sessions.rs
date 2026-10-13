@@ -2,6 +2,7 @@
 //! cookie path's `LocalOwner` route, CSRF and origin refusals, and logout.
 #![cfg(feature = "runtime")]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -11,10 +12,11 @@ use axum::http::{Request, StatusCode};
 use axum::response::Response;
 use okf_jawn_contract::access::{AccessRoute, CSRF_HEADER, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::events::EventKind;
-use okf_jawn_contract::identity::{TenantId, Timestamp};
+use okf_jawn_contract::events::{Event, EventKind, ListEventsResponse};
+use okf_jawn_contract::identity::{MutationId, TenantId, Timestamp};
 use okf_jawn_core::credentials::{CredentialStore, SessionRecord};
-use okf_jawn_core::events::EventScope;
+use okf_jawn_core::events::{EventLog, EventQuery, EventScope, NewEvent};
+use okf_jawn_core::ports::PortFuture;
 use okf_jawn_server::cookies::CookiePolicy;
 use okf_jawn_server::identity::{csrf_token_of, session_id_of};
 use okf_jawn_server::local::{LaunchTokens, SecretSource};
@@ -23,10 +25,17 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use check::{TestResult, some};
+use fixtures::{FixturePorts, GrantTable};
 use support::{HOST, INSTANT, LocalApp, ORIGIN, OWNER, WORKSPACE};
 
 /// Secrets handed out in order.
 struct Sequence(Mutex<Vec<&'static str>>);
+
+/// An event log that refuses to append while `failing` is set.
+struct Flaky {
+    failing: AtomicBool,
+    inner: Arc<fixtures::FixtureEvents>,
+}
 
 /// The service, its stores and a launch token.
 struct Local {
@@ -49,17 +58,54 @@ impl SecretSource for Sequence {
     }
 }
 
+impl EventLog for Flaky {
+    fn append<'a>(
+        &'a self,
+        scope: &'a EventScope,
+        mutation_id: Option<MutationId>,
+        event: NewEvent,
+    ) -> PortFuture<'a, Event> {
+        Box::pin(async move {
+            if self.failing.load(Ordering::SeqCst) {
+                return Err(ApiError::new(
+                    ErrorCode::Unavailable,
+                    "the event log is down",
+                ));
+            }
+            self.inner.append(scope, mutation_id, event).await
+        })
+    }
+
+    fn list<'a>(
+        &'a self,
+        scope: &'a EventScope,
+        query: EventQuery,
+    ) -> PortFuture<'a, ListEventsResponse> {
+        self.inner.list(scope, query)
+    }
+}
+
 impl Local {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::with_events(None)
+    }
+
+    /// The service whose sign-ins are recorded in `events` (the fixture log when `None`).
+    fn with_events(events: Option<Arc<dyn EventLog>>) -> Result<Self, Box<dyn std::error::Error>> {
         let base = LocalApp::new()?;
         base.counting
             .set_response("list_drafts", json!({ "items": [] }))?;
         let tokens = Arc::new(LaunchTokens::new());
-        let secrets = Arc::new(Sequence(Mutex::new(vec![SESSION_SECRET, "launch-token"])));
+        // One secret more than one sign-in needs, so a second sign-in would show.
+        let secrets = Arc::new(Sequence(Mutex::new(vec![
+            "second-session-secret",
+            SESSION_SECRET,
+            "launch-token",
+        ])));
         let token = tokens.issue(secrets.as_ref())?;
         let sessions = Sessions::new(SessionParts {
             credentials: base.credentials.clone(),
-            events: base.ports.events.clone(),
+            events: events.unwrap_or_else(|| base.ports.events.clone()),
             secrets,
             policy: CookiePolicy {
                 secure: false,
@@ -339,6 +385,215 @@ async fn two_session_cookies_of_one_name_are_read_as_none() -> TestResult {
         .list_drafts(Some(&doubled), Some(&csrf), Some(ORIGIN))
         .await?;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
+/// The attributes of a `Set-Cookie` value, sorted, without its `name=value`.
+fn attributes(cookie: &str) -> Vec<&str> {
+    let mut attributes: Vec<&str> = cookie.split("; ").skip(1).collect();
+    attributes.sort_unstable();
+    attributes
+}
+
+#[tokio::test]
+async fn the_session_cookies_carry_exactly_their_attributes() -> TestResult {
+    let local = Local::new()?;
+    let response = local.launch().await?;
+    let cookies = set_cookies(&response);
+    let session = some(
+        cookies.iter().find(|c| c.starts_with("okf-session=")),
+        "the session cookie",
+    )?;
+    // `Path=/` exactly, the lifetime as `Max-Age`, and no `Domain`; not `Secure` over http.
+    assert_eq!(
+        attributes(session),
+        vec!["HttpOnly", "Max-Age=3600", "Path=/", "SameSite=Strict"]
+    );
+    let csrf = some(
+        cookies.iter().find(|c| c.starts_with("okf-csrf=")),
+        "the anti-CSRF cookie",
+    )?;
+    assert_eq!(
+        attributes(csrf),
+        vec!["Max-Age=3600", "Path=/", "SameSite=Strict"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn logout_clears_both_cookies_on_the_path_they_were_set_on() -> TestResult {
+    let local = Local::new()?;
+    local.launch().await?;
+    let csrf = csrf_token_of(SESSION_SECRET);
+    let request = Request::post("/auth/logout")
+        .header("host", HOST)
+        .header("cookie", cookie())
+        .header(CSRF_HEADER, csrf.as_str())
+        .body(Body::empty())?;
+    let response = local.app.clone().oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookies = set_cookies(&response);
+    for (name, http_only) in [("okf-session", true), ("okf-csrf", false)] {
+        let cleared = some(
+            cookies.iter().find(|c| c.starts_with(&format!("{name}=;"))),
+            "a clearing cookie",
+        )?;
+        let attributes = attributes(cleared);
+        assert!(attributes.contains(&"Path=/"), "{cleared}");
+        assert!(attributes.contains(&"Max-Age=0"), "{cleared}");
+        assert!(attributes.contains(&"SameSite=Strict"), "{cleared}");
+        assert_eq!(attributes.contains(&"HttpOnly"), http_only, "{cleared}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_origin_that_only_begins_like_the_services_own_is_refused() -> TestResult {
+    let local = Local::new()?;
+    local.launch().await?;
+    let csrf = csrf_token_of(SESSION_SECRET);
+    for origin in [
+        "http://127.0.0.1:7711.attacker.example",
+        "http://127.0.0.1:77110",
+        "http://127.0.0.1:7711/",
+        "http://127.0.0.1:771",
+        "HTTP://127.0.0.1:7711",
+        "null",
+    ] {
+        let response = local
+            .list_drafts(Some(&cookie()), Some(&csrf), Some(origin))
+            .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{origin}");
+    }
+    assert_eq!(local.base.counting.call_count("list_drafts")?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_cookie_put_patch_or_delete_without_the_token_is_refused() -> TestResult {
+    let local = Local::new()?;
+    local.launch().await?;
+    for method in ["PUT", "PATCH", "DELETE", "POST"] {
+        let send = |token: Option<String>| {
+            let mut builder = Request::builder()
+                .method(method)
+                .uri("/api/schemas/view")
+                .header("host", HOST)
+                .header("cookie", cookie());
+            if let Some(token) = token {
+                builder = builder.header(CSRF_HEADER, token);
+            }
+            builder.body(Body::empty())
+        };
+        let refused = local.app.clone().oneshot(send(None)?).await?;
+        assert_eq!(
+            refused.status(),
+            StatusCode::FORBIDDEN,
+            "{method} without the token"
+        );
+        // With the token the request passes the middleware: no route takes the method.
+        let passed = local
+            .app
+            .clone()
+            .oneshot(send(Some(csrf_token_of(SESSION_SECRET)))?)
+            .await?;
+        assert_eq!(
+            passed.status(),
+            StatusCode::NOT_FOUND,
+            "{method} with the token"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_sign_in_that_cannot_be_recorded_is_undone_and_the_launch_link_still_works() -> TestResult
+{
+    let events = Arc::new(Flaky {
+        failing: AtomicBool::new(true),
+        inner: FixturePorts::new(GrantTable::default()).events,
+    });
+    let log: Arc<dyn EventLog> = events.clone();
+    let local = Local::with_events(Some(log))?;
+    let failed = local.launch().await?;
+    assert_eq!(failed.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(set_cookies(&failed), Vec::<String>::new());
+    assert_eq!(
+        failed
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store")
+    );
+    // The session that was stored is revoked: nothing authenticates with its secret.
+    assert_eq!(
+        local.base.credentials.revoked_sessions()?,
+        vec![session_id_of(SESSION_SECRET)]
+    );
+    assert!(
+        local
+            .base
+            .credentials
+            .get_session(&session_id_of(SESSION_SECRET))
+            .await?
+            .is_none()
+    );
+    // The token was given back: once the log is up, the same link signs in.
+    events.failing.store(false, Ordering::SeqCst);
+    assert_eq!(local.launch().await?.status(), StatusCode::FOUND);
+    // And is then spent.
+    assert_eq!(local.launch().await?.status(), StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_head_of_the_launch_link_does_not_take_the_token() -> TestResult {
+    let local = Local::new()?;
+    let head = Request::head(format!("/auth/local?token={}", local.token))
+        .header("host", HOST)
+        .body(Body::empty())?;
+    let response = local.app.clone().oneshot(head).await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(set_cookies(&response), Vec::<String>::new());
+    assert_eq!(local.launch().await?.status(), StatusCode::FOUND);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn eight_exchanges_of_one_launch_token_at_once_open_one_session() -> TestResult {
+    for round in 0..40 {
+        let local = Arc::new(Local::new()?);
+        let barrier = Arc::new(tokio::sync::Barrier::new(8));
+        let mut exchanges = Vec::new();
+        for _ in 0..8 {
+            let local = local.clone();
+            let barrier = barrier.clone();
+            exchanges.push(tokio::spawn(async move {
+                barrier.wait().await;
+                let request = Request::get(format!("/auth/local?token={}", local.token))
+                    .header("host", HOST)
+                    .body(Body::empty())
+                    .map_err(|error| error.to_string())?;
+                local
+                    .app
+                    .clone()
+                    .oneshot(request)
+                    .await
+                    .map(|response| response.status())
+                    .map_err(|error| error.to_string())
+            }));
+        }
+        let mut opened = 0_u32;
+        for exchange in exchanges {
+            let status = exchange.await??;
+            if status == StatusCode::FOUND {
+                opened = opened.saturating_add(1);
+            } else {
+                assert_eq!(status, StatusCode::UNAUTHORIZED);
+            }
+        }
+        assert_eq!(opened, 1, "round {round}");
+    }
     Ok(())
 }
 

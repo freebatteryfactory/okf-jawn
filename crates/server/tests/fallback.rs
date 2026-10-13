@@ -126,7 +126,8 @@ mod http_fallback_errors {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let error = api_error(response).await?;
         assert_eq!(error.code, ErrorCode::NotFound);
-        assert!(error.message.contains("GET"));
+        // The refusal names no method: a method is the client's text.
+        assert!(!error.message.contains("GET"));
         assert_eq!(counting.call_count("list_items")?, 0);
         Ok(())
     }

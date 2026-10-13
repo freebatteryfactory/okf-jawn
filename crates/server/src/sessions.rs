@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use axum::extract::{Query, State};
 use axum::http::header::{CACHE_CONTROL, LOCATION, REFERRER_POLICY, SET_COOKIE};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -35,7 +35,7 @@ use crate::cookies::{
     CookiePolicy, CrateCookies, cleared_cookies, cleared_login_cookie, login_cookie,
     session_cookies,
 };
-use crate::errors::error_response;
+use crate::errors::{Readable, error_response, wrong_method};
 use crate::hosted::{HostedLogin, LOGIN_COOKIE, MAX_CALLBACK_PARAMETER_CHARS, PendingLogin};
 use crate::identity::{CookieReader as _, hex, session_id_of};
 use crate::local::{LaunchTokens, SecretSource};
@@ -189,21 +189,32 @@ pub async fn record_sign_in(events: &dyn EventLog, principal: &Principal) -> Res
     events.append(&scope, None, event).await.map(|_| ())
 }
 
+/// Exchange the launch token for the local owner's session. Only a `GET` takes the token: a
+/// `HEAD` (a link preview, a prefetch) is refused without touching it. An exchange that fails
+/// after the token was taken gives it back.
 async fn begin_local(
     State(sessions): State<Sessions>,
-    Query(query): Query<BTreeMap<String, String>>,
+    method: Method,
+    Readable(Query(query)): Readable<Query<BTreeMap<String, String>>>,
 ) -> Response {
     let SessionEntry::Local { tokens } = &sessions.inner.parts.entry else {
         return private(error_response(not_here()));
     };
+    if method != Method::GET {
+        return private(wrong_method().await);
+    }
     let presented = query.get("token").map(String::as_str).unwrap_or_default();
+    let taken = match tokens.redeem(presented) {
+        Ok(taken) => taken,
+        Err(error) => return private(error_response(error)),
+    };
+    if !taken {
+        return private(error_response(ApiError::new(
+            ErrorCode::Unauthenticated,
+            "The launch link is not valid or was already used",
+        )));
+    }
     let outcome = async {
-        if !tokens.redeem(presented)? {
-            return Err(ApiError::new(
-                ErrorCode::Unauthenticated,
-                "The launch link is not valid or was already used",
-            ));
-        }
         let owner = sessions
             .inner
             .parts
@@ -221,7 +232,14 @@ async fn begin_local(
             .await
     }
     .await;
-    private(outcome.unwrap_or_else(error_response))
+    match outcome {
+        Ok(response) => private(response),
+        Err(error) => {
+            // The first error is the answer; a failed give-back leaves the token spent.
+            let _given_back = tokens.give_back(presented);
+            private(error_response(error))
+        }
+    }
 }
 
 /// Start a hosted sign-in: redirect to the provider, and hand the browser the state and the
@@ -247,7 +265,7 @@ async fn begin_login(State(sessions): State<Sessions>) -> Response {
 /// the cookie is cleared on every outcome.
 async fn complete_login(
     State(sessions): State<Sessions>,
-    Query(query): Query<BTreeMap<String, String>>,
+    Readable(Query(query)): Readable<Query<BTreeMap<String, String>>>,
     headers: HeaderMap,
 ) -> Response {
     let SessionEntry::Hosted { login } = &sessions.inner.parts.entry else {
