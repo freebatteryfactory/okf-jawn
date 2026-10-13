@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { asLeft, refusals, withHeaderBack } from '../../src/features/documents/PropertiesYaml';
 import { AUTOSAVE_DELAY_MS, resetDraftSessions } from '../../src/features/drafts/saving';
 import { YAML_PAUSE_MS } from '../../src/lib/yaml';
+import { setYamlEngine, TOO_COMPLEX_WORDS, YAML_LIMIT_MS } from '../../src/lib/yaml-reading';
 import { type Handler, mockApi, ok } from './support/api';
 import { findTextBox, replaceText, textBox, textIn } from './support/editor';
 import {
@@ -21,6 +22,7 @@ import {
   WS,
   writableWorkspace,
 } from './support/workspace';
+import { heldEngine } from './support/yaml-engine';
 
 const SAVE = '/api/items/save-draft';
 const TYPES = '/api/types/list-types';
@@ -90,6 +92,8 @@ function service(overrides: Record<string, Handler> = {}, types: unknown[] = [me
 }
 
 const pass = (ms = 0) => act(() => vi.advanceTimersByTimeAsync(ms));
+/** The pause after typing, and the turn in which the reading then answers. */
+const READ_MS = YAML_PAUSE_MS + 1;
 const tab = (name: string) => screen.getByRole('tab', { name });
 /** The properties of the last `save_draft`. */
 const saved = (api: ReturnType<typeof mockApi>) => api.callsTo(SAVE).at(-1)?.properties;
@@ -162,7 +166,7 @@ describe('the properties as YAML', () => {
       box,
       storedYaml.replace('owner: Ada', 'owner: Grace').replace('by: grace', 'by: ada'),
     );
-    await pass(YAML_PAUSE_MS + AUTOSAVE_DELAY_MS);
+    await pass(READ_MS + AUTOSAVE_DELAY_MS);
     expect(saved(api)).toEqual({
       ...stored,
       owner: 'Grace',
@@ -177,13 +181,17 @@ describe('the properties as YAML', () => {
     const box = await openYaml();
     replaceText(box, storedYaml.replace('owner: Ada', 'owner: Grace'));
     fireEvent.click(tab('Form'));
+    // The change of view started the reading; until it answers there is no form to edit.
+    expect(screen.queryByLabelText(/^Owner\*?$/)).toBeNull();
+    expect(screen.getByText('Reading the text of the YAML view…')).toBeTruthy();
+    await pass(0);
     const owner = screen.getByLabelText(/^Owner\*?$/);
     expect(owner).toHaveProperty('value', 'Grace');
     fireEvent.change(owner, { target: { value: 'Hedy' } });
     fireEvent.click(tab('YAML'));
     await pass(0);
     expect(textIn(textBox(YAML))).toBe(storedYaml.replace('owner: Ada', 'owner: Hedy'));
-    await pass(YAML_PAUSE_MS + AUTOSAVE_DELAY_MS);
+    await pass(READ_MS + AUTOSAVE_DELAY_MS);
     expect(saved(api)).toEqual({ ...stored, owner: 'Hedy' });
   });
 
@@ -224,7 +232,7 @@ describe('the properties as YAML', () => {
     expect(api.callsTo(SAVE)).toEqual([]);
     // Fitting again, it is saved.
     replaceText(box, storedYaml.replace('attendees: 4', 'attendees: 5'));
-    await pass(YAML_PAUSE_MS + AUTOSAVE_DELAY_MS);
+    await pass(READ_MS + AUTOSAVE_DELAY_MS);
     expect(screen.queryByRole('alert')).toBeNull();
     expect(saved(api)).toEqual({ ...stored, attendees: 5 });
   });
@@ -233,7 +241,7 @@ describe('the properties as YAML', () => {
     const api = service({}, []);
     const box = await openYaml();
     replaceText(box, `${storedYaml}added: true\n`);
-    await pass(YAML_PAUSE_MS + AUTOSAVE_DELAY_MS);
+    await pass(READ_MS + AUTOSAVE_DELAY_MS);
     expect(saved(api)).toEqual({ ...stored, added: true });
     expect(Object.keys(saved(api) as object).at(-1)).toBe('added');
   });
@@ -245,17 +253,73 @@ describe('when the properties YAML is read', () => {
     screen.queryAllByRole('alert').some((alert) => alert.textContent?.includes('cannot be read'));
 
   it('reads the text a pause after the last change, not at every change', async () => {
+    const held = heldEngine();
+    setYamlEngine(held.engine);
     service();
     const box = await openYaml();
     replaceText(box, broken);
     await pass(YAML_PAUSE_MS - 1);
-    expect(cannotBeRead()).toBe(false);
+    expect(held.readings).toHaveLength(0);
     // Another change starts the pause again.
     replaceText(box, `${broken}#\n`);
     await pass(YAML_PAUSE_MS - 1);
-    expect(cannotBeRead()).toBe(false);
+    expect(held.readings).toHaveLength(0);
     await pass(1);
+    expect(held.readings.map((reading) => reading.text)).toEqual([`${broken}#\n`]);
+    expect(cannotBeRead()).toBe(false);
+    act(() => {
+      held.readings.at(0)?.began();
+      held.readings.at(0)?.done();
+    });
     expect(cannotBeRead()).toBe(true);
+  });
+
+  it('ends the reading of a text that was changed meanwhile, and never shows its answer', async () => {
+    const held = heldEngine();
+    setYamlEngine(held.engine);
+    const api = service();
+    const box = await openYaml();
+    replaceText(box, broken);
+    await pass(YAML_PAUSE_MS);
+    const [older] = held.readings;
+    act(() => older?.began());
+    expect(older?.ended).toBe(false);
+    // The person types on while the older text is still being read.
+    replaceText(box, storedYaml.replace('owner: Ada', 'owner: Grace'));
+    expect(older?.ended).toBe(true);
+    await pass(YAML_PAUSE_MS);
+    expect(held.readings).toHaveLength(2);
+    // The older reading answers all the same: nothing of it is shown.
+    act(() => older?.done());
+    expect(cannotBeRead()).toBe(false);
+    act(() => {
+      held.readings.at(1)?.began();
+      held.readings.at(1)?.done();
+    });
+    expect(cannotBeRead()).toBe(false);
+    await pass(AUTOSAVE_DELAY_MS);
+    expect(saved(api)).toEqual({ ...stored, owner: 'Grace' });
+  });
+
+  it('holds back a text whose reading takes longer than the limit, and says that it is too complex', async () => {
+    const held = heldEngine();
+    setYamlEngine(held.engine);
+    const api = service();
+    const box = await openYaml();
+    const typed = `deep: [${'a: '.repeat(100)}]\n`;
+    replaceText(box, typed);
+    await pass(YAML_PAUSE_MS);
+    act(() => held.readings.at(0)?.began());
+    await pass(YAML_LIMIT_MS - 1);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(held.readings.at(0)?.ended).toBe(false);
+    await pass(1);
+    expect(screen.getByRole('alert').textContent).toContain(TOO_COMPLEX_WORDS);
+    expect(held.readings.at(0)?.ended).toBe(true);
+    // Nothing of it is saved, and the text is still in the box.
+    await pass(AUTOSAVE_DELAY_MS * 2);
+    expect(api.callsTo(SAVE)).toEqual([]);
+    expect(textIn(box)).toBe(typed);
   });
 
   it('reads the text at once when keyboard focus leaves the text box', async () => {
@@ -337,7 +401,7 @@ describe('what the form holds back, in the YAML view', () => {
     expect(api.callsTo(SAVE)).toEqual([]);
 
     replaceText(box, storedYaml.replace('attendees: 4', 'attendees: 9'));
-    await pass(YAML_PAUSE_MS + AUTOSAVE_DELAY_MS);
+    await pass(READ_MS + AUTOSAVE_DELAY_MS);
     expect(saved(api)).toEqual({ ...stored, attendees: 9 });
     expect(screen.queryByRole('alert')).toBeNull();
     // Nothing is held back any more, in either view.

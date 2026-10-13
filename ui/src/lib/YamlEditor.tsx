@@ -8,10 +8,13 @@
  * `onChange`. Its text is never set from outside while it is mounted, so a keystroke cannot be
  * undone by an older value arriving late.
  *
- * Reading the text is not done at every keystroke: `usePausedReading` reads it a short pause
- * after the last change (`YAML_PAUSE_MS`), and at once when asked (`flush`): when keyboard focus
- * leaves the text box, when the view changes, and before anything is sent. So what is sent or
- * shown as the value is never older than the text.
+ * Reading the text is not done at every keystroke, and never on the page's thread
+ * (`lib/yaml-reading.ts`): `usePausedReading` starts reading it a short pause after the last
+ * change (`YAML_PAUSE_MS`), and at once when asked (`flush`): when keyboard focus leaves the text
+ * box, when the view changes, when a button is pressed that would send. The answer comes a moment
+ * later. Until it has come the text is not read (`unread`, `pending`), and the callers send
+ * nothing meanwhile: what is sent is never older than the text. A change of the text ends a
+ * reading still under way, whose answer would be of an older text, so it is never reported.
  *
  * `YamlFindings` shows what reading the text found: each problem with its line and column, as an
  * alert, and each warning as a note. The text box is described by it.
@@ -20,9 +23,10 @@ import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { yaml } from '@codemirror/lang-yaml';
 import { Compartment, EditorState } from '@codemirror/state';
 import { EditorView, keymap } from '@codemirror/view';
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { keyed } from './keys';
-import { describeProblem, readYaml, YAML_PAUSE_MS, type YamlRead } from './yaml';
+import { describeProblem, YAML_PAUSE_MS, type YamlRead } from './yaml';
+import { readOffThread } from './yaml-reading';
 
 export interface YamlEditorProps {
   /** The text box's accessible name. */
@@ -37,16 +41,30 @@ export interface YamlEditorProps {
 }
 
 export interface PausedReading {
-  /** The text changed: it is read a pause after the last change. */
+  /**
+   * The text changed: its reading starts a pause after the last change. A reading still under way
+   * is of an older text: it is ended, and its answer is never reported.
+   */
   change: (text: string) => void;
-  /** Read now what waits to be read. Answers that reading, or null when nothing waited. */
-  flush: () => YamlRead | null;
+  /** Start reading now the text that waits for the pause to pass. */
+  flush: () => void;
+  /** Forget the text that waits and end the reading under way: nothing is reported of either. */
+  cancel: () => void;
+  /**
+   * A text waits to be read or is being read, so what was reported last is older than the text.
+   * For an event handler: it is true from the change itself, before anything is drawn again.
+   */
+  unread: () => boolean;
+  /** The same, for drawing. */
+  pending: boolean;
 }
 
 /**
- * Read a text as YAML a short pause after its last change, not at every keystroke. `onRead` gets
- * each text that was read with what reading it found. A text still waiting when the caller leaves
- * the page is read then, so it is never dropped unread.
+ * Read a text as YAML a short pause after its last change, not at every keystroke, and off the
+ * page's thread. `onRead` gets each text that was read with what reading it found (a refusal
+ * when it took too long: `readOffThread`), unless the text changed meanwhile. A text still
+ * waiting when the caller leaves the page is read then, and reported to the last `onRead`, so
+ * it is never dropped unread.
  */
 export function usePausedReading(onRead: (text: string, read: YamlRead) => void): PausedReading {
   const report = useRef(onRead);
@@ -55,26 +73,45 @@ export function usePausedReading(onRead: (text: string, read: YamlRead) => void)
   }, [onRead]);
   const waiting = useRef<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** What ends the reading under way; null when none is. */
+  const underWay = useRef<(() => void) | null>(null);
+  const [pending, setPending] = useState(false);
+  const endUnderWay = useCallback(() => {
+    underWay.current?.();
+    underWay.current = null;
+  }, []);
   const flush = useCallback(() => {
     if (timer.current !== null) clearTimeout(timer.current);
     timer.current = null;
     const text = waiting.current;
-    if (text === null) return null;
+    if (text === null) return;
     waiting.current = null;
-    const read = readYaml(text);
-    report.current(text, read);
-    return read;
+    underWay.current = readOffThread(text, (read) => {
+      underWay.current = null;
+      setPending(false);
+      report.current(text, read);
+    });
   }, []);
   const change = useCallback(
     (text: string) => {
+      endUnderWay();
       waiting.current = text;
+      setPending(true);
       if (timer.current !== null) clearTimeout(timer.current);
       timer.current = setTimeout(flush, YAML_PAUSE_MS);
     },
-    [flush],
+    [flush, endUnderWay],
   );
-  useEffect(() => () => void flush(), [flush]);
-  return { change, flush };
+  const cancel = useCallback(() => {
+    if (timer.current !== null) clearTimeout(timer.current);
+    timer.current = null;
+    waiting.current = null;
+    endUnderWay();
+    setPending(false);
+  }, [endUnderWay]);
+  const unread = useCallback(() => waiting.current !== null || underWay.current !== null, []);
+  useEffect(() => () => flush(), [flush]);
+  return { change, flush, cancel, unread, pending };
 }
 
 const look = EditorView.theme({

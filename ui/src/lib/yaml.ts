@@ -33,18 +33,28 @@
  * uint32.) A number written with a fraction or an exponent is a float, and is read as the
  * nearest double, as every YAML reader reads it.
  *
- * The bounds, and the measurements they were chosen from (this reader, on the build machine while
- * other builds ran, best of three). Before the bounds: 4,096 unclosed brackets took 3.5 s, 2,048
- * nested `- ` 0.7 s, `a: a: a: …` on one line of 16,384 characters 32 s, and a mapping of a
- * megabyte minutes. With them, at 16,384 characters: a naming rules file of 70 rules reads in
- * about 25 ms, and the slowest text found that passes the depth check (3,500 two-letter keys in
- * one mapping, where the parser compares each key with every other) in about 0.2 s; every text
- * that is too deep is refused in about 10 ms. Rules nest 3 deep and properties a few levels. The
- * depth is an upper estimate (a line counts its own `-` and `:`), so a text of fewer real levels
- * than `MAX_YAML_DEPTH` can be refused: 31 brackets in a top-level list are read, 32 are not. The
- * callers read
- * a text a short pause after the last change (`YAML_PAUSE_MS`), not at every keystroke
- * (`usePausedReading`), so the 0.2 s is spent once, after the typing stops.
+ * The bounds are a first line, not the guarantee. This reader is not run on the page's thread:
+ * `lib/yaml-reading.ts` runs it in a worker and ends it after a second, because no bound on length
+ * or depth has kept its time small for every shape of text. The bounds refuse an ordinary text
+ * that is too long or too deep at once, so that it does not wait for that limit. Measured in the
+ * built worker, in Chromium and in WebKit, while other builds ran (one run each):
+ * - a naming rules file of 70 rules, 16,384 characters: 30 ms and 51 ms;
+ * - 4,000 two-letter keys in one block mapping: 0.2 s and 0.26 s;
+ * - 8,190 one-letter keys in one flow mapping (`{一,丁,…}`): 0.53 to 0.65 s in both, the slowest
+ *   text found that is read to the end (the parser compares each key with every other);
+ * - `[a: a: a: …]` on one line, which the depth scan passes: at 2,042 characters 0.17 s and
+ *   0.36 s; at 4,094, WebKit 1.4 s; at 8,192, WebKit 5.9 s (7.3 s on the page's thread before
+ *   this, and 21 s at 16,384). Chromium gives up on that text from about 2,850 characters, in
+ *   20 ms: its call stack is full, which is caught and shown as a problem;
+ * - eight lines of `- [a: a: …]`: at 15,399 characters 1.1 s in Chromium; at 14,439 characters
+ *   2 s in WebKit.
+ * So a text inside every bound can take longer than the limit, and is then refused as too complex.
+ * Rules nest 3 deep and properties a few levels. The depth is an upper estimate for text in block
+ * style and in JSON style (a line counts its own `-` and `:`, and JSON-style text is counted one
+ * level deeper than it is), so a text of fewer real levels than `MAX_YAML_DEPTH` can be refused:
+ * 31 brackets in a top-level list are read, 32 are not. It is not an upper estimate for a colon
+ * inside brackets, which the scan does not count. The callers start reading a text a short pause
+ * after the last change (`YAML_PAUSE_MS`), not at every keystroke (`usePausedReading`).
  *
  * The schema is YAML 1.2 core, where `yes`, `no`, `on` and `off` are strings. A plain scalar that
  * a YAML 1.1 reader would take for something else is read as the string it is and reported as a
@@ -118,8 +128,11 @@ function firstLine(message: string): string {
  * counted is what the parser will take for structure: a bracket or a colon inside a quoted text,
  * a block of text or a comment is not counted. A line's depth is the indentation steps it stands
  * in, the `-`, `?` and `:` indicators on it (outside brackets, where each can open a level; inside
- * brackets a `:` opens none), and the brackets open on it. It is meant as an upper estimate of the
- * nesting the parser builds: every way of nesting that was measured to be slow is counted.
+ * brackets a `:` opens none), and the brackets open on it. For text in block style and in JSON
+ * style that is an upper estimate of the nesting the parser builds (JSON-style text is counted one
+ * level deeper than it is). It does not bound the parser's time: `[a: a: a: …]` nests inside
+ * brackets by its colons, which are not counted, and is slow all the same. The time limit of
+ * `lib/yaml-reading.ts` is what holds for such a text.
  */
 export function deepestNesting(text: string): { depth: number; line: number } {
   let deepest = { depth: 0, line: 1 };

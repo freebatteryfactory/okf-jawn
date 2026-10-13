@@ -535,6 +535,116 @@ test.describe('changing the tree and the naming rules', () => {
     await shot(page, '31-properties-yaml');
   });
 
+  test('reading YAML never stalls the page: the worker is ended at its limit, and the text stays', async ({
+    page,
+  }) => {
+    const played = await service();
+    await routeApi(page, played.answers);
+    // First a reader that never comes back: the worker's script is answered with one that says it
+    // is ready and then spins for good on the first text. Everything on the page's side is real:
+    // the worker, the limit, and ending it.
+    const workerScript = '**/assets/yaml.worker-*.js';
+    let stubbed = 0;
+    await page.route(workerScript, async (route) => {
+      stubbed += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/javascript',
+        headers: { 'cache-control': 'no-store' },
+        body: 'addEventListener("message", () => { for (;;) {} }); postMessage({ ready: true });',
+      });
+    });
+    await page.goto(`${server.origin()}/w/${WS}`);
+    await expect(row(page, 'notes')).toBeVisible();
+    await press(page, 'Naming rules');
+    await page.getByRole('tab', { name: 'Form' }).focus();
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Enter');
+    const rules = page.getByRole('textbox', { name: 'The naming rules as YAML' });
+    await expect(rules).toContainText('schema_version: 1');
+
+    // The page's own clock: the longest its thread went without running a timer, and the longest
+    // a key or a click waited before the page handled it.
+    await page.evaluate(() => {
+      const seen = { gap: 0, wait: 0 };
+      Object.assign(window, { okfStall: seen });
+      let last = performance.now();
+      setInterval(() => {
+        const now = performance.now();
+        seen.gap = Math.max(seen.gap, now - last);
+        last = now;
+      }, 20);
+      for (const kind of ['keydown', 'click']) {
+        document.addEventListener(
+          kind,
+          (event) => {
+            seen.wait = Math.max(seen.wait, performance.now() - event.timeStamp);
+          },
+          true,
+        );
+      }
+    });
+    const stall = () =>
+      page.evaluate(
+        () => (window as unknown as { okfStall: { gap: number; wait: number } }).okfStall,
+      );
+    /** Replace the whole text at once, as a paste does. */
+    const paste = async (text: string) => {
+      await rules.focus();
+      await page.keyboard.press('ControlOrMeta+A');
+      await page.keyboard.insertText(text);
+    };
+    const alert = page.getByRole('alert');
+    const tooComplex =
+      'This text is too complex to read here: reading it took more than a second and was stopped.';
+
+    await paste('schema_version: 1\nrules: [] # never read\n');
+    // While it is read, a press is handled at once: it sends nothing and says why.
+    await press(page, 'Preview the renames');
+    await expect(page.locator('.rules-said')).toContainText(
+      'The text of the YAML view is still being read. Nothing was sent or changed',
+      { timeout: 1_000 },
+    );
+    // At the limit the reading is ended, and the person is told in plain words.
+    await expect(alert).toContainText('This YAML cannot be read. Nothing of it is sent.');
+    await expect(alert).toContainText(tooComplex);
+    expect(stubbed).toBe(1);
+    // The text stays in the box, and nothing of it is sent at the next press either.
+    await expect(rules).toContainText('rules: [] # never read');
+    await press(page, 'Preview the renames');
+    expect(await focusSettled(page)).toContain('This YAML cannot be read');
+    expect(played.sent).toEqual([]);
+    await expectVisibleFocus(page);
+    await expectNoAxeViolations(page, 'a YAML text that is too complex to read');
+    await shot(page, '33-yaml-too-complex');
+
+    // Now the reader itself, in a new worker (the one before was ended). An ordinary text is
+    // read at once.
+    await page.unroute(workerScript);
+    await paste('schema_version: 1\nrules: []\n');
+    await expect(page.getByText('These rules differ from the saved ones.')).toBeVisible();
+    await expect(alert.filter({ hasText: 'This YAML cannot be read' })).toHaveCount(0);
+
+    // And the re-review's text, inside the bound on length and on depth. This engine's reader
+    // takes seconds over it, or gives up on its depth in a moment; either way it is refused in
+    // the page's words, and the page's thread never waited for it.
+    const slow = `[${'a: '.repeat(2730)}]`;
+    expect(slow.length).toBe(8192);
+    await paste(slow);
+    await expect(alert).toContainText(
+      /too complex to read here: reading it took more than a second|This text could not be read as YAML/,
+    );
+    await expect(rules).toContainText('a: a: a: a: ');
+    await press(page, 'Preview the renames');
+    expect(await focusSettled(page)).toContain('This YAML cannot be read');
+    expect(played.sent).toEqual([]);
+
+    // Through all of it the page went on: no timer waited a second, and no key or click did.
+    const seen = await stall();
+    expect(seen.gap).toBeLessThan(1_000);
+    expect(seen.wait).toBeLessThan(1_000);
+  });
+
   test('a refused change is shown, and retried from the keyboard', async ({ page }) => {
     const played = await service();
     await routeApi(page, played.answers);

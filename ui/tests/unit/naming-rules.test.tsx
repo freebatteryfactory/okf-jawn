@@ -14,6 +14,7 @@ import { staleReason } from '../../src/features/conventions/NamingRules';
 import { formHolds, RulesForm, rulesProblems } from '../../src/features/conventions/RulesForm';
 import { keepOrder, type Preview, sameRules } from '../../src/features/conventions/rules';
 import { resetDraftSessions } from '../../src/features/drafts/saving';
+import { setYamlEngine, TOO_COMPLEX_WORDS, YAML_LIMIT_MS } from '../../src/lib/yaml-reading';
 import { type Handler, type Json, mockApi, ok, type Reply } from './support/api';
 import { findTextBox, replaceText, textIn } from './support/editor';
 import {
@@ -33,6 +34,7 @@ import {
   workspace,
   writableWorkspace,
 } from './support/workspace';
+import { type HeldReading, heldEngine } from './support/yaml-engine';
 
 const OPEN = '/api/workspaces/open-workspace';
 const LIST = '/api/items/list-items';
@@ -205,12 +207,18 @@ const button = (name: string | RegExp) => screen.getByRole('button', { name });
 const panel = () => screen.getByRole('region', { name: 'Naming rules' });
 const prefix = () => within(panel()).getByRole('textbox', { name: /^prefix/ });
 const said = () => panel().querySelector('.rules-said')?.textContent ?? '';
-/** Replace the YAML and leave the text box, as a person does before pressing anything else: it is read at once. */
-const typeYaml = (box: HTMLElement, text: string) => {
+/** A turn of the event loop: a reading that was started has answered after it. */
+const turn = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+/**
+ * Replace the YAML and leave the text box, as a person does before pressing anything else: its
+ * reading starts at once, and this waits until it has answered.
+ */
+const typeYaml = async (box: HTMLElement, text: string) => {
   replaceText(box, text);
   act(() => {
     fireEvent.blur(box);
   });
+  await turn();
 };
 const writes = (api: ReturnType<typeof mockApi>) => [...api.callsTo(SET), ...api.callsTo(APPLY)];
 
@@ -674,7 +682,7 @@ describe('the naming rules', () => {
     expect(textIn(box)).toContain('prefix: 2025-');
     // Text another YAML reader would take for a date or a boolean is written in quotes.
     expect(textIn(box)).toContain('date_order: ymd');
-    typeYaml(box, textIn(box).replace('prefix: 2025-', 'prefix: draft-'));
+    await typeYaml(box, textIn(box).replace('prefix: 2025-', 'prefix: draft-'));
     await userEvent.click(screen.getByRole('tab', { name: 'Form' }));
     expect(prefix()).toHaveProperty('value', 'draft-');
     await userEvent.click(button('Save the rules'));
@@ -691,7 +699,7 @@ describe('the naming rules', () => {
     await openRules();
     await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
     const box = await findTextBox('The naming rules as YAML');
-    typeYaml(box, `${textIn(box)}x-team:\n  owner: ada\n  tags: [a, b]\n`);
+    await typeYaml(box, `${textIn(box)}x-team:\n  owner: ada\n  tags: [a, b]\n`);
     expect(within(panel()).getByRole('alert').textContent).toContain('“x-team”');
     await userEvent.click(screen.getByRole('tab', { name: 'Form' }));
     await setPrefix('2025-');
@@ -712,7 +720,7 @@ describe('the naming rules', () => {
     await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
     const box = await findTextBox('The naming rules as YAML');
     const broken = 'schema_version: 1\nrules: [\n';
-    typeYaml(box, broken);
+    await typeYaml(box, broken);
     const alert = within(panel()).getByRole('alert');
     expect(alert.textContent).toContain('This YAML cannot be read. Nothing of it is sent.');
     expect(alert.textContent).toMatch(/Line 3, column 1: /);
@@ -737,9 +745,9 @@ describe('the naming rules', () => {
     await openRules();
     await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
     const box = await findTextBox('The naming rules as YAML');
-    typeYaml(box, textIn(box).replace('case: kebab', 'case: shouting'));
+    await typeYaml(box, textIn(box).replace('case: kebab', 'case: shouting'));
     expect(within(panel()).getByRole('alert').textContent).toContain('.rules.0.case must');
-    typeYaml(box, '- just\n- a list\n');
+    await typeYaml(box, '- just\n- a list\n');
     expect(within(panel()).getByRole('alert').textContent).toMatch(/must be object/);
     await userEvent.click(button('Save the rules'));
     expect(writes(api)).toEqual([]);
@@ -915,6 +923,19 @@ describe('the retry of a renaming or a save that failed', () => {
 });
 
 describe('rules typed as YAML a moment before a press', () => {
+  const NOT_READ =
+    'The text of the YAML view is still being read. Nothing was sent or changed: press again in a moment.';
+  /** The readings the page asked for; each stays under way until the test answers it. */
+  const hold = () => {
+    const held = heldEngine();
+    setYamlEngine(held.engine);
+    return held.readings;
+  };
+  const answer = (reading: HeldReading | undefined) =>
+    act(() => {
+      reading?.began();
+      reading?.done();
+    });
   /** Change the YAML and press at once: no pause passes, and focus never left the text box. */
   const yamlWithPrefix = async (value: string) => {
     await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
@@ -922,26 +943,44 @@ describe('rules typed as YAML a moment before a press', () => {
     replaceText(box, textIn(box).replace(/prefix: .*/, `prefix: ${value}`));
   };
 
-  it('saves the rules the text holds, not the ones read before it', async () => {
+  it('sends nothing for a press of Save that finds text not read yet, and says so; read, the text is what is saved', async () => {
+    const readings = hold();
     const { api } = service();
     await openRules();
     await setPrefix('2025-');
     await yamlWithPrefix('2026-');
+    expect(readings).toHaveLength(0);
+    await userEvent.click(button('Save the rules'));
+    // The press started the reading at once, sent nothing, and the page says why.
+    expect(readings).toHaveLength(1);
+    expect(said()).toBe(NOT_READ);
+    await turn();
+    expect(api.callsTo(SET)).toEqual([]);
+    answer(readings.at(0));
     await userEvent.click(button('Save the rules'));
     await waitFor(() => expect(api.callsTo(SET)).toHaveLength(1));
     const sent = api.callsTo(SET).at(0)?.rules as NamingRules | undefined;
     expect(sent?.rules.at(0)?.prefix).toBe('2026-');
   });
 
-  it('previews with the rules the text holds, and sends nothing while it cannot be read', async () => {
+  it('asks no preview for a press that finds text not read yet; read, the preview is of the rules the text holds', async () => {
+    const readings = hold();
     const { api } = service();
     await openRules();
     await yamlWithPrefix('2026-');
     await userEvent.click(button('Preview the renames'));
+    expect(said()).toBe(NOT_READ);
+    await turn();
+    expect(api.callsTo(PREVIEW)).toEqual([]);
+    answer(readings.at(0));
+    await userEvent.click(button('Preview the renames'));
     await waitFor(() => expect(api.callsTo(PREVIEW)).toHaveLength(1));
     const asked = api.callsTo(PREVIEW).at(0)?.rules as NamingRules | undefined;
     expect(asked?.rules.at(0)?.prefix).toBe('2026-');
+    // Text that cannot be read: nothing is sent while it is read, and nothing after.
     replaceText(await findTextBox('The naming rules as YAML'), 'rules: [\n');
+    await userEvent.click(button('Preview the renames'));
+    answer(readings.at(1));
     await userEvent.click(button('Preview the renames'));
     await userEvent.click(button('Save the rules'));
     expect(api.callsTo(PREVIEW)).toHaveLength(1);
@@ -949,7 +988,8 @@ describe('rules typed as YAML a moment before a press', () => {
     expect(document.activeElement?.textContent).toContain('This YAML cannot be read');
   });
 
-  it('opens no question for a preview the text has just put out of date', async () => {
+  it('opens no question while the text is not read, and none for a preview the text put out of date', async () => {
+    const readings = hold();
     const { api } = service();
     await openRules();
     await setPrefix('2025-');
@@ -957,11 +997,16 @@ describe('rules typed as YAML a moment before a press', () => {
     await yamlWithPrefix('2026-');
     await userEvent.click(button('Apply this preview…'));
     expect(screen.queryByRole('group', { name: /^Rename / })).toBeNull();
+    expect(said()).toBe(NOT_READ);
+    answer(readings.at(0));
     await within(panel()).findByText(/This preview is out of date and cannot be applied/);
+    await userEvent.click(button('Apply this preview…'));
+    expect(screen.queryByRole('group', { name: /^Rename / })).toBeNull();
     expect(api.callsTo(APPLY)).toEqual([]);
   });
 
-  it('renames nothing when the text changed the rules while the question was open', async () => {
+  it('renames nothing when the text changed while the question was open', async () => {
+    const readings = hold();
     const { api } = service();
     await openRules();
     await setPrefix('2025-');
@@ -971,17 +1016,61 @@ describe('rules typed as YAML a moment before a press', () => {
     const box = await findTextBox('The naming rules as YAML');
     replaceText(box, textIn(box).replace(/prefix: .*/, 'prefix: 2026-'));
     await userEvent.click(button('Rename 2 items'));
+    expect(said()).toBe(NOT_READ);
+    await turn();
+    expect(api.callsTo(APPLY)).toEqual([]);
+    // Read, the text holds other rules: the preview is out of date, and the question is gone.
+    answer(readings.at(0));
     await within(panel()).findByText(/This preview is out of date and cannot be applied/);
+    expect(screen.queryByRole('group', { name: /^Rename / })).toBeNull();
     expect(api.callsTo(APPLY)).toEqual([]);
     expect(said()).not.toMatch(/(was|were) renamed/);
   });
 
-  it('shows in the form what the text says when the view changes before the pause has passed', async () => {
+  it('draws no form while the text is not read, and then the form of what the text says', async () => {
+    const readings = hold();
     service();
     await openRules();
     await yamlWithPrefix('typed-');
     await userEvent.click(screen.getByRole('tab', { name: 'Form' }));
+    // The change of view started the reading; until it answers there is no form to edit.
+    expect(readings).toHaveLength(1);
+    expect(within(panel()).queryByRole('textbox', { name: /^prefix/ })).toBeNull();
+    expect(within(panel()).getByText('Reading the text of the YAML view…')).toBeTruthy();
+    answer(readings.at(0));
     expect(prefix()).toHaveProperty('value', 'typed-');
+  });
+});
+
+describe('a YAML text whose reading does not come back', () => {
+  it('is said to be too complex after the limit: nothing is sent, the rules and the text stay', async () => {
+    const held = heldEngine();
+    setYamlEngine(held.engine);
+    const { api } = service();
+    await openRules();
+    await setPrefix('2025-');
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const box = await findTextBox('The naming rules as YAML');
+    const typed = `[${'a: '.repeat(200)}]`;
+    replaceText(box, typed);
+    act(() => {
+      fireEvent.blur(box);
+    });
+    act(() => held.readings.at(0)?.began());
+    const alert = await within(panel()).findByRole('alert', {}, { timeout: YAML_LIMIT_MS + 2_000 });
+    expect(alert.textContent).toContain('This YAML cannot be read. Nothing of it is sent.');
+    expect(alert.textContent).toContain(TOO_COMPLEX_WORDS);
+    // The reading was ended, and the text is still in the box.
+    expect(held.readings.at(0)?.ended).toBe(true);
+    expect(textIn(box)).toBe(typed);
+    await userEvent.click(button('Save the rules'));
+    await userEvent.click(button('Preview the renames'));
+    expect(writes(api)).toEqual([]);
+    expect(api.callsTo(PREVIEW)).toEqual([]);
+    expect(document.activeElement?.textContent).toContain(TOO_COMPLEX_WORDS);
+    // The rules are the last that could be read.
+    await userEvent.click(screen.getByRole('tab', { name: 'Form' }));
+    expect(prefix()).toHaveProperty('value', '2025-');
   });
 });
 
@@ -991,18 +1080,22 @@ describe('whether there is something to save, a moment after typing', () => {
     return findTextBox('The naming rules as YAML');
   };
 
-  it('saves rules the text has just changed, though the page still showed them as unchanged', async () => {
+  it('saves rules the text changed once it is read, though the page showed them as unchanged at the first press', async () => {
     const { api } = service();
     await openRules();
     const box = await yamlBox();
     replaceText(box, textIn(box).replace(/prefix: .*/, 'prefix: 2026-'));
+    // Not read yet: the button still says there is nothing to save, and the press reads the text.
+    await userEvent.click(button('Save the rules'));
+    await turn();
+    expect(api.callsTo(SET)).toEqual([]);
     await userEvent.click(button('Save the rules'));
     await waitFor(() => expect(api.callsTo(SET)).toHaveLength(1));
     const sent = api.callsTo(SET).at(0)?.rules as NamingRules | undefined;
     expect(sent?.rules.at(0)?.prefix).toBe('2026-');
   });
 
-  it('sends nothing when the text has just put the rules back to the saved ones', async () => {
+  it('sends nothing when the text has put the rules back to the saved ones', async () => {
     const { api } = service();
     await openRules();
     await setPrefix('2025-');
@@ -1012,6 +1105,8 @@ describe('whether there is something to save, a moment after typing', () => {
     await waitFor(() =>
       expect(panel().textContent).toContain('These are the saved rules, unchanged.'),
     );
+    await userEvent.click(button('Save the rules'));
+    await turn();
     expect(api.callsTo(SET)).toEqual([]);
   });
 });
@@ -1257,8 +1352,8 @@ describe('leaving the naming rules with edits that are not saved', () => {
     // Put back in the YAML view (the form drops a text it is emptied of).
     await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
     const box = await findTextBox('The naming rules as YAML');
-    // Typed a moment ago and not read yet: it is read, and found to be the saved rules.
-    replaceText(box, textIn(box).replace(/prefix: .*/, 'prefix: ""'));
+    // Once it is read, it is found to be the saved rules.
+    await typeYaml(box, textIn(box).replace(/prefix: .*/, 'prefix: ""'));
     expect(leavingAsks()).toBe(false);
     await userEvent.click(close());
     expect(screen.queryByRole('region', { name: 'Naming rules' })).toBeNull();
@@ -1308,7 +1403,7 @@ describe('leaving the naming rules with edits that are not saved', () => {
     await userEvent.click(close());
     expect(question()).not.toBeNull();
     await userEvent.click(button('Keep editing'));
-    typeYaml(await findTextBox('The naming rules as YAML'), 'rules: [\n');
+    await typeYaml(await findTextBox('The naming rules as YAML'), 'rules: [\n');
     expect(leavingAsks()).toBe(true);
     await userEvent.click(close());
     expect(question()).not.toBeNull();
@@ -1318,7 +1413,7 @@ describe('leaving the naming rules with edits that are not saved', () => {
     service();
     await openRules();
     await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
-    typeYaml(await findTextBox('The naming rules as YAML'), 'rules: [\n');
+    await typeYaml(await findTextBox('The naming rules as YAML'), 'rules: [\n');
     // The rules are still the last that could be read: the saved ones. The text is the edit.
     expect(panel().textContent).toContain('These are the saved rules, unchanged.');
     expect(leavingAsks()).toBe(true);
@@ -1485,7 +1580,7 @@ describe('what the two views of the rules say and keep', () => {
       'schema_version: 1',
       '',
     ].join('\n');
-    typeYaml(box, mine);
+    await typeYaml(box, mine);
     await userEvent.click(screen.getByRole('tab', { name: 'Form' }));
     await userEvent.type(prefix(), 'x-');
     await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));

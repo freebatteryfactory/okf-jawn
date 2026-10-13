@@ -20,6 +20,11 @@
  * through a change of view too. A change made in the form after that replaces the text: the YAML
  * view then opens on the draft's properties again.
  *
+ * The text is read off the page's thread, a moment after it was typed (`usePausedReading`, held by
+ * `PropertiesViews` so that it outlives a change of view). While a text is not read yet the form
+ * is not drawn: its properties would be older than the text, and an edit made in it would be undone
+ * when the reading answers. A text that took too long to read is a text that cannot be read.
+ *
  * What the form holds back (input that does not fit the type, kept with the session) is in the
  * text too: the view opens on the properties as the person left them, the held-back input in its
  * place, and lists why they are held back. So they can be repaired here: once the text fits, it
@@ -27,11 +32,16 @@
  */
 import { Tabs } from '@base-ui/react/tabs';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { type RefObject, useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { z } from 'zod';
 import { listTypesOptions } from '../../api/generated/@tanstack/react-query.gen';
 import { keyed } from '../../lib/keys';
-import { usePausedReading, YamlEditor, YamlFindings } from '../../lib/YamlEditor';
+import {
+  type PausedReading,
+  usePausedReading,
+  YamlEditor,
+  YamlFindings,
+} from '../../lib/YamlEditor';
 import { writeYaml, type YamlRead } from '../../lib/yaml';
 import { editSession } from '../drafts/saving';
 import type { DraftSession, HeldProperties } from '../drafts/sessions';
@@ -103,35 +113,15 @@ export function refusals(schema: PropertyMap | null | undefined, value: unknown)
 
 interface PropertiesYamlProps {
   session: DraftSession;
-  typeName: string;
   /** The text as typed, while it still stands; null while the view shows the draft's properties. */
   typed: TypedYaml | null;
-  onTyped: (typed: TypedYaml) => void;
-  /** Set, while this view is on screen, to what reads at once the text that still waits. */
-  readNow: RefObject<(() => void) | null>;
+  /** The reading of this view's text, which the two views share. */
+  reading: PausedReading;
 }
 
-function PropertiesYaml({ session, typeName, typed, onTyped, readNow }: PropertiesYamlProps) {
-  const client = useQueryClient();
+function PropertiesYaml({ session, typed, reading }: PropertiesYamlProps) {
   const findingsId = useId();
-  const types = useQuery(listTypesOptions({ body: { workspace_id: session.workspaceId } }));
-  const definition = types.data?.items.find((type) => type.name === typeName);
-  const shape = zObject.safeParse(definition?.properties_schema);
-  const schema =
-    types.data === undefined ? undefined : shape.success ? withoutHeaderField(shape.data) : null;
   const count = Object.keys(session.properties).length;
-  // The text is read a pause after the last change, when keyboard focus leaves it, and when this
-  // view goes (another view, another tab): what was typed is never dropped unread.
-  const reading = usePausedReading((text, read) => {
-    const refused = read.ok ? refusals(schema, read.value) : [];
-    if (!read.ok || refused.length > 0 || !isMapping(read.value)) {
-      onTyped({ text, read, refused, draft: session.properties });
-      return;
-    }
-    const wanted = withHeaderBack(session.properties, read.value);
-    onTyped({ text, read, refused, draft: wanted });
-    editSession(client, session.workspaceId, session.itemId, { properties: wanted });
-  });
   const opening =
     typed?.text ?? writeYaml(withoutHeader(asLeft(session.properties, session.heldBack)));
   // The form's held-back input is text that is held back here too: read once as the view opens,
@@ -144,12 +134,6 @@ function PropertiesYaml({ session, typeName, typed, onTyped, readNow }: Properti
     change(first.current.text);
     flush();
   }, [change, flush]);
-  useEffect(() => {
-    readNow.current = flush;
-    return () => {
-      readNow.current = null;
-    };
-  }, [readNow, flush]);
   return (
     <details className="properties" open>
       <summary>Properties ({count})</summary>
@@ -193,9 +177,26 @@ export interface PropertiesViewsProps {
 
 /** The properties of the draft being edited, as a form or as YAML. */
 export function PropertiesViews({ session, typeName }: PropertiesViewsProps) {
+  const client = useQueryClient();
   const [view, setView] = useState<'form' | 'yaml'>('form');
   const [typed, setTyped] = useState<TypedYaml | null>(null);
-  const readNow = useRef<(() => void) | null>(null);
+  const types = useQuery(listTypesOptions({ body: { workspace_id: session.workspaceId } }));
+  const definition = types.data?.items.find((type) => type.name === typeName);
+  const shape = zObject.safeParse(definition?.properties_schema);
+  const schema =
+    types.data === undefined ? undefined : shape.success ? withoutHeaderField(shape.data) : null;
+  // The text is read a pause after the last change, when keyboard focus leaves it, when the view
+  // changes, and when the editor goes (another tab): what was typed is never dropped unread.
+  const reading = usePausedReading((text, read) => {
+    const refused = read.ok ? refusals(schema, read.value) : [];
+    if (!read.ok || refused.length > 0 || !isMapping(read.value)) {
+      setTyped({ text, read, refused, draft: session.properties });
+      return;
+    }
+    const wanted = withHeaderBack(session.properties, read.value);
+    setTyped({ text, read, refused, draft: wanted });
+    editSession(client, session.workspaceId, session.itemId, { properties: wanted });
+  });
   // The text stands while the draft's properties are what they were when it was typed; a change
   // made in the form since then replaces it. The application's header is not the text's: when
   // only it changed (the person archived or moved the item), the text stands.
@@ -212,8 +213,9 @@ export function PropertiesViews({ session, typeName }: PropertiesViewsProps) {
       value={view}
       onValueChange={(next) => {
         if (next !== 'form' && next !== 'yaml') return;
-        // The other view opens on what the text says now: it is read before the view changes.
-        readNow.current?.();
+        // The other view opens on what the text says: its reading starts now, and the form waits
+        // for it.
+        reading.flush();
         setView(next);
       }}
     >
@@ -226,22 +228,20 @@ export function PropertiesViews({ session, typeName }: PropertiesViewsProps) {
         </Tabs.Tab>
       </Tabs.List>
       <Tabs.Panel value="form">
-        {heldBack && (
+        {heldBack && !reading.pending && (
           <p role="note" className="notice">
             The YAML view holds text that is not saved. Below are the properties the draft holds. A
             change made here replaces that text.
           </p>
         )}
-        <PropertiesForm session={session} typeName={typeName} />
+        {reading.pending ? (
+          <p role="status">Reading the text of the YAML view…</p>
+        ) : (
+          <PropertiesForm session={session} typeName={typeName} />
+        )}
       </Tabs.Panel>
       <Tabs.Panel value="yaml">
-        <PropertiesYaml
-          session={session}
-          typeName={typeName}
-          typed={standing}
-          onTyped={setTyped}
-          readNow={readNow}
-        />
+        <PropertiesYaml session={session} typed={standing} reading={reading} />
       </Tabs.Panel>
     </Tabs.Root>
   );

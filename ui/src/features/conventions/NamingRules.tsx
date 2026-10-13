@@ -14,6 +14,14 @@
  * the value has a problem by the service's schema: the problems are shown at their fields and in
  * a list, and Save and Preview say so instead of asking the service.
  *
+ * The YAML is read off the page's thread, a moment after it is typed (`lib/yaml-reading.ts`).
+ * While the text is not read yet (it waits for the typing to pause, or is being read), the rules
+ * on the page are older than the text, so nothing is sent or applied: a press of Save, Preview,
+ * "Apply this preview…" or "Rename" starts the reading at once, does nothing else, and the status
+ * line says why. The form is not drawn meanwhile, and leaving asks, as for an edit. A text whose
+ * reading takes longer than a second is ended and is then a text that cannot be read: its
+ * problem says that it is too complex, and the text stays in the box.
+ *
  * A preview writes nothing. It lists each item that would be renamed with its name now and its
  * name after, as a table (read row by row with a screen reader's table keys; the column it is in
  * scrolls from any control), with the service's warnings and the duplicate paths it observed. A preview belongs to the revision and the rules it was made of.
@@ -99,6 +107,8 @@ export interface NamingRulesProps {
 
 const zSchema = z.record(z.string(), z.unknown());
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+const NOT_READ_YET =
+  'The text of the YAML view is still being read. Nothing was sent or changed: press again in a moment.';
 const RULES_REFUSED =
   'The service refused it because it does not fit the workspace as it is now. Preview again, then check the rules.';
 
@@ -170,8 +180,8 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   const [view, setView] = useState<'form' | 'yaml'>('form');
   const [typed, setTyped] = useState<{ text: string; read: YamlRead } | null>(null);
   const unreadable = typed !== null && !typed.read.ok;
-  // The YAML is read a pause after the last change, not at every keystroke; `flush` reads at once
-  // what still waits (before a change of view, and before anything is sent or applied).
+  // The YAML is read a pause after the last change, off the page's thread; `flush` starts reading
+  // at once what still waits (at a change of view, and when a press finds text that is not read).
   const reading = usePausedReading((text, read) => {
     setTyped({ text, read });
     // Only YAML that can be read becomes the rules; otherwise they stay as they were.
@@ -331,30 +341,30 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   const renames = preview === null ? [] : preview.plan.entries.filter((e) => e.from !== e.to);
   const kept = preview === null ? 0 : preview.plan.entries.length - renames.length;
 
+  /**
+   * Whether the YAML view holds text that is not read yet (typed a moment ago, or being read).
+   * Nothing is sent or applied then: the rules on the page are older than the text. Its reading
+   * starts at once, and the page says why the press did nothing.
+   */
+  const notReadYet = () => {
+    if (!reading.unread()) return false;
+    reading.flush();
+    setSaid(NOT_READ_YET);
+    return true;
+  };
   /** The rules, when they can be sent; otherwise focus goes to the list of what is wrong. */
   const sendable = () => {
-    // Text typed a moment ago is read first: what is sent is never older than the text.
-    const read = reading.flush();
-    const now = read === null ? rules : sendableOf(read.ok ? read.value : value, read.ok);
-    if (now !== null) return now;
+    if (notReadYet()) return null;
+    if (rules !== null) return rules;
     setSaid('');
     focusNext.current = 'problems';
     problemsRef.current?.focus();
     return null;
   };
-  /** Read the text that still waits; whether the preview is then no longer what the rules give. */
-  const staleAfterReading = (shown: Preview) => {
-    const read = reading.flush();
-    return read?.ok === true && staleReason(shown, head, read.value, refused) !== null;
-  };
   // Leaving with edits that are not saved asks first.
   const [leaving, setLeaving] = useState<{ proceed: () => void } | null>(null);
-  /** Whether leaving now would lose edits; text typed a moment ago is read first. */
-  const unsavedNow = () => {
-    const read = reading.flush();
-    if (read === null) return unreadable || changed;
-    return !read.ok || (savedRules !== undefined && !sameRules(read.value, savedRules));
-  };
+  /** Whether leaving now would lose edits; text that is not read yet counts as one. */
+  const unsavedNow = () => reading.unread() || unreadable || changed;
   const leave: LeaveGuard = (proceed) => {
     if (!unsavedNow()) {
       proceed();
@@ -411,7 +421,8 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
     setReplacing(true);
   };
   const takeSaved = () => {
-    reading.flush();
+    // Text typed a moment ago is dropped with the rest: read later, it would bring the edits back.
+    reading.cancel();
     setEdited(undefined);
     setTyped(null);
     setDropped((count) => count + 1);
@@ -512,7 +523,8 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
             value={view}
             onValueChange={(next) => {
               if (next !== 'form' && next !== 'yaml') return;
-              // The other view opens on what the text says now.
+              // The other view opens on what the text says: its reading starts now, and the
+              // form waits for it.
               reading.flush();
               setView(next);
             }}
@@ -526,13 +538,17 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
               </Tabs.Tab>
             </Tabs.List>
             <Tabs.Panel value="form">
-              {unreadable && (
+              {unreadable && !reading.pending && (
                 <p role="note" className="notice">
                   The YAML view holds text that cannot be read. Below are the last rules that could
                   be. A change made here replaces that text.
                 </p>
               )}
-              {formHolds(value) ? (
+              {reading.pending ? (
+                // No form over rules older than the text: an edit made in it would be undone, or
+                // would undo the text, when the reading answers.
+                <p role="status">Reading the text of the YAML view…</p>
+              ) : formHolds(value) ? (
                 <RulesForm
                   schema={form}
                   value={value}
@@ -822,9 +838,9 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
                     onClick={() => {
                       // The question is on screen only while the preview is the preview of what
                       // the page shows (`stale` above): what is sent is that preview. Text typed
-                      // a moment ago is read first; when it changes the rules nothing is sent,
-                      // and the page says that the preview is out of date.
-                      if (staleAfterReading(preview)) return;
+                      // a moment ago is not read yet: nothing is sent, the page says so, and when
+                      // the reading finds other rules the preview goes out of date.
+                      if (notReadYet()) return;
                       setSent(preview.plan);
                       apply.start(preview);
                     }}
@@ -842,7 +858,7 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
                   ref={applyButton}
                   aria-disabled={stale !== null}
                   onClick={() => {
-                    if (stale !== null || staleAfterReading(preview)) return;
+                    if (stale !== null || notReadYet()) return;
                     focusNext.current = 'keep';
                     setAsking(true);
                   }}
