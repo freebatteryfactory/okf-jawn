@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::{Request, State};
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, HOST, RANGE};
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, RANGE};
 use axum::http::{HeaderName, HeaderValue, Method};
 use axum::middleware::{self, Next};
 use axum::response::Response;
@@ -35,6 +35,7 @@ use tower_http::csrf::{CsrfLayer, ProtectionError};
 
 use crate::config::HostedConfig;
 use crate::errors::{error_response, with_fallbacks, wrong_method};
+use crate::hosts::names_only;
 use crate::identity::{Identity, identify};
 use crate::{BoundApplication, assets, operation_routes, public};
 
@@ -156,29 +157,9 @@ fn invalid_origin() -> ApiError {
     .with_field("cors_origins")
 }
 
-/// Whether every host `request` names is one this service answers for, and it names at least one.
-///
-/// A request names a host in its `Host` header and, for an absolute-form target or over HTTP/2,
-/// in the authority of its request target. Each one present must be on the list, compared whole
-/// and ASCII case-insensitively, so this guard and any proxy that routes on the other value can
-/// never disagree. More than one `Host` header is refused outright, and so is a request that
-/// names no host at all.
-fn names_only_known_hosts(hosts: &Hosts, request: &Request) -> bool {
-    let known = |host: &str| hosts.0.iter().any(|known| known.eq_ignore_ascii_case(host));
-    let mut headers = request.headers().get_all(HOST).iter();
-    let header = headers.next();
-    if headers.next().is_some() {
-        return false;
-    }
-    let authority = request.uri().authority();
-    let header_ok = header.is_none_or(|host| host.to_str().is_ok_and(known));
-    let authority_ok = authority.is_none_or(|authority| known(authority.as_str()));
-    (header.is_some() || authority.is_some()) && header_ok && authority_ok
-}
-
 /// Refuse a request whose `Host` is not one this service answers for.
 async fn guard_host(State(hosts): State<Hosts>, request: Request, next: Next) -> Response {
-    if names_only_known_hosts(&hosts, &request) {
+    if names_only(&request, &hosts.0) {
         next.run(request).await
     } else {
         error_response(ApiError::new(

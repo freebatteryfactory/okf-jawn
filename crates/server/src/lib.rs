@@ -170,6 +170,7 @@ pub mod errors;
 pub mod events;
 pub mod grants;
 pub mod hosted;
+pub mod hosts;
 pub mod identity;
 pub mod local;
 #[cfg(feature = "runtime")]

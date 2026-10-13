@@ -33,6 +33,7 @@ struct Capabilities(Mutex<BTreeMap<[u8; 32], SandboxResolved>>);
 struct Blobs(Mutex<BTreeMap<String, (Vec<u8>, u64)>>);
 
 const SANDBOX_HOST: &str = "127.0.0.1:7712";
+const OTHER_HOST: &str = "attacker.example:7712";
 const APP_ORIGIN: &str = "http://127.0.0.1:7711";
 const TOKEN: &str = "capability-token-of-the-test";
 const HTML: &str = "<html><body><script>alert(1)</script>hostile</body></html>";
@@ -380,6 +381,80 @@ fn the_service_does_not_start_with_an_application_origin_that_is_not_an_origin()
         let headers = isolation_headers(origin)?;
         assert_eq!(headers.len(), 6, "{origin}");
     }
+    Ok(())
+}
+
+/// A request for the capability's representation with `target` as its request target and one
+/// `Host` header for each of `hosts`.
+fn naming(target: &str, hosts: &[&str]) -> Result<Request<Body>, axum::http::Error> {
+    let mut builder = Request::get(target);
+    for host in hosts {
+        builder = builder.header("host", *host);
+    }
+    builder.body(Body::empty())
+}
+
+#[tokio::test]
+async fn two_host_headers_are_refused_by_the_sandbox_whatever_they_name() -> TestResult {
+    let app = sandbox(u64::try_from(HTML.len())?)?;
+    let path = format!("/sandbox/{TOKEN}");
+    for hosts in [
+        [SANDBOX_HOST, OTHER_HOST],
+        [OTHER_HOST, SANDBOX_HOST],
+        [SANDBOX_HOST, SANDBOX_HOST],
+    ] {
+        let response = app.clone().oneshot(naming(&path, &hosts)?).await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{hosts:?}");
+        assert_isolated(&response)?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_sandbox_request_whose_target_names_another_authority_is_refused() -> TestResult {
+    let app = sandbox(u64::try_from(HTML.len())?)?;
+    let good = format!("http://{SANDBOX_HOST}/sandbox/{TOKEN}");
+    let other = format!("http://{OTHER_HOST}/sandbox/{TOKEN}");
+    let cases: [(&str, &[&str]); 5] = [
+        // A good `Host` does not excuse a target that names another authority.
+        (&other, &[SANDBOX_HOST]),
+        // An empty `Host` is a host named, and it is not this service's.
+        (&good, &[""]),
+        (&other, &[""]),
+        // Without a `Host` the target's authority is the host named.
+        (&other, &[]),
+        // The other way round: a good target does not excuse another `Host`.
+        (&good, &[OTHER_HOST]),
+    ];
+    for (target, hosts) in cases {
+        let response = app.clone().oneshot(naming(target, hosts)?).await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "{target} {hosts:?}"
+        );
+        assert_isolated(&response)?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_sandbox_answers_a_request_that_names_only_its_own_host() -> TestResult {
+    let app = sandbox(u64::try_from(HTML.len())?)?;
+    let path = format!("/sandbox/{TOKEN}");
+    let absolute = format!("http://{SANDBOX_HOST}/sandbox/{TOKEN}");
+    let served: [(&str, &[&str]); 3] = [
+        (&path, &[SANDBOX_HOST]),
+        (&absolute, &[]),
+        (&absolute, &[SANDBOX_HOST]),
+    ];
+    for (target, hosts) in served {
+        let response = app.clone().oneshot(naming(target, hosts)?).await?;
+        assert_eq!(response.status(), StatusCode::OK, "{target} {hosts:?}");
+    }
+    // A request that names no host at all is refused.
+    let response = app.oneshot(naming(&path, &[])?).await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
     Ok(())
 }
 

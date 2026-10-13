@@ -30,8 +30,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::{Path, Request, State};
 use axum::http::header::{
-    CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, HOST, REFERRER_POLICY,
-    X_CONTENT_TYPE_OPTIONS,
+    CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS,
 };
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::middleware::{self, Next};
@@ -43,6 +42,7 @@ use okf_jawn_core::storage::BlobStore;
 use tokio::io::AsyncReadExt as _;
 
 use crate::errors::{Readable, error_response, with_fallbacks};
+use crate::hosts::names_only;
 
 /// What the sandbox origin's service reads from.
 #[derive(Clone)]
@@ -257,11 +257,9 @@ fn too_large() -> ApiError {
 
 /// Answer only the sandbox host.
 async fn guard_host(State(host): State<String>, request: Request, next: Next) -> Response {
-    let named = match request.headers().get(HOST) {
-        Some(value) => value.to_str().ok().map(str::to_owned),
-        None => request.uri().authority().map(ToString::to_string),
-    };
-    if named.is_some_and(|named| named.eq_ignore_ascii_case(&host)) {
+    // The rule the application's guard uses (`hosts::names_only`), with this service's one
+    // host: every `Host` header and the target's authority, and never two `Host` headers.
+    if names_only(&request, std::slice::from_ref(&host)) {
         next.run(request).await
     } else {
         error_response(ApiError::new(
