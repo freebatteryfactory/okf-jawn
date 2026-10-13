@@ -538,31 +538,35 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
               </Tabs.Tab>
             </Tabs.List>
             <Tabs.Panel value="form">
-              {unreadable && !reading.pending && (
-                <p role="note" className="notice">
-                  The YAML view holds text that cannot be read. Below are the last rules that could
-                  be. A change made here replaces that text.
-                </p>
-              )}
               {reading.pending ? (
-                // No form over rules older than the text: an edit made in it would be undone, or
-                // would undo the text, when the reading answers.
+                // Nothing over rules older than the text: an edit made in a form of them would
+                // be undone, or would undo the text, when the reading answers.
                 <p role="status">Reading the text of the YAML view…</p>
-              ) : formHolds(value) ? (
-                <RulesForm
-                  schema={form}
-                  value={value}
-                  onChange={(next) => {
-                    // The form is one view of the value: the YAML is written from it again, its
-                    // keys where they were.
-                    setEdited(keepOrder(value, next));
-                    setTyped(null);
-                  }}
-                />
               ) : (
-                <p role="note" className="notice">
-                  What the YAML view holds is not a set of rules, so there is no form for it.
-                </p>
+                <>
+                  {unreadable && (
+                    <p role="note" className="notice">
+                      The YAML view holds text that cannot be read. Below are the last rules that
+                      could be. A change made here replaces that text.
+                    </p>
+                  )}
+                  {formHolds(value) ? (
+                    <RulesForm
+                      schema={form}
+                      value={value}
+                      onChange={(next) => {
+                        // The form is one view of the value: the YAML is written from it again,
+                        // its keys where they were.
+                        setEdited(keepOrder(value, next));
+                        setTyped(null);
+                      }}
+                    />
+                  ) : (
+                    <p role="note" className="notice">
+                      What the YAML view holds is not a set of rules, so there is no form for it.
+                    </p>
+                  )}
+                </>
               )}
             </Tabs.Panel>
             <Tabs.Panel value="yaml">

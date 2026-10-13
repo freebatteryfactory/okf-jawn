@@ -228,16 +228,18 @@ export function PropertiesViews({ session, typeName }: PropertiesViewsProps) {
         </Tabs.Tab>
       </Tabs.List>
       <Tabs.Panel value="form">
-        {heldBack && !reading.pending && (
-          <p role="note" className="notice">
-            The YAML view holds text that is not saved. Below are the properties the draft holds. A
-            change made here replaces that text.
-          </p>
-        )}
         {reading.pending ? (
           <p role="status">Reading the text of the YAML view…</p>
         ) : (
-          <PropertiesForm session={session} typeName={typeName} />
+          <>
+            {heldBack && (
+              <p role="note" className="notice">
+                The YAML view holds text that is not saved. Below are the properties the draft
+                holds. A change made here replaces that text.
+              </p>
+            )}
+            <PropertiesForm session={session} typeName={typeName} />
+          </>
         )}
       </Tabs.Panel>
       <Tabs.Panel value="yaml">
