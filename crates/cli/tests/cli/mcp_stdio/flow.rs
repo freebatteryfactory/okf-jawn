@@ -21,7 +21,7 @@ use tokio::sync::watch;
 use super::{notification, request, response};
 use crate::check::{TestResult, some};
 use crate::support::doubles::{
-    Body, Broken, FakeTransport, Script, Setup, Stuck, answered, broken, relay, relay_on,
+    Body, Broken, FakeTransport, Script, Setup, Stuck, accepted, answered, broken, relay, relay_on,
     relay_over, status,
 };
 use crate::support::{Outcome, TOKEN};
@@ -1065,6 +1065,91 @@ async fn the_relay_s_last_words_get_two_seconds_and_no_more() -> TestResult {
     assert!(
         took >= Duration::from_millis(2300) && took < Duration::from_millis(12_300),
         "the relay ended {took:?} after its input"
+    );
+    Ok(())
+}
+
+/// An input that hands out all of its bytes at once and then fails.
+struct Breaking {
+    bytes: Vec<u8>,
+    given: bool,
+}
+
+impl AsyncRead for Breaking {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if this.given {
+            return Poll::Ready(Err(std::io::Error::other("the input breaks")));
+        }
+        this.given = true;
+        buffer.put_slice(&std::mem::take(&mut this.bytes));
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// An input that fails while the loop is busy with `initialize` and every turn is taken: the
+/// failure is read ahead and waits for a turn. The loop must still be handed it (exit code 1,
+/// said on the error stream, never 0 in silence), and when the relay gives up meanwhile the
+/// failure is not counted among the lines that were not looked at.
+#[tokio::test]
+async fn an_input_failure_that_is_read_ahead_is_handed_to_the_loop_and_is_no_line() -> TestResult {
+    let lines = format!(
+        "{}{}\n",
+        request(&json!(1), "initialize", &json!({})),
+        json!({"jsonrpc": "2.0", "method": "notifications/x"})
+    );
+    // The answer to `initialize` comes late, after the input was read ahead.
+    let late = FakeTransport::new(|post, _events| {
+        Box::pin(async move {
+            let message: Value = serde_json::from_slice(&post.body).unwrap_or(Value::Null);
+            for _ in 0..TURNS {
+                tokio::task::yield_now().await;
+            }
+            match message.get("id") {
+                Some(id) => answered(&json!({"jsonrpc": "2.0", "id": id, "result": {}})).reply,
+                None => accepted().reply,
+            }
+        })
+    });
+    let mut setup = Setup::new(&late);
+    setup.limits.in_flight = 2;
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let input = Breaking {
+        bytes: lines.clone().into_bytes(),
+        given: false,
+    };
+    let code = tokio::time::timeout(PATIENCE, relay_on(setup, input, &mut stdout, &mut stderr))
+        .await
+        .map_err(|_| "the relay did not end")??;
+    let said = String::from_utf8_lossy(&stderr).into_owned();
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("the input stream failed"), "{said}");
+    assert!(said.contains("the input breaks"), "{said}");
+
+    // `initialize` is never answered: the relay gives up, and the line that waited is one line.
+    let never = FakeTransport::new(|_, _| Box::pin(std::future::pending()));
+    let mut setup = Setup::new(&never);
+    setup.limits.in_flight = 2;
+    setup.limits.closing = Duration::from_millis(300);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let input = Breaking {
+        bytes: lines.into_bytes(),
+        given: false,
+    };
+    let code = tokio::time::timeout(PATIENCE, relay_on(setup, input, &mut stdout, &mut stderr))
+        .await
+        .map_err(|_| "the relay did not end")??;
+    let said = String::from_utf8_lossy(&stderr).into_owned();
+    assert_eq!(code, 1, "{said}");
+    assert!(
+        said.contains("1 of its lines had not been looked at"),
+        "a failure is not a line: {said}"
     );
     Ok(())
 }
