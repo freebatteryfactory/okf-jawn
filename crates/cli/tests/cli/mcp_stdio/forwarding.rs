@@ -378,29 +378,35 @@ async fn a_name_or_method_that_cannot_travel_in_a_header_is_refused() -> TestRes
 }
 
 /// A session the service issues at `initialize` is carried on every later message, and a new
-/// `initialize` starts without it.
+/// `initialize` replaces the session and the version with what its own answer carries.
 #[tokio::test]
 async fn a_session_the_service_issues_is_carried_on_later_messages() -> TestResult {
     let transport = FakeTransport::scripted(|message| {
-        if message.get("method") == Some(&json!("initialize")) {
-            let mut script = answered(&response(
-                &json!(0),
-                &json!({"protocolVersion": "2025-06-18"}),
-            ));
-            script.reply = script.reply.map(|reply| Reply {
-                session: Some("session-7".to_owned()),
-                ..reply
-            });
-            script
-        } else {
-            answered(&response(&json!(1), &json!({})))
+        if message.get("method") != Some(&json!("initialize")) {
+            return answered(&response(&json!(1), &json!({})));
         }
+        if message.pointer("/params/first") != Some(&json!(true)) {
+            return answered(&response(
+                &json!(0),
+                &json!({"protocolVersion": "2025-03-26"}),
+            ));
+        }
+        let mut script = answered(&response(
+            &json!(0),
+            &json!({"protocolVersion": "2025-06-18"}),
+        ));
+        script.reply = script.reply.map(|reply| Reply {
+            session: Some("session-7".to_owned()),
+            ..reply
+        });
+        script
     });
     let input = format!(
-        "{}{}{}",
-        request(&json!(0), "initialize", &json!({})),
+        "{}{}{}{}",
+        request(&json!(0), "initialize", &json!({"first": true})),
         request(&json!(1), "tools/list", &json!({})),
         request(&json!(0), "initialize", &json!({})),
+        request(&json!(1), "tools/list", &json!({})),
     );
     relay(Setup::new(&transport), input.as_bytes()).await?;
     let posts = transport.posts()?;
@@ -408,7 +414,15 @@ async fn a_session_the_service_issues_is_carried_on_later_messages() -> TestResu
         .iter()
         .map(|post| header(post, "Mcp-Session-Id"))
         .collect();
-    assert_eq!(sessions, [None, Some("session-7"), None]);
+    assert_eq!(sessions, [None, Some("session-7"), None, None]);
+    let versions: Vec<Option<&str>> = posts
+        .iter()
+        .map(|post| header(post, "MCP-Protocol-Version"))
+        .collect();
+    assert_eq!(
+        versions,
+        [None, Some("2025-06-18"), None, Some("2025-03-26")]
+    );
     assert_eq!(id_of(&some(posts.get(1), "the second POST")?.body)?, "1");
     Ok(())
 }

@@ -121,7 +121,6 @@ fn headers(
     lifecycle: &mut Lifecycle,
 ) -> Result<Vec<(&'static str, String)>, String> {
     if request && method == Some("initialize") {
-        *lifecycle = Lifecycle::default();
         return Ok(Vec::new());
     }
     let inline = message
