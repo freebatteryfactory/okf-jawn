@@ -1,14 +1,32 @@
-//! WorkOS Connect access-token verification: JWKS signature, issuer, audience and expiry.
+//! WorkOS Connect access-token verification: JWKS signature, issuer, audience, expiry and
+//! not-before.
 //!
 //! SPEC section 11: "validate JWKS signatures/issuer/audience/expiry ... Connect access tokens
 //! identify the caller (subject, org, client) and do not carry workspace permissions". A token is
 //! verified with `jsonwebtoken` against the key its `kid` names in the issuer's key set
-//! (`{issuer}/oauth2/jwks`, fetched through the `workos` crate's transport); an unknown `kid`
-//! refreshes the set once, for a rotated key. Only RS256 is accepted, so a token cannot choose a
-//! weaker algorithm. The issuer must be the configured AuthKit issuer and the audience the
-//! configured MCP resource; `exp`, `iss`, `aud` and `sub` are required, and `org_id` and
-//! `client_id` must be present. Every refusal is the same `Unauthenticated`, and no token or claim
-//! is echoed.
+//! (`{issuer}/oauth2/jwks`, fetched through the `workos` crate's transport). Only RS256 is
+//! accepted, and a token of another algorithm is refused before any key is looked up, so it can
+//! neither choose a weaker algorithm nor cause a fetch. The issuer must be the configured AuthKit
+//! issuer and the audience the configured MCP resource; `exp`, `iss`, `aud` and `sub` are
+//! required, `exp` and `nbf` are checked with 30 seconds of leeway, and `sub`, `org_id` and
+//! `client_id` must be present and not empty. A refused token is `Unauthenticated`, in the same
+//! words whatever the reason, and no token or claim is echoed.
+//!
+//! The key set is cached here, and its timing is this module's, read from an injected clock:
+//! - the issuer is asked at most once per [`REFRESH_INTERVAL`] (60 seconds), whatever arrives: an
+//!   unknown `kid` inside that interval is refused from the cached set with no fetch, so a flood
+//!   of forged tokens costs the issuer one request a minute;
+//! - a set older than [`KEY_SET_MAX_AGE`] (10 minutes) is refreshed at its next use, so a key the
+//!   issuer withdrew stops being trusted;
+//! - when a refresh fails the cached set stays in use, for at most [`KEY_SET_KEPT`] (one hour)
+//!   after the last successful fetch; after that, and when no set was ever fetched, the answer is
+//!   `Unavailable`.
+//!
+//! One fetch runs at a time and verification waits for it. Known limit: the fetch follows
+//! whatever redirect policy the transport it is given has. [`IssuerKeys`] cannot see or refuse a
+//! redirect through the `workos` transport interface; the composition must hand it a transport
+//! whose client follows none (`ReqwestTransport::from_client`), which needs `reqwest` in this
+//! crate's manifest (reported as a request).
 //!
 //! Only public-key signature verification happens here: no private-key operation is ever
 //! performed in production, so the `rsa` crate's private-key decryption timing advisory
@@ -17,6 +35,7 @@
 //! another provider cannot leave verification without one.
 
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use axum::http::{HeaderMap, Method};
 use jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER;
@@ -28,26 +47,38 @@ use serde::Deserialize;
 use workos::transport::{HttpRequest, SharedTransport};
 
 use crate::config::HostedConfig;
+use crate::grants::Clock;
 use crate::identity::{ConnectIdentity, ConnectVerifier};
 
-/// Where verification keys come from.
+/// Where verification keys come from; caching and its timing are [`ConnectTokens`]'s.
 pub trait KeySource: Send + Sync {
-    /// The issuer's key set; `refresh` asks for a fresh copy instead of a cached one.
-    fn keys(&self, refresh: bool) -> PortFuture<'_, JwkSet>;
+    /// Fetch the issuer's current key set.
+    fn fetch(&self) -> PortFuture<'_, JwkSet>;
 }
 
 /// The issuer's published key set, fetched with the `workos` crate's HTTP transport.
 pub struct IssuerKeys {
     transport: SharedTransport,
     url: String,
-    cached: tokio::sync::RwLock<Option<JwkSet>>,
 }
 
 /// Connect token verification against a key source.
 pub struct ConnectTokens {
     keys: Arc<dyn KeySource>,
+    clock: Arc<dyn Clock>,
     issuer: String,
     audience: String,
+    cache: tokio::sync::Mutex<KeyCache>,
+}
+
+/// The cached key set and when the issuer was last asked.
+#[derive(Default)]
+struct KeyCache {
+    set: Option<JwkSet>,
+    /// The last fetch that succeeded.
+    fetched_at: Option<Instant>,
+    /// The last fetch that was tried, whether or not it succeeded.
+    attempted_at: Option<Instant>,
 }
 
 /// The claims a Connect access token must carry for this service.
@@ -58,8 +89,17 @@ struct ConnectClaims {
     client_id: String,
 }
 
-/// Seconds of clock difference tolerated on `exp`.
-const LEEWAY_SECONDS: u64 = 30;
+/// Seconds of clock difference tolerated on `exp` and `nbf`.
+pub const LEEWAY_SECONDS: u64 = 30;
+
+/// The issuer is asked for its keys at most once in this interval.
+pub const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+
+/// A cached key set this old is refreshed at its next use.
+pub const KEY_SET_MAX_AGE: Duration = Duration::from_secs(600);
+
+/// How long after its last successful fetch a key set stays in use while refreshes fail.
+pub const KEY_SET_KEPT: Duration = Duration::from_secs(3600);
 
 impl IssuerKeys {
     /// The key set at `{issuer}/oauth2/jwks`, fetched through `transport`.
@@ -68,23 +108,13 @@ impl IssuerKeys {
         Self {
             transport,
             url: format!("{}/oauth2/jwks", issuer.trim_end_matches('/')),
-            cached: tokio::sync::RwLock::new(None),
         }
     }
 }
 
 impl KeySource for IssuerKeys {
-    fn keys(&self, refresh: bool) -> PortFuture<'_, JwkSet> {
+    fn fetch(&self) -> PortFuture<'_, JwkSet> {
         Box::pin(async move {
-            if !refresh && let Some(set) = self.cached.read().await.as_ref() {
-                return Ok(set.clone());
-            }
-            let unavailable = || {
-                ApiError::new(
-                    ErrorCode::Unavailable,
-                    "The token issuer's keys are unavailable",
-                )
-            };
             let response = self
                 .transport
                 .execute(HttpRequest {
@@ -98,47 +128,78 @@ impl KeySource for IssuerKeys {
             if !response.status.is_success() {
                 return Err(unavailable());
             }
-            let set: JwkSet = serde_json::from_slice(&response.body).map_err(|_| unavailable())?;
-            *self.cached.write().await = Some(set.clone());
-            Ok(set)
+            serde_json::from_slice(&response.body).map_err(|_| unavailable())
         })
     }
 }
 
 impl ConnectTokens {
-    /// A verifier for tokens `config.issuer` issued for `config.resource`, keyed by `keys`.
+    /// A verifier for tokens `config.issuer` issued for `config.resource`, keyed by `keys`, with
+    /// the key set's timing read from `clock`.
     ///
     /// # Errors
     /// Returns `install_crypto`'s error.
-    pub fn new(keys: Arc<dyn KeySource>, config: &HostedConfig) -> Result<Self, ApiError> {
+    pub fn new(
+        keys: Arc<dyn KeySource>,
+        config: &HostedConfig,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, ApiError> {
         install_crypto()?;
         Ok(Self {
             keys,
+            clock,
             issuer: config.issuer.clone(),
             audience: config.resource.clone(),
+            cache: tokio::sync::Mutex::new(KeyCache::default()),
         })
+    }
+
+    /// The verification key `kid` names, by the timing rules of the module header.
+    async fn key(&self, kid: &str) -> Result<DecodingKey, ApiError> {
+        let now = self.clock.now();
+        let since = |at: Option<Instant>| at.and_then(|at| now.checked_duration_since(at));
+        // Held across the fetch: one fetch at a time, and no second decision on a half-updated
+        // cache.
+        let mut cache = self.cache.lock().await;
+        let known = cache
+            .set
+            .as_ref()
+            .is_some_and(|set| set.find(kid).is_some());
+        let stale = since(cache.fetched_at).is_none_or(|age| age >= KEY_SET_MAX_AGE);
+        let may_refresh = since(cache.attempted_at).is_none_or(|waited| waited >= REFRESH_INTERVAL);
+        if may_refresh && (stale || !known) {
+            cache.attempted_at = Some(now);
+            // The one error tolerated here: a failed refresh leaves the cached set in use, for
+            // as long as `KEY_SET_KEPT` allows below.
+            if let Ok(set) = self.keys.fetch().await {
+                cache.set = Some(set);
+                cache.fetched_at = Some(now);
+            }
+        }
+        let kept = since(cache.fetched_at).is_some_and(|age| age < KEY_SET_KEPT);
+        let set = cache
+            .set
+            .as_ref()
+            .filter(|_| kept)
+            .ok_or_else(unavailable)?;
+        let jwk = set.find(kid).ok_or_else(refused)?;
+        DecodingKey::from_jwk(jwk).map_err(|_| refused())
     }
 
     async fn identity(&self, token: &str) -> Result<ConnectIdentity, ApiError> {
         let header = decode_header(token).map_err(|_| refused())?;
+        // Before any key lookup: a token of another algorithm never causes a fetch.
         if header.alg != Algorithm::RS256 {
             return Err(refused());
         }
         let kid = header.kid.ok_or_else(refused)?;
-        let known = self.keys.keys(false).await?;
-        let key = if let Some(jwk) = known.find(&kid) {
-            DecodingKey::from_jwk(jwk).map_err(|_| refused())?
-        } else {
-            // An unknown key id: the issuer may have rotated its keys since the set was cached.
-            let fresh = self.keys.keys(true).await?;
-            let jwk = fresh.find(&kid).ok_or_else(refused)?;
-            DecodingKey::from_jwk(jwk).map_err(|_| refused())?
-        };
+        let key = self.key(&kid).await?;
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_issuer(&[self.issuer.as_str()]);
         validation.set_audience(&[self.audience.as_str()]);
         validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
         validation.validate_exp = true;
+        validation.validate_nbf = true;
         validation.leeway = LEEWAY_SECONDS;
         // Public-key signature verification only; no private-key operation happens here.
         let claims = decode::<ConnectClaims>(token, &key, &validation)
@@ -184,5 +245,12 @@ fn refused() -> ApiError {
     ApiError::new(
         ErrorCode::Unauthenticated,
         "The bearer token does not authenticate",
+    )
+}
+
+fn unavailable() -> ApiError {
+    ApiError::new(
+        ErrorCode::Unavailable,
+        "The token issuer's keys are unavailable",
     )
 }

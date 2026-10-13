@@ -10,13 +10,14 @@ use jsonwebtoken::jwk::JwkSet;
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_server::config::HostedConfig;
 use okf_jawn_server::connect::{ConnectTokens, KeySource, install_crypto};
+use okf_jawn_server::grants::SystemClock;
 
 use check::TestResult;
 
 struct NoKeys;
 
 impl KeySource for NoKeys {
-    fn keys(&self, _refresh: bool) -> PortFuture<'_, JwkSet> {
+    fn fetch(&self) -> PortFuture<'_, JwkSet> {
         Box::pin(async { Ok(JwkSet::default()) })
     }
 }
@@ -30,7 +31,7 @@ fn building_the_verifier_installs_the_rust_crypto_provider() -> TestResult {
         resource: "https://okf.example.test/mcp".to_owned(),
         redirect_uri: "https://okf.example.test/auth/callback".to_owned(),
     };
-    ConnectTokens::new(Arc::new(NoKeys), &config)?;
+    ConnectTokens::new(Arc::new(NoKeys), &config, Arc::new(SystemClock))?;
     // A provider is now installed for the process, so installing one again is refused.
     assert!(DEFAULT_PROVIDER.install_default().is_err());
     // And the service's own call stays harmless.
