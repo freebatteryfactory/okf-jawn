@@ -2039,3 +2039,81 @@ describe('a draft whose item is ahead of the page, or whose own save is in the w
     expect(own.api.callsTo(SAVE)).toHaveLength(1);
   }, 20000);
 });
+
+describe('two rules whose mutants survived the re-review', () => {
+  const headLine = () => screen.getByText(/Showing the workspace as of/).textContent ?? '';
+
+  it('sends no save when the header cannot be read at the head shown: the draft’s notice says why', async () => {
+    const own = service({
+      // The item can be read at the first head, and at no later one.
+      [ITEM]: (body) =>
+        revisionAsked(body, HEAD) === HEAD
+          ? ok(itemDocument({ ...noteSummary, revision: HEAD }, { okf_jawn: { id: NOTE } }))
+          : refuse(500, 'internal', 'the store broke'),
+    });
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Edit' }));
+    const box = await findTextBox(/Text of Meeting notes/);
+    // Someone else moves the head and the person refreshes: the item cannot be read there, so
+    // the header a save would carry is not known.
+    own.moveHead();
+    await userEvent.click(await screen.findByRole('button', { name: /^Refresh/ }));
+    await waitFor(() => expect(headLine()).toContain('cccccccccc'));
+    const { typeInto } = await import('./support/editor');
+    typeInto(box, '\nwords typed after the refresh');
+    const notice = await within(pane()).findByText(/Saving this draft/, {}, { timeout: 5000 });
+    expect(notice.closest('.failure-notice')?.textContent).toContain('the store broke');
+    // Nothing was sent with the header the session had.
+    expect(own.api.callsTo(SAVE)).toEqual([]);
+    expect(textIn(box)).toContain('words typed after the refresh');
+  }, 20000);
+
+  it('moves no tab to the revision of a change the page does not show', async () => {
+    const gate: { release: () => void } = { release: () => {} };
+    const holder: { commit: () => string } = { commit: () => '' };
+    const own = service({
+      [MOVE]: () =>
+        new Promise<Reply>((resolve) => {
+          gate.release = () =>
+            resolve(ok({ revision: holder.commit(), receipt_id: RECEIPT, warnings: [] }));
+        }),
+    });
+    holder.commit = own.moveHead;
+    const { router } = await openTree(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    const note = await row(/Meeting notes/);
+    act(() => note.focus());
+    await userEvent.keyboard('{F2}');
+    await type('File name', 'minutes.md');
+    await userEvent.keyboard('{Enter}');
+    await waitFor(() => expect(own.api.callsTo(MOVE)).toHaveLength(1));
+    // While the move is asked, the person refreshes to someone else's newer head, and their tab
+    // comes to cite that head (as a link from a search made there does).
+    const theirs = own.moveHead();
+    await userEvent.click(await screen.findByRole('button', { name: /^Refresh/ }));
+    await waitFor(() => expect(headLine()).toContain('cccccccccc'));
+    await act(async () => {
+      await router.navigate({
+        to: '/w/$workspaceId/i/$itemId',
+        params: { workspaceId: WS, itemId: NOTE },
+        search: { rev: theirs },
+        replace: true,
+      });
+    });
+    await act(async () => {
+      gate.release();
+      await Promise.resolve();
+    });
+    // The move is done: its form closes.
+    await waitFor(() =>
+      expect(screen.queryByRole('group', { name: /^Rename or move/ })).toBeNull(),
+    );
+    await act(() => new Promise<void>((resolve) => setTimeout(resolve, 50)));
+    // The tab goes on citing the head shown; it is not moved to the revision the move made.
+    expect(headLine()).toContain('cccccccccc');
+    expect(router.state.location.search).toMatchObject({ rev: theirs });
+    const view = useExplorerStore.getState().views[WS];
+    expect(JSON.stringify(view)).not.toContain(MADE.at(1));
+  }, 20000);
+});

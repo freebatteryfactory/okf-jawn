@@ -14,6 +14,7 @@ import { staleReason } from '../../src/features/conventions/NamingRules';
 import { formHolds, RulesForm, rulesProblems } from '../../src/features/conventions/RulesForm';
 import { keepOrder, type Preview, sameRules } from '../../src/features/conventions/rules';
 import { resetDraftSessions } from '../../src/features/drafts/saving';
+import { YAML_PAUSE_MS } from '../../src/lib/yaml';
 import { setYamlEngine, TOO_COMPLEX_WORDS, YAML_LIMIT_MS } from '../../src/lib/yaml-reading';
 import { type Handler, type Json, mockApi, ok, type Reply } from './support/api';
 import { findTextBox, replaceText, textIn } from './support/editor';
@@ -1807,6 +1808,36 @@ describe('saving over rules someone else saved meanwhile', () => {
     await waitFor(() => expect(savedNow()).not.toBeNull());
     expect(button('Replace the saved rules with mine…')).toBeTruthy();
     expect(own.api.callsTo(SET)).toHaveLength(1);
+  });
+
+  it('drops text typed a moment before with the rest: read later, it would bring the edits back', async () => {
+    const { api } = await refusedThenRefreshed();
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const box = await findTextBox('The naming rules as YAML');
+    // Typed, and not read: the pause has not passed when the choice is made.
+    replaceText(box, textIn(box).replace(/prefix: .*/, 'prefix: late-'));
+    await userEvent.click(button('Take the saved rules, and drop mine'));
+    // Well past the pause: nothing of that text is read.
+    await act(() => new Promise<void>((resolve) => setTimeout(resolve, YAML_PAUSE_MS + 100)));
+    expect(said()).toBe('These are the saved rules now. Your changes were dropped.');
+    expect(textIn(await findTextBox('The naming rules as YAML'))).toContain('prefix: theirs-');
+    expect(panel().textContent).toContain('These are the saved rules, unchanged.');
+    await userEvent.click(screen.getByRole('tab', { name: 'Form' }));
+    expect(prefix()).toHaveProperty('value', 'theirs-');
+    expect(savedNow()).toBeNull();
+    expect(api.callsTo(SET)).toHaveLength(1);
+  });
+
+  it('asks nothing about replacing with rules that cannot be sent: what is wrong with them comes first', async () => {
+    const { api } = await refusedThenRefreshed();
+    // The person's rules get a problem: a key the rules do not have.
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const box = await findTextBox('The naming rules as YAML');
+    await typeYaml(box, `${textIn(box)}x-team: ada\n`);
+    await userEvent.click(button('Replace the saved rules with mine…'));
+    expect(replaceQuestion()).toBeNull();
+    expect(document.activeElement?.textContent).toMatch(/These rules have \d+ problems?\./);
+    expect(api.callsTo(SET)).toHaveLength(1);
   });
 
   it('is an ordinary save when the version shown moved and the saved rules did not', async () => {

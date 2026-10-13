@@ -318,6 +318,22 @@ describe('the bounds that keep the page from stalling', () => {
     expect(MAX_YAML_DEPTH).toBe(32);
   });
 
+  it('counts a closing bracket that closes nothing as nothing, and brackets over indented lines once', () => {
+    // A stray `]` does not lower the count of the brackets that open after it.
+    expect(deepestNesting(`]\n${'['.repeat(5)}`)).toEqual({ depth: 6, line: 2 });
+    // JSON written over indented lines: its depth is its brackets, not its indentation as well.
+    const pretty = (levels: number) =>
+      [
+        ...Array.from({ length: levels }, (_, i) => `${'  '.repeat(i)}[`),
+        `${'  '.repeat(levels)}1`,
+        ...Array.from({ length: levels }, (_, i) => `${'  '.repeat(levels - 1 - i)}]`),
+      ].join('\n');
+    expect(deepestNesting(pretty(20)).depth).toBe(21);
+    const read = readYaml(pretty(20));
+    expect(read.ok).toBe(true);
+    expect(JSON.stringify(read.ok ? read.value : null)).toBe(`${'['.repeat(20)}1${']'.repeat(20)}`);
+  });
+
   it('measures the depth from what the parser takes for structure', () => {
     expect(deepestNesting('')).toEqual({ depth: 0, line: 1 });
     expect(deepestNesting('a: 1\n')).toEqual({ depth: 2, line: 1 });
