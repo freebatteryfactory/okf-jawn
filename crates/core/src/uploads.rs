@@ -118,7 +118,10 @@ pub trait UploadStore: Send + Sync {
     /// `consume` for each.
     ///
     /// Refused with `Conflict` naming the purge, before any upload is read, when a purge names
-    /// the workspace (`storage::Purger`).
+    /// the workspace (`storage::Purger`); an empty batch is refused then too.
+    ///
+    /// The batch is one transaction on the records connection, and this port sets no bound on
+    /// its length: the bound belongs to the request that lists the uploads.
     fn consume_batch<'a>(
         &'a self,
         scope: &'a StorageScope,

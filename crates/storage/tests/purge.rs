@@ -2402,6 +2402,34 @@ async fn purge_refuses_an_upload_batch_after_it_completes_naming_the_purge() -> 
     Ok(())
 }
 
+/// R-I13, review N7: an empty batch is refused by a purge too. The refusal comes before
+/// anything else the batch does, so a batch that lists nothing does not answer "none taken"
+/// for a workspace a purge names. (Reviewer probe PP3, adopted.)
+#[tokio::test]
+async fn purge_refuses_an_empty_upload_batch() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let taken = storage
+        .uploads()
+        .consume_batch(&target, &[], uuid!(70)?)
+        .await?;
+    assert!(
+        taken.is_empty(),
+        "without a purge an empty batch takes none"
+    );
+    let purge: PurgeId = uuid!(60)?;
+    record_purge_of(&storage, &target, purge).await?;
+    refused(
+        storage
+            .uploads()
+            .consume_batch(&target, &[], uuid!(70)?)
+            .await,
+        "an empty upload batch",
+    )?;
+    Ok(())
+}
+
 /// The job that consumed `upload`, as the records database holds it; `None` inside when no job
 /// did, and `None` outside when the row is gone.
 fn consumer_of(storage: &Storage, upload: UploadId) -> Fallible<Option<Option<String>>> {

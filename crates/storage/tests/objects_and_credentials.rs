@@ -625,6 +625,111 @@ async fn two_batches_that_share_uploads_never_take_one_each() -> TestResult {
     Ok(())
 }
 
+/// R-I13: a repeat by the same job with a different set. A superset that lists another job's
+/// upload is refused whole, and the new upload it also listed stays free; a superset of free
+/// uploads takes the new one and leaves the others; a subset changes nothing and releases
+/// nothing. (Reviewer probe PO1, adopted.)
+#[tokio::test]
+async fn a_repeated_batch_with_a_different_set_takes_the_new_and_releases_none() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let uploads = storage.uploads();
+    let local = scope("local", 1)?;
+    let (importer, other): (JobId, JobId) = (uuid!(7)?, uuid!(8)?);
+    let a = complete_slot(&uploads, &local, 20, b"a").await?;
+    let b = complete_slot(&uploads, &local, 21, b"b").await?;
+    let c = complete_slot(&uploads, &local, 22, b"c").await?;
+    let d = complete_slot(&uploads, &local, 23, b"d").await?;
+    let e = complete_slot(&uploads, &local, 24, b"e").await?;
+    uploads.consume(&local, d, other).await?;
+    uploads.consume_batch(&local, &[a, b], importer).await?;
+    // A superset holding another job's upload: refused whole, and `e` stays free.
+    let error = err_of(uploads.consume_batch(&local, &[a, b, e, d], importer).await)?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    assert_eq!(
+        consumers(&uploads, &local, &[a, b, c, d, e]).await?,
+        [Some(importer), Some(importer), None, Some(other), None]
+    );
+    // A superset of free uploads: the new one is taken too.
+    let more = uploads.consume_batch(&local, &[a, b, c], importer).await?;
+    assert_eq!(more.len(), 3);
+    assert_eq!(
+        consumers(&uploads, &local, &[a, b, c, d, e]).await?,
+        [
+            Some(importer),
+            Some(importer),
+            Some(importer),
+            Some(other),
+            None
+        ]
+    );
+    // A subset: nothing changes, and nothing is released.
+    let fewer = uploads.consume_batch(&local, &[a], importer).await?;
+    assert_eq!(fewer.len(), 1);
+    assert_eq!(
+        consumers(&uploads, &local, &[a, b, c, d, e]).await?,
+        [
+            Some(importer),
+            Some(importer),
+            Some(importer),
+            Some(other),
+            None
+        ]
+    );
+    Ok(())
+}
+
+/// R-I13: each refusal cause in the middle of a batch marks nothing before it or after it,
+/// and one fresh upload listed twice gives two records and one mark. (Reviewer probe PO2,
+/// adopted.)
+#[tokio::test]
+async fn a_cause_in_the_middle_of_a_batch_marks_none_and_an_upload_listed_twice_is_marked_once()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let uploads = storage.uploads();
+    let local = scope("local", 1)?;
+    let (importer, other): (JobId, JobId) = (uuid!(7)?, uuid!(8)?);
+    let first = complete_slot(&uploads, &local, 20, b"first").await?;
+    let last = complete_slot(&uploads, &local, 21, b"last").await?;
+    let taken = complete_slot(&uploads, &local, 22, b"taken").await?;
+    uploads.consume(&local, taken, other).await?;
+    let open = uploads.create(&local, uuid!(23)?, announced(4)).await?.id;
+    let unknown: UploadId = uuid!(99)?;
+    for (cause, code) in [
+        (open, ErrorCode::InvalidInput),
+        (taken, ErrorCode::Conflict),
+        (unknown, ErrorCode::NotFound),
+    ] {
+        let error = err_of(
+            uploads
+                .consume_batch(&local, &[first, cause, last], importer)
+                .await,
+        )?;
+        assert_eq!(error.code, code, "{}", error.message);
+        assert_eq!(
+            consumers(&uploads, &local, &[first, last, taken]).await?,
+            [None, None, Some(other)],
+            "the refused batch marked nothing"
+        );
+    }
+    let twice = uploads
+        .consume_batch(&local, &[first, first], importer)
+        .await?;
+    assert_eq!(
+        twice
+            .iter()
+            .map(|record| (record.id, record.consumed_by))
+            .collect::<Vec<_>>(),
+        [(first, Some(importer)), (first, Some(importer))]
+    );
+    assert_eq!(
+        consumers(&uploads, &local, &[first, last]).await?,
+        [Some(importer), None]
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_connector_secret_is_issued_once_and_kept_only_as_its_hash() -> TestResult {
     let directory = tempfile::tempdir()?;
