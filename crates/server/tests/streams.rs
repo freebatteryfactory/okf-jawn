@@ -29,6 +29,8 @@ use support::{HOST, LocalApp, SECRET, WORKSPACE};
 struct Bytes {
     uploaded: Mutex<Vec<u8>>,
     callers: Mutex<Vec<AccessRoute>>,
+    /// The media type the store recorded for the object; empty stands for `application/pdf`.
+    stored_type: &'static str,
 }
 
 const OBJECT: &[u8] = b"0123456789";
@@ -44,7 +46,10 @@ impl Bytes {
         Ok(())
     }
 
-    fn object(range: Option<ByteRange>) -> Result<Download, ApiError> {
+    /// The object as the store holds it. Like the application, this double trusts the route to
+    /// have refused a range that is not one interval: an inverted range is answered whole.
+    fn object(&self, range: Option<ByteRange>) -> Result<Download, ApiError> {
+        let range = range.filter(|range| range.end.is_none_or(|end| end >= range.start));
         let total = OBJECT.len();
         let start = range.map_or(0, |range| {
             usize::try_from(range.start).unwrap_or(usize::MAX)
@@ -60,7 +65,11 @@ impl Bytes {
             .get(start..=last)
             .ok_or_else(|| ApiError::new(ErrorCode::InvalidInput, "range outside the object"))?;
         Ok(Download {
-            media_type: "application/pdf".to_owned(),
+            media_type: if self.stored_type.is_empty() {
+                "application/pdf".to_owned()
+            } else {
+                self.stored_type.to_owned()
+            },
             total_size: u64::try_from(total).unwrap_or(u64::MAX),
             offset: u64::try_from(start).unwrap_or(u64::MAX),
             length: u64::try_from(slice.len()).unwrap_or(u64::MAX),
@@ -109,7 +118,7 @@ impl Transfers for Bytes {
     ) -> PortFuture<'a, Download> {
         Box::pin(async move {
             self.saw(caller)?;
-            Self::object(range)
+            self.object(range)
         })
     }
 
@@ -135,9 +144,40 @@ impl Transfers for Bytes {
     ) -> PortFuture<'a, Download> {
         Box::pin(async move {
             self.saw(caller)?;
-            Self::object(None)
+            self.object(None)
         })
     }
+}
+
+fn storing(stored_type: &'static str) -> Arc<Bytes> {
+    Arc::new(Bytes {
+        stored_type,
+        ..Bytes::default()
+    })
+}
+
+fn header(response: &axum::response::Response, name: &str) -> Option<String> {
+    response
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+}
+
+/// The three headers every download carries, whatever was stored.
+fn assert_never_a_page(response: &axum::response::Response) {
+    assert_eq!(
+        header(response, "content-disposition").as_deref(),
+        Some("attachment")
+    );
+    assert_eq!(
+        header(response, "content-security-policy").as_deref(),
+        Some("sandbox; default-src 'none'")
+    );
+    assert_eq!(
+        header(response, "x-content-type-options").as_deref(),
+        Some("nosniff")
+    );
 }
 
 fn byte_service(bytes: Arc<Bytes>) -> Result<Router, Box<dyn std::error::Error>> {
@@ -243,6 +283,107 @@ async fn an_object_is_streamed_whole_or_as_the_requested_range() -> TestResult {
         )?)
         .await?;
     assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stored_type_that_could_run_as_a_page_is_sent_as_the_declared_type() -> TestResult {
+    for stored in [
+        "text/html",
+        "image/svg+xml",
+        "application/xhtml+xml",
+        "text/html; charset=utf-8",
+        "TEXT/HTML",
+        "image/png; charset=utf-8",
+        "text/javascript",
+    ] {
+        let response = byte_service(storing(stored))?
+            .oneshot(request("GET", &object_path(), true, None, Body::empty())?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            header(&response, "content-type").as_deref(),
+            Some("application/octet-stream"),
+            "stored {stored}"
+        );
+        assert_never_a_page(&response);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_inert_stored_type_is_kept_and_is_still_an_attachment() -> TestResult {
+    for (stored, sent) in [
+        ("image/png", "image/png"),
+        ("IMAGE/PNG", "image/png"),
+        ("image/jpeg", "image/jpeg"),
+        ("image/gif", "image/gif"),
+        ("image/webp", "image/webp"),
+        ("application/pdf", "application/pdf"),
+    ] {
+        let response = byte_service(storing(stored))?
+            .oneshot(request("GET", &object_path(), true, None, Body::empty())?)
+            .await?;
+        assert_eq!(header(&response, "content-type").as_deref(), Some(sent));
+        assert_never_a_page(&response);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_ranged_download_and_an_artifact_carry_the_same_headers() -> TestResult {
+    let ranged = byte_service(storing("text/html"))?
+        .oneshot(request(
+            "GET",
+            &object_path(),
+            true,
+            Some("bytes=2-5"),
+            Body::empty(),
+        )?)
+        .await?;
+    assert_eq!(ranged.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        header(&ranged, "content-type").as_deref(),
+        Some("application/octet-stream")
+    );
+    assert_never_a_page(&ranged);
+
+    // An artifact is declared `application/zip`, whatever the store says it is.
+    for stored in ["application/zip", "text/html"] {
+        let artifact = byte_service(storing(stored))?
+            .oneshot(request(
+                "GET",
+                &format!("/api/artifacts/{UPLOAD}"),
+                true,
+                None,
+                Body::empty(),
+            )?)
+            .await?;
+        assert_eq!(artifact.status(), StatusCode::OK);
+        assert_eq!(
+            header(&artifact, "content-type").as_deref(),
+            Some("application/zip")
+        );
+        assert_never_a_page(&artifact);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_inverted_range_is_refused_by_the_route_itself() -> TestResult {
+    // The double answers an inverted range whole, so only the route's own check refuses it.
+    let response = byte_service(Arc::new(Bytes::default()))?
+        .oneshot(request(
+            "GET",
+            &object_path(),
+            true,
+            Some("bytes=5-2"),
+            Body::empty(),
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: ApiError = serde_json::from_slice(&to_bytes(response.into_body(), 65_536).await?)?;
+    assert_eq!(error.code, ErrorCode::InvalidInput);
     Ok(())
 }
 

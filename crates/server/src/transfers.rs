@@ -8,12 +8,22 @@
 //! application behind [`Transfers`]. Core has no such port yet (report request S3), so these
 //! routes are bound against this trait and tested with doubles; no production adapter exists in
 //! the server.
+//!
+//! A download is never a page of the application origin (SPEC section 11: "Uploaded HTML is
+//! hostile data until constrained by actual isolation"). The response headers are written here,
+//! not by the application: every download carries `Content-Disposition: attachment`,
+//! `Content-Security-Policy: sandbox; default-src 'none'` and `X-Content-Type-Options: nosniff`,
+//! and its `Content-Type` is the type the transport declares for the route unless the stored type
+//! is one of [`INERT_TYPES`]. A ranged answer carries the same headers.
 
 use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE};
+use axum::http::header::{
+    ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_SECURITY_POLICY,
+    CONTENT_TYPE, RANGE, X_CONTENT_TYPE_OPTIONS,
+};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
@@ -110,6 +120,22 @@ pub const ARTIFACT_PATH: &str = "/api/workspaces/{workspace_id}/artifacts/{artif
 
 /// The installation archive route (`download_tenant_artifact`).
 pub const TENANT_ARTIFACT_PATH: &str = "/api/artifacts/{artifact_id}";
+
+/// The media type `api/transports.json` declares for `download_object`.
+pub const OBJECT_MEDIA: &str = "application/octet-stream";
+
+/// The media type `api/transports.json` declares for both artifact downloads.
+pub const ARTIFACT_MEDIA: &str = "application/zip";
+
+/// The stored media types a download keeps: none of them can run as a page. `image/svg+xml`,
+/// `text/html` and every other type go out as the route's declared type.
+pub const INERT_TYPES: [&str; 5] = [
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "application/pdf",
+];
 
 /// The byte routes over `transfers`, for `ServiceParts::extra`.
 pub fn routes(transfers: Arc<dyn Transfers>) -> Router {
@@ -210,7 +236,7 @@ async fn download_object(
                 range,
             )
             .await?;
-        send(download, range.is_some())
+        send(download, OBJECT_MEDIA, range.is_some())
     }
     .await;
     outcome.unwrap_or_else(error_response)
@@ -227,7 +253,7 @@ async fn download_artifact(
         let download = transfers
             .download_artifact(&caller, identity(&workspace_id)?, identity(&artifact_id)?)
             .await?;
-        send(download, false)
+        send(download, ARTIFACT_MEDIA, false)
     }
     .await;
     outcome.unwrap_or_else(error_response)
@@ -244,7 +270,7 @@ async fn download_tenant_artifact(
         let download = transfers
             .download_tenant_artifact(&caller, identity(&artifact_id)?)
             .await?;
-        send(download, false)
+        send(download, ARTIFACT_MEDIA, false)
     }
     .await;
     outcome.unwrap_or_else(error_response)
@@ -256,32 +282,42 @@ fn identity<T: DeserializeOwned>(segment: &str) -> Result<T, ApiError> {
         .map_err(|_| ApiError::new(ErrorCode::NotFound, "No such resource"))
 }
 
-/// The response that streams `download`: 206 with `Content-Range` for a range request.
-fn send(download: Download, ranged: bool) -> Result<Response, ApiError> {
-    let header = |text: String| {
-        HeaderValue::from_str(&text)
-            .map_err(|_| ApiError::new(ErrorCode::Internal, "A download header cannot be sent"))
-    };
+/// The media type a download is sent with: the stored type when it is one of [`INERT_TYPES`],
+/// compared whole and ASCII case-insensitively (a type with any parameter is not on the list),
+/// and otherwise the type the transport declares for the route.
+fn sent_media_type(stored: &str, declared: &'static str) -> &'static str {
+    INERT_TYPES
+        .iter()
+        .copied()
+        .find(|inert| inert.eq_ignore_ascii_case(stored))
+        .unwrap_or(declared)
+}
+
+/// The response that streams `download` as an attachment: 206 with `Content-Range` for a range
+/// request. It is never a page of this origin, whatever was stored (see the module header).
+fn send(download: Download, declared: &'static str, ranged: bool) -> Result<Response, ApiError> {
     let mut headers = HeaderMap::new();
-    headers.insert(CONTENT_TYPE, header(download.media_type.clone())?);
-    headers.insert(CONTENT_LENGTH, header(download.length.to_string())?);
-    headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     headers.insert(
-        axum::http::header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
+        CONTENT_TYPE,
+        HeaderValue::from_static(sent_media_type(&download.media_type, declared)),
     );
+    headers.insert(CONTENT_LENGTH, HeaderValue::from(download.length));
+    headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    headers.insert(CONTENT_DISPOSITION, HeaderValue::from_static("attachment"));
+    headers.insert(
+        CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("sandbox; default-src 'none'"),
+    );
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     let status = if ranged {
         let last = download
             .offset
             .saturating_add(download.length)
             .saturating_sub(1);
-        headers.insert(
-            CONTENT_RANGE,
-            header(format!(
-                "bytes {}-{last}/{}",
-                download.offset, download.total_size
-            ))?,
-        );
+        let range = format!("bytes {}-{last}/{}", download.offset, download.total_size);
+        let range = HeaderValue::from_str(&range)
+            .map_err(|_| ApiError::new(ErrorCode::Internal, "A download range cannot be sent"))?;
+        headers.insert(CONTENT_RANGE, range);
         StatusCode::PARTIAL_CONTENT
     } else {
         StatusCode::OK
