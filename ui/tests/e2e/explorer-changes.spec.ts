@@ -656,6 +656,74 @@ test.describe('changing the tree and the naming rules', () => {
     expect(seen.wait).toBeLessThan(1_000);
   });
 
+  test('Back and Forward ask before unsaved rule edits are lost', async ({ page }) => {
+    const played = await service();
+    await routeApi(page, {
+      ...played.answers,
+      '/api/workspaces/list-workspaces': () =>
+        ok({ items: [writableWorkspace], next_cursor: null }),
+    });
+    await page.goto(`${server.origin()}/`);
+    await page.getByRole('link', { name: 'Workshop notes' }).click();
+    await expect(row(page, 'notes')).toBeVisible();
+    await press(page, 'Naming rules');
+    const prefix = page.getByRole('textbox', { name: /^prefix/ });
+    await prefix.fill('unsaved-');
+    const question = page.getByRole('group', { name: 'Leave the naming rules without saving?' });
+    const onWorkspace = new RegExp(`/w/${WS}$`);
+
+    // Back: the page asks, and has gone nowhere. (A browser moves its address before it tells the
+    // page, so while the question is open the address is the one being gone to; the router puts
+    // it back when the person stays.)
+    await page.evaluate(() => history.back());
+    await expect(question).toBeVisible();
+    await expect(prefix).toHaveValue('unsaved-');
+    expect(await focusSettled(page)).toBe('button:Keep editing');
+    await expectVisibleFocus(page);
+    await expectNoAxeViolations(page, 'the question before Back leaves the naming rules');
+    await page.keyboard.press('Enter');
+    await expect(question).toHaveCount(0);
+    await expect(page).toHaveURL(onWorkspace);
+    await expect(prefix).toHaveValue('unsaved-');
+    await expect(prefix).toBeFocused();
+
+    // Back again, and this time the edits are discarded: the workspace list.
+    await page.evaluate(() => history.back());
+    await press(page, 'Discard my changes');
+    await expect(page.getByRole('heading', { name: 'Your workspaces' })).toBeVisible();
+    await expect(page).toHaveURL(new RegExp(`^${server.origin()}/$`));
+    // Focus went back into the rules before they left, so the new page's heading takes it.
+    expect(await focusSettled(page)).toBe('h1:Your workspaces');
+
+    // Forward asks too. Open an item, go back to the workspace (nothing to lose: no question),
+    // edit the rules, then go forward to the item.
+    await page.evaluate(() => history.forward());
+    await expect(row(page, 'notes')).toBeVisible();
+    await openNotes(page);
+    await row(page, /Meeting notes/).focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByText('Revenue grew by 12% in 2025.')).toBeVisible();
+    await page.evaluate(() => history.back());
+    await expect(page).toHaveURL(onWorkspace);
+    await press(page, 'Naming rules');
+    await prefix.fill('again-');
+    await page.evaluate(() => history.forward());
+    await expect(question).toBeVisible();
+    await press(page, 'Keep editing');
+    await expect(prefix).toHaveValue('again-');
+    await expect(page).toHaveURL(onWorkspace);
+    await page.evaluate(() => history.forward());
+    await press(page, 'Discard my changes');
+    // The item is shown, in the place the rules had.
+    await expect(page).toHaveURL(new RegExp(`/w/${WS}/i/${NOTE}`));
+    await expect(page.getByText('Revenue grew by 12% in 2025.')).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Naming rules' })).toHaveCount(0);
+    // What had focus went with the rules: it is on the page's heading, not on the page body.
+    expect(await focusSettled(page)).toBe('h1:Workshop notes');
+    await expectNoAxeViolations(page, 'the item shown after Forward left the naming rules');
+    expect(played.sent).toEqual([]);
+  });
+
   test('a refused change is shown, and retried from the keyboard', async ({ page }) => {
     const played = await service();
     await routeApi(page, played.answers);

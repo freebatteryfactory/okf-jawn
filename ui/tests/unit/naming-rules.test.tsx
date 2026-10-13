@@ -1385,6 +1385,8 @@ describe('leaving the naming rules with edits that are not saved', () => {
     await userEvent.click(button('Discard my changes'));
     expect(await screen.findByText('Text of Annual report')).toBeTruthy();
     expect(screen.queryByRole('region', { name: 'Naming rules' })).toBeNull();
+    // The pressed button went with the rules: focus is back on the row that was opened.
+    expect(document.activeElement).toBe(report);
   });
 
   it('asks before the shell’s own button closes the panel', async () => {
@@ -1438,6 +1440,113 @@ describe('leaving the naming rules with edits that are not saved', () => {
       expect(panel().textContent).toContain('These are the saved rules, unchanged.'),
     );
     expect(leavingAsks()).toBe(false);
+  });
+});
+
+describe('leaving the workspace page with rule edits that are not saved', () => {
+  const SEARCH = '/api/search/search-items';
+  const question = () =>
+    screen.queryByRole('group', { name: 'Leave the naming rules without saving?' });
+  const home = () => screen.getByRole('link', { name: 'okf-jawn' });
+  const found = () =>
+    ok({
+      revision: HEAD,
+      hits: [
+        {
+          title: 'Meeting notes',
+          snippet: '…matching words…',
+          score: 1,
+          source: {
+            workspace_id: WS,
+            item_id: NOTE,
+            path: 'notes/meeting.md',
+            revision: HEAD,
+            selection: { kind: 'lines', range: { start: 1, end: 2 } },
+            locations: [],
+          },
+        },
+      ],
+    });
+  const hit = async () =>
+    within(await screen.findByRole('region', { name: 'Results for “budget”' })).findByRole('link', {
+      name: /Meeting notes/,
+    });
+
+  it('asks before a link to the workspace list is followed, stays on "Keep editing", and leaves only when told', async () => {
+    service();
+    const { router } = await openRules();
+    await setPrefix('unsaved-');
+    await userEvent.click(home());
+    // Still on the workspace, with the question; focus on the choice that loses nothing.
+    expect(question()).not.toBeNull();
+    expect(router.state.location.pathname).toBe(`/w/${WS}`);
+    expect(document.activeElement).toBe(button('Keep editing'));
+    await userEvent.click(button('Keep editing'));
+    expect(question()).toBeNull();
+    expect(document.activeElement).toBe(home());
+    expect(router.state.location.pathname).toBe(`/w/${WS}`);
+    expect(prefix()).toHaveProperty('value', 'unsaved-');
+    await userEvent.click(home());
+    await userEvent.click(button('Discard my changes'));
+    await waitFor(() => expect(router.state.location.pathname).toBe('/'));
+    expect(screen.queryByRole('region', { name: 'Naming rules' })).toBeNull();
+    // The pressed button went with the question: focus is on the link that was followed.
+    expect(document.activeElement).toBe(home());
+  });
+
+  it('follows a link out at once when the rules hold no edit', async () => {
+    service();
+    const { router } = await openRules();
+    await userEvent.click(home());
+    await waitFor(() => expect(router.state.location.pathname).toBe('/'));
+    expect(question()).toBeNull();
+  });
+
+  it('asks before a search result’s link is followed, and then shows the item in place of the rules', async () => {
+    const { api } = service({ [SEARCH]: found });
+    const { router } = await openRules(`/w/${WS}?q=budget`);
+    await setPrefix('unsaved-');
+    const link = await hit();
+    const readsBefore = api.callsTo('/api/reads/read-item').length;
+    await userEvent.click(link);
+    expect(question()).not.toBeNull();
+    await userEvent.click(button('Keep editing'));
+    // Nothing was opened behind the question.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(router.state.location.pathname).toBe(`/w/${WS}`);
+    expect(api.callsTo('/api/reads/read-item')).toHaveLength(readsBefore);
+    expect(document.activeElement).toBe(link);
+    await userEvent.click(link);
+    await userEvent.click(button('Discard my changes'));
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`));
+    // The item is on screen: the rules gave the documents their place back.
+    expect(await screen.findByText('Text of Meeting notes')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Naming rules' })).toBeNull();
+    expect(document.activeElement).toBe(link);
+  });
+
+  it('shows the item of a search result’s link at once when the rules hold no edit', async () => {
+    service({ [SEARCH]: found });
+    const { router } = await openRules(`/w/${WS}?q=budget`);
+    await userEvent.click(await hit());
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`));
+    expect(question()).toBeNull();
+    expect(await screen.findByText('Text of Meeting notes')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Naming rules' })).toBeNull();
+  });
+
+  it('asks nothing, and keeps the rules open, when only the search changes', async () => {
+    service({ [SEARCH]: found });
+    const { router } = await openRules();
+    await setPrefix('unsaved-');
+    await userEvent.type(
+      screen.getByRole('searchbox', { name: 'Search this workspace' }),
+      'budget{Enter}',
+    );
+    await waitFor(() => expect(router.state.location.search).toEqual({ q: 'budget' }));
+    await hit();
+    expect(question()).toBeNull();
+    expect(prefix()).toHaveProperty('value', 'unsaved-');
   });
 });
 

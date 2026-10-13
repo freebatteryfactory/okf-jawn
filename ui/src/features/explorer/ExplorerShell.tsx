@@ -11,13 +11,21 @@
  * pagination stays tied to the same revision.)
  */
 import { useQuery } from '@tanstack/react-query';
-import { Outlet, useNavigate, useParams, useSearch } from '@tanstack/react-router';
-import { type Ref, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import {
+  Outlet,
+  type ShouldBlockFn,
+  useBlocker,
+  useNavigate,
+  useParams,
+  useSearch,
+} from '@tanstack/react-router';
+import { type Ref, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import { openWorkspaceQueryKey } from '../../api/generated/@tanstack/react-query.gen';
 import { openWorkspace } from '../../api/generated/sdk.gen';
 import type { Workspace } from '../../api/generated/types.gen';
 import { zItemId } from '../../api/generated/zod.gen';
+import { pageHeading } from '../../lib/focus';
 import { Instant } from '../../lib/instant';
 import { type LeaveGuard, NamingRulesPanel } from '../conventions/NamingRules';
 import { itemOptions } from '../documents/DocumentView';
@@ -72,6 +80,29 @@ interface Destination {
   replace?: boolean;
 }
 
+/** Where a navigation starts or ends, as the router's blocker tells it. */
+interface Place {
+  pathname: string;
+  search: object;
+}
+
+/** A place without its search query: the query changes what the sidebar lists, nothing else. */
+const apartFromQuery = (place: Place) =>
+  JSON.stringify([
+    place.pathname,
+    Object.entries(place.search)
+      .filter(([key]) => key !== 'q')
+      .sort(([a], [b]) => a.localeCompare(b)),
+  ]);
+
+/**
+ * Whether a navigation takes the naming rules off the page: it goes to another page, or to an
+ * item (another one, or the same at another selection or revision), which is then shown in the
+ * rules' place. A change of the search query alone does not.
+ */
+export const leavesRules = (current: Place, next: Place) =>
+  apartFromQuery(current) !== apartFromQuery(next);
+
 export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerShellProps) {
   const workspaceId = workspace.id;
   const head = workspace.head;
@@ -106,11 +137,55 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
   const rulesButton = useRef<HTMLButtonElement | null>(null);
   // The panel's guard, while it is open: leaving it asks first when edits would be lost.
   const rulesGuard = useRef<LeaveGuard | null>(null);
-  const leaveRules = (proceed: () => void) => {
+  const leaveRules = (proceed: () => void, stay?: () => void) => {
     const guard = rulesOpen ? rulesGuard.current : null;
     if (guard === null) proceed();
-    else guard(proceed);
+    else guard(proceed, stay);
   };
+  // Every other way off the rules goes through the router, and the router holds it back until
+  // the same question is answered: Back and Forward, a link to another page, a search result's
+  // link. Not the page's own corrections of the address (a replace: a tab follows a change), and
+  // not a change of the search query alone. A navigation that goes on and stays on this
+  // workspace's page shows the documents again: the item it names is on screen, not behind the
+  // rules. Reload and closing the browser tab are the panel's own (`beforeunload`).
+  const holdBack = useRef<ShouldBlockFn>(() => false);
+  // What had keyboard focus when a way off the rules was taken, once the documents are back in
+  // their place: focus goes back to it (a row of the folders, a link), and when it went with the
+  // rules (Back or Forward with focus in them), to the page's heading. Never to the page body.
+  const askedToLeave = useRef<Element | null | undefined>(undefined);
+  const showDocuments = (asker: Element | null) => {
+    askedToLeave.current = asker;
+    setRulesOpen(false);
+  };
+  useLayoutEffect(() => {
+    const asker = askedToLeave.current;
+    if (asker === undefined || rulesOpen) return;
+    askedToLeave.current = undefined;
+    const still = asker instanceof HTMLElement && asker.isConnected && asker !== document.body;
+    (still ? asker : pageHeading())?.focus();
+  });
+  useEffect(() => {
+    holdBack.current = ({ current, next, action }) => {
+      if (action === 'REPLACE' || !leavesRules(current, next)) return false;
+      const here =
+        next.pathname === `/w/${workspaceId}` || next.pathname.startsWith(`/w/${workspaceId}/`);
+      const asker = document.activeElement;
+      return new Promise<boolean>((resolve) => {
+        leaveRules(
+          () => {
+            if (here) showDocuments(asker);
+            resolve(false);
+          },
+          () => resolve(true),
+        );
+      });
+    };
+  });
+  useBlocker({
+    disabled: !rulesOpen,
+    enableBeforeUnload: false,
+    shouldBlockFn: useCallback<ShouldBlockFn>((navigation) => holdBack.current(navigation), []),
+  });
   const focusRulesButton = useRef(false);
   useLayoutEffect(() => {
     if (!focusRulesButton.current || rulesOpen) return;
@@ -141,15 +216,17 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
     // An item that is opened is shown: the documents come back in place of the naming rules,
     // after the panel's question when its edits are not saved.
     if (destination.replace !== true && rulesOpen) {
+      const asker = document.activeElement;
       leaveRules(() => {
-        setRulesOpen(false);
-        openItemAt(target, destination);
+        showDocuments(asker);
+        // The question was asked here: the router does not ask it again.
+        openItemAt(target, destination, true);
       });
       return;
     }
     openItemAt(target, destination);
   };
-  const openItemAt = (target: string, destination: Destination) => {
+  const openItemAt = (target: string, destination: Destination, asked = false) => {
     void navigate({
       to: '/w/$workspaceId/i/$itemId',
       params: { workspaceId, itemId: target },
@@ -159,6 +236,7 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
         ...(destination.rev === undefined ? {} : { rev: destination.rev }),
       },
       replace: destination.replace ?? false,
+      ignoreBlocker: asked,
     });
   };
   const goToWorkspace = () =>

@@ -46,12 +46,13 @@
  * page has not shown.
  *
  * Edits that are not saved are not lost silently. While the rules differ from the saved ones, or
- * the YAML view holds text that cannot be read, leaving asks first: "Close the naming rules",
- * the shell's own ways out (its "Naming rules" button, opening an item, which puts the
- * documents back in this place: `leaveGuard`), and a reload or a closed browser tab (the browser's
- * own question, `beforeunload`, as for a draft's text). The question opens on "Keep editing",
- * which gives focus back to what asked to leave. Not asked: leaving the workspace itself by a link
- * to another page.
+ * the YAML view holds text that cannot be read or is not read yet, leaving asks first: "Close the
+ * naming rules"; the shell's own ways out (`leaveGuard`): its "Naming rules" button, opening an
+ * item, and every navigation that would take the rules off the page, which the shell holds back
+ * through the router until the question is answered (Back and Forward, a link to another page, a
+ * search result's link); and a reload or a closed browser tab (the browser's own question,
+ * `beforeunload`, as for a draft's text). The question opens on "Keep editing", which gives focus
+ * back to what asked to leave and tells whoever asked that the person stays.
  *
  * Focus: the panel opens on its heading; a preview puts focus on the preview's heading; the
  * question before renaming opens on the choice that keeps the names, and gives focus back to the
@@ -95,8 +96,12 @@ import {
   saveRules,
 } from './rules';
 
-/** Leave the naming rules by `proceed`, after a question when edits would be lost. */
-export type LeaveGuard = (proceed: () => void) => void;
+/**
+ * Leave the naming rules by `proceed`, after a question when edits would be lost. `stay` is
+ * called instead when the person chooses to keep editing (or asks to leave another way before
+ * answering): whoever asked learns that this leaving is off.
+ */
+export type LeaveGuard = (proceed: () => void, stay?: () => void) => void;
 
 export interface NamingRulesProps {
   /** Leave the naming rules; the caller puts focus back on what opened them. */
@@ -369,17 +374,19 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
     return null;
   };
   // Leaving with edits that are not saved asks first.
-  const [leaving, setLeaving] = useState<{ proceed: () => void } | null>(null);
+  const [leaving, setLeaving] = useState<{ proceed: () => void; stay?: () => void } | null>(null);
   /** Whether leaving now would lose edits; text that is not read yet counts as one. */
   const unsavedNow = () => reading.unread() || unreadable || changed;
-  const leave: LeaveGuard = (proceed) => {
+  const leave: LeaveGuard = (proceed, stay) => {
     if (!unsavedNow()) {
       proceed();
       return;
     }
+    // A question still open is over: the one who asked it is told that the person stayed.
+    leaving?.stay?.();
     opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     focusNext.current = 'stay';
-    setLeaving({ proceed });
+    setLeaving(stay === undefined ? { proceed } : { proceed, stay });
   };
   const guard = useRef(leave);
   const unsaved = useRef(unsavedNow);
@@ -389,7 +396,7 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   });
   useEffect(() => {
     if (leaveGuard === undefined) return;
-    leaveGuard.current = (proceed) => guard.current(proceed);
+    leaveGuard.current = (proceed, stay) => guard.current(proceed, stay);
     return () => {
       leaveGuard.current = null;
     };
@@ -464,6 +471,7 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
               onClick={() => {
                 focusNext.current = 'opener';
                 setLeaving(null);
+                leaving.stay?.();
               }}
             >
               Keep editing
@@ -471,6 +479,9 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
             <button
               type="button"
               onClick={() => {
+                // Focus leaves this button before it goes: back to what asked to leave, so a
+                // navigation that follows begins with focus on the page, never on its body.
+                focusNext.current = 'opener';
                 setLeaving(null);
                 leaving.proceed();
               }}
