@@ -37,7 +37,7 @@ use crate::import::{
 use crate::item::{
     CreateFolderRequest, CreateItemRequest, DeleteItemRequest, DiscardDraftRequest, GetItemRequest,
     ItemStatus, ListDraftsRequest, ListItemsRequest, ListTypesRequest, MoveItemRequest,
-    SaveDraftRequest, SetLifecycleRequest, SetTypeRequest,
+    SaveDraftRequest, SetLifecycleRequest, SetTypeRequest, check_item_text,
 };
 use crate::proposal::{
     AcceptProposalRequest, AddCommentRequest, DeclineProposalRequest, GetProposalRequest,
@@ -86,8 +86,10 @@ macro_rules! workspace_keyed {
 }
 
 macro_rules! tenant_admin_keyed {
-    ($($request:ty),* $(,)?) => {
+    ($($request:ty => $workspace:literal),* $(,)?) => {
         $(impl RequestScope for $request {
+            const RESPONSE_WORKSPACE: Option<&'static str> = Some($workspace);
+
             fn targets(&self) -> Vec<Target> {
                 vec![Target::Deployment(Permission::Admin)]
             }
@@ -153,6 +155,16 @@ pub trait RequestScope {
     /// Replay behaviour for this operation's completed mutations.
     const REPLAY: ReplayPolicy = ReplayPolicy::StoredResponse;
 
+    /// JSON pointer into the response to the one workspace a mutation authorized at the tenant
+    /// is about (the workspace it creates, or a purge's target); `None` for every other
+    /// request. The mutation ledger records that workspace when the mutation completes, so a
+    /// purge of it reaches the stored response by identity, never by its text, except for the
+    /// two purge operations, whose rows are kept (their response is the purge record). A
+    /// response in which the pointer finds nothing names no workspace (a tenant job's absent
+    /// `workspace_id`). A response that names workspaces only in a list (a connector's grants)
+    /// names no one workspace and declares none.
+    const RESPONSE_WORKSPACE: Option<&'static str> = None;
+
     /// Every resource that must be authorized, first the one named by the table permission.
     fn targets(&self) -> Vec<Target>;
 
@@ -162,10 +174,12 @@ pub trait RequestScope {
     /// Refuse a decoded request that breaks a rule its wire schema cannot state.
     ///
     /// Dispatch calls this before any grant lookup or handler, so the refusal does not depend
-    /// on who asks. Most requests have no such rule.
+    /// on who asks. Most requests have no such rule. A request carrying an item's text refuses
+    /// one longer than `item::MAX_ITEM_TEXT_BYTES` here.
     ///
     /// # Errors
-    /// Returns `InvalidInput` naming the offending field.
+    /// Returns `InvalidInput`, or `TooLarge` for an item text over the bound, naming the
+    /// offending field.
     fn check_rules(&self) -> Result<(), ApiError> {
         Ok(())
     }
@@ -213,8 +227,6 @@ workspace_read!(
 workspace_keyed!(Write:
     UpdateWorkspaceRequest,
     ExportWorkspaceRequest,
-    CreateItemRequest,
-    SaveDraftRequest,
     DiscardDraftRequest,
     MoveItemRequest,
     DeleteItemRequest,
@@ -228,7 +240,6 @@ workspace_keyed!(Write:
     RetryJobRequest,
     CancelJobRequest,
     RedigestRequest,
-    CorrectDigestRequest,
     SetRulesRequest,
     ApplyNamesRequest,
     ExportViewRequest,
@@ -243,9 +254,9 @@ workspace_keyed!(Admin:
 );
 
 tenant_admin_keyed!(
-    PurgeWorkspaceRequest,
-    PurgeItemRequest,
-    BackupInstallationRequest,
+    PurgeWorkspaceRequest => "/target/workspace_id",
+    PurgeItemRequest => "/target/workspace_id",
+    BackupInstallationRequest => "/workspace_id",
 );
 
 tenant_admin_read!(
@@ -264,6 +275,8 @@ authenticated!(
 );
 
 impl RequestScope for CreateWorkspaceRequest {
+    const RESPONSE_WORKSPACE: Option<&'static str> = Some("/id");
+
     fn targets(&self) -> Vec<Target> {
         vec![Target::Deployment(Permission::Admin)]
     }
@@ -319,9 +332,50 @@ impl RequestScope for OpenProposalRequest {
     fn idempotency_key(&self) -> Option<&IdempotencyKey> {
         Some(&self.idempotency_key)
     }
-    /// A supply proposal holds only supply changes, each for a different item.
+    /// A supply proposal holds only supply changes, each for a different item, and no change
+    /// carries an item text over the bound.
     fn check_rules(&self) -> Result<(), ApiError> {
-        ProposalKind::of(&self.changes).map(|_| ())
+        ProposalKind::of(&self.changes)?;
+        for (index, change) in self.changes.iter().enumerate() {
+            change.check_text(&format!("/changes/{index}"))?;
+        }
+        Ok(())
+    }
+}
+
+impl RequestScope for CreateItemRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Write)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        Some(&self.idempotency_key)
+    }
+    fn check_rules(&self) -> Result<(), ApiError> {
+        check_item_text(&self.body, "/body")
+    }
+}
+
+impl RequestScope for SaveDraftRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Write)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        Some(&self.idempotency_key)
+    }
+    fn check_rules(&self) -> Result<(), ApiError> {
+        check_item_text(&self.body, "/body")
+    }
+}
+
+impl RequestScope for CorrectDigestRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Write)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        Some(&self.idempotency_key)
+    }
+    fn check_rules(&self) -> Result<(), ApiError> {
+        check_item_text(&self.corrected_markdown, "/corrected_markdown")
     }
 }
 

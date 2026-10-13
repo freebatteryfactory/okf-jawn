@@ -10,6 +10,8 @@ use okf_jawn_core::storage::StorageScope;
 use rusqlite::{OptionalExtension, params};
 
 use crate::db::{Db, conflict, scope_key, sql};
+use crate::purge::guard;
+use crate::puts;
 use crate::seam;
 
 /// `SandboxCapabilityStore` over the records database.
@@ -36,6 +38,7 @@ impl SandboxCapabilityStore for SqliteSandbox {
     ) -> PortFuture<'a, ()> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
+            guard::refuse(transaction, &tenant, &workspace)?;
             let inserted = transaction
                 .execute(
                     "INSERT INTO sandbox_capabilities (token_hash, tenant_id, workspace_id,
@@ -56,7 +59,9 @@ impl SandboxCapabilityStore for SqliteSandbox {
             if inserted == 0 {
                 return Err(conflict("a capability with this token hash already exists"));
             }
-            Ok(())
+            // Only a capability this call stored lands its object; a repeat is refused above
+            // and rolls back.
+            puts::land(transaction, &tenant, &workspace, [&mint.object])
         }))
     }
 

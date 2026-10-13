@@ -179,7 +179,8 @@ pub struct CreateItemRequest {
     pub type_name: String,
     /// Built-in role.
     pub kind: ItemKind,
-    /// Markdown content.
+    /// Markdown content, at most 8 MiB in UTF-8.
+    #[schemars(length(max = MAX_ITEM_TEXT_BYTES))]
     pub body: String,
     /// Preserved extension properties.
     pub properties: std::collections::BTreeMap<String, serde_json::Value>,
@@ -189,8 +190,9 @@ pub struct CreateItemRequest {
 
 /// Save the caller's draft; always succeeds even when the head has moved.
 ///
-/// The first save takes the item's head revision as its base. Later saves keep the draft's
-/// base unless `base_revision` equals the current head, which is the explicit rebase.
+/// The first save records `base_revision`, the revision the editor saw, as the draft's base;
+/// the item must exist at that revision. Later saves keep the draft's base unless
+/// `base_revision` equals the current head, which is the explicit rebase.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SaveDraftRequest {
@@ -200,7 +202,8 @@ pub struct SaveDraftRequest {
     pub item_id: crate::identity::ItemId,
     /// Revision the editor saw; equal to the current head to rebase after resolving a conflict.
     pub base_revision: crate::identity::Revision,
-    /// Drafted Markdown body.
+    /// Drafted Markdown body, at most 8 MiB in UTF-8.
+    #[schemars(length(max = MAX_ITEM_TEXT_BYTES))]
     pub body: String,
     /// Complete preserved property map.
     pub properties: std::collections::BTreeMap<String, serde_json::Value>,
@@ -354,3 +357,36 @@ pub struct SetTypeRequest {
 
 /// The frontmatter key of the application-owned header every item file carries.
 pub const APP_HEADER_KEY: &str = "okf_jawn";
+
+/// The largest Markdown or body text of one item in a write request: 8 MiB of UTF-8.
+///
+/// It bounds every write field that carries a whole item's text or a proposal's item text:
+/// `body` of `create_item` and `save_draft`, `body` of a proposal's `create` and `edit` changes,
+/// `markdown` of its `supply_extraction` changes, and `corrected_markdown` of `correct_digest`.
+/// Each field's published schema states it as `maxLength`. JSON Schema counts characters there,
+/// and a text never has more characters than UTF-8 bytes, so a text within this bound always
+/// passes the schema; `check_rules` counts the bytes and refuses a longer text as `too_large`,
+/// naming the field.
+/// The request body as a whole is bounded by `transport::MAX_REQUEST_BODY_BYTES`.
+pub const MAX_ITEM_TEXT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Refuse an item text longer than [`MAX_ITEM_TEXT_BYTES`] UTF-8 bytes.
+///
+/// `field` is the JSON Pointer of the text inside its request, such as `/body` or
+/// `/changes/0/markdown`.
+///
+/// # Errors
+/// Returns `TooLarge` on `field` when `text` is longer than the bound.
+pub fn check_item_text(text: &str, field: &str) -> Result<(), crate::error::ApiError> {
+    if text.len() <= MAX_ITEM_TEXT_BYTES {
+        return Ok(());
+    }
+    Err(crate::error::ApiError::new(
+        crate::error::ErrorCode::TooLarge,
+        format!(
+            "The text is {} bytes; one item's text is at most {MAX_ITEM_TEXT_BYTES} bytes",
+            text.len()
+        ),
+    )
+    .with_field(field))
+}

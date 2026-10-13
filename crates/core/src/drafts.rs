@@ -19,7 +19,10 @@ pub struct DraftWrite {
     pub item_id: ItemId,
     /// Server-established editor subject.
     pub editor: String,
-    /// Head revision the draft is based on.
+    /// The revision the editor saw when it began the draft: the request's `base_revision` on a
+    /// first save, the draft's kept base on a later one, and the head when a later save names the
+    /// head (the explicit rebase). A Snapshot is blocked when the item changed between this
+    /// revision and the head. It need not be the head at the time of the save.
     pub base_revision: Revision,
     /// Drafted Markdown body.
     pub body: String,

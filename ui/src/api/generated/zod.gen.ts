@@ -1600,7 +1600,7 @@ export const zConnector = z.object({
 export const zCorrectDigestRequest = z.object({
     adopts: zProposalId.nullish(),
     base_revision: zRevision,
-    corrected_markdown: z.string(),
+    corrected_markdown: z.string().max(8388608),
     digest: zDigest,
     idempotency_key: zIdempotencyKey,
     item_id: zItemId,
@@ -2117,12 +2117,13 @@ export const zRetryJobRequest = z.object({
 /**
  * Save the caller's draft; always succeeds even when the head has moved.
  *
- * The first save takes the item's head revision as its base. Later saves keep the draft's
- * base unless `base_revision` equals the current head, which is the explicit rebase.
+ * The first save records `base_revision`, the revision the editor saw, as the draft's base;
+ * the item must exist at that revision. Later saves keep the draft's base unless
+ * `base_revision` equals the current head, which is the explicit rebase.
  */
 export const zSaveDraftRequest = z.object({
     base_revision: zRevision,
-    body: z.string(),
+    body: z.string().max(8388608),
     idempotency_key: zIdempotencyKey,
     item_id: zItemId,
     properties: z.record(z.string(), z.unknown()),
@@ -2260,14 +2261,14 @@ export const zWorkspacePath = z.string().min(1).max(4096).regex(/^[^\/\\:<>"|?*\
  */
 export const zChange = z.union([
     z.object({
-        body: z.string(),
+        body: z.string().max(8388608),
         kind: z.literal('create'),
         path: zWorkspacePath,
         properties: z.record(z.string(), z.unknown()),
         type_name: z.string()
     }),
     z.object({
-        body: z.string(),
+        body: z.string().max(8388608),
         item_id: zItemId,
         kind: z.literal('edit'),
         properties: z.record(z.string(), z.unknown())
@@ -2285,7 +2286,7 @@ export const zChange = z.union([
         based_on: zDigest.nullish(),
         item_id: zItemId,
         kind: z.literal('supply_extraction'),
-        markdown: z.string(),
+        markdown: z.string().max(8388608),
         pages: z.array(zPageRange).optional()
     })
 ]);
@@ -2305,7 +2306,7 @@ export const zCreateFolderRequest = z.object({
  */
 export const zCreateItemRequest = z.object({
     base_revision: zRevision,
-    body: z.string(),
+    body: z.string().max(8388608),
     idempotency_key: zIdempotencyKey,
     kind: zItemKind,
     path: zWorkspacePath,

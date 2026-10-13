@@ -46,11 +46,20 @@ export const downloadTenantArtifact = <ThrowOnError extends boolean = false>(opt
  * Show actionable maintenance observations; an empty result is not a safety certificate.
  */
 export const getAttention = <ThrowOnError extends boolean = false>(options: Options<GetAttentionData, ThrowOnError>): RequestResult<GetAttentionResponses, GetAttentionErrors, ThrowOnError> => (options.client ?? client).post<GetAttentionResponses, GetAttentionErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/attention/get-attention',
     ...options,
     headers: {
@@ -65,11 +74,20 @@ export const getAttention = <ThrowOnError extends boolean = false>(options: Opti
  * Rebuild only derived search and link data; preserve reviews and receipts.
  */
 export const rebuildIndex = <ThrowOnError extends boolean = false>(options: Options<RebuildIndexData, ThrowOnError>): RequestResult<RebuildIndexResponses, RebuildIndexErrors, ThrowOnError> => (options.client ?? client).post<RebuildIndexResponses, RebuildIndexErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/attention/rebuild-index',
     ...options,
     headers: {
@@ -84,11 +102,20 @@ export const rebuildIndex = <ThrowOnError extends boolean = false>(options: Opti
  * Apply the checked preview and rewrite references in one versioned action.
  */
 export const applyNames = <ThrowOnError extends boolean = false>(options: Options<ApplyNamesData, ThrowOnError>): RequestResult<ApplyNamesResponses, ApplyNamesErrors, ThrowOnError> => (options.client ?? client).post<ApplyNamesResponses, ApplyNamesErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/conventions/apply-names',
     ...options,
     headers: {
@@ -103,11 +130,20 @@ export const applyNames = <ThrowOnError extends boolean = false>(options: Option
  * Read the same naming conventions used by the form, YAML editor, and import process.
  */
 export const getRules = <ThrowOnError extends boolean = false>(options: Options<GetRulesData, ThrowOnError>): RequestResult<GetRulesResponses, GetRulesErrors, ThrowOnError> => (options.client ?? client).post<GetRulesResponses, GetRulesErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/conventions/get-rules',
     ...options,
     headers: {
@@ -122,11 +158,20 @@ export const getRules = <ThrowOnError extends boolean = false>(options: Options<
  * Compute before and after naming changes without mutating content.
  */
 export const previewNames = <ThrowOnError extends boolean = false>(options: Options<PreviewNamesData, ThrowOnError>): RequestResult<PreviewNamesResponses, PreviewNamesErrors, ThrowOnError> => (options.client ?? client).post<PreviewNamesResponses, PreviewNamesErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/conventions/preview-names',
     ...options,
     headers: {
@@ -141,11 +186,20 @@ export const previewNames = <ThrowOnError extends boolean = false>(options: Opti
  * Save explicit rules as versioned context.
  */
 export const setRules = <ThrowOnError extends boolean = false>(options: Options<SetRulesData, ThrowOnError>): RequestResult<SetRulesResponses, SetRulesErrors, ThrowOnError> => (options.client ?? client).post<SetRulesResponses, SetRulesErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/conventions/set-rules',
     ...options,
     headers: {
@@ -160,11 +214,20 @@ export const setRules = <ThrowOnError extends boolean = false>(options: Options<
  * Inspect the exact sources returned through this server, not an external model internal state.
  */
 export const getReceipt = <ThrowOnError extends boolean = false>(options: Options<GetReceiptData, ThrowOnError>): RequestResult<GetReceiptResponses, GetReceiptErrors, ThrowOnError> => (options.client ?? client).post<GetReceiptResponses, GetReceiptErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/events/get-receipt',
     ...options,
     headers: {
@@ -179,11 +242,20 @@ export const getReceipt = <ThrowOnError extends boolean = false>(options: Option
  * Read resumable notifications without treating them as authoritative document content.
  */
 export const listEvents = <ThrowOnError extends boolean = false>(options: Options<ListEventsData, ThrowOnError>): RequestResult<ListEventsResponses, ListEventsErrors, ThrowOnError> => (options.client ?? client).post<ListEventsResponses, ListEventsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/events/list-events',
     ...options,
     headers: {
@@ -198,11 +270,20 @@ export const listEvents = <ThrowOnError extends boolean = false>(options: Option
  * Read installation-level notifications: sign-ins, connector issue and revocation, and refusals outside a workspace.
  */
 export const listTenantEvents = <ThrowOnError extends boolean = false>(options: Options<ListTenantEventsData, ThrowOnError>): RequestResult<ListTenantEventsResponses, ListTenantEventsErrors, ThrowOnError> => (options.client ?? client).post<ListTenantEventsResponses, ListTenantEventsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/events/list-tenant-events',
     ...options,
     headers: {
@@ -217,11 +298,20 @@ export const listTenantEvents = <ThrowOnError extends boolean = false>(options: 
  * Read process liveness, not feature qualification.
  */
 export const getHealth = <ThrowOnError extends boolean = false>(options: Options<GetHealthData, ThrowOnError>): RequestResult<GetHealthResponses, GetHealthErrors, ThrowOnError> => (options.client ?? client).post<GetHealthResponses, GetHealthErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/health/get-health',
     ...options,
     headers: {
@@ -236,11 +326,20 @@ export const getHealth = <ThrowOnError extends boolean = false>(options: Options
  * Read configured dependency readiness.
  */
 export const getReadiness = <ThrowOnError extends boolean = false>(options: Options<GetReadinessData, ThrowOnError>): RequestResult<GetReadinessResponses, GetReadinessErrors, ThrowOnError> => (options.client ?? client).post<GetReadinessResponses, GetReadinessErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/health/get-readiness',
     ...options,
     headers: {
@@ -255,11 +354,20 @@ export const getReadiness = <ThrowOnError extends boolean = false>(options: Opti
  * Show which commit last changed each selected line, not the origin of each fact.
  */
 export const blameItem = <ThrowOnError extends boolean = false>(options: Options<BlameItemData, ThrowOnError>): RequestResult<BlameItemResponses, BlameItemErrors, ThrowOnError> => (options.client ?? client).post<BlameItemResponses, BlameItemErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/history/blame-item',
     ...options,
     headers: {
@@ -274,11 +382,20 @@ export const blameItem = <ThrowOnError extends boolean = false>(options: Options
  * Name a snapshot from the caller's saved drafts; blocked only when a selected item was changed or deleted since its draft's base.
  */
 export const commitItems = <ThrowOnError extends boolean = false>(options: Options<CommitItemsData, ThrowOnError>): RequestResult<CommitItemsResponses, CommitItemsErrors, ThrowOnError> => (options.client ?? client).post<CommitItemsResponses, CommitItemsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/history/commit-items',
     ...options,
     headers: {
@@ -293,11 +410,20 @@ export const commitItems = <ThrowOnError extends boolean = false>(options: Optio
  * Compare two explicit versions and retain both references.
  */
 export const diffItems = <ThrowOnError extends boolean = false>(options: Options<DiffItemsData, ThrowOnError>): RequestResult<DiffItemsResponses, DiffItemsErrors, ThrowOnError> => (options.client ?? client).post<DiffItemsResponses, DiffItemsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/history/diff-items',
     ...options,
     headers: {
@@ -312,11 +438,20 @@ export const diffItems = <ThrowOnError extends boolean = false>(options: Options
  * Read content snapshots; Git history is not the complete application event log.
  */
 export const logItems = <ThrowOnError extends boolean = false>(options: Options<LogItemsData, ThrowOnError>): RequestResult<LogItemsResponses, LogItemsErrors, ThrowOnError> => (options.client ?? client).post<LogItemsResponses, LogItemsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/history/log-items',
     ...options,
     headers: {
@@ -331,11 +466,20 @@ export const logItems = <ThrowOnError extends boolean = false>(options: Options<
  * Restore selected historical content as a new commit without rewriting history.
  */
 export const restoreItems = <ThrowOnError extends boolean = false>(options: Options<RestoreItemsData, ThrowOnError>): RequestResult<RestoreItemsResponses, RestoreItemsErrors, ThrowOnError> => (options.client ?? client).post<RestoreItemsResponses, RestoreItemsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/history/restore-items',
     ...options,
     headers: {
@@ -350,11 +494,20 @@ export const restoreItems = <ThrowOnError extends boolean = false>(options: Opti
  * Cancel work while retaining completed uploads and recorded state.
  */
 export const cancelJob = <ThrowOnError extends boolean = false>(options: Options<CancelJobData, ThrowOnError>): RequestResult<CancelJobResponses, CancelJobErrors, ThrowOnError> => (options.client ?? client).post<CancelJobResponses, CancelJobErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/imports/cancel-job',
     ...options,
     headers: {
@@ -369,11 +522,20 @@ export const cancelJob = <ThrowOnError extends boolean = false>(options: Options
  * Check expected bytes and digest before conversion.
  */
 export const completeUpload = <ThrowOnError extends boolean = false>(options: Options<CompleteUploadData, ThrowOnError>): RequestResult<CompleteUploadResponses, CompleteUploadErrors, ThrowOnError> => (options.client ?? client).post<CompleteUploadResponses, CompleteUploadErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/imports/complete-upload',
     ...options,
     headers: {
@@ -388,11 +550,20 @@ export const completeUpload = <ThrowOnError extends boolean = false>(options: Op
  * Save a correction separately from generated extraction.
  */
 export const correctDigest = <ThrowOnError extends boolean = false>(options: Options<CorrectDigestData, ThrowOnError>): RequestResult<CorrectDigestResponses, CorrectDigestErrors, ThrowOnError> => (options.client ?? client).post<CorrectDigestResponses, CorrectDigestErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/imports/correct-digest',
     ...options,
     headers: {
@@ -407,11 +578,20 @@ export const correctDigest = <ThrowOnError extends boolean = false>(options: Opt
  * Register a source occurrence before authenticated binary upload.
  */
 export const createUpload = <ThrowOnError extends boolean = false>(options: Options<CreateUploadData, ThrowOnError>): RequestResult<CreateUploadResponses, CreateUploadErrors, ThrowOnError> => (options.client ?? client).post<CreateUploadResponses, CreateUploadErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/imports/create-upload',
     ...options,
     headers: {
@@ -426,11 +606,20 @@ export const createUpload = <ThrowOnError extends boolean = false>(options: Opti
  * Read durable job progress; a receipt does not imply completion.
  */
 export const getJob = <ThrowOnError extends boolean = false>(options: Options<GetJobData, ThrowOnError>): RequestResult<GetJobResponses, GetJobErrors, ThrowOnError> => (options.client ?? client).post<GetJobResponses, GetJobErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/imports/get-job',
     ...options,
     headers: {
@@ -445,11 +634,20 @@ export const getJob = <ThrowOnError extends boolean = false>(options: Options<Ge
  * Read an installation-level job: an installation backup or a purge.
  */
 export const getTenantJob = <ThrowOnError extends boolean = false>(options: Options<GetTenantJobData, ThrowOnError>): RequestResult<GetTenantJobResponses, GetTenantJobErrors, ThrowOnError> => (options.client ?? client).post<GetTenantJobResponses, GetTenantJobErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/imports/get-tenant-job',
     ...options,
     headers: {
@@ -464,11 +662,20 @@ export const getTenantJob = <ThrowOnError extends boolean = false>(options: Opti
  * List conversion, export, and maintenance work.
  */
 export const listJobs = <ThrowOnError extends boolean = false>(options: Options<ListJobsData, ThrowOnError>): RequestResult<ListJobsResponses, ListJobsErrors, ThrowOnError> => (options.client ?? client).post<ListJobsResponses, ListJobsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/imports/list-jobs',
     ...options,
     headers: {
@@ -483,11 +690,20 @@ export const listJobs = <ThrowOnError extends boolean = false>(options: Options<
  * List installation-level jobs, newest first, with their artifacts.
  */
 export const listTenantJobs = <ThrowOnError extends boolean = false>(options: Options<ListTenantJobsData, ThrowOnError>): RequestResult<ListTenantJobsResponses, ListTenantJobsErrors, ThrowOnError> => (options.client ?? client).post<ListTenantJobsResponses, ListTenantJobsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/imports/list-tenant-jobs',
     ...options,
     headers: {
@@ -502,11 +718,20 @@ export const listTenantJobs = <ThrowOnError extends boolean = false>(options: Op
  * Re-run extraction with declared settings; preserve prior digests and separate corrections.
  */
 export const redigestItem = <ThrowOnError extends boolean = false>(options: Options<RedigestItemData, ThrowOnError>): RequestResult<RedigestItemResponses, RedigestItemErrors, ThrowOnError> => (options.client ?? client).post<RedigestItemResponses, RedigestItemErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/imports/redigest-item',
     ...options,
     headers: {
@@ -521,11 +746,20 @@ export const redigestItem = <ThrowOnError extends boolean = false>(options: Opti
  * Retry the same durable work identity without duplicating completed effects.
  */
 export const retryJob = <ThrowOnError extends boolean = false>(options: Options<RetryJobData, ThrowOnError>): RequestResult<RetryJobResponses, RetryJobErrors, ThrowOnError> => (options.client ?? client).post<RetryJobResponses, RetryJobErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/imports/retry-job',
     ...options,
     headers: {
@@ -540,11 +774,20 @@ export const retryJob = <ThrowOnError extends boolean = false>(options: Options<
  * Durably register conversion and source creation, preserving originals.
  */
 export const startImport = <ThrowOnError extends boolean = false>(options: Options<StartImportData, ThrowOnError>): RequestResult<StartImportResponses, StartImportErrors, ThrowOnError> => (options.client ?? client).post<StartImportResponses, StartImportErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/imports/start-import',
     ...options,
     headers: {
@@ -559,11 +802,20 @@ export const startImport = <ThrowOnError extends boolean = false>(options: Optio
  * Create a user-selected folder with a maintained index.
  */
 export const createFolder = <ThrowOnError extends boolean = false>(options: Options<CreateFolderData, ThrowOnError>): RequestResult<CreateFolderResponses, CreateFolderErrors, ThrowOnError> => (options.client ?? client).post<CreateFolderResponses, CreateFolderErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/items/create-folder',
     ...options,
     headers: {
@@ -578,11 +830,20 @@ export const createFolder = <ThrowOnError extends boolean = false>(options: Opti
  * Create authored content without modifying source bytes.
  */
 export const createItem = <ThrowOnError extends boolean = false>(options: Options<CreateItemData, ThrowOnError>): RequestResult<CreateItemResponses, CreateItemErrors, ThrowOnError> => (options.client ?? client).post<CreateItemResponses, CreateItemErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/items/create-item',
     ...options,
     headers: {
@@ -597,11 +858,20 @@ export const createItem = <ThrowOnError extends boolean = false>(options: Option
  * Remove the current reference while retaining historical source objects.
  */
 export const deleteItem = <ThrowOnError extends boolean = false>(options: Options<DeleteItemData, ThrowOnError>): RequestResult<DeleteItemResponses, DeleteItemErrors, ThrowOnError> => (options.client ?? client).post<DeleteItemResponses, DeleteItemErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/items/delete-item',
     ...options,
     headers: {
@@ -616,11 +886,20 @@ export const deleteItem = <ThrowOnError extends boolean = false>(options: Option
  * Remove the caller's own draft without changing committed content.
  */
 export const discardDraft = <ThrowOnError extends boolean = false>(options: Options<DiscardDraftData, ThrowOnError>): RequestResult<DiscardDraftResponses, DiscardDraftErrors, ThrowOnError> => (options.client ?? client).post<DiscardDraftResponses, DiscardDraftErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/items/discard-draft',
     ...options,
     headers: {
@@ -635,11 +914,20 @@ export const discardDraft = <ThrowOnError extends boolean = false>(options: Opti
  * Read the editable Markdown and preserved properties of an item.
  */
 export const getItem = <ThrowOnError extends boolean = false>(options: Options<GetItemData, ThrowOnError>): RequestResult<GetItemResponses, GetItemErrors, ThrowOnError> => (options.client ?? client).post<GetItemResponses, GetItemErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/items/get-item',
     ...options,
     headers: {
@@ -654,11 +942,20 @@ export const getItem = <ThrowOnError extends boolean = false>(options: Options<G
  * List only the caller's own uncommitted drafts.
  */
 export const listDrafts = <ThrowOnError extends boolean = false>(options: Options<ListDraftsData, ThrowOnError>): RequestResult<ListDraftsResponses, ListDraftsErrors, ThrowOnError> => (options.client ?? client).post<ListDraftsResponses, ListDraftsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/items/list-drafts',
     ...options,
     headers: {
@@ -673,11 +970,20 @@ export const listDrafts = <ThrowOnError extends boolean = false>(options: Option
  * List a folder with one-line descriptions at one resolved revision. With extraction = "unprocessed", list only the source files whose conversion is partial, failed or unsupported.
  */
 export const listItems = <ThrowOnError extends boolean = false>(options: Options<ListItemsData, ThrowOnError>): RequestResult<ListItemsResponses, ListItemsErrors, ThrowOnError> => (options.client ?? client).post<ListItemsResponses, ListItemsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/items/list-items',
     ...options,
     headers: {
@@ -692,11 +998,20 @@ export const listItems = <ThrowOnError extends boolean = false>(options: Options
  * Move an item and rewrite references in one committed change.
  */
 export const moveItem = <ThrowOnError extends boolean = false>(options: Options<MoveItemData, ThrowOnError>): RequestResult<MoveItemResponses, MoveItemErrors, ThrowOnError> => (options.client ?? client).post<MoveItemResponses, MoveItemErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/items/move-item',
     ...options,
     headers: {
@@ -711,11 +1026,20 @@ export const moveItem = <ThrowOnError extends boolean = false>(options: Options<
  * Permanently remove one item's bytes, derivatives, index entries and history, rewrite or delete the managed backups that hold it, and mark what referred to it invalidated. Tenant administrator in a human session only.
  */
 export const purgeItem = <ThrowOnError extends boolean = false>(options: Options<PurgeItemData, ThrowOnError>): RequestResult<PurgeItemResponses, PurgeItemErrors, ThrowOnError> => (options.client ?? client).post<PurgeItemResponses, PurgeItemErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/items/purge-item',
     ...options,
     headers: {
@@ -730,11 +1054,20 @@ export const purgeItem = <ThrowOnError extends boolean = false>(options: Options
  * Autosave the caller's own draft against its base revision; never creates a revision, and only a Snapshot commits it.
  */
 export const saveDraft = <ThrowOnError extends boolean = false>(options: Options<SaveDraftData, ThrowOnError>): RequestResult<SaveDraftResponses, SaveDraftErrors, ThrowOnError> => (options.client ?? client).post<SaveDraftResponses, SaveDraftErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/items/save-draft',
     ...options,
     headers: {
@@ -749,11 +1082,20 @@ export const saveDraft = <ThrowOnError extends boolean = false>(options: Options
  * Change lifecycle without approving any claim in the document.
  */
 export const setLifecycle = <ThrowOnError extends boolean = false>(options: Options<SetLifecycleData, ThrowOnError>): RequestResult<SetLifecycleResponses, SetLifecycleErrors, ThrowOnError> => (options.client ?? client).post<SetLifecycleResponses, SetLifecycleErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/items/set-lifecycle',
     ...options,
     headers: {
@@ -768,11 +1110,20 @@ export const setLifecycle = <ThrowOnError extends boolean = false>(options: Opti
  * Accept exactly the confirmed proposal against the displayed head; never an agent tool.
  */
 export const acceptProposal = <ThrowOnError extends boolean = false>(options: Options<AcceptProposalData, ThrowOnError>): RequestResult<AcceptProposalResponses, AcceptProposalErrors, ThrowOnError> => (options.client ?? client).post<AcceptProposalResponses, AcceptProposalErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/proposals/accept-proposal',
     ...options,
     headers: {
@@ -787,11 +1138,20 @@ export const acceptProposal = <ThrowOnError extends boolean = false>(options: Op
  * Add discussion without certifying content.
  */
 export const addComment = <ThrowOnError extends boolean = false>(options: Options<AddCommentData, ThrowOnError>): RequestResult<AddCommentResponses, AddCommentErrors, ThrowOnError> => (options.client ?? client).post<AddCommentResponses, AddCommentErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/proposals/add-comment',
     ...options,
     headers: {
@@ -806,11 +1166,20 @@ export const addComment = <ThrowOnError extends boolean = false>(options: Option
  * Close a proposal without applying its content.
  */
 export const declineProposal = <ThrowOnError extends boolean = false>(options: Options<DeclineProposalData, ThrowOnError>): RequestResult<DeclineProposalResponses, DeclineProposalErrors, ThrowOnError> => (options.client ?? client).post<DeclineProposalResponses, DeclineProposalErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/proposals/decline-proposal',
     ...options,
     headers: {
@@ -825,11 +1194,20 @@ export const declineProposal = <ThrowOnError extends boolean = false>(options: O
  * Read the exact proposed content and base revision.
  */
 export const getProposal = <ThrowOnError extends boolean = false>(options: Options<GetProposalData, ThrowOnError>): RequestResult<GetProposalResponses, GetProposalErrors, ThrowOnError> => (options.client ?? client).post<GetProposalResponses, GetProposalErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/proposals/get-proposal',
     ...options,
     headers: {
@@ -844,11 +1222,20 @@ export const getProposal = <ThrowOnError extends boolean = false>(options: Optio
  * List visible suggested changes.
  */
 export const listProposals = <ThrowOnError extends boolean = false>(options: Options<ListProposalsData, ThrowOnError>): RequestResult<ListProposalsResponses, ListProposalsErrors, ThrowOnError> => (options.client ?? client).post<ListProposalsResponses, ListProposalsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/proposals/list-proposals',
     ...options,
     headers: {
@@ -863,11 +1250,20 @@ export const listProposals = <ThrowOnError extends boolean = false>(options: Opt
  * Create a suggested change set without merging or marking anything reviewed. A `supply_extraction` change proposes the complete text of an unprocessed source file; it is applied only when a person accepts it and is labelled as supplied by an agent.
  */
 export const openProposal = <ThrowOnError extends boolean = false>(options: Options<OpenProposalData, ThrowOnError>): RequestResult<OpenProposalResponses, OpenProposalErrors, ThrowOnError> => (options.client ?? client).post<OpenProposalResponses, OpenProposalErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/proposals/open-proposal',
     ...options,
     headers: {
@@ -882,11 +1278,20 @@ export const openProposal = <ThrowOnError extends boolean = false>(options: Opti
  * Mint a short-lived capability URL on the sandbox origin bound to one workspace, item, revision and representation; Explorer only.
  */
 export const createSandboxCapability = <ThrowOnError extends boolean = false>(options: Options<CreateSandboxCapabilityData, ThrowOnError>): RequestResult<CreateSandboxCapabilityResponses, CreateSandboxCapabilityErrors, ThrowOnError> => (options.client ?? client).post<CreateSandboxCapabilityResponses, CreateSandboxCapabilityErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/reads/create-sandbox-capability',
     ...options,
     headers: {
@@ -901,11 +1306,20 @@ export const createSandboxCapability = <ThrowOnError extends boolean = false>(op
  * Return a bounded binary block authorized through its source; knowing a hash never grants access.
  */
 export const getObject = <ThrowOnError extends boolean = false>(options: Options<GetObjectData, ThrowOnError>): RequestResult<GetObjectResponses, GetObjectErrors, ThrowOnError> => (options.client ?? client).post<GetObjectResponses, GetObjectErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/reads/get-object',
     ...options,
     headers: {
@@ -920,11 +1334,20 @@ export const getObject = <ThrowOnError extends boolean = false>(options: Options
  * Show supporting sources and occurrence-specific provenance.
  */
 export const getSources = <ThrowOnError extends boolean = false>(options: Options<GetSourcesData, ThrowOnError>): RequestResult<GetSourcesResponses, GetSourcesErrors, ThrowOnError> => (options.client ?? client).post<GetSourcesResponses, GetSourcesErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/reads/get-sources',
     ...options,
     headers: {
@@ -939,11 +1362,20 @@ export const getSources = <ThrowOnError extends boolean = false>(options: Option
  * Read an outline, Markdown, selected images, pages, or original. Resolve latest once; return exact citations and visible continuation.
  */
 export const readItem = <ThrowOnError extends boolean = false>(options: Options<ReadItemData, ThrowOnError>): RequestResult<ReadItemResponses, ReadItemErrors, ThrowOnError> => (options.client ?? client).post<ReadItemResponses, ReadItemErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/reads/read-item',
     ...options,
     headers: {
@@ -958,11 +1390,20 @@ export const readItem = <ThrowOnError extends boolean = false>(options: Options<
  * Create a session-bound confirmation for explicit human action; issuance is not review.
  */
 export const createConfirmation = <ThrowOnError extends boolean = false>(options: Options<CreateConfirmationData, ThrowOnError>): RequestResult<CreateConfirmationResponses, CreateConfirmationErrors, ThrowOnError> => (options.client ?? client).post<CreateConfirmationResponses, CreateConfirmationErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/reviews/create-confirmation',
     ...options,
     headers: {
@@ -977,11 +1418,20 @@ export const createConfirmation = <ThrowOnError extends boolean = false>(options
  * Record exact revision and content reviewed by an explicit authorized action; never infer review from OAuth identity.
  */
 export const createReview = <ThrowOnError extends boolean = false>(options: Options<CreateReviewData, ThrowOnError>): RequestResult<CreateReviewResponses, CreateReviewErrors, ThrowOnError> => (options.client ?? client).post<CreateReviewResponses, CreateReviewErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/reviews/create-review',
     ...options,
     headers: {
@@ -996,11 +1446,20 @@ export const createReview = <ThrowOnError extends boolean = false>(options: Opti
  * Show review coverage and revisions without extending it to later edits.
  */
 export const listReviews = <ThrowOnError extends boolean = false>(options: Options<ListReviewsData, ThrowOnError>): RequestResult<ListReviewsResponses, ListReviewsErrors, ThrowOnError> => (options.client ?? client).post<ListReviewsResponses, ListReviewsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/reviews/list-reviews',
     ...options,
     headers: {
@@ -1030,11 +1489,20 @@ export const getFormSchema = <ThrowOnError extends boolean = false>(options: Opt
  * Read a bounded graph projection using the same authorized source identities.
  */
 export const getGraph = <ThrowOnError extends boolean = false>(options: Options<GetGraphData, ThrowOnError>): RequestResult<GetGraphResponses, GetGraphErrors, ThrowOnError> => (options.client ?? client).post<GetGraphResponses, GetGraphErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/search/get-graph',
     ...options,
     headers: {
@@ -1049,11 +1517,20 @@ export const getGraph = <ThrowOnError extends boolean = false>(options: Options<
  * Read incoming or outgoing references at the selected revision.
  */
 export const getLinks = <ThrowOnError extends boolean = false>(options: Options<GetLinksData, ThrowOnError>): RequestResult<GetLinksResponses, GetLinksErrors, ThrowOnError> => (options.client ?? client).post<GetLinksResponses, GetLinksErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/search/get-links',
     ...options,
     headers: {
@@ -1068,11 +1545,20 @@ export const getLinks = <ThrowOnError extends boolean = false>(options: Options<
  * Search authorized content and return cited snippets, not whole-document dumps. The query may be empty only with a filter; extraction = "unprocessed" lists every source file whose text the converter could not fully extract.
  */
 export const searchItems = <ThrowOnError extends boolean = false>(options: Options<SearchItemsData, ThrowOnError>): RequestResult<SearchItemsResponses, SearchItemsErrors, ThrowOnError> => (options.client ?? client).post<SearchItemsResponses, SearchItemsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/search/search-items',
     ...options,
     headers: {
@@ -1087,11 +1573,20 @@ export const searchItems = <ThrowOnError extends boolean = false>(options: Optio
  * Issue a local MCP connector credential scoped to read, or read and propose; never review or approve. Local owner only; hosted agents use WorkOS Connect.
  */
 export const createConnector = <ThrowOnError extends boolean = false>(options: Options<CreateConnectorData, ThrowOnError>): RequestResult<CreateConnectorResponses, CreateConnectorErrors, ThrowOnError> => (options.client ?? client).post<CreateConnectorResponses, CreateConnectorErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/session/create-connector',
     ...options,
     headers: {
@@ -1106,11 +1601,20 @@ export const createConnector = <ThrowOnError extends boolean = false>(options: O
  * Read the current authenticated principal without exposing credentials.
  */
 export const getSession = <ThrowOnError extends boolean = false>(options: Options<GetSessionData, ThrowOnError>): RequestResult<GetSessionResponses, GetSessionErrors, ThrowOnError> => (options.client ?? client).post<GetSessionResponses, GetSessionErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/session/get-session',
     ...options,
     headers: {
@@ -1125,11 +1629,20 @@ export const getSession = <ThrowOnError extends boolean = false>(options: Option
  * List local connector credentials and their scopes without secrets. Local owner only.
  */
 export const listConnectors = <ThrowOnError extends boolean = false>(options: Options<ListConnectorsData, ThrowOnError>): RequestResult<ListConnectorsResponses, ListConnectorsErrors, ThrowOnError> => (options.client ?? client).post<ListConnectorsResponses, ListConnectorsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/session/list-connectors',
     ...options,
     headers: {
@@ -1144,11 +1657,20 @@ export const listConnectors = <ThrowOnError extends boolean = false>(options: Op
  * Revoke a local connector credential immediately. Local owner only.
  */
 export const revokeConnector = <ThrowOnError extends boolean = false>(options: Options<RevokeConnectorData, ThrowOnError>): RequestResult<RevokeConnectorResponses, RevokeConnectorErrors, ThrowOnError> => (options.client ?? client).post<RevokeConnectorResponses, RevokeConnectorErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/session/revoke-connector',
     ...options,
     headers: {
@@ -1163,11 +1685,20 @@ export const revokeConnector = <ThrowOnError extends boolean = false>(options: O
  * List built-in and user-defined OKF property schemas.
  */
 export const listTypes = <ThrowOnError extends boolean = false>(options: Options<ListTypesData, ThrowOnError>): RequestResult<ListTypesResponses, ListTypesErrors, ThrowOnError> => (options.client ?? client).post<ListTypesResponses, ListTypesErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/types/list-types',
     ...options,
     headers: {
@@ -1182,11 +1713,20 @@ export const listTypes = <ThrowOnError extends boolean = false>(options: Options
  * Persist a user-defined type without dropping extension properties.
  */
 export const setType = <ThrowOnError extends boolean = false>(options: Options<SetTypeData, ThrowOnError>): RequestResult<SetTypeResponses, SetTypeErrors, ThrowOnError> => (options.client ?? client).post<SetTypeResponses, SetTypeErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/types/set-type',
     ...options,
     headers: {
@@ -1201,11 +1741,20 @@ export const setType = <ThrowOnError extends boolean = false>(options: Options<S
  * Export the spec, source references, data table and rendering.
  */
 export const exportView = <ThrowOnError extends boolean = false>(options: Options<ExportViewData, ThrowOnError>): RequestResult<ExportViewResponses, ExportViewErrors, ThrowOnError> => (options.client ?? client).post<ExportViewResponses, ExportViewErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/views/export-view',
     ...options,
     headers: {
@@ -1220,11 +1769,20 @@ export const exportView = <ThrowOnError extends boolean = false>(options: Option
  * Describe the allowed visual components; the catalog never grants capabilities.
  */
 export const getCatalog = <ThrowOnError extends boolean = false>(options: Options<GetCatalogData, ThrowOnError>): RequestResult<GetCatalogResponses, GetCatalogErrors, ThrowOnError> => (options.client ?? client).post<GetCatalogResponses, GetCatalogErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/views/get-catalog',
     ...options,
     headers: {
@@ -1239,11 +1797,20 @@ export const getCatalog = <ThrowOnError extends boolean = false>(options: Option
  * Read a saved visual artifact and its precise source bindings.
  */
 export const getView = <ThrowOnError extends boolean = false>(options: Options<GetViewData, ThrowOnError>): RequestResult<GetViewResponses, GetViewErrors, ThrowOnError> => (options.client ?? client).post<GetViewResponses, GetViewErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/views/get-view',
     ...options,
     headers: {
@@ -1258,11 +1825,20 @@ export const getView = <ThrowOnError extends boolean = false>(options: Options<G
  * Render a validated candidate using approved components and real source bindings; does not save or approve it.
  */
 export const presentView = <ThrowOnError extends boolean = false>(options: Options<PresentViewData, ThrowOnError>): RequestResult<PresentViewResponses, PresentViewErrors, ThrowOnError> => (options.client ?? client).post<PresentViewResponses, PresentViewErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/views/present-view',
     ...options,
     headers: {
@@ -1277,11 +1853,20 @@ export const presentView = <ThrowOnError extends boolean = false>(options: Optio
  * Resolve pinned inputs or explicitly refresh a live view without silently modifying saved state.
  */
 export const resolveView = <ThrowOnError extends boolean = false>(options: Options<ResolveViewData, ThrowOnError>): RequestResult<ResolveViewResponses, ResolveViewErrors, ThrowOnError> => (options.client ?? client).post<ResolveViewResponses, ResolveViewErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/views/resolve-view',
     ...options,
     headers: {
@@ -1296,11 +1881,20 @@ export const resolveView = <ThrowOnError extends boolean = false>(options: Optio
  * Archive without deleting historical content.
  */
 export const archiveWorkspace = <ThrowOnError extends boolean = false>(options: Options<ArchiveWorkspaceData, ThrowOnError>): RequestResult<ArchiveWorkspaceResponses, ArchiveWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<ArchiveWorkspaceResponses, ArchiveWorkspaceErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/workspaces/archive-workspace',
     ...options,
     headers: {
@@ -1315,11 +1909,20 @@ export const archiveWorkspace = <ThrowOnError extends boolean = false>(options: 
  * Back up the installation's identities, tenant grants, connector records without secrets, purge records and tenant events; no workspace content. Tenant administrator in a human session only.
  */
 export const backupInstallation = <ThrowOnError extends boolean = false>(options: Options<BackupInstallationData, ThrowOnError>): RequestResult<BackupInstallationResponses, BackupInstallationErrors, ThrowOnError> => (options.client ?? client).post<BackupInstallationResponses, BackupInstallationErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/workspaces/backup-installation',
     ...options,
     headers: {
@@ -1334,11 +1937,20 @@ export const backupInstallation = <ThrowOnError extends boolean = false>(options
  * Back up the workspace's history, retained objects and application records, drafts included, into one self-contained archive. Human administrator session only.
  */
 export const backupWorkspace = <ThrowOnError extends boolean = false>(options: Options<BackupWorkspaceData, ThrowOnError>): RequestResult<BackupWorkspaceResponses, BackupWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<BackupWorkspaceResponses, BackupWorkspaceErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/workspaces/backup-workspace',
     ...options,
     headers: {
@@ -1353,11 +1965,20 @@ export const backupWorkspace = <ThrowOnError extends boolean = false>(options: O
  * Create a blank workspace; no example content is inserted.
  */
 export const createWorkspace = <ThrowOnError extends boolean = false>(options: Options<CreateWorkspaceData, ThrowOnError>): RequestResult<CreateWorkspaceResponses, CreateWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<CreateWorkspaceResponses, CreateWorkspaceErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/workspaces/create-workspace',
     ...options,
     headers: {
@@ -1372,11 +1993,20 @@ export const createWorkspace = <ThrowOnError extends boolean = false>(options: O
  * Build a portable export with resolvable referenced assets; current app reviews are written into the files as OKF verified. Drafts, sessions and credentials are never included.
  */
 export const exportWorkspace = <ThrowOnError extends boolean = false>(options: Options<ExportWorkspaceData, ThrowOnError>): RequestResult<ExportWorkspaceResponses, ExportWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<ExportWorkspaceResponses, ExportWorkspaceErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/workspaces/export-workspace',
     ...options,
     headers: {
@@ -1391,11 +2021,20 @@ export const exportWorkspace = <ThrowOnError extends boolean = false>(options: O
  * Read a purge's progress and counts; available after the workspace is gone.
  */
 export const getPurge = <ThrowOnError extends boolean = false>(options: Options<GetPurgeData, ThrowOnError>): RequestResult<GetPurgeResponses, GetPurgeErrors, ThrowOnError> => (options.client ?? client).post<GetPurgeResponses, GetPurgeErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/workspaces/get-purge',
     ...options,
     headers: {
@@ -1410,11 +2049,20 @@ export const getPurge = <ThrowOnError extends boolean = false>(options: Options<
  * List the workspaces this connection may read, each with its current head revision. Treat head as a pin: pass it to later reads as at = {"kind": "revision", "revision": head} so every call sees one consistent state, and compare it with a later listing to detect change.
  */
 export const listWorkspaces = <ThrowOnError extends boolean = false>(options: Options<ListWorkspacesData, ThrowOnError>): RequestResult<ListWorkspacesResponses, ListWorkspacesErrors, ThrowOnError> => (options.client ?? client).post<ListWorkspacesResponses, ListWorkspacesErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/workspaces/list-workspaces',
     ...options,
     headers: {
@@ -1429,11 +2077,20 @@ export const listWorkspaces = <ThrowOnError extends boolean = false>(options: Op
  * Open an existing authorized workspace.
  */
 export const openWorkspace = <ThrowOnError extends boolean = false>(options: Options<OpenWorkspaceData, ThrowOnError>): RequestResult<OpenWorkspaceResponses, OpenWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<OpenWorkspaceResponses, OpenWorkspaceErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/workspaces/open-workspace',
     ...options,
     headers: {
@@ -1448,11 +2105,20 @@ export const openWorkspace = <ThrowOnError extends boolean = false>(options: Opt
  * Permanently remove a workspace's originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge.
  */
 export const purgeWorkspace = <ThrowOnError extends boolean = false>(options: Options<PurgeWorkspaceData, ThrowOnError>): RequestResult<PurgeWorkspaceResponses, PurgeWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<PurgeWorkspaceResponses, PurgeWorkspaceErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/workspaces/purge-workspace',
     ...options,
     headers: {
@@ -1467,11 +2133,20 @@ export const purgeWorkspace = <ThrowOnError extends boolean = false>(options: Op
  * Fill a blank workspace from an uploaded workspace archive, keeping item identities; drafts of editors unknown here stay in the archive and are counted. Human administrator session only.
  */
 export const restoreWorkspace = <ThrowOnError extends boolean = false>(options: Options<RestoreWorkspaceData, ThrowOnError>): RequestResult<RestoreWorkspaceResponses, RestoreWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<RestoreWorkspaceResponses, RestoreWorkspaceErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/workspaces/restore-workspace',
     ...options,
     headers: {
@@ -1486,11 +2161,20 @@ export const restoreWorkspace = <ThrowOnError extends boolean = false>(options: 
  * Return an archived workspace to ordinary listings; its history and records were kept.
  */
 export const unarchiveWorkspace = <ThrowOnError extends boolean = false>(options: Options<UnarchiveWorkspaceData, ThrowOnError>): RequestResult<UnarchiveWorkspaceResponses, UnarchiveWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<UnarchiveWorkspaceResponses, UnarchiveWorkspaceErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/workspaces/unarchive-workspace',
     ...options,
     headers: {
@@ -1505,11 +2189,20 @@ export const unarchiveWorkspace = <ThrowOnError extends boolean = false>(options
  * Update workspace metadata at the supplied base revision.
  */
 export const updateWorkspace = <ThrowOnError extends boolean = false>(options: Options<UpdateWorkspaceData, ThrowOnError>): RequestResult<UpdateWorkspaceResponses, UpdateWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<UpdateWorkspaceResponses, UpdateWorkspaceErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/workspaces/update-workspace',
     ...options,
     headers: {
@@ -1570,11 +2263,20 @@ export const downloadObject = <ThrowOnError extends boolean = false>(options: Op
  */
 export const uploadContent = <ThrowOnError extends boolean = false>(options: Options<UploadContentData, ThrowOnError>): RequestResult<UploadContentResponses, unknown, ThrowOnError> => (options.client ?? client).put<UploadContentResponses, unknown, ThrowOnError>({
     bodySerializer: null,
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/api/workspaces/{workspace_id}/uploads/{upload_id}/content',
     ...options,
     headers: {
@@ -1610,11 +2312,20 @@ export const beginLogin = <ThrowOnError extends boolean = false>(options?: Optio
  * Invalidate the local or hosted browser session after checking CSRF protection.
  */
 export const endSession = <ThrowOnError extends boolean = false>(options?: Options<EndSessionData, ThrowOnError>): RequestResult<EndSessionResponses, unknown, ThrowOnError> => (options?.client ?? client).post<EndSessionResponses, unknown, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/auth/logout',
     ...options
 });
@@ -1632,11 +2343,20 @@ export const liveness = <ThrowOnError extends boolean = false>(options?: Options
  * End an authenticated MCP session through the SDK.
  */
 export const mcpClose = <ThrowOnError extends boolean = false>(options?: Options<McpCloseData, ThrowOnError>): RequestResult<McpCloseResponses, unknown, ThrowOnError> => (options?.client ?? client).delete<McpCloseResponses, unknown, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/mcp',
     ...options
 });
@@ -1662,11 +2382,20 @@ export const mcpEvents = <ThrowOnError extends boolean = false>(options?: Option
  * MCP Streamable HTTP endpoint owned by rmcp, including tools and UI resources.
  */
 export const mcpRequest = <ThrowOnError extends boolean = false>(options: Options<McpRequestData, ThrowOnError>): RequestResult<McpRequestResponses, unknown, ThrowOnError> => (options.client ?? client).post<McpRequestResponses, unknown, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: 'okf-csrf',
+            type: 'apiKey'
+        },
+        { name: 'x-okf-csrf', type: 'apiKey' }
+    ],
     url: '/mcp',
     ...options,
     headers: {

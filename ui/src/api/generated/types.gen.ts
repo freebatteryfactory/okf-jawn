@@ -387,7 +387,7 @@ export type CellRange = {
  */
 export type Change = {
     /**
-     * Body.
+     * Body, at most 8 MiB in UTF-8.
      */
     body: string;
     kind: 'create';
@@ -407,7 +407,7 @@ export type Change = {
     type_name: string;
 } | {
     /**
-     * Body.
+     * Body, at most 8 MiB in UTF-8.
      */
     body: string;
     /**
@@ -448,7 +448,7 @@ export type Change = {
     item_id: ItemId;
     kind: 'supply_extraction';
     /**
-     * The complete proposed text, Markdown.
+     * The complete proposed text, Markdown, at most 8 MiB in UTF-8.
      */
     markdown: string;
     /**
@@ -856,7 +856,7 @@ export type CorrectDigestRequest = {
      */
     base_revision: Revision;
     /**
-     * Corrected text kept separate from generated text.
+     * Corrected text kept separate from generated text, at most 8 MiB in UTF-8.
      */
     corrected_markdown: string;
     /**
@@ -960,7 +960,7 @@ export type CreateItemRequest = {
      */
     base_revision: Revision;
     /**
-     * Markdown content.
+     * Markdown content, at most 8 MiB in UTF-8.
      */
     body: string;
     /**
@@ -3918,8 +3918,9 @@ export type SandboxOriginConfig = {
 /**
  * Save the caller's draft; always succeeds even when the head has moved.
  *
- * The first save takes the item's head revision as its base. Later saves keep the draft's
- * base unless `base_revision` equals the current head, which is the explicit rebase.
+ * The first save records `base_revision`, the revision the editor saw, as the draft's base;
+ * the item must exist at that revision. Later saves keep the draft's base unless
+ * `base_revision` equals the current head, which is the explicit rebase.
  */
 export type SaveDraftRequest = {
     /**
@@ -3927,7 +3928,7 @@ export type SaveDraftRequest = {
      */
     base_revision: Revision;
     /**
-     * Drafted Markdown body.
+     * Drafted Markdown body, at most 8 MiB in UTF-8.
      */
     body: string;
     /**
@@ -4076,7 +4077,8 @@ export type Selection = {
  */
 export type SessionResponse = {
     /**
-     * Browser writes require a same-origin anti-CSRF token.
+     * Browser writes require a same-origin anti-CSRF token: the double-submit pair published
+     * as the `csrfCookie` and `csrfHeader` security schemes.
      */
     csrf_required: boolean;
     /**

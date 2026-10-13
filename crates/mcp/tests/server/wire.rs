@@ -12,6 +12,7 @@ use std::net::SocketAddr;
 use axum::{Extension, Router};
 use okf_jawn_contract::access::Permission;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::transport::MAX_REQUEST_BODY_BYTES;
 use okf_jawn_mcp::{APP_URI, DEFAULT_MAX_REQUEST_BODY_BYTES, McpConfig, streamable_http_service};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -241,8 +242,8 @@ async fn a_request_over_the_configured_body_limit_is_refused() -> TestResult {
     Ok(())
 }
 
-/// The configured limit can be raised, not only lowered: an 8 MiB limit admits a call over the
-/// 4 MiB default.
+/// The configured limit can be raised, not only lowered: twice the default admits a call over
+/// the default.
 #[tokio::test]
 async fn a_raised_body_limit_admits_a_larger_request() -> TestResult {
     let world = World::new(FakeAccess::default().granting("alice", &[Permission::Read]));
@@ -270,8 +271,8 @@ async fn a_raised_body_limit_admits_a_larger_request() -> TestResult {
 }
 
 #[tokio::test]
-async fn the_provisional_default_body_limit_is_rmcps_4_mib() -> TestResult {
-    assert_eq!(DEFAULT_MAX_REQUEST_BODY_BYTES, 4 * 1024 * 1024);
+async fn the_default_body_limit_is_the_contracts_request_body_limit() -> TestResult {
+    assert_eq!(DEFAULT_MAX_REQUEST_BODY_BYTES, MAX_REQUEST_BODY_BYTES);
     let world = World::new(FakeAccess::default().granting("alice", &[Permission::Read]));
     let service = http_service(&world, missing_bundle("wire-default-limit.html")?)?;
     let over = call(
