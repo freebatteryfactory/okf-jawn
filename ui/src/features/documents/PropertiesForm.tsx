@@ -110,6 +110,30 @@ class FormBoundary extends Component<
   }
 }
 
+/** The form library's options that render a description or a help text as Markdown. */
+const MARKDOWN_OPTIONS: ReadonlySet<string> = new Set([
+  'enableMarkdownInDescription',
+  'enableMarkdownInHelp',
+]);
+
+/**
+ * A type's UI schema without the options that turn on Markdown, at every depth and in either
+ * spelling (`ui:enableMarkdownInDescription`, or the bare name under `ui:options` and
+ * `ui:globalOptions`). A description and a help text are then plain text: no image is fetched and
+ * no link is drawn because a schema said so. (The reader refuses images in documents the same way.)
+ * A property that is itself named like one of the two options loses its UI hints with them.
+ */
+export function plainText<T>(uiSchema: T): T;
+export function plainText(uiSchema: unknown): unknown {
+  if (Array.isArray(uiSchema)) return uiSchema.map((entry) => plainText(entry));
+  if (uiSchema === null || typeof uiSchema !== 'object') return uiSchema;
+  return Object.fromEntries(
+    Object.entries(uiSchema)
+      .filter(([key]) => !MARKDOWN_OPTIONS.has(key.replace(/^ui:/, '')))
+      .map(([key, value]) => [key, plainText(value)]),
+  );
+}
+
 /** The properties whose value differs between two states of the form's data. */
 export function changedKeys(before: PropertyMap, after: PropertyMap): string[] {
   return [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(
@@ -179,7 +203,7 @@ export function PropertiesForm({ session, typeName }: PropertiesFormProps) {
           <TypedForm
             session={session}
             schema={schema.data}
-            uiSchema={uiSchema.success ? uiSchema.data : {}}
+            uiSchema={uiSchema.success ? plainText(uiSchema.data) : {}}
             held={held}
           />
         </FormBoundary>

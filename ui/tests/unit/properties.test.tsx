@@ -373,6 +373,51 @@ describe('the properties form', () => {
     });
   });
 
+  it('shows a type’s description and help as text: no image, no link, whatever its UI schema asks', async () => {
+    const described = {
+      ...meetingNote,
+      properties_schema: {
+        type: 'object',
+        properties: {
+          owner: {
+            type: 'string',
+            title: 'Owner',
+            description:
+              'see <img src=x onerror=alert(1)> [link](javascript:alert(3)) ![pix](https://elsewhere.example/p.png) [out](https://elsewhere.example/)',
+          },
+          place: {
+            type: 'object',
+            title: 'Place',
+            properties: {
+              room: {
+                type: 'string',
+                title: 'Room',
+                description: '![in](https://elsewhere.example/r.png)',
+              },
+            },
+          },
+        },
+      },
+      ui_schema: {
+        owner: {
+          'ui:enableMarkdownInDescription': true,
+          'ui:help': '[help](https://elsewhere.example/h)',
+          'ui:options': { enableMarkdownInHelp: true },
+        },
+        place: { room: { 'ui:enableMarkdownInDescription': true } },
+        'ui:globalOptions': { enableMarkdownInDescription: true, enableMarkdownInHelp: true },
+      },
+    };
+    typed({ [TYPES]: () => ok({ items: [described] }) });
+    await editNote();
+    const form = document.querySelector('.properties-form');
+    expect(form?.querySelectorAll('img, a, script')).toHaveLength(0);
+    // The words are there, as the text they are.
+    expect(form?.textContent).toContain('![pix](https://elsewhere.example/p.png)');
+    expect(form?.textContent).toContain('[help](https://elsewhere.example/h)');
+    expect(form?.textContent).toContain('![in](https://elsewhere.example/r.png)');
+  });
+
   it('does not send a required property emptied', async () => {
     const api = typed();
     await editNote();
