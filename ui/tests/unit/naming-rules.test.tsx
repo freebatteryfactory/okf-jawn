@@ -1104,3 +1104,52 @@ describe('the question before a renaming, when it leaves by itself', () => {
     expect(api.callsTo(APPLY)).toHaveLength(1);
   });
 });
+
+describe('the question before a renaming, when another preview is made', () => {
+  it('is closed by the new preview: what was asked was asked of the one before', async () => {
+    const { api } = service();
+    await openRules();
+    await setPrefix('2025-');
+    await previewNow();
+    await userEvent.click(button('Apply this preview…'));
+    expect(screen.getByRole('group', { name: 'Rename 2 items?' })).toBeTruthy();
+    // The same rules on the same version, previewed again: another preview all the same.
+    await userEvent.click(button('Preview the renames'));
+    await waitFor(() => expect(api.callsTo(PREVIEW)).toHaveLength(2));
+    await waitFor(() => expect(screen.queryByRole('group', { name: /^Rename / })).toBeNull());
+    expect(document.activeElement).toBe(
+      screen.getByRole('heading', { name: 'Preview: what would be renamed' }),
+    );
+    expect(button('Apply this preview…').getAttribute('aria-disabled')).toBe('false');
+    expect(api.callsTo(APPLY)).toEqual([]);
+  });
+
+  it('asks nothing more for a second press of Preview while the first is in flight', async () => {
+    let release: (reply: Reply) => void = () => {};
+    const lists: Json[] = [];
+    const { api } = service({
+      [PREVIEW]: () =>
+        new Promise<Reply>((resolve) => {
+          release = resolve;
+        }),
+    });
+    await openRules();
+    await setPrefix('2025-');
+    await userEvent.click(button('Preview the renames'));
+    await waitFor(() => expect(api.callsTo(PREVIEW)).toHaveLength(1));
+    lists.push(...api.callsTo(LIST));
+    const working = screen.getByRole('button', { name: 'Previewing…' });
+    expect(working.getAttribute('aria-disabled')).toBe('true');
+    await userEvent.click(working);
+    await userEvent.click(working);
+    // Neither a second walk of the folders nor a second preview was started.
+    expect(api.callsTo(LIST)).toHaveLength(lists.length);
+    expect(api.callsTo(PREVIEW)).toHaveLength(1);
+    await act(async () => {
+      release(refuse(503, 'unavailable', 'the index is busy'));
+      await Promise.resolve();
+    });
+    await screen.findByRole('button', { name: 'Try again' });
+    expect(api.callsTo(PREVIEW)).toHaveLength(1);
+  });
+});
