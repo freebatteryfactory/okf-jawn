@@ -420,7 +420,7 @@ fn a_remote_address_requires_https_and_loopback_may_use_http() -> TestResult {
 #[tokio::test]
 async fn a_remote_http_address_sends_nothing_and_exits_1() -> TestResult {
     let ran = cli(
-        &["get_health", "--server", "http://example.org:7711"],
+        &["get_health", "--server", "http://okf-jawn.invalid:7711"],
         Some(TOKEN),
         b"",
     )
@@ -445,7 +445,7 @@ async fn an_address_with_credentials_is_refused_and_not_repeated() -> TestResult
         format!("http://owner:hunter2@127.0.0.1:{port}"),
         format!("http://owner@127.0.0.1:{port}"),
         format!("http://:hunter2@127.0.0.1:{port}"),
-        "https://owner:hunter2@example.org".to_owned(),
+        "https://owner:hunter2@okf-jawn.invalid".to_owned(),
     ] {
         let ran = cli(&["get_health", "--server", &address], Some(TOKEN), b"").await?;
         assert_eq!((ran.code, ran.stdout.as_str()), (1, ""), "{address}");
