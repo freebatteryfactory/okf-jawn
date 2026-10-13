@@ -13,7 +13,7 @@ import {
 } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Job } from '../../src/api/generated/types.gen';
-import { importAttempt } from '../../src/features/imports/import-start';
+import { importAttempt, importBase } from '../../src/features/imports/import-start';
 import { resetUploads } from '../../src/features/imports/uploading';
 import { JOBS_POLL_MS, JOBS_SAFETY_POLL_MS } from '../../src/features/jobs/jobs';
 import { fail, type Handler, mockApi, ok } from './support/api';
@@ -161,6 +161,25 @@ describe('the identity of a start_import request', () => {
 
   it('is a new one when nothing was asked before', () => {
     expect(importAttempt(null, ['u1'], '', HEAD).key).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
+
+describe('the revision an import is based on', () => {
+  const made = (revision: string) => jobOf('succeeded', { revision });
+
+  it('is the one shown while no import started here has made another', () => {
+    expect(importBase(HEAD, [])).toBe(HEAD);
+    // Not read yet, still running, failed, or finished without reporting a revision.
+    expect(
+      importBase(HEAD, [undefined, jobOf('running'), jobOf('failed'), jobOf('succeeded')]),
+    ).toBe(HEAD);
+    // A revision reported by a job that did not succeed is not the head.
+    expect(importBase(HEAD, [jobOf('failed', { revision: OLD })])).toBe(HEAD);
+  });
+
+  it('is the one made by the newest import started here that has finished', () => {
+    expect(importBase(HEAD, [made(IMPORTED)])).toBe(IMPORTED);
+    expect(importBase(HEAD, [jobOf('running'), made(IMPORTED), made(OLD)])).toBe(IMPORTED);
   });
 });
 
@@ -496,24 +515,115 @@ describe('starting the import', () => {
     expect(api.callsTo(JOBS)).toHaveLength(2);
   });
 
-  it('says to refresh when the version shown is not the one to import onto, with no retry of its own', async () => {
+  it('says to refresh when the answer says the base is stale, with no retry of its own', async () => {
     const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {
-      [START]: () => fail(409, 'conflict', 'the workspace head moved'),
+      // The answer names the request's base as what it is about.
+      [START]: () => ({
+        status: 409,
+        body: { code: 'conflict', message: 'the workspace head moved', field: 'base_revision' },
+      }),
     });
     fireEvent.click(importButton());
     await eventually(() =>
       screen.getByText(
-        'Starting the import: The import could not be started on the version shown.',
+        'Starting the import: The workspace has changed since the version this import was based on.',
       ),
     );
     expect(
-      screen.getByText(/press Refresh in the workspace’s bar, then start the import again\./),
+      screen.getByText(
+        'Press Refresh in the workspace’s bar to see the workspace as it is now, then start the import again.',
+      ),
     ).toBeDefined();
     expect(screen.getByText(/The service said:/).textContent).toContain('the workspace head moved');
     expect(screen.queryByText(/This changed since it was loaded/)).toBeNull();
     expect(screen.queryByRole('button', { name: /Try again|Reload/ })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Imports started here' })).toBeNull();
     expect(api.callsTo(START)).toHaveLength(1);
+  });
+
+  it.each([
+    ['names no field', {}],
+    ['is about another field', { field: 'upload_ids' }],
+  ])(
+    'names no stale base for a conflict that %s: the general words, and the service’s own',
+    async (_what, about) => {
+      let answers = 0;
+      const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {
+        [START]: () => {
+          answers += 1;
+          return answers === 1
+            ? {
+                status: 409,
+                body: {
+                  code: 'conflict',
+                  message: 'this upload was already taken by another job',
+                  ...about,
+                },
+              }
+            : accepted(jobOf('queued'));
+        },
+        [JOB]: () => ok(jobOf('queued')),
+      });
+      fireEvent.click(importButton());
+      await eventually(() =>
+        screen.getByText('Starting the import: This changed since it was loaded.'),
+      );
+      expect(screen.getByText(/The service said:/).textContent).toContain(
+        'this upload was already taken by another job',
+      );
+      // Nothing is said of the version shown, or of Refresh: the answer did not say that.
+      expect(screen.queryByText(/the version this import was based on/)).toBeNull();
+      expect(screen.queryByText(/Press Refresh/)).toBeNull();
+      // The general words carry their own action, which repeats the same request.
+      fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
+      await eventually(() => jobRow());
+      expect(api.callsTo(START).at(1)).toEqual(api.callsTo(START).at(0));
+    },
+  );
+
+  it('bases the next import on the revision its own finished import made, until the workspace is refreshed', async () => {
+    const NEWER = 'e'.repeat(40);
+    let head = HEAD;
+    let job: Job = jobOf('running');
+    const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {
+      [OPEN]: () => ok({ ...writableWorkspace, head }),
+      [START]: () => accepted(job),
+      [JOB]: () => ok(job),
+    });
+    fireEvent.click(importButton());
+    await eventually(() => jobRow());
+    expect(api.callsTo(START).at(0)?.base_revision).toBe(HEAD);
+    // While it runs, the base is still the version shown: nothing says the head moved.
+    expect(screen.queryByText(/The next import is based on it/)).toBeNull();
+    // The import finishes: it made a revision, and the head is now that one.
+    job = jobOf('succeeded', { item_ids: [], revision: IMPORTED });
+    await pass(JOBS_POLL_MS);
+    await later(() => expect(jobRow().textContent).toContain('Finished.'));
+    const note = screen.getByText(/The next import is based on it/);
+    expect(note.textContent).toBe(
+      'An import started here made revision ffffffffff of the workspace. The next import is based on it. The workspace above still shows the version from before: press Refresh to see what was imported.',
+    );
+    expect(note.getAttribute('role')).toBe('note');
+    // A second import from the same page, with the version shown still the old one.
+    vi.useRealTimers();
+    choose([fileOf('b.txt', 'abcd')]);
+    fireEvent.click(screen.getByRole('button', { name: /^Upload \d+ files?$/ }));
+    await waitFor(() => expect(importButton().textContent).toBe('Import 1 uploaded file'));
+    job = jobOf('queued', { id: '99999999-9999-4999-8999-999999999999' });
+    fireEvent.click(importButton());
+    await waitFor(() => expect(api.callsTo(START)).toHaveLength(2));
+    expect(api.callsTo(START).at(1)?.base_revision).toBe(IMPORTED);
+    // Refreshed: the version shown is the base again, whatever the page's own imports made.
+    head = NEWER;
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await screen.findByText(`Refreshed: now showing revision ${NEWER.slice(0, 10)}.`);
+    await waitFor(() => expect(screen.queryByText(/The next import is based on it/)).toBeNull());
+    choose([fileOf('c.txt', 'abcde')]);
+    fireEvent.click(screen.getByRole('button', { name: /^Upload \d+ files?$/ }));
+    await waitFor(() => expect(importButton().textContent).toBe('Import 1 uploaded file'));
+    fireEvent.click(importButton());
+    await waitFor(() => expect(api.callsTo(START)).toHaveLength(3));
+    expect(api.callsTo(START).at(2)?.base_revision).toBe(NEWER);
   });
 
   it('reads "not available in this build" where imports are not built, and starts nothing', async () => {

@@ -107,6 +107,17 @@ export function jobOptions(workspaceId: string, jobId: string, live: boolean) {
   });
 }
 
+/**
+ * One job as the cache holds it, without asking: for a place that only needs to know what a job
+ * shown elsewhere on the page last reported.
+ */
+export function jobHeldOptions(workspaceId: string, jobId: string) {
+  return queryOptions({
+    ...getJobOptions({ body: { workspace_id: workspaceId, job_id: jobId } }),
+    enabled: false,
+  });
+}
+
 const zJobKey = z.object({
   _id: z.literal('getJob'),
   body: z.object({ workspace_id: z.string() }),

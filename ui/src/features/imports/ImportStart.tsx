@@ -12,15 +12,21 @@
  * status says so; it is never worded as an import that has finished. From then on its row follows
  * the job (`features/jobs`).
  *
- * A `conflict` here most often means the workspace has moved on from the version on screen, which
- * the import is based on: the notice says to refresh and start again, and shows the service's own
- * words. Those words allow no retry, so the notice shows none: the same request would be refused
- * again.
+ * A `conflict` is said to be a stale base only when the answer says so: it names the request's
+ * `base_revision` as the field it is about (the wire has no typed detail for it). The notice then
+ * says to refresh and start again, and offers no retry: the same request would be refused again.
+ * Any other `conflict` (an upload already taken by another job, a key used for another request)
+ * keeps the general words, with the service's own beside them.
+ *
+ * What the import is based on is `importBase` (`import-start.ts`): the revision shown, or the
+ * revision this page's own finished import made, when that is newer than what is shown. The page
+ * says so when the two differ.
  */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useId, useRef, useState } from 'react';
 import type { Revision } from '../../api/generated/types.gen';
+import { short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, type FailureMessage } from '../errors/failure';
 import { useRetry } from '../errors/retry';
@@ -28,23 +34,51 @@ import type { FolderListing } from '../explorer/folder-listing';
 import { useJobsFeed } from '../jobs/feed';
 import { JobRow } from '../jobs/JobRow';
 import { jobName, jobStateSaid } from '../jobs/job-words';
-import { jobOptions } from '../jobs/jobs';
-import { beginImport, type ImportAttempt, importAttempt } from './import-start';
+import { jobHeldOptions, jobOptions } from '../jobs/jobs';
+import { beginImport, type ImportAttempt, importAttempt, importBase } from './import-start';
 import { type UploadEntry, useUploads } from './upload-list';
 
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 const STALE_BASE: FailureMessage = {
-  title: 'The import could not be started on the version shown.',
+  title: 'The workspace has changed since the version this import was based on.',
   advice:
-    'An import is based on the version of the workspace on screen. If the workspace has changed since, press Refresh in the workspace’s bar, then start the import again.',
+    'Press Refresh in the workspace’s bar to see the workspace as it is now, then start the import again.',
   action: { kind: 'none' },
 };
 
-/** A refusal a repeat of the same request cannot cure: the base, or the uploads, are not as sent. */
+/** The field of `start_import` that names the import's base. */
+const BASE_FIELD = 'base_revision';
+
+/** The answer says the base is stale: a `conflict` about the request's base revision. */
 function isStale(error: unknown): boolean {
   const failure = classifyFailure(error);
-  return failure.kind === 'api' && failure.error.code === 'conflict';
+  return (
+    failure.kind === 'api' &&
+    failure.error.code === 'conflict' &&
+    failure.error.field === BASE_FIELD
+  );
+}
+
+const NO_JOBS: readonly string[] = [];
+
+/**
+ * The revision the next import is based on: the one shown, or the one made by an import this page
+ * started under it and that has finished (`importBase`). Read from the cache, where the rows
+ * under "Imports started here" keep those jobs current; nothing is asked here.
+ */
+function useImportBase(workspaceId: string, shown: Revision): Revision {
+  const started = useUploads((state) => state.started[workspaceId]) ?? NO_JOBS;
+  const under = useUploads((state) => state.startedUnder);
+  const mine = useQueries({
+    queries: started
+      .filter((jobId) => under[jobId] === shown)
+      .map((jobId) => jobHeldOptions(workspaceId, jobId)),
+  });
+  return importBase(
+    shown,
+    mine.map((job) => job.data),
+  );
 }
 
 /** The folders the tree has listed at this revision, for suggestions; read as the cache holds them. */
@@ -75,12 +109,13 @@ export function ImportStart({ workspaceId, head, entries }: ImportStartProps) {
   const [destination, setDestination] = useState('');
   const [said, setSaid] = useState('');
   const folders = useListedFolders(workspaceId, head);
+  const base = useImportBase(workspaceId, head);
   const ready = entries.flatMap((entry) =>
     entry.state === 'uploaded' && entry.uploadId !== null ? [entry.uploadId] : [],
   );
   const last = useRef<ImportAttempt | null>(null);
   const start = useMutation({
-    mutationFn: (attempt: ImportAttempt) => beginImport(client, workspaceId, attempt),
+    mutationFn: (attempt: ImportAttempt) => beginImport(client, workspaceId, attempt, head),
     onSuccess: (job, attempt) => {
       last.current = null;
       const where =
@@ -92,7 +127,7 @@ export function ImportStart({ workspaceId, head, entries }: ImportStartProps) {
   });
   const begin = () => {
     if (start.isPending || ready.length === 0) return;
-    const attempt = importAttempt(last.current, ready, destination.trim(), head);
+    const attempt = importAttempt(last.current, ready, destination.trim(), base);
     last.current = attempt;
     start.mutate(attempt);
   };
@@ -134,6 +169,13 @@ export function ImportStart({ workspaceId, head, entries }: ImportStartProps) {
           A path inside the workspace, such as notes/2025. Leave it empty for the top of the
           workspace. Each file keeps its own path under that folder.
         </p>
+        {base !== head && (
+          <p role="note" className="notice">
+            An import started here made revision <code title={base}>{short(base)}</code> of the
+            workspace. The next import is based on it. The workspace above still shows the version
+            from before: press Refresh to see what was imported.
+          </p>
+        )}
         {/* aria-disabled rather than disabled: the button keeps focus while the import starts,
             and when the files it took have left the list. */}
         <button type="submit" ref={buttonRef} aria-disabled={start.isPending || ready.length === 0}>

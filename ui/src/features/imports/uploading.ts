@@ -358,5 +358,5 @@ export function resetUploads() {
   running.clear();
   waiting.clear();
   reading = Promise.resolve();
-  useUploads.setState({ entries: [], started: {} });
+  useUploads.setState({ entries: [], started: {}, startedUnder: {} });
 }

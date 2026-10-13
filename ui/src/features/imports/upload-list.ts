@@ -144,6 +144,8 @@ interface UploadsState {
   entries: UploadEntry[];
   /** By workspace: the jobs started from this page, newest first. */
   started: Record<string, string[]>;
+  /** By job started from this page: the revision the workspace showed when it was started. */
+  startedUnder: Record<string, string>;
   /**
    * List these files for a workspace, and the files of a drop that could not be read, each as not
    * readable. A file already listed there (the same path, length and modification time; for one
@@ -157,7 +159,7 @@ interface UploadsState {
   ) => { added: number; repeated: number; unreadable: number };
   change: (id: string, change: Partial<UploadEntry>) => void;
   remove: (ids: readonly string[]) => void;
-  jobStarted: (workspaceId: string, jobId: string) => void;
+  jobStarted: (workspaceId: string, jobId: string, shown: string) => void;
 }
 
 const samePath = (entry: UploadEntry, named: NamedPath) =>
@@ -186,6 +188,7 @@ const fresh = () => ({
 export const useUploads = create<UploadsState>()((set, get) => ({
   entries: [],
   started: {},
+  startedUnder: {},
   add: (workspaceId, chosen, unreadable = []) => {
     const entries = [...get().entries];
     let added = 0;
@@ -235,8 +238,9 @@ export const useUploads = create<UploadsState>()((set, get) => ({
     })),
   remove: (ids) =>
     set((state) => ({ entries: state.entries.filter((entry) => !ids.includes(entry.id)) })),
-  jobStarted: (workspaceId, jobId) =>
+  jobStarted: (workspaceId, jobId, shown) =>
     set((state) => ({
+      startedUnder: { ...state.startedUnder, [jobId]: shown },
       started: {
         ...state.started,
         [workspaceId]: [

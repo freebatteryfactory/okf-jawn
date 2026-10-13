@@ -4,7 +4,14 @@
  * The request names the completed upload slots, the destination folder as it was typed, less the
  * spaces around it (empty for the top of the workspace), and the revision the workspace shows as
  * its base: the
- * service refuses a stale base as a `conflict`, and the page then says to refresh. Converter
+ * service refuses a stale base as a `conflict`, and the page then says to refresh when the answer
+ * names the base (`ImportStart.tsx`).
+ *
+ * The base. It is the revision the workspace shows, with one exception: once an import started
+ * from this page, under the revision still shown, has finished and reports the revision it made,
+ * the next import is based on that revision (`importBase`). The page's own import moved the head,
+ * and the revision shown waits for Refresh as always; an import based on it would be refused as
+ * stale every time. After a Refresh the base is the revision shown again. Converter
  * settings are left out, which means the deployment's own. Naming rules are not applied
  * (`apply_naming_rules: false`): the wire applies them "after preview acceptance", and no preview
  * is part of this page, so files keep the names they came with.
@@ -46,11 +53,27 @@ export function importAttempt(
   return same ? last : { key: crypto.randomUUID(), uploadIds, destination, baseRevision };
 }
 
-/** Start the import. Resolves with the job as the service answered it. */
+/**
+ * The revision the next import is based on. `mine`: the jobs started from this page under the
+ * revision now shown, newest first, as last reported (undefined when not read yet).
+ */
+export function importBase(shown: Revision, mine: ReadonlyArray<Job | undefined>): Revision {
+  for (const job of mine) {
+    const made = job?.state === 'succeeded' ? (job.revision ?? null) : null;
+    if (made !== null) return made;
+  }
+  return shown;
+}
+
+/**
+ * Start the import. `shown` is the revision the workspace shows now. Resolves with the job as the
+ * service answered it.
+ */
 export async function beginImport(
   client: QueryClient,
   workspaceId: string,
   attempt: ImportAttempt,
+  shown: Revision,
 ): Promise<Job> {
   const { data: job } = await startImport({
     body: {
@@ -75,6 +98,6 @@ export async function beginImport(
       )
       .map((entry) => entry.id),
   );
-  uploads.jobStarted(workspaceId, job.id);
+  uploads.jobStarted(workspaceId, job.id, shown);
   return job;
 }
