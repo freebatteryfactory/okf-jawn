@@ -833,5 +833,39 @@ async fn the_503_says_which_case_it_is_and_the_wait_is_short_while_a_fetch_is_un
     Ok(())
 }
 
+#[tokio::test]
+async fn with_no_usable_key_set_the_wait_is_short_while_a_fetch_is_under_way() -> TestResult {
+    const NO_KEYS: &str = "The token issuer's keys could not be fetched";
+    let setup = Setup::new(Some(KEY_SET))?;
+    let valid = sign(&with("exp", json!(now()?.saturating_add(7200)))?, Some(KID))?;
+    // Start-up: no set is held, the first request takes the attempt, and the issuer is slow.
+    let gate = setup.issuer.hold_next()?;
+    let first = setup.verifying(valid.clone());
+    setup.issuer.held().await?;
+    // A request during that first fetch: come back in two seconds, not in sixty.
+    let during = err_of(timeout(AT_ONCE, setup.verifier.verify(&valid)).await?)?;
+    assert_eq!(during.error.code, ErrorCode::Unavailable);
+    assert_eq!(during.retry_after, Some(2));
+    assert_eq!(during.error.message, NO_KEYS);
+    assert_eq!(setup.issuer.fetches(), 1);
+    gate.notify_one();
+    assert_eq!(first.await?, None);
+    setup.verifier.verify(&valid).await?;
+
+    // The same when the set held is older than the hour and its refresh is under way.
+    setup.clock.advance(Duration::from_secs(3600))?;
+    let gate = setup.issuer.hold_next()?;
+    let refreshing = setup.verifying(valid.clone());
+    setup.issuer.held().await?;
+    let during = err_of(timeout(AT_ONCE, setup.verifier.verify(&valid)).await?)?;
+    assert_eq!(during.error.code, ErrorCode::Unavailable);
+    assert_eq!(during.retry_after, Some(2));
+    assert_eq!(during.error.message, NO_KEYS);
+    assert_eq!(setup.issuer.fetches(), 2);
+    gate.notify_one();
+    assert_eq!(refreshing.await?, None);
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
