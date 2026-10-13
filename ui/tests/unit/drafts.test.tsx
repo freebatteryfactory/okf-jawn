@@ -196,6 +196,28 @@ describe('autosave', () => {
     expect(api.violations).toEqual([]);
   });
 
+  it('saves at the latest ten seconds after the first unsaved change, however fast the typing', async () => {
+    const api = writable();
+    const { box } = await startEditing();
+    // A key every half second: the one-second pause never comes.
+    for (let typed = 0; typed < 20; typed += 1) {
+      typeInto(box, 'a');
+      await pass(typed < 19 ? 500 : 499);
+    }
+    // 9,999 ms after the first change: nothing sent yet.
+    expect(api.callsTo(SAVE)).toHaveLength(0);
+    await pass(1);
+    expect(api.callsTo(SAVE)).toHaveLength(1);
+    expect(api.callsTo(SAVE).at(0)?.body).toBe(`${COMMITTED}${'a'.repeat(20)}`);
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+    // The next change starts its own wait: one second after it, not ten after the first.
+    typeInto(box, 'b');
+    await pass(AUTOSAVE_DELAY_MS - 1);
+    expect(api.callsTo(SAVE)).toHaveLength(1);
+    await pass(1);
+    expect(api.callsTo(SAVE)).toHaveLength(2);
+  });
+
   it('says "Saving…" while the save is in flight', async () => {
     let answer: (reply: Reply) => void = () => {};
     const api = writable({
