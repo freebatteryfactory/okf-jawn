@@ -53,8 +53,8 @@ export function uploadWords(failure: {
   }
   if (error instanceof SlotUnusable) {
     return {
-      title: 'The service holds something else in this upload’s place.',
-      advice: 'What it holds is not the beginning of this file. Send it again.',
+      title: 'The service’s answer about this upload could not be read.',
+      advice: 'It did not say how many bytes of the file it holds. Send it again.',
       action: SEND_AGAIN,
     };
   }

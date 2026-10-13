@@ -24,9 +24,11 @@
  * A retry is a new try of the same file on the same slot under the same keys, so nothing is opened
  * or sent twice. The exception is a slot that cannot take this file any more: `complete_upload` or
  * `create_upload` answered `conflict` (what the slot holds, or how it was announced, does not match
- * the file), the slot is gone (`not_found`), it holds more than the file, or its finish was not
- * confirmed. Then the next try reads the file again and opens a new slot under new keys. The old
- * slot stays with the service: the client has no operation that lists or removes a slot.
+ * the file), the slot is gone (`not_found`), its count of bytes could not be read, or its finish
+ * was not confirmed. Then the next try reads the file again and opens a new slot under new keys.
+ * A slot that says it holds more than the file is one of these through its finish: no bytes are
+ * sent, the finish is asked, and the service refuses it. The old slot stays with the service: the
+ * client has no operation that lists or removes a slot.
  *
  * For the same reason a slot is opened only when its file's turn comes, never for the whole list
  * up front, so a file removed before its turn leaves nothing behind. Removing a file under way
@@ -72,10 +74,10 @@ export class UploadNotConfirmed extends Error {
   }
 }
 
-/** The slot holds more bytes than the file has, or a count that is not a number. */
+/** The service answered the slot with a count of bytes that is not a decimal number. */
 export class SlotUnusable extends Error {
   constructor(received: string) {
-    super(`The slot holds ${received} bytes, which is not part of this file`);
+    super(`The service said the slot holds "${received}" bytes, which is not a count`);
     this.name = 'SlotUnusable';
   }
 }
@@ -143,7 +145,7 @@ async function run(id: string): Promise<void> {
       throwOnError: true,
     });
     const held = bytesIn(slot.received_bytes);
-    if (held === null || held > size) throw new SlotUnusable(slot.received_bytes);
+    if (held === null) throw new SlotUnusable(slot.received_bytes);
 
     if (held < size) {
       step = 'bytes';

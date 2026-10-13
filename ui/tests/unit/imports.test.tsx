@@ -619,6 +619,54 @@ describe('uploading', () => {
     expect(sent.transfers).toEqual([]);
   });
 
+  it('sends nothing more to a slot that says it holds more than the file: the finish refuses it, and a new slot follows', async () => {
+    const service = uploadService();
+    service.script.create.push(async (_body, usual) => {
+      const reply = await usual();
+      return ok({ ...(reply.body as object), received_bytes: '5' });
+    });
+    const { api, sent } = setup(service);
+    await openImport();
+    choose('Choose files…', [fileOf('a.txt', 'abc')]);
+    upload();
+    await notUploaded('a.txt');
+    const row = rowOf('a.txt');
+    // No byte was added to what the slot holds; the service's own check decided.
+    expect(sent.transfers).toEqual([]);
+    expect(api.callsTo(COMPLETE)).toHaveLength(1);
+    expect(row.textContent).toContain('Uploading a.txt: The service did not accept this file.');
+    fireEvent.click(within(row).getByRole('button', { name: 'Send it again' }));
+    await uploaded('a.txt');
+    expect(service.slots).toHaveLength(2);
+    expect(api.callsTo(CREATE).at(1)?.idempotency_key).not.toBe(
+      api.callsTo(CREATE).at(0)?.idempotency_key,
+    );
+  });
+
+  it('opens a new slot when the service does not say how many bytes the slot holds', async () => {
+    const service = uploadService();
+    service.script.create.push(async (_body, usual) => {
+      const reply = await usual();
+      return ok({ ...(reply.body as object), received_bytes: 'some' });
+    });
+    const { api, sent } = setup(service);
+    await openImport();
+    choose('Choose files…', [fileOf('a.txt', 'abc')]);
+    upload();
+    await notUploaded('a.txt');
+    const row = rowOf('a.txt');
+    expect(row.textContent).toContain(
+      'Uploading a.txt: The service’s answer about this upload could not be read.',
+    );
+    expect(row.textContent).toContain('It did not say how many bytes of the file it holds.');
+    // Nothing was sent on a guess, and nothing was finished.
+    expect(sent.transfers).toEqual([]);
+    expect(api.callsTo(COMPLETE)).toEqual([]);
+    fireEvent.click(within(row).getByRole('button', { name: 'Send it again' }));
+    await uploaded('a.txt');
+    expect(service.slots).toHaveLength(2);
+  });
+
   it('keeps a failed file in its place with a retry, while the others go on', async () => {
     const service = uploadService();
     service.script.put.push((transfer) => {
