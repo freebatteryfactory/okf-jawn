@@ -35,6 +35,7 @@ import {
 import { listTypesOptions } from '../../api/generated/@tanstack/react-query.gen';
 import type { ItemSummary } from '../../api/generated/types.gen';
 import type { DraftMark } from '../drafts/marks';
+import type { DraftAfterChange } from '../drafts/saving';
 import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, messageFor } from '../errors/failure';
 import { type FailureRetry, useRetry } from '../errors/retry';
@@ -56,6 +57,28 @@ import { folderProblem, joinPath, pathProblem, segmentProblem, splitPath } from 
 
 /** Whether the workspace has a newer head than the one shown; `unknown` when it could not be asked. */
 type Moved = 'checking' | 'moved' | 'same' | 'unknown';
+
+/**
+ * What a change did, to be said politely, and how to say it. A change is said as done when the
+ * service has answered it. When it was a change of an item, how the person's draft of that item
+ * then stands is known later (`ItemChange.draft`: the draft follows after the change, and may
+ * wait for a save of its own): it is said after the first words when it comes, and only while
+ * that change is still the one last spoken of.
+ */
+export function useSaid(): [string, (done: string, draft?: Promise<DraftAfterChange>) => void] {
+  const [said, setSaid] = useState('');
+  const spoken = useRef(0);
+  const say = (done: string, draft?: Promise<DraftAfterChange>) => {
+    spoken.current += 1;
+    const mine = spoken.current;
+    setSaid(done);
+    void draft?.then((outcome) => {
+      const words = DRAFT_AFTER[outcome];
+      if (words !== '' && spoken.current === mine) setSaid(`${done} ${words}`);
+    });
+  };
+  return [said, say];
+}
 
 export interface Change<T> {
   start: (values: T) => void;
@@ -614,8 +637,8 @@ export interface MoveFormProps {
   item: ItemSummary;
   /** How the person's draft of the item stands, when they have one. */
   mark: DraftMark | null;
-  /** The item was moved; `said` is what to say of the person's draft of it ('' for nothing). */
-  onDone: (moved: ItemChange, destination: string, said: string) => void;
+  /** The item was moved; how the person's draft of it then stands comes later (`moved.draft`). */
+  onDone: (moved: ItemChange, destination: string) => void;
   onCancel: () => void;
 }
 
@@ -631,7 +654,7 @@ export function MoveForm({ item, mark, onDone, onCancel }: MoveFormProps) {
   const [checked, setChecked] = useState(false);
   const change = useChange<{ itemId: string; destination: string }, ItemChange>(
     moveItemTo,
-    (result, values) => onDone(result, values.destination, DRAFT_AFTER[result.draft]),
+    (result, values) => onDone(result, values.destination),
     submitRef,
   );
   const destination = joinPath(folder, name);

@@ -18,7 +18,7 @@ import { act, cleanup, renderHook, screen, waitFor, within } from '@testing-libr
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ItemSummary } from '../../src/api/generated/types.gen';
-import { resetDraftSessions } from '../../src/features/drafts/saving';
+import { resetDraftSessions, stopSaving } from '../../src/features/drafts/saving';
 import { useDeleted, useExplorerStore } from '../../src/features/explorer/store';
 import { fieldInWords } from '../../src/features/tree/fields';
 import {
@@ -1327,6 +1327,8 @@ describe('a draft of an item the person changes themselves', () => {
     return api.callsTo(SAVE).at(-1) ?? {};
   }
   const headerOf = (save: Json) => (save.properties as Record<string, unknown>).okf_jawn;
+  /** A moment in which a follow that has nothing to wait for has ended. */
+  const settled = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 50)));
 
   it('carries the header as the item has it at the head shown, through Archive and after it', async () => {
     const { api, state } = service();
@@ -1340,7 +1342,7 @@ describe('a draft of an item the person changes themselves', () => {
     await userEvent.click(within(pane()).getByRole('button', { name: 'Archive' }));
     await waitFor(() => expect(statusLine()).toContain('Archived.'));
     // The draft followed: saved once more, on the revision the change made, with its header.
-    expect(statusLine()).toContain(FOLLOWS);
+    await waitFor(() => expect(statusLine()).toContain(FOLLOWS));
     const followed = api.callsTo(SAVE).at(-1) ?? {};
     expect(api.callsTo(SAVE)).toHaveLength(2);
     expect(followed).toMatchObject({ base_revision: FIRST, body: first.body });
@@ -1368,13 +1370,14 @@ describe('a draft of an item the person changes themselves', () => {
     expect((first.properties as Record<string, unknown>).status).toBeUndefined();
     await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Status' }), 'deprecated');
     await waitFor(() => expect(statusLine()).toContain('The status is now deprecated.'));
-    expect(statusLine()).toContain(FOLLOWS);
+    await waitFor(() => expect(statusLine()).toContain(FOLLOWS));
     const followed = api.callsTo(SAVE).at(-1) ?? {};
     expect(followed).toMatchObject({ base_revision: FIRST, body: first.body });
     expect(followed.properties).toEqual({ ...(first.properties as object), status: 'deprecated' });
     // Archive sets no status word: the draft keeps the one it has.
     await userEvent.click(within(pane()).getByRole('button', { name: 'Archive' }));
     await waitFor(() => expect(statusLine()).toContain('Archived.'));
+    await waitFor(() => expect(statusLine()).toContain(FOLLOWS));
     const archived = api.callsTo(SAVE).at(-1) ?? {};
     expect((archived.properties as Record<string, unknown>).status).toBe('deprecated');
     // The header changed where it stood: no property moved.
@@ -1398,7 +1401,7 @@ describe('a draft of an item the person changes themselves', () => {
     await type('File name', 'minutes.md');
     await userEvent.keyboard('{Enter}');
     await waitFor(() => expect(statusLine()).toContain('is now at notes/minutes.md'));
-    expect(statusLine()).toContain(FOLLOWS);
+    await waitFor(() => expect(statusLine()).toContain(FOLLOWS));
     const followed = api.callsTo(SAVE).at(-1) ?? {};
     expect(followed).toMatchObject({ base_revision: FIRST, body: 'My draft' });
     expect((followed.properties as Record<string, unknown>).status).toBe('draft');
@@ -1411,8 +1414,10 @@ describe('a draft of an item the person changes themselves', () => {
     await findTextBox('Text of Meeting notes');
     await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Status' }), 'draft');
     await waitFor(() => expect(statusLine()).toContain('The status is now draft.'));
-    expect(statusLine()).toContain(
-      'It was started on an older version than the one you changed, so its next Snapshot will first ask whether to keep your text.',
+    await waitFor(() =>
+      expect(statusLine()).toContain(
+        'It was started on an older version than the one you changed, so its next Snapshot will first ask whether to keep your text.',
+      ),
     );
     expect(statusLine()).not.toContain(FOLLOWS);
     // Saved once, with the status word and the header, on the base it had: no silent rebase.
@@ -1431,6 +1436,7 @@ describe('a draft of an item the person changes themselves', () => {
     await findTextBox(/Text of Meeting notes/);
     await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Status' }), 'deprecated');
     await waitFor(() => expect(statusLine()).toContain('The status is now deprecated.'));
+    await settled();
     expect(statusLine()).not.toContain('Your draft');
     expect(api.callsTo(SAVE)).toEqual([]);
     expect(within(pane()).getByText('No changes to save.')).toBeTruthy();
@@ -1445,7 +1451,7 @@ describe('a draft of an item the person changes themselves', () => {
     await type('File name', 'minutes.md');
     await userEvent.keyboard('{Enter}');
     const said = await screen.findByText(/is now at notes\/minutes.md\./);
-    expect(said.textContent).toContain(FOLLOWS);
+    await waitFor(() => expect(said.textContent).toContain(FOLLOWS));
     expect(api.callsTo(SAVE)).toEqual([
       {
         workspace_id: WS,
@@ -1465,6 +1471,7 @@ describe('a draft of an item the person changes themselves', () => {
     await screen.findByText('Text of Meeting notes');
     await userEvent.click(within(pane()).getByRole('button', { name: 'Archive' }));
     await waitFor(() => expect(statusLine()).toContain('Archived.'));
+    await settled();
     expect(statusLine()).not.toContain('Your draft');
     expect(api.callsTo(SAVE)).toEqual([]);
   });
@@ -1485,8 +1492,10 @@ describe('a draft of an item the person changes themselves', () => {
     failing = true;
     await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Status' }), 'draft');
     await waitFor(() => expect(statusLine()).toContain('The status is now draft.'));
-    expect(statusLine()).toContain(
-      'Your draft of this item is kept, but it could not be saved on this version: its own notice says why.',
+    await waitFor(() =>
+      expect(statusLine()).toContain(
+        'Your draft of this item is kept, but it could not be saved on this version: its own notice says why.',
+      ),
     );
     expect(api.callsTo(SAVE)).toHaveLength(1);
     // The change itself was made, and reads as made; the draft's own notice has the retry.
@@ -1737,4 +1746,196 @@ describe('state that must not outlive its truth', () => {
     // That a newer version exists is said by the shell, with its Refresh.
     expect(await screen.findByText(/A newer version of this workspace exists/)).toBeTruthy();
   });
+});
+
+describe('a draft whose item is ahead of the page, or whose own save is in the way', () => {
+  const statusLine = () =>
+    within(pane())
+      .getAllByRole('status')
+      .map((each) => each.textContent ?? '')
+      .join(' ');
+  const headLine = () => screen.getByText(/Showing the workspace as of/).textContent ?? '';
+  const headerOf = (save: Json | undefined) =>
+    (save?.properties as Record<string, unknown> | undefined)?.okf_jawn;
+  const FOLLOWS = 'Your draft of this item follows the change: it now starts from this version';
+  const typeMore = async (words: string) => {
+    const { typeInto } = await import('./support/editor');
+    typeInto(await findTextBox(/Text of Meeting notes/), words);
+  };
+  /** Open the note in its editor. */
+  async function editing() {
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Edit' }));
+    await findTextBox(/Text of Meeting notes/);
+  }
+  /** A service whose saves of the draft are held until the test lets them answer. */
+  function holdingSaves() {
+    const held: Array<{ body: Json; answer: () => void }> = [];
+    const gate = { holding: false };
+    const own = service({
+      [SAVE]: (body) => {
+        const reply = ok(draftOf(NOTE, text(body, 'base_revision')));
+        if (!gate.holding) return reply;
+        return new Promise<Reply>((resolve) => {
+          held.push({ body, answer: () => resolve(reply) });
+        });
+      },
+    });
+    return { ...own, held, gate };
+  }
+
+  it('says that the item was changed elsewhere, and that Refresh lets the save go on, when a save is refused for the header', async () => {
+    const { api, state, archiveElsewhere } = service();
+    await editing();
+    archiveElsewhere(NOTE);
+    await typeMore('\nwords after their archive');
+    await waitFor(() => expect(state.refusedSaves).toBe(1), { timeout: 4000 });
+    const alert = await within(pane()).findByRole('alert');
+    expect(alert.textContent).toContain(
+      'Saving this draft: This item was changed in the workspace since this page was refreshed.',
+    );
+    expect(alert.textContent).toContain(
+      'Nothing was saved; your text is kept here. Press “Refresh” at the top of the page, then “Try again” here: the save then goes on.',
+    );
+    // Not the words for a request the person got wrong.
+    expect(alert.textContent).not.toContain('The request was not valid');
+    expect(alert.textContent).not.toContain('Check the address');
+    expect(textIn(await findTextBox(/Text of Meeting notes/))).toContain(
+      'words after their archive',
+    );
+    // Refreshed, the save goes on with the header the item has now.
+    await userEvent.click(await screen.findByRole('button', { name: /^Refresh/ }));
+    await waitFor(() => expect(headLine()).toContain('cccccccccc'));
+    await userEvent.click(await within(pane()).findByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(within(pane()).getByText(/Saved as a draft at/)).toBeTruthy());
+    expect(headerOf(api.callsTo(SAVE).at(-1))).toEqual({ id: NOTE, archived: true });
+    expect(state.refusedSaves).toBe(1);
+    expect(within(pane()).queryByRole('alert')).toBeNull();
+  }, 20000);
+
+  it('says a change as done when the service has answered it, and the draft’s follow after it, when its save has answered', async () => {
+    const { api, held, gate } = holdingSaves();
+    await editing();
+    gate.holding = true;
+    await typeMore('\nslow words');
+    await waitFor(() => expect(held).toHaveLength(1), { timeout: 4000 });
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Archive' }));
+    // The change is done: said, shown in the head line, and its controls are available again,
+    // though the draft's save has not answered.
+    await waitFor(() => expect(statusLine()).toContain('Archived.'));
+    expect(statusLine()).not.toContain('Changing…');
+    expect(statusLine()).not.toContain('Your draft');
+    expect(headLine()).toContain('cccccccccc');
+    const unarchive = await within(pane()).findByRole('button', { name: 'Unarchive' });
+    expect(unarchive.getAttribute('aria-disabled')).not.toBe('true');
+    expect(api.callsTo(LIFE)).toHaveLength(1);
+    // The save answers: the draft follows, once, on the revision the change made, and says so.
+    await act(async () => {
+      held.at(0)?.answer();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(held).toHaveLength(2));
+    expect(statusLine()).not.toContain('Your draft');
+    await act(async () => {
+      held.at(1)?.answer();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(statusLine()).toContain(FOLLOWS));
+    expect(statusLine()).toContain('Archived.');
+    expect(held.map((save) => [save.body.base_revision, headerOf(save.body)])).toEqual([
+      [HEAD, { id: NOTE }],
+      [FIRST, { id: NOTE, archived: true }],
+    ]);
+  }, 20000);
+
+  it('says the draft’s follow only of the change last made', async () => {
+    const { held, gate } = holdingSaves();
+    await editing();
+    gate.holding = true;
+    await typeMore('\nslow words');
+    await waitFor(() => expect(held).toHaveLength(1), { timeout: 4000 });
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Archive' }));
+    await waitFor(() => expect(statusLine()).toContain('Archived.'));
+    // A second change before the draft has followed the first.
+    await userEvent.click(await within(pane()).findByRole('button', { name: 'Unarchive' }));
+    await waitFor(() => expect(statusLine()).toContain('Unarchived.'));
+    gate.holding = false;
+    await act(async () => {
+      held.at(0)?.answer();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(statusLine()).toContain(FOLLOWS));
+    // One sentence about the draft, after the words of the last change; none of the first.
+    expect(statusLine()).toContain('Unarchived.');
+    expect(statusLine()).not.toContain('Archived. It no longer shows');
+    expect(statusLine().split(FOLLOWS)).toHaveLength(2);
+  }, 20000);
+
+  it('sends nothing for the draft after "Stop" when the person changes the item, and says where the retry is', async () => {
+    const { api, held, gate } = holdingSaves();
+    await editing();
+    gate.holding = true;
+    await typeMore('\nslow words');
+    await waitFor(() => expect(held).toHaveLength(1), { timeout: 4000 });
+    // The person stops the save: what the editor's "Stop" does.
+    act(() => stopSaving(WS, NOTE));
+    await within(pane()).findByText(/You stopped this before the service answered/);
+    const saves = api.callsTo(SAVE).length;
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Archive' }));
+    await waitFor(() => expect(statusLine()).toContain('Archived.'));
+    await waitFor(() =>
+      expect(statusLine()).toContain(
+        'Your draft of this item is kept, but it could not be saved on this version: its own notice says why.',
+      ),
+    );
+    // Nothing was sent by itself: the stopped save's notice still has the retry.
+    expect(api.callsTo(SAVE)).toHaveLength(saves);
+    // Asked for, the save carries the change: the new base and the header.
+    gate.holding = false;
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(api.callsTo(SAVE)).toHaveLength(saves + 1));
+    expect(api.callsTo(SAVE).at(-1)).toMatchObject({ base_revision: FIRST });
+    expect(headerOf(api.callsTo(SAVE).at(-1))).toEqual({ id: NOTE, archived: true });
+  }, 20000);
+
+  it('says that the draft is left on the older version when the change is not on the page', async () => {
+    const gate: { release: () => void } = { release: () => {} };
+    const holder: { commit: () => string } = { commit: () => '' };
+    const own = service({
+      [LIFE]: () =>
+        new Promise<Reply>((resolve) => {
+          gate.release = () =>
+            resolve(ok({ revision: holder.commit(), receipt_id: RECEIPT, warnings: [] }));
+        }),
+    });
+    holder.commit = own.moveHead;
+    await editing();
+    await typeMore('\nmy words');
+    await waitFor(() => expect(own.api.callsTo(SAVE)).toHaveLength(1), { timeout: 4000 });
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Archive' }));
+    await waitFor(() => expect(own.api.callsTo(LIFE)).toHaveLength(1));
+    // While the change is asked, the person refreshes to someone else's newer head.
+    own.moveHead();
+    await userEvent.click(await screen.findByRole('button', { name: /^Refresh/ }));
+    await waitFor(() => expect(headLine()).toContain('cccccccccc'));
+    await act(async () => {
+      gate.release();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(statusLine()).toContain('Archived.'));
+    await waitFor(() =>
+      expect(statusLine()).toContain(
+        'Your draft of this item is still on the older version this page shows. Until you refresh the workspace, saving it may be refused, and its next Snapshot will first ask whether to keep your text.',
+      ),
+    );
+    expect(statusLine()).not.toContain(FOLLOWS);
+    // The page goes on showing the version it showed, and says that the change is not on it.
+    expect(headLine()).toContain('cccccccccc');
+    expect(pane().textContent).toContain(
+      'The change was made, but the workspace shown here moved on while it was asked',
+    );
+    // Nothing of the draft was sent for it.
+    expect(own.api.callsTo(SAVE)).toHaveLength(1);
+  }, 20000);
 });

@@ -1286,8 +1286,11 @@ describe('the person’s drafts of items a renaming renames', () => {
       withDraftOfNote((body) => ok({ ...draft, base_revision: text(body, 'base_revision') })),
     );
     await rename();
-    expect(said()).toContain(
-      '1 draft of yours follows the renaming: the next Snapshot will not ask about it.',
+    // The renaming is said as done; the draft's follow is said after it, when it has followed.
+    await waitFor(() =>
+      expect(said()).toContain(
+        '1 draft of yours follows the renaming: the next Snapshot will not ask about it.',
+      ),
     );
     expect(said()).not.toContain('could not follow');
     // The one renamed item the person has a draft of, and no other.
@@ -1306,16 +1309,63 @@ describe('the person’s drafts of items a renaming renames', () => {
   it('say so when one could not follow: the renaming is made all the same', async () => {
     const { api } = service(withDraftOfNote(() => refuse(500, 'internal', 'the store broke')));
     await rename();
-    expect(said()).toContain(
-      '1 draft of yours could not follow it: the next Snapshot will first ask whether to keep your text.',
+    await waitFor(() =>
+      expect(said()).toContain(
+        '1 draft of yours could not follow it: the next Snapshot will first ask whether to keep your text.',
+      ),
     );
     expect(said()).not.toContain('follows the renaming');
     expect(api.callsTo(APPLY)).toHaveLength(1);
   });
 
+  it('are said to be left on the older version when the renaming is not on the page', async () => {
+    const gate: { release: () => void } = { release: () => {} };
+    const holder: { commit: () => string } = { commit: () => '' };
+    const own = service({
+      ...withDraftOfNote((body) => ok({ ...draft, base_revision: text(body, 'base_revision') })),
+      [APPLY]: () =>
+        new Promise<Reply>((resolve) => {
+          gate.release = () =>
+            resolve(ok({ revision: holder.commit(), receipt_id: RECEIPT, warnings: [] }));
+        }),
+    });
+    holder.commit = own.moveHead;
+    // The note's tab is open on the person's draft of it; then the rules.
+    renderAt(`/w/${WS}/i/${NOTE}`);
+    await findTextBox('Text of Meeting notes');
+    await userEvent.click(await screen.findByRole('button', { name: 'Naming rules' }));
+    await within(panel()).findByRole('textbox', { name: /^prefix/ });
+    await setPrefix('2025-');
+    await previewNow();
+    await userEvent.click(button('Apply this preview…'));
+    await userEvent.click(button('Rename 2 items'));
+    await waitFor(() => expect(own.api.callsTo(APPLY)).toHaveLength(1));
+    // While the renaming is asked, the person refreshes to someone else's newer head.
+    own.moveHead();
+    await userEvent.click(await screen.findByRole('button', { name: /^Refresh/ }));
+    await waitFor(() =>
+      expect(screen.getByText(/Showing the workspace as of/).textContent).toContain('cccccccccc'),
+    );
+    await act(async () => {
+      gate.release();
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(said()).toContain('2 items were renamed. The renaming made revision dddddddddd.'),
+    );
+    await waitFor(() =>
+      expect(said()).toContain(
+        '1 draft of yours is still on the older version this page shows: until you refresh the workspace, saving may be refused, and the next Snapshot will first ask whether to keep your text.',
+      ),
+    );
+    expect(said()).not.toContain('follows the renaming');
+    expect(own.api.callsTo(SAVE_DRAFT)).toEqual([]);
+  });
+
   it('are not spoken of when the person has none', async () => {
     const { api } = service();
     await rename();
+    await turn();
     expect(said()).not.toContain('draft');
     expect(api.callsTo(SAVE_DRAFT)).toEqual([]);
     // Nor is any renamed item read for a draft: at 10,000 items that would be 10,000 requests.

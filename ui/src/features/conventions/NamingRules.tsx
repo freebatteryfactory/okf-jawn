@@ -322,18 +322,31 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
       const renamed = applied.plan.entries.filter((entry) => entry.from !== entry.to).length;
       setPreview(null);
       setAsking(false);
-      setSaid(
+      const done =
         `${count(renamed, 'item was', 'items were')} renamed.` +
-          (result.adopted
-            ? ` The workspace now shows revision ${short(result.revision)}, which includes the change.`
-            : ` The renaming made revision ${short(result.revision)}.`) +
-          (result.draftsFollowing > 0
-            ? ` ${count(result.draftsFollowing, 'draft of yours follows', 'drafts of yours follow')} the renaming: the next Snapshot will not ask about it.`
+        (result.adopted
+          ? ` The workspace now shows revision ${short(result.revision)}, which includes the change.`
+          : ` The renaming made revision ${short(result.revision)}.`);
+      setSaid(done);
+      // The renaming is done. How the person's drafts of the renamed items stand is said after
+      // it, when they have followed, unless something else has been said since.
+      void result.drafts.then((outcomes) => {
+        const of = (...kinds: string[]) => outcomes.filter((each) => kinds.includes(each)).length;
+        const following = of('follows');
+        const not = of('asks', 'not-saved');
+        const behind = of('behind');
+        const drafts =
+          (following > 0
+            ? ` ${count(following, 'draft of yours follows', 'drafts of yours follow')} the renaming: the next Snapshot will not ask about it.`
             : '') +
-          (result.draftsNotFollowing > 0
-            ? ` ${count(result.draftsNotFollowing, 'draft of yours', 'drafts of yours')} could not follow it: the next Snapshot will first ask whether to keep your text.`
-            : ''),
-      );
+          (not > 0
+            ? ` ${count(not, 'draft of yours', 'drafts of yours')} could not follow it: the next Snapshot will first ask whether to keep your text.`
+            : '') +
+          (behind > 0
+            ? ` ${count(behind, 'draft of yours is', 'drafts of yours are')} still on the older version this page shows: until you refresh the workspace, saving may be refused, and the next Snapshot will first ask whether to keep your text.`
+            : '');
+        if (drafts !== '') setSaid((now) => (now === done ? `${done}${drafts}` : now));
+      });
       focusNext.current = 'heading';
     },
     previewButton,

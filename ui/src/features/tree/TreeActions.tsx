@@ -20,7 +20,7 @@ import { type RefObject, useEffect, useLayoutEffect, useRef, useState } from 're
 import type { ItemSummary } from '../../api/generated/types.gen';
 import type { DraftMark } from '../drafts/marks';
 import { useExplorerStore } from '../explorer/store';
-import { DeleteQuestion, MoveForm, NewEntryForm } from './ChangeForms';
+import { DeleteQuestion, MoveForm, NewEntryForm, useSaid } from './ChangeForms';
 import { useWorkspaceChanges } from './context';
 
 /** The tree's current entry, as far as a change needs it. */
@@ -66,7 +66,7 @@ export function TreeActions({
   const { workspaceId, head } = useWorkspaceChanges();
   const revealInTree = useExplorerStore((state) => state.revealInTree);
   const requestEdit = useExplorerStore((state) => state.requestEdit);
-  const [said, setSaid] = useState('');
+  const [said, say] = useSaid();
   const buttons = useRef<Partial<Record<What, HTMLButtonElement | null>>>({});
   // Where focus goes in the commit that closes a form: a button of the bar, or the tree's row.
   const focusNext = useRef<What | 'row' | null>(null);
@@ -92,10 +92,10 @@ export function TreeActions({
   const folder = target === null ? '' : target.folder;
   const title = item === null ? '' : item.item.title || item.item.path;
   const open = (what: What) => {
-    setSaid('');
+    say('');
     if (what === 'move' || what === 'delete') {
       if (item === null) {
-        setSaid(target?.kind === 'folder' ? NO_FOLDER_CHANGES : CHOOSE_FIRST);
+        say(target?.kind === 'folder' ? NO_FOLDER_CHANGES : CHOOSE_FIRST);
         return;
       }
       onForm({ what, folder, item, fromRow: false });
@@ -167,13 +167,11 @@ export function TreeActions({
           onDone={(created) => {
             if ('item' in created) {
               const name = created.item.title || created.item.path;
-              setSaid(
-                `Created the note “${name}” at ${created.item.path}. It is open for writing.`,
-              );
+              say(`Created the note “${name}” at ${created.item.path}. It is open for writing.`);
               setCreated(created.item);
               close('note');
             } else {
-              setSaid(`Created the folder ${created.folder}.`);
+              say(`Created the folder ${created.folder}.`);
               revealInTree({
                 workspaceId,
                 revision: created.revision,
@@ -190,11 +188,10 @@ export function TreeActions({
           item={form.item.item}
           mark={form.item.mark}
           onCancel={cancel}
-          onDone={(change, destination, draft) => {
+          onDone={(change, destination) => {
             const moved = form.item;
             if (moved === null) return;
-            const done = `“${moved.item.title || moved.item.path}” is now at ${destination}.`;
-            setSaid(draft === '' ? done : `${done} ${draft}`);
+            say(`“${moved.item.title || moved.item.path}” is now at ${destination}.`, change.draft);
             revealInTree({
               workspaceId,
               revision: change.revision,
@@ -214,7 +211,7 @@ export function TreeActions({
           onDone={(change) => {
             const removed = form.item;
             if (removed === null) return;
-            setSaid(`Deleted “${removed.item.title || removed.item.path}”. Its history is kept.`);
+            say(`Deleted “${removed.item.title || removed.item.path}”. Its history is kept.`);
             revealInTree({
               workspaceId,
               revision: change.revision,

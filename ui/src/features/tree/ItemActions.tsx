@@ -11,15 +11,16 @@
  * keyboard focus: after a rename or a move focus is back on "Rename or move", and the status
  * choice and Archive keep it. After a delete these controls go with the item; the pane then says
  * the item was deleted and puts focus on "Close this tab" (`DocumentView`). A polite status says
- * what was done.
+ * what was done, as soon as the service has answered: the controls are available again then. How
+ * the person's draft of the item stands after the change is said after it, when the draft has
+ * followed (`useSaid`).
  */
 import { useId, useLayoutEffect, useRef, useState } from 'react';
 import type { ItemSummary } from '../../api/generated/types.gen';
 import type { DraftMark } from '../drafts/marks';
-import { ChangeFailure, DeleteQuestion, MoveForm, useChange } from './ChangeForms';
+import { ChangeFailure, DeleteQuestion, MoveForm, useChange, useSaid } from './ChangeForms';
 import {
   changeLifecycle,
-  DRAFT_AFTER,
   type ItemChange,
   type Lifecycle,
   STATUS_WORDS,
@@ -44,7 +45,7 @@ const isStatusWord = (word: string): word is StatusWord =>
 export function ItemActions({ item, mark, busy }: ItemActionsProps) {
   const statusId = useId();
   const [form, setForm] = useState<'move' | 'delete' | null>(null);
-  const [said, setSaid] = useState('');
+  const [said, say] = useSaid();
   const moveRef = useRef<HTMLButtonElement | null>(null);
   const deleteRef = useRef<HTMLButtonElement | null>(null);
   const statusRef = useRef<HTMLSelectElement | null>(null);
@@ -68,9 +69,8 @@ export function ItemActions({ item, mark, busy }: ItemActionsProps) {
           : values.archived
             ? 'Archived. It no longer shows in the folders; its history is kept. Unarchive brings it back.'
             : 'Unarchived. It shows in the folders again.';
-      // The person's draft of the item followed the change, or did not: said as it stands.
-      const draft = DRAFT_AFTER[result.draft];
-      setSaid(draft === '' ? done : `${done} ${draft}`);
+      // How the person's draft of the item stands after it is said when it is known.
+      say(done, result.draft);
     },
     statusRef,
   );
@@ -111,7 +111,7 @@ export function ItemActions({ item, mark, busy }: ItemActionsProps) {
           onChange={(event) => {
             const next = event.target.value;
             if (unavailable || !isStatusWord(next)) return;
-            setSaid('');
+            say('');
             life.start({ itemId: item.id, status: next });
           }}
         >
@@ -131,7 +131,7 @@ export function ItemActions({ item, mark, busy }: ItemActionsProps) {
           aria-disabled={unavailable}
           onClick={() => {
             if (unavailable) return;
-            setSaid('');
+            say('');
             life.start({ itemId: item.id, archived: !item.archived });
           }}
         >
@@ -148,9 +148,8 @@ export function ItemActions({ item, mark, busy }: ItemActionsProps) {
           item={item}
           mark={mark()}
           onCancel={() => close('move')}
-          onDone={(_moved, destination, draft) => {
-            const done = `“${title}” is now at ${destination}. This tab stays on it.`;
-            setSaid(draft === '' ? done : `${done} ${draft}`);
+          onDone={(moved, destination) => {
+            say(`“${title}” is now at ${destination}. This tab stays on it.`, moved.draft);
             close('move');
           }}
         />

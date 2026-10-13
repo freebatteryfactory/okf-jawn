@@ -22,8 +22,11 @@
  *   it, by its id, at the new head. The person's draft of that item follows their own change
  *   (`followOwnChange` in `drafts/saving.ts`): it takes the item's header as the change left it,
  *   and the status word when the change set one, and is saved on the revision the change made, so
- *   its next Snapshot does not conflict with the person's own change. Each of the two resolves
- *   once the draft has followed, and says how the draft then stands.
+ *   its next Snapshot does not conflict with the person's own change. The change is done when
+ *   the service has answered it, and each of the two resolves then; the draft follows after
+ *   that (it may wait for a save of its own that is in flight), and how it then stands is a
+ *   second answer (`ItemChange.draft`), said when it comes. A change whose answer is not adopted
+ *   as the head shown leaves the draft behind, on the older version the page shows, and says so.
  */
 import type { QueryClient } from '@tanstack/react-query';
 import { getItemOptions } from '../../api/generated/@tanstack/react-query.gen';
@@ -35,7 +38,7 @@ import {
   setLifecycle,
 } from '../../api/generated/sdk.gen';
 import type { ItemSummary, Revision } from '../../api/generated/types.gen';
-import { type DraftAfterChange, followOwnChange } from '../drafts/saving';
+import { type DraftAfterChange, draftLeftBehind, followOwnChange } from '../drafts/saving';
 import { adoptHeadFrom, checkHeadsAgain, type HeadChange } from '../explorer/head';
 import { useExplorerStore } from '../explorer/store';
 import { joinPath } from './names';
@@ -74,8 +77,11 @@ export interface Lifecycle {
   archived?: boolean;
 }
 
-/** A change of one item, and how the person's draft of it stands after it. */
-export type ItemChange = HeadChange & { draft: DraftAfterChange };
+/**
+ * A change of one item, done, and how the person's draft of it stands after it: known later,
+ * once the draft has followed. `draft` never rejects.
+ */
+export type ItemChange = HeadChange & { draft: Promise<DraftAfterChange> };
 
 /** What is said of the person's draft after their own change of its item; nothing when they have none. */
 export const DRAFT_AFTER: Record<DraftAfterChange, string> = {
@@ -85,7 +91,26 @@ export const DRAFT_AFTER: Record<DraftAfterChange, string> = {
   asks: 'Your draft of this item is kept. It was started on an older version than the one you changed, so its next Snapshot will first ask whether to keep your text.',
   'not-saved':
     'Your draft of this item is kept, but it could not be saved on this version: its own notice says why. Until it is, its next Snapshot may first ask whether to keep your text.',
+  behind:
+    'Your draft of this item is still on the older version this page shows. Until you refresh the workspace, saving it may be refused, and its next Snapshot will first ask whether to keep your text.',
 };
+
+/**
+ * The person's draft of `itemId` after their own change of it: it follows a change the page
+ * shows, and is left behind by one it does not show. Started here, not waited for.
+ */
+function draftAfter(
+  client: QueryClient,
+  workspaceId: string,
+  itemId: string,
+  base: Revision,
+  change: HeadChange,
+  took: { status: boolean },
+): Promise<DraftAfterChange> {
+  return change.adopted
+    ? followOwnChange(client, workspaceId, itemId, base, change.revision, took)
+    : Promise.resolve(draftLeftBehind(workspaceId, itemId));
+}
 
 /**
  * The shell shows the revision a change made, when it still shows `base`, the head the change was
@@ -177,11 +202,7 @@ export async function moveItemTo(
     throwOnError: true,
   });
   const change = changed(client, workspaceId, attempt.base, data.revision, [itemId]);
-  const draft = change.adopted
-    ? await followOwnChange(client, workspaceId, itemId, attempt.base, data.revision, {
-        status: false,
-      })
-    : 'none';
+  const draft = draftAfter(client, workspaceId, itemId, attempt.base, change, { status: false });
   return { ...change, draft };
 }
 
@@ -229,10 +250,8 @@ export async function changeLifecycle(
     throwOnError: true,
   });
   const change = changed(client, workspaceId, attempt.base, data.revision, [itemId]);
-  const draft = change.adopted
-    ? await followOwnChange(client, workspaceId, itemId, attempt.base, data.revision, {
-        status: status !== undefined,
-      })
-    : 'none';
+  const draft = draftAfter(client, workspaceId, itemId, attempt.base, change, {
+    status: status !== undefined,
+  });
   return { ...change, draft };
 }

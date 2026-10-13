@@ -19,6 +19,10 @@
  * again; the renamed items keep their identity, so their tabs go on reading them. A draft the
  * person has of a renamed item follows the renaming like any other change of their own
  * (`followOwnChange`): the drafts this page knows of, from its sessions and the listed drafts.
+ * The renaming is done when the service has answered it; the drafts follow after that, and how
+ * they then stand is a second answer (`Renamed.drafts`), said when it comes. A renaming whose
+ * answer is not adopted as the head shown leaves the drafts this page holds behind, on the older
+ * version, and says so.
  * Saving the rules is a commit too, and is told to the cache the same way.
  */
 import type { QueryClient } from '@tanstack/react-query';
@@ -34,7 +38,7 @@ import type {
   Revision,
 } from '../../api/generated/types.gen';
 import { listedDraft } from '../drafts/drafts-list';
-import { followOwnChange } from '../drafts/saving';
+import { type DraftAfterChange, draftLeftBehind, followOwnChange } from '../drafts/saving';
 import { sessionKey, useDraftSessions } from '../drafts/sessions';
 import { listingPageOptions } from '../explorer/folder-listing';
 import { adoptHeadFrom, checkHeadsAgain, type HeadChange } from '../explorer/head';
@@ -187,8 +191,11 @@ export async function previewRenames(
   return { plan: data, rules, folder, looked: itemIds.length };
 }
 
-/** A renaming, and how many of the person's drafts of the renamed items follow it or do not. */
-export type Renamed = HeadChange & { draftsFollowing: number; draftsNotFollowing: number };
+/**
+ * A renaming, done, and how each of the person's drafts of the renamed items stands after it:
+ * known later, once they have followed. `drafts` never rejects.
+ */
+export type Renamed = HeadChange & { drafts: Promise<DraftAfterChange[]> };
 
 /** Apply a preview: exactly the plan and the rules the person saw. */
 export async function applyPreview(
@@ -209,8 +216,9 @@ export async function applyPreview(
     plan.base_revision,
   );
   checkHeadsAgain(client, workspaceId);
-  // The person's drafts of the items that were renamed follow their own change.
-  const drafted = (adopted ? plan.entries : [])
+  // The person's drafts of the items that were renamed follow their own change, when the page
+  // shows it; they are started here and not waited for.
+  const drafted = plan.entries
     .filter((entry) => entry.from !== entry.to)
     .map((entry) => entry.item_id)
     .filter(
@@ -218,11 +226,13 @@ export async function applyPreview(
         useDraftSessions.getState().sessions[sessionKey(workspaceId, itemId)] !== undefined ||
         listedDraft(client, workspaceId, itemId) !== undefined,
     );
-  const outcomes = await Promise.all(
+  const drafts = Promise.all(
     drafted.map((itemId) =>
-      followOwnChange(client, workspaceId, itemId, plan.base_revision, data.revision, {
-        status: false,
-      }),
+      adopted
+        ? followOwnChange(client, workspaceId, itemId, plan.base_revision, data.revision, {
+            status: false,
+          })
+        : Promise.resolve(draftLeftBehind(workspaceId, itemId)),
     ),
   );
   return {
@@ -230,8 +240,6 @@ export async function applyPreview(
     previousHead,
     itemIds: plan.entries.map((entry) => entry.item_id),
     adopted,
-    draftsFollowing: outcomes.filter((outcome) => outcome === 'follows').length,
-    draftsNotFollowing: outcomes.filter((outcome) => outcome === 'asks' || outcome === 'not-saved')
-      .length,
+    drafts,
   };
 }
