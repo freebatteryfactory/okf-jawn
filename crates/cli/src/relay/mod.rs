@@ -19,7 +19,17 @@
 //!   CLI has no Base64 dependency;
 //! - `Mcp-Param-*` headers are not sent: the service's tools declare none;
 //! - a session the service might issue is carried on later requests but never deleted, and no
-//!   standalone event stream is opened: the service is stateless and offers neither.
+//!   standalone event stream is opened: the service is stateless and offers neither;
+//! - a response the service sends for another request's id is passed on as it is, so a
+//!   service that misbehaves can answer one request on another's exchange;
+//! - a line of the client that is valid JSON nested deeper than 128 levels is answered as not
+//!   JSON (`-32700`): the JSON library stops there. An answer of the service has no such
+//!   limit;
+//! - nothing identifies the service: whatever answers the liveness check with success at the
+//!   address is sent the credential with the next message. On a loopback address that is any
+//!   program of this computer that listens there first;
+//! - on Windows a server the relay starts holds an end of the relay's own standard streams
+//!   (`launch::ProcessLauncher` says why).
 
 pub use self::frame::{Frame, Frames};
 pub use self::http::HttpTransport;

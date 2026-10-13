@@ -107,9 +107,18 @@ impl Endpoint {
     /// # Errors
     /// Returns `Internal` when the HTTP client cannot be built.
     pub fn client(&self, total: Option<Duration>) -> Result<reqwest::Client, ApiError> {
+        self.client_within(total, CONNECT_TIMEOUT)
+    }
+
+    /// [`Endpoint::client`], with the time one connection attempt may take.
+    fn client_within(
+        &self,
+        total: Option<Duration>,
+        connect: Duration,
+    ) -> Result<reqwest::Client, ApiError> {
         let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(CONNECT_TIMEOUT);
+            .connect_timeout(connect);
         if self.loopback {
             builder = builder.no_proxy();
         }
@@ -161,4 +170,49 @@ fn is_loopback_host(host: &str) -> bool {
 
 fn refuse(message: impl Into<String>) -> ApiError {
     ApiError::new(ErrorCode::InvalidInput, message).with_field("server")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::{CONNECT_TIMEOUT, Endpoint};
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn err_of<T: std::fmt::Debug, E>(result: Result<T, E>) -> Result<E, String> {
+        match result {
+            Ok(value) => Err(format!("expected an error, got Ok({value:?})")),
+            Err(error) => Ok(error),
+        }
+    }
+
+    /// A connection attempt has a limit in time (the review's R12). The address is in
+    /// TEST-NET-1 (RFC 5737), where nothing answers: an attempt gets neither an acceptance
+    /// nor a refusal, and without a limit it waits as long as the operating system does
+    /// (about 21 seconds on Windows, longer on Linux). The limit of the shipped CLI is 10
+    /// seconds; the test passes a short one through the same builder.
+    ///
+    /// Known weakness: on a computer with no route to that address the attempt fails at once
+    /// and this test passes whatever the limit is.
+    #[tokio::test]
+    async fn a_connection_attempt_ends_at_its_time_limit() -> TestResult {
+        assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(10));
+        let endpoint = Endpoint::parse("https://192.0.2.1:9")?;
+        let client = endpoint.client_within(None, Duration::from_millis(300))?;
+        let started = Instant::now();
+        let sent = tokio::time::timeout(
+            Duration::from_secs(12),
+            client.get(endpoint.url("/healthz")).send(),
+        )
+        .await;
+        let failed = err_of(sent.map_err(|_| "the attempt was still waiting after 12 s")?)?;
+        assert!(failed.is_connect() || failed.is_timeout(), "{failed}");
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "the attempt took {:?}",
+            started.elapsed()
+        );
+        Ok(())
+    }
 }

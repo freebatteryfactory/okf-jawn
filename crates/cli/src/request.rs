@@ -60,7 +60,27 @@ pub(crate) async fn call<O: AsyncWrite + Unpin>(
     input: Vec<u8>,
     output: &mut O,
 ) -> Result<(), Failure> {
-    let client = endpoint.client(Some(OPERATION_TIMEOUT))?;
+    call_within(
+        operation,
+        endpoint,
+        credential,
+        input,
+        output,
+        OPERATION_TIMEOUT,
+    )
+    .await
+}
+
+/// [`call`], with the time the whole exchange may take, connection and answer together.
+async fn call_within<O: AsyncWrite + Unpin>(
+    operation: &OperationInfo,
+    endpoint: &Endpoint,
+    credential: Option<&Credential>,
+    input: Vec<u8>,
+    output: &mut O,
+    limit: Duration,
+) -> Result<(), Failure> {
+    let client = endpoint.client(Some(limit))?;
     let mut request = client
         .post(endpoint.url(operation.path))
         .header(CONTENT_TYPE, "application/json")
@@ -257,4 +277,71 @@ pub(crate) fn chain(error: &dyn std::error::Error) -> String {
         source = cause.source();
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use okf_jawn_contract::error::ErrorCode;
+    use okf_jawn_contract::metadata::operations;
+
+    use super::{OPERATION_TIMEOUT, call_within};
+    use crate::endpoint::Endpoint;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn err_of<T: std::fmt::Debug, E>(result: Result<T, E>) -> Result<E, String> {
+        match result {
+            Ok(value) => Err(format!("expected an error, got Ok({value:?})")),
+            Err(error) => Ok(error),
+        }
+    }
+
+    fn some<T>(value: Option<T>, what: &str) -> Result<T, String> {
+        value.ok_or_else(|| format!("expected {what} to be present"))
+    }
+
+    /// One operation has a limit in time, connection and answer together (the review's
+    /// R11): a service that accepts the connection and never answers ends the operation at
+    /// the limit, with `unavailable`. The limit of the shipped CLI is 120 seconds; the test
+    /// passes a short one through the same path.
+    #[tokio::test]
+    async fn an_operation_that_is_never_answered_ends_at_its_time_limit() -> TestResult {
+        assert_eq!(OPERATION_TIMEOUT, Duration::from_secs(120));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = Endpoint::parse(&format!("http://{}", listener.local_addr()?))?;
+        let holding = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let operation = some(operations().into_iter().next(), "an operation")?;
+        let limit = Duration::from_millis(300);
+        let mut output = Vec::new();
+        let started = Instant::now();
+        let ended = tokio::time::timeout(
+            Duration::from_secs(20),
+            call_within(
+                &operation,
+                &endpoint,
+                None,
+                b"{}".to_vec(),
+                &mut output,
+                limit,
+            ),
+        )
+        .await;
+        holding.abort();
+        let failure = err_of(ended.map_err(|_| "the operation was still waiting after 20 s")?)?;
+        assert!(
+            matches!(failure.error.code, ErrorCode::Unavailable),
+            "{}",
+            failure.error.message
+        );
+        assert!(started.elapsed() >= limit, "it ended before its limit");
+        assert_eq!(output, b"");
+        Ok(())
+    }
 }

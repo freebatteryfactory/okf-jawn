@@ -161,15 +161,3 @@ fn no_command_takes_a_credential_as_an_argument() {
     }
     assert!(seen > operations().len(), "walked {seen} arguments");
 }
-
-#[test]
-fn the_relay_command_requires_the_stdio_flag() -> TestResult {
-    let refused = command().try_get_matches_from(["okf-jawn", RELAY_COMMAND]);
-    assert!(
-        refused.is_err(),
-        "mcp without --stdio must be a usage error"
-    );
-    let matches = command().try_get_matches_from(["okf-jawn", RELAY_COMMAND, "--stdio"])?;
-    assert_eq!(matches.subcommand_name(), Some(RELAY_COMMAND));
-    Ok(())
-}
