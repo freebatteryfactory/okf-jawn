@@ -3,7 +3,7 @@
  * state the generated types name: always in words, and an unsupported file never as converted or
  * as an empty document.
  */
-import { cleanup, screen, within } from '@testing-library/react';
+import { cleanup, configure, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   ConversionOutcome,
@@ -25,6 +25,9 @@ import {
 } from './support/workspace';
 
 const ITEM = '/api/items/get-item';
+
+// On a loaded machine an answer has taken longer than the default second to reach the page.
+configure({ asyncUtilTimeout: 10_000 });
 
 afterEach(() => {
   cleanup();

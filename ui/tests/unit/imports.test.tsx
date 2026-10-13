@@ -2,7 +2,15 @@
  * Bringing files in: choosing files and folders with their paths, and uploading each one as a
  * slot, its bytes and a finish against its length and SHA-256.
  */
-import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  configure,
+  fireEvent,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CSRF_COOKIE, CSRF_HEADER } from '../../src/app/api-client';
 import { MAX_FILE_BYTES, useUploads } from '../../src/features/imports/upload-list';
@@ -33,6 +41,9 @@ import {
 
 const OPEN = '/api/workspaces/open-workspace';
 const TOKEN = '0123456789abcdef0123456789abcdef';
+
+// On a loaded machine an answer has taken longer than the default second to reach the page.
+configure({ asyncUtilTimeout: 10_000 });
 
 afterEach(() => {
   act(() => resetUploads());

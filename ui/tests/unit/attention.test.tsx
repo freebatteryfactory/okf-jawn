@@ -3,7 +3,7 @@
  * and in the reader. The words always say they are advisory, and an empty list never reads as
  * safe.
  */
-import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, configure, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AttentionItem } from '../../src/api/generated/types.gen';
 import { SHOWN_STEP } from '../../src/features/attention/AttentionPage';
@@ -27,6 +27,9 @@ import {
 } from './support/workspace';
 
 const ITEM = '/api/items/get-item';
+
+// On a loaded machine an answer has taken longer than the default second to reach the page.
+configure({ asyncUtilTimeout: 10_000 });
 
 afterEach(() => {
   cleanup();

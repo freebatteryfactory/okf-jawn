@@ -2,7 +2,15 @@
  * Starting the import of the uploaded files (`start_import`) into the folder the person chose, and
  * the job it answers: shown at once in the state it reports, then followed.
  */
-import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  configure,
+  fireEvent,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Job } from '../../src/api/generated/types.gen';
 import { resetUploads } from '../../src/features/imports/uploading';
@@ -24,6 +32,9 @@ import { mockTransfers } from './support/transfers';
 import { explorerHandlers, HEAD, NOTE, renderAt, WS, writableWorkspace } from './support/workspace';
 
 const OPEN = '/api/workspaces/open-workspace';
+
+// On a loaded machine an answer has taken longer than the default second to reach the page.
+configure({ asyncUtilTimeout: 10_000 });
 
 afterEach(() => {
   act(() => resetUploads());
