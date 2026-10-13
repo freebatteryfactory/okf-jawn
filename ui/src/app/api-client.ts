@@ -17,7 +17,9 @@
  * not cut short. A caller's own abort (a cancelled query) is not a timeout. A request that timed
  * out may still have been carried out: a write is repeated with the idempotency key it had.
  *
- * Limit: the wait is one value for every request, whatever the size of its body.
+ * Limit: the wait is one value for every request sent here, whatever the size of its body. A
+ * file's bytes are not sent here: `upload-transport.ts` sends them, bounded by progress instead of
+ * by a total time, under the same CSRF rule (`csrfHeaderFor`).
  */
 import { client } from '../api/generated/client.gen';
 
@@ -63,10 +65,16 @@ export function csrfToken(): string | null {
   return null;
 }
 
-function needsCsrfHeader(request: Request): boolean {
-  // A Request's method is already in upper case, and its URL absolute.
-  if (SAFE_METHODS.has(request.method)) return false;
-  return new URL(request.url).origin === window.location.origin;
+/**
+ * The CSRF header's value for a request of this method to this URL; null when the request carries
+ * none: a method the server accepts without it, another origin, or no cookie. The one rule for
+ * every request the workspace sends, whichever part of the transport sends it (`sendRequest` here,
+ * the byte upload in `upload-transport.ts`).
+ */
+export function csrfHeaderFor(method: string, url: string): string | null {
+  if (SAFE_METHODS.has(method.toUpperCase())) return null;
+  if (new URL(url, window.location.href).origin !== window.location.origin) return null;
+  return csrfToken();
 }
 
 function isJson(response: Response): boolean {
@@ -77,10 +85,8 @@ function isJson(response: Response): boolean {
 /** `fetch` for the generated client: the CSRF header, then the bounded wait. */
 export async function sendRequest(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const request = input instanceof Request && init === undefined ? input : new Request(input, init);
-  if (needsCsrfHeader(request)) {
-    const token = csrfToken();
-    if (token !== null) request.headers.set(CSRF_HEADER, token);
-  }
+  const token = csrfHeaderFor(request.method, request.url);
+  if (token !== null) request.headers.set(CSRF_HEADER, token);
 
   const deadline = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
