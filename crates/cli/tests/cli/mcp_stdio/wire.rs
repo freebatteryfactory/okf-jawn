@@ -5,6 +5,9 @@
 //! that carries no credential, the redirect that is not followed, and the event-stream and
 //! answer bounds. The doubles in the other modules cannot show any of it.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use okf_jawn_cli::relay::{
     Body, EventParser, HttpTransport, Post, Probe, Transport, TransportError,
 };
@@ -16,7 +19,7 @@ use tokio::sync::mpsc;
 use super::{notification, request};
 use crate::check::{TestResult, err_of, some};
 use crate::support::http::{Answering, Heard, answer, closed, events, json as json_answer};
-use crate::support::{Outcome, TOKEN, cli};
+use crate::support::{Outcome, TOKEN, Untouched, cli, cli_reading};
 
 /// The request among `heard` whose body mentions `text`.
 fn mentioning<'heard>(heard: &'heard [Heard], text: &str) -> Outcome<&'heard Heard> {
@@ -428,5 +431,42 @@ fn mcp_stdio_event_stream_framing() -> TestResult {
             .0
             .contains("UTF-8")
     );
+    Ok(())
+}
+
+/// The relay as shipped, with nothing listening at a loopback address and a server executable
+/// that is not there: stderr says why and names the executable it was told to start, the exit
+/// code is 1, stdin is not read and stdout stays empty.
+#[tokio::test]
+async fn the_relay_as_shipped_explains_a_server_it_cannot_start() -> TestResult {
+    let nowhere = closed().await?;
+    let missing = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("no-okf-jawn-server-here")
+        .display()
+        .to_string();
+    let read = Arc::new(AtomicBool::new(false));
+    let ran = cli_reading(
+        &[
+            "mcp",
+            "--stdio",
+            "--server",
+            &format!("http://{nowhere}"),
+            "--server-bin",
+            &missing,
+        ],
+        Some(TOKEN),
+        Untouched(read.clone()),
+    )
+    .await?;
+    assert_eq!((ran.code, ran.stdout.as_str()), (1, ""));
+    assert!(
+        ran.stderr.starts_with(
+            "okf-jawn mcp: No service is running, and the server could not be started: "
+        ),
+        "{}",
+        ran.stderr
+    );
+    assert!(ran.stderr.contains(&missing), "{}", ran.stderr);
+    assert!(!read.load(Ordering::SeqCst), "stdin was read");
     Ok(())
 }
