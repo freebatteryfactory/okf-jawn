@@ -4,22 +4,24 @@
 use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::common::PageRequest;
 use okf_jawn_contract::error::{ErrorCode, ErrorDetail};
+use okf_jawn_contract::extraction::TextOrigin;
 use okf_jawn_contract::history::{CommitRequest, FileChange, FileChangeKind};
 use okf_jawn_contract::identity::{IdempotencyKey, ItemId, PurgeId, Revision};
 use okf_jawn_contract::item::{
-    APP_HEADER_KEY, DiscardDraftRequest, ListDraftsRequest, SaveDraftRequest,
+    APP_HEADER_KEY, DiscardDraftRequest, ItemKind, ListDraftsRequest, SaveDraftRequest,
 };
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_core::jobs::RevisionMapping;
 use okf_jawn_core::portable::content_digest;
 use okf_jawn_core::ports::Application;
+use okf_jawn_core::storage::{TreeEdit, VersionStore};
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::check::{TestResult, err_of, some};
 use crate::fixture::{
-    ALICE, Built, NOTE, World, alice, context, draft_of, mutation, note, revision, scope,
-    served_digest,
+    ALICE, Built, CARD_BODY, NOTE, World, alice, context, converted, digest, draft_of, mutation,
+    note, revision, scope, served_digest, source_card,
 };
 
 fn save(base: Revision, properties: serde_json::Value) -> Built<SaveDraftRequest> {
@@ -231,6 +233,92 @@ async fn a_first_save_based_where_the_item_does_not_exist_is_refused_not_recorde
     assert_eq!(failed.code, ErrorCode::Unavailable);
     assert_eq!(failed.field, None);
     assert!(world.drafts.saves()?.is_empty());
+    Ok(())
+}
+
+/// What happens today, pinned for the owner's question and not as a rule (sweep part 1, fix
+/// round 1, item 7): a draft of a source card, and of a View, is saved and snapshotted exactly
+/// as a note's is. The Snapshot is one `EditItem`: the card's shown text is replaced, no
+/// correction is recorded, and the card still says its text is the converter's, uncorrected.
+#[tokio::test]
+async fn today_a_draft_of_a_source_card_or_a_view_is_snapshotted_as_a_plain_edit() -> TestResult {
+    const CARD: u128 = 10;
+    const VIEW: u128 = 30;
+    for (id, kind, properties) in [
+        (CARD, "Source", json!({ "type": "Source" })),
+        (VIEW, "View", json!({ "type": "View" })),
+    ] {
+        let world = World::new()?;
+        let head = revision('a')?;
+        world.versions.put_document(
+            &head,
+            source_card(
+                CARD,
+                &head,
+                "sources/report-pdf.md",
+                CARD_BODY,
+                converted(&digest('b')?),
+            )?,
+        )?;
+        let mut view = note(
+            VIEW,
+            &head,
+            "views/board.md",
+            "# Board
+",
+            json!({ "type": "View" }),
+        )?;
+        view.summary.kind = ItemKind::View;
+        world.versions.put_document(&head, view)?;
+        world.versions.queue_revision(revision('c')?)?;
+        let item_id = ItemId(Uuid::from_u128(id));
+        // Saving is not refused for the kind.
+        let saved = world
+            .service
+            .save_draft(
+                &alice(OperationName::SaveDraft, Some(mutation(1)))?,
+                SaveDraftRequest {
+                    item_id,
+                    ..save(head, properties)?
+                },
+            )
+            .await?;
+        assert_eq!(saved.item_id, item_id, "{kind}");
+        // Nor is the Snapshot, and it is the edit a note's draft is.
+        let landed = world
+            .service
+            .commit_items(
+                &alice(OperationName::CommitItems, Some(mutation(2)))?,
+                CommitRequest {
+                    item_ids: vec![item_id],
+                    ..snapshot_of_the_note()?
+                },
+            )
+            .await?;
+        let commits = world.versions.commits()?;
+        let commit = some(commits.last(), "the snapshot")?;
+        assert!(
+            matches!(
+                commit.edits.as_slice(),
+                [TreeEdit::EditItem { item_id: edited, body, .. }]
+                    if *edited == item_id && body == "# Plan, revised\n"
+            ),
+            "{kind}: {:?}",
+            commit.edits
+        );
+        let shown = world
+            .versions
+            .show(&scope()?, &landed.revision, item_id)
+            .await?;
+        assert_eq!(shown.body, "# Plan, revised\n", "{kind}");
+        if let Some(appearance) = shown.source {
+            // The card still names the converter's record and calls the text the converter's.
+            let extraction = appearance.extraction;
+            assert_eq!(extraction.digest, Some(digest('b')?));
+            assert_eq!(extraction.text_origin, TextOrigin::Converter);
+            assert!(!extraction.corrected, "no correction was recorded");
+        }
+    }
     Ok(())
 }
 
