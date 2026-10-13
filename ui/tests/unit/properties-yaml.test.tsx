@@ -418,3 +418,54 @@ describe('what the form holds back, in the YAML view', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 });
+
+describe('a YAML reading under way when the draft is discarded', () => {
+  /** The draft holds a change of its text, so there is something to discard; the YAML reads on. */
+  const changeTheText = () => replaceText(textBox('Text of Meeting notes'), 'Changed text');
+  const discard = async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Discard draft' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Discard the draft' }));
+    await pass(0);
+  };
+
+  it('brings nothing back when it answers after the draft is gone: no save, and a new edit starts from the committed text', async () => {
+    const held = heldEngine();
+    setYamlEngine(held.engine);
+    const api = service();
+    const box = await openYaml();
+    changeTheText();
+    replaceText(box, storedYaml.replace('owner: Ada', 'owner: Grace'));
+    fireEvent.blur(box);
+    expect(held.readings).toHaveLength(1);
+    act(() => held.readings.at(0)?.began());
+    await discard();
+    // The answer arrives anyway, as one from a worker already on its way would.
+    act(() => held.readings.at(0)?.done());
+    await pass(AUTOSAVE_DELAY_MS * 2);
+    expect(api.callsTo(SAVE)).toEqual([]);
+    expect(screen.queryByRole('textbox', { name: YAML })).toBeNull();
+    // A new draft starts from what is committed, not from the discarded text.
+    await pass(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    await pass(0);
+    fireEvent.click(tab('YAML'));
+    await pass(0);
+    expect(textIn(textBox(YAML))).toBe(storedYaml);
+  });
+
+  it('brings nothing back when the text still waited for its pause: it is read at the discard and answers to nothing', async () => {
+    const api = service();
+    const box = await openYaml();
+    changeTheText();
+    replaceText(box, storedYaml.replace('owner: Ada', 'owner: Grace'));
+    await discard();
+    await pass(YAML_PAUSE_MS + AUTOSAVE_DELAY_MS * 2);
+    expect(api.callsTo(SAVE)).toEqual([]);
+    await pass(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    await pass(0);
+    fireEvent.click(tab('YAML'));
+    await pass(0);
+    expect(textIn(textBox(YAML))).toBe(storedYaml);
+  });
+});
