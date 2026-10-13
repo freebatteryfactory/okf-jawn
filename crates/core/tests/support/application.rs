@@ -1995,10 +1995,16 @@ impl MutationStore for Unused {
         &'a self,
         _key: &'a MutationKey,
         _digest: &'a Digest,
+        _workspace: Option<WorkspaceId>,
     ) -> PortFuture<'a, BeginOutcome> {
         unused()
     }
-    fn complete(&self, _lease: MutationLease, _response: Value) -> PortFuture<'_, ()> {
+    fn complete(
+        &self,
+        _lease: MutationLease,
+        _response: Value,
+        _workspace: Option<WorkspaceId>,
+    ) -> PortFuture<'_, ()> {
         unused()
     }
     fn release(&self, _lease: MutationLease) -> PortFuture<'_, ()> {

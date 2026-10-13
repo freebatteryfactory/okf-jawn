@@ -586,10 +586,13 @@ pub trait VersionStore: Send + Sync {
         scope: &'a StorageScope,
         query: BlameQuery,
     ) -> PortFuture<'a, BlameResponse>;
-    /// The 1-based line of the item file at `revision` on which the item's body starts: the line
-    /// after the frontmatter, or 1 for a file without frontmatter. Lines a diff's patch numbers
-    /// from this line on are body lines `line - start + 1`, the lines a read and a blame cite.
-    /// `NotFound` when no item with that identity is at `revision`.
+    /// The 1-based line of the item file at `revision`, counted in the stored bytes, on which the
+    /// item's body starts: 1 for a file without frontmatter; otherwise the line after the closing
+    /// `---`, or the line after that when it is empty (the one blank line a parse strips). For an
+    /// empty body it is the line where a body would begin, which can be past the end of the file.
+    /// Lines a diff's patch numbers from this line on are body lines `line - start + 1`, the
+    /// lines a read and a blame cite; a line before it is frontmatter. `NotFound` when no item
+    /// with that identity is at `revision`.
     fn body_start<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -708,9 +711,79 @@ pub trait WorkspaceCatalog: Send + Sync {
 /// Removes a purge target from every store that holds it; storage implements it, because one
 /// call must own every store it clears (Stage 1b design section 6).
 ///
-/// Both calls are idempotent on the mutation id and resumable after a crash: they return only
-/// when nothing section 6 lists still holds the target, and count the objects kept because a
-/// surviving item still references them.
+/// Both calls are idempotent on the mutation id and resumable after a crash. A workspace purge
+/// returns only when nothing section 6 lists still holds the workspace, and counts the objects
+/// kept because a surviving workspace or tenant record still references, pends or pins them. A
+/// purge is never cancelled; a failed call is resumed by repeating it with the same mutation
+/// and purge ids.
+///
+/// What the caller must do:
+///
+/// - Record the purge first (`RecordStore::create_purge`), and only then call the purger.
+/// - Before the first call, cancel every queued or running job of the target workspace and
+///   wait until none is running (the drain). From the moment the purge is recorded storage
+///   refuses to create, retry or claim a job of the workspace (`RecordStore::create_job`,
+///   `retry_job`, `claim_job`, each with `Conflict` naming the purge; a refused claim leaves
+///   the job as it is, for the caller to cancel), but it cannot stop a job that already runs.
+///   A workspace archive and a written history check the refusal before and again under the
+///   workspace's lock, and store their files as workspace-scoped puts: a pending put is
+///   recorded before the bytes are retained, and their record lands it, so a stop before the
+///   record leaves bytes the objects step deletes. An import copies its rows without the
+///   refusal.
+///
+/// What storage guarantees on its own, from the moment the purge is recorded and after the
+/// purge completes:
+///
+/// - Every write scoped to the target workspace listed here is refused with `Conflict` naming
+///   the purge, checked inside the write's own SQLite transaction: new jobs, job retries and
+///   claims, drafts (save, discard), upload slots, upload content, upload completions (also
+///   checked before anything is read, so a completion after the purge is refused rather than
+///   answered `NotFound`), artifacts, job completions, derived objects, receipts, reviews,
+///   proposals (insert, update), comments, confirmations (create, consume), sandbox
+///   capabilities and catalog changes. Commits, candidates and promotions are refused under the
+///   workspace's write lock, under which the purge reads the workspace's records and history
+///   for its plan, so each either is in the plan or is refused. Every content-bearing write a
+///   conversion makes is among these: its object puts, its commits, its derived objects and its
+///   job completion. Events are not refused: an event carries identities only. Job
+///   cancellation is never refused.
+/// - A workspace-scoped object put (`BlobStore::put`, an upload completion, an import) pins
+///   the object for as long as the write runs and then, in one transaction, checks the refusal
+///   again and records a durable pending put, before it retains the object. Apart from the
+///   purge of its own workspace, which clears it, a pending put is deleted only in the
+///   transaction of a record of the workspace that names the object (a commit's or a
+///   candidate's just after it landed). What a record deletes is what the stored record names:
+///   a write answered by an earlier record (a replayed artifact, commit or candidate) deletes
+///   only the pending puts of objects that record names, and an import only those of the
+///   archive objects its restored history and rows name, or a conversion record among them
+///   names. So a put whose record never lands (a failed or cancelled job, a failed retain, a
+///   refused record write, a crash, a replay of a record that names different bytes) keeps its
+///   pending put, which has no lifetime.
+/// - Before the purge deletes the target's objects it waits until no write of the target that
+///   pinned is still running, for at most ten minutes; after that the call fails with
+///   `Unavailable` having deleted none of the target's objects (its earlier steps, which remove
+///   the target's managed backups, rows, index entries and repository, may already have run),
+///   and repeating it resumes the purge. It then deletes every object the target's pending
+///   puts name that no surviving reference names, and clears those pending puts.
+/// - Writes to other workspaces of the tenant continue during the purge. An object is deleted
+///   only when no durable reference the purge read names it (another workspace's pending puts
+///   included) and no other workspace's write pinned it at any moment from the start of that
+///   read until the delete; so an object another workspace puts and then references while the
+///   purge runs is kept. One exception: a copy of one of the target's workspace archives that
+///   another workspace holds in an upload slot or names in a pending put is no surviving
+///   reference, and the archive goes with the target. A write of another workspace that is
+///   putting the same bytes during the objects step pins them and keeps them, as it keeps any
+///   pinned object. A pending put that never gets a record keeps an identical object of
+///   another workspace's purge, counted as kept, until the next purge of its own workspace
+///   deletes the bytes and clears it.
+/// - Index entries an indexing of the target stored after the index step are removed by the
+///   index pass the purge runs again after it deleted the repository; an indexing reads and
+///   stores under the workspace's write lock, so a later one finds no repository.
+/// - Managed backups are read again on every attempt and once more before the purge
+///   completes, so a backup written while the purge was unfinished is reached as well.
+///
+/// Pins live in the storage process's memory, and the data directory has one writer process,
+/// so a crash ends every write in flight; what such a write stored is named by its pending put,
+/// which carries it to the next purge of its workspace.
 pub trait Purger: Send + Sync {
     /// Remove a workspace: its repository, the objects only it references, its records, index
     /// entries, managed backups and retained exports.
@@ -769,6 +842,11 @@ pub trait Backups: Send + Sync {
     /// Import a workspace archive into `scope`. `editors` are the subjects with `write` on
     /// the target, computed by core from `AccessControl`: a draft whose editor is not among them
     /// stays in the archive and is counted as unassigned. Idempotent on the mutation id.
+    ///
+    /// After installing the archive's history it writes one commit on top of the restored head
+    /// carrying `mutation_id` (the restored head's tree, no content change), so
+    /// `VersionStore::find_commit(scope, mutation_id, None)` finds the revision the restore
+    /// produced, on a first or a resumed attempt alike; a repeat writes no second commit.
     fn restore_import<'a>(
         &'a self,
         scope: &'a StorageScope,
