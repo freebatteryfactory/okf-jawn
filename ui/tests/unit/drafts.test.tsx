@@ -676,6 +676,90 @@ describe('typed text is never lost silently', () => {
   });
 });
 
+// An editor reads the text once, when it opens: two over one session would each write the other's
+// words away. So there is one editor per item on a page.
+describe('the same item in two panes', () => {
+  const boxes = () => screen.queryAllByRole('textbox', { name: 'Text of Meeting notes' });
+  const pane = (which: 1 | 2, focused: 1 | 2) =>
+    screen.getByRole('region', {
+      name: `Documents, pane ${which} of 2${which === focused ? ', focused' : ''}`,
+    });
+
+  /** The note edited in pane 1, then split to the right: pane 2 has focus. */
+  async function editedAndSplit() {
+    const api = writable();
+    const { box } = await startEditing();
+    typeInto(box, ' first words');
+    fireEvent.click(screen.getByRole('button', { name: 'Split right' }));
+    await eventually(() => pane(2, 2));
+    return { api, box };
+  }
+
+  it('shows the committed text in the second pane, says why, and keeps one editor', async () => {
+    const { api, box } = await editedAndSplit();
+    await eventually(() =>
+      expect(within(pane(2, 2)).getByText('Text of Meeting notes')).toBeDefined(),
+    );
+    expect(boxes()).toEqual([box]);
+    expect(
+      within(pane(2, 2)).getByText(
+        'This item is being edited in another pane. Below is the committed text.',
+      ),
+    ).toBeDefined();
+    expect(within(pane(2, 2)).getByRole('button', { name: 'Edit here' })).toBeDefined();
+    // The first pane's words are still the draft, and are saved.
+    typeInto(box, ' and more');
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+    expect(api.callsTo(SAVE).at(-1)?.body).toBe(`${COMMITTED} first words and more`);
+    expect(document.querySelectorAll('.save-state')).toHaveLength(1);
+  });
+
+  it('"Edit here" moves the editor, with its text, its save state and keyboard focus', async () => {
+    const { api, box } = await editedAndSplit();
+    const here = within(pane(2, 2)).getByRole('button', { name: 'Edit here' });
+    act(() => here.focus());
+    fireEvent.click(here);
+    await eventually(() => expect(boxes()).toHaveLength(1));
+    const moved = boxes().at(0);
+    if (moved === undefined) throw new Error('no editor');
+    expect(moved).not.toBe(box);
+    expect(pane(2, 2).contains(moved)).toBe(true);
+    // The text typed in the other pane came with it, saved or not.
+    expect(textIn(moved)).toBe(`${COMMITTED} first words`);
+    await eventually(() => expect(document.activeElement).toBe(moved));
+    // The pane that had the editor reads the committed text and offers to take it back.
+    expect(within(pane(1, 2)).getByRole('button', { name: 'Edit here' })).toBeDefined();
+    expect(within(pane(1, 2)).getByText(/being edited in another pane/)).toBeDefined();
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+    expect(api.callsTo(SAVE).at(-1)?.body).toBe(`${COMMITTED} first words`);
+    typeInto(moved, ' then these');
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() =>
+      expect(api.callsTo(SAVE).at(-1)?.body).toBe(`${COMMITTED} first words then these`),
+    );
+  });
+
+  it('lets the other pane edit once the editing pane is closed', async () => {
+    const { box } = await editedAndSplit();
+    // Focus the first pane (the one editing) and close its tab: the pane goes.
+    act(() =>
+      within(pane(1, 2))
+        .getByRole('tab', { name: /Meeting notes/ })
+        .focus(),
+    );
+    await eventually(() => pane(1, 1));
+    fireEvent.click(within(pane(1, 1)).getByRole('button', { name: 'Close tab' }));
+    await eventually(() => expect(screen.getByRole('region', { name: 'Documents' })).toBeDefined());
+    await eventually(() => expect(boxes()).toHaveLength(1));
+    const left = boxes().at(0);
+    if (left === undefined) throw new Error('no editor');
+    expect(left).not.toBe(box);
+    expect(textIn(left)).toBe(`${COMMITTED} first words`);
+    expect(screen.queryByText(/being edited in another pane/)).toBeNull();
+  });
+});
+
 describe('the drafts of a workspace', () => {
   const twoPages: Handler = (body) => {
     const page = body.page;

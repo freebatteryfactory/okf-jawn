@@ -22,6 +22,8 @@ import {
   otherSummary,
   RECEIPT,
   renderAt,
+  SOURCE,
+  sourceSummary,
   WS,
   writableWorkspace,
 } from './support/workspace';
@@ -114,7 +116,9 @@ function service(overrides: Record<string, Handler> = {}, drafts: string[] = [NO
       [OPEN]: () => ok({ ...writableWorkspace, head: state.head }),
       [ITEM]: (body) => {
         const itemId = String(body.item_id);
-        const document = itemDocument(itemId === NOTE ? noteSummary : otherSummary);
+        const document = itemDocument(
+          itemId === NOTE ? noteSummary : itemId === SOURCE ? sourceSummary : otherSummary,
+        );
         return ok(
           state.drafts.has(itemId) ? { ...document, draft: draftContent(itemId) } : document,
         );
@@ -357,6 +361,86 @@ describe('taking a Snapshot', () => {
     expect(snapshotButton().textContent).toBe('Snapshot 0 drafts');
     expect(snapshotButton().getAttribute('aria-disabled')).toBe('true');
     expect(api.violations).toEqual([]);
+  });
+
+  // Keyboard focus never falls to the page body when a Snapshot takes away what had it.
+  describe('focus when a Snapshot answers', () => {
+    /** A Snapshot of every draft, held in flight until the test answers it. */
+    function heldSnapshot(drafts: string[]) {
+      let answer: () => void = () => {};
+      const made = service(
+        {
+          [COMMIT]: (body) =>
+            new Promise<Reply>((resolve) => {
+              answer = () => {
+                const ids = Array.isArray(body.item_ids) ? body.item_ids.map(String) : [];
+                for (const id of ids) made.state.drafts.delete(id);
+                made.state.head = MADE;
+                resolve(committed());
+              };
+            }),
+        },
+        drafts,
+      );
+      return { ...made, answer: () => act(() => answer()) };
+    }
+
+    it('goes from the editor to the pane’s switch', async () => {
+      const made = heldSnapshot([NOTE]);
+      renderAt(`/w/${WS}/i/${NOTE}`);
+      const box = await findTextBox('Text of Meeting notes');
+      await screen.findByRole('region', { name: 'Drafts (1)' });
+      await pressSnapshot('Tidy');
+      await eventuallyReal(() => expect(made.api.callsTo(COMMIT)).toHaveLength(1));
+      // The person goes back into the text while the Snapshot is taken, and types nothing.
+      act(() => box.focus());
+      made.answer();
+      await eventuallyReal(() => expect(said()).toMatch(/^Snapshot “Tidy” taken/));
+      await eventuallyReal(() => expect(box.isConnected).toBe(false));
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Edit' }));
+    });
+
+    it.each([
+      [
+        'the row now in its place',
+        [NOTE, OTHER, SOURCE],
+        ['Meeting notes', 'Annual report'],
+        'Annual report',
+      ],
+      ['the row before, when it was the last', [NOTE, OTHER], ['Meeting notes'], 'Meeting notes'],
+    ] as const)('goes from a row that leaves to %s', async (_where, drafts, kept, to) => {
+      // Only the plan is snapshotted; the others are unticked and stay listed.
+      const made = heldSnapshot([...drafts]);
+      renderAt(`/w/${WS}`);
+      await screen.findByRole('region', { name: `Drafts (${drafts.length})` });
+      const row = await within(panel()).findByRole('button', { name: 'Plan' });
+      for (const name of kept) {
+        fireEvent.click(
+          await within(panel()).findByRole('checkbox', { name: `Include ${name} in the Snapshot` }),
+        );
+      }
+      await pressSnapshot('Tidy');
+      await eventuallyReal(() => expect(made.api.callsTo(COMMIT)).toHaveLength(1));
+      expect(made.api.callsTo(COMMIT).at(0)?.item_ids).toEqual([OTHER]);
+      act(() => row.focus());
+      made.answer();
+      await eventuallyReal(() => expect(row.isConnected).toBe(false));
+      // (The row's title is read again at the new head; the row itself is the same one.)
+      expect(document.activeElement).toBe(await within(panel()).findByRole('button', { name: to }));
+    });
+
+    it('goes from the only row to the panel’s heading', async () => {
+      const made = heldSnapshot([NOTE]);
+      renderAt(`/w/${WS}`);
+      await screen.findByRole('region', { name: 'Drafts (1)' });
+      const row = await within(panel()).findByRole('button', { name: 'Meeting notes' });
+      await pressSnapshot('Tidy');
+      await eventuallyReal(() => expect(made.api.callsTo(COMMIT)).toHaveLength(1));
+      act(() => row.focus());
+      made.answer();
+      await eventuallyReal(() => expect(row.isConnected).toBe(false));
+      expect(document.activeElement).toBe(within(panel()).getByRole('heading'));
+    });
   });
 
   it('leaves out a draft whose box is unticked', async () => {

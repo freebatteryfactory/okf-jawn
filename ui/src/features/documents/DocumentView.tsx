@@ -12,7 +12,10 @@
  *
  * Editing happens in place of the reading: one button switches the pane between the committed
  * text (rendered, read through `read_item`) and the person's draft (`DraftEditor`, its text from
- * `get_item`). Two panes can show the two side by side, since any pane can be split. An item that
+ * `get_item`). There is one editor per item on a page: while one pane edits an item, another pane
+ * of the same item shows the committed text, says the item is being edited in the other pane, and
+ * offers "Edit here", which moves the editor, its text and keyboard focus to this pane. So the
+ * two can stand side by side, and two editors never write over one draft. An item that
  * has a draft opens on the draft, marked as one. Editing is for Notes: a Source or a View is shown
  * by the reader alone, with no "Edit". A draft is started only where the pane reads the version
  * the workspace shows and the person may write; a pane of a Note that reads another revision says
@@ -27,7 +30,7 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import {
   getItemOptions,
   openWorkspaceQueryKey,
@@ -40,12 +43,13 @@ import type {
   Revision,
   Workspace,
 } from '../../api/generated/types.gen';
+import { pageHeading, takeHeld, useWatchedPart } from '../../lib/focus';
 import { Instant } from '../../lib/instant';
 import { keyed } from '../../lib/keys';
 import { ItemAttention } from '../attention/ItemAttention';
 import { ConflictNotice } from '../drafts/ConflictNotice';
 import { DraftEditor } from '../drafts/DraftEditor';
-import { beginSession } from '../drafts/saving';
+import { beginSession, claimEditor, releaseEditor } from '../drafts/saving';
 import { saveStateOf, useConflict, useDraftSession } from '../drafts/sessions';
 import type { Snapshotted } from '../drafts/snapshot';
 import { FailureNotice } from '../errors/FailureNotice';
@@ -299,6 +303,11 @@ export function DocumentView({
   const atShown = canWrite && revision === head;
   const [seenAsNote, setSeenAsNote] = useState(false);
   if (!seenAsNote && document?.summary.kind === 'note') setSeenAsNote(true);
+  // The item's type, kept the same way: the form is drawn from it while the item is read again.
+  const [typeName, setTypeName] = useState<string | null>(null);
+  if (document !== undefined && typeName !== document.summary.type_name) {
+    setTypeName(document.summary.type_name);
+  }
   const isNote = session !== undefined || seenAsNote;
   const editable = atShown && isNote;
   const hasDraft = session !== undefined || (document?.draft ?? null) !== null;
@@ -307,12 +316,25 @@ export function DocumentView({
   // A draft the service holds is opened as it arrives. Without one, a session starts only when
   // the person presses "Edit": a discarded draft is not started again behind their back.
   const heldDraft = document?.draft ?? null;
+  // One editor per item on a page: this pane's own name, and whether another pane has the editor.
+  const pane = useId();
+  const editor = session?.editor ?? null;
+  const elsewhere = session !== undefined && editor !== null && editor !== pane;
   useEffect(() => {
     if (editable && session === undefined && document && heldDraft !== null) {
-      beginSession(workspaceId, revision, document);
+      beginSession(workspaceId, revision, document, pane);
     }
-  }, [editable, session, document, heldDraft, workspaceId, revision]);
-  const editing = wantsEdit && session !== undefined;
+  }, [editable, session, document, heldDraft, workspaceId, revision, pane]);
+  // A pane that wants the editor takes it when no pane has it (the one that had it was closed or
+  // went back to reading), and gives it up when it stops wanting it or goes.
+  const sessionOpen = session !== undefined;
+  useEffect(() => {
+    if (!sessionOpen) return;
+    if (wantsEdit && editor === null) claimEditor(workspaceId, itemId, pane);
+    else if (!wantsEdit && editor === pane) releaseEditor(workspaceId, itemId, pane);
+  }, [sessionOpen, wantsEdit, editor, workspaceId, itemId, pane]);
+  useEffect(() => () => releaseEditor(workspaceId, itemId, pane), [workspaceId, itemId, pane]);
+  const editing = wantsEdit && session !== undefined && editor === pane;
   // Whether this pane opens on a draft is known once `get_item` has answered. Until then the
   // committed text is neither read nor shown, so it never stands where the draft will.
   const undecided =
@@ -332,7 +354,7 @@ export function DocumentView({
     initialPageParam: { body: request },
     getNextPageParam: (last) => last.next_cursor ?? undefined,
     // The editor shows the draft's own text; the committed text is read when it is shown.
-    enabled: !wantsEdit && !undecided,
+    enabled: !(wantsEdit && !elsewhere) && !undecided,
   });
 
   const pages = read.data?.pages ?? [];
@@ -391,6 +413,14 @@ export function DocumentView({
       focusNext.current = null;
       target.focus();
     }
+  });
+  // The editor and the form leave when the session ends by another hand than this pane's own
+  // buttons (a Snapshot taken in the Drafts panel). Keyboard focus that was in them goes to the
+  // pane's switch, as after the other ways out of the editor; with no switch, to the page's heading.
+  const heldFocus = useRef<HTMLElement | null>(null);
+  const [, editingRef] = useWatchedPart<HTMLDivElement>(heldFocus);
+  useLayoutEffect(() => {
+    if (takeHeld(heldFocus)) (switchRef.current ?? pageHeading())?.focus();
   });
   const reading = JSON.stringify(request);
   const itemFailure = useRetry({
@@ -472,14 +502,22 @@ export function DocumentView({
               if (editing) setChosen('read');
               else if (session !== undefined || document !== undefined) {
                 if (session === undefined && document !== undefined) {
-                  beginSession(workspaceId, revision, document);
+                  beginSession(workspaceId, revision, document, pane);
                 }
+                // "Edit here" moves the editor from the pane that has it to this one.
+                claimEditor(workspaceId, itemId, pane, true);
                 focusNext.current = 'text';
                 setChosen('edit');
               }
             }}
           >
-            {editing ? 'Read the committed text' : hasDraft ? 'Edit your draft' : 'Edit'}
+            {editing
+              ? 'Read the committed text'
+              : elsewhere
+                ? 'Edit here'
+                : hasDraft
+                  ? 'Edit your draft'
+                  : 'Edit'}
           </button>
         </p>
       )}
@@ -505,7 +543,10 @@ export function DocumentView({
       )}
       {editable && !editing && session !== undefined && (
         <p role="note" className="notice">
-          {DRAFT_STANDS[saveStateOf(session)]} Below is the committed text.
+          {elsewhere
+            ? 'This item is being edited in another pane.'
+            : DRAFT_STANDS[saveStateOf(session)]}{' '}
+          Below is the committed text.
         </p>
       )}
       {selection && !editing && (
@@ -517,32 +558,36 @@ export function DocumentView({
         </p>
       )}
 
-      {itemFailure.shown ? (
+      {/* A read that fails when asked again never takes away what is on screen: the notice
+          stands beside the properties, the form and the text, and replaces them only when there
+          is nothing to show. */}
+      {itemFailure.shown && (
         <FailureNotice
           context="Reading this item’s properties"
           error={itemFailure.error}
           retry={itemFailure}
           workspaceId={workspaceId}
         />
-      ) : editing && document ? (
-        <PropertiesForm session={session} typeName={document.summary.type_name} />
-      ) : document ? (
-        <Properties properties={document.properties} />
-      ) : (
-        <p role="status">Loading properties…</p>
       )}
-
       {editing ? (
-        <DraftEditor
-          session={session}
-          title={title}
-          onDiscarded={() => {
-            focusNext.current = 'switch';
-            setChosen('read');
-          }}
-        />
+        <div ref={editingRef} className="editing">
+          {typeName === null ? null : <PropertiesForm session={session} typeName={typeName} />}
+          <DraftEditor
+            session={session}
+            title={title}
+            onDiscarded={() => {
+              focusNext.current = 'switch';
+              setChosen('read');
+            }}
+          />
+        </div>
       ) : (
         <>
+          {document ? (
+            <Properties properties={document.properties} />
+          ) : itemFailure.shown ? null : (
+            <p role="status">Loading properties…</p>
+          )}
           {first && first.outline.length > 0 && (
             <details className="outline">
               <summary>Outline ({first.outline.length})</summary>

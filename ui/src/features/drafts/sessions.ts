@@ -36,6 +36,12 @@ export interface SaveAttempt extends DraftText {
 export interface DraftSession extends DraftText {
   workspaceId: string;
   itemId: string;
+  /**
+   * The one pane whose editor holds this session's text now; null while no pane does. An editor
+   * reads the text once, when it opens, so two over one session would each write the other's
+   * words away: a second pane of the item shows the committed text until it takes the editor over.
+   */
+  editor: string | null;
   /** The revision the draft started from; every save carries it. */
   baseRevision: Revision;
   /** The committed content the session started from. */

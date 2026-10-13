@@ -62,7 +62,12 @@ const sessions = () => useDraftSessions.getState();
  * Start editing an item from what `get_item` answered at `revision`: the person's draft when it
  * carries one, otherwise the committed content. A session already there is left as it is.
  */
-export function beginSession(workspaceId: string, revision: Revision, document: ItemDocument) {
+export function beginSession(
+  workspaceId: string,
+  revision: Revision,
+  document: ItemDocument,
+  pane: string,
+) {
   const itemId = document.summary.id;
   if (sessions().sessions[sessionKey(workspaceId, itemId)] !== undefined) return;
   const committed: DraftText = { body: document.body, properties: document.properties };
@@ -72,6 +77,7 @@ export function beginSession(workspaceId: string, revision: Revision, document: 
   sessions().put({
     workspaceId,
     itemId,
+    editor: pane,
     baseRevision: draft === null ? revision : draft.draft.base_revision,
     ...text,
     committed,
@@ -81,6 +87,23 @@ export function beginSession(workspaceId: string, revision: Revision, document: 
     attempt: null,
     tooLong: null,
   });
+}
+
+/**
+ * Make `pane` the one whose editor holds the session's text. A session another pane edits is left
+ * to it unless `takeOver`: that is "Edit here", the person moving the editor to this pane.
+ */
+export function claimEditor(workspaceId: string, itemId: string, pane: string, takeOver = false) {
+  const key = sessionKey(workspaceId, itemId);
+  const session = sessions().sessions[key];
+  if (session === undefined || session.editor === pane) return;
+  if (session.editor === null || takeOver) sessions().change(key, { editor: pane });
+}
+
+/** `pane` no longer shows the session's editor (it reads, or it is gone): another may take it. */
+export function releaseEditor(workspaceId: string, itemId: string, pane: string) {
+  const key = sessionKey(workspaceId, itemId);
+  if (sessions().sessions[key]?.editor === pane) sessions().change(key, { editor: null });
 }
 
 function cancelTimer(key: string) {
