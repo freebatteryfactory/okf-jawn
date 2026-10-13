@@ -417,3 +417,90 @@ async fn a_refusal_given_the_request_id_stays_within_the_answer_bound() -> TestR
     }
     Ok(())
 }
+
+/// A tab between tokens is white space, as a blank is (the re-review's F5): an answer the
+/// service indented with tabs and ended its lines with a carriage return and a line feed is
+/// a message, and comes out as one line with its tabs.
+#[tokio::test]
+async fn an_answer_indented_with_tabs_is_passed_on() -> TestResult {
+    let pretty = "{\r\n\t\"jsonrpc\": \"2.0\",\r\n\t\"id\": 1,\r\n\t\"result\": {\t}\r\n}\r\n";
+    let ran = answered_with(200, pretty).await?;
+    assert_eq!(
+        (ran.stdout.as_str(), ran.stderr.as_str()),
+        (
+            "{\t\"jsonrpc\": \"2.0\",\t\"id\": 1,\t\"result\": {\t}}\n",
+            ""
+        )
+    );
+    let refusal =
+        "{\n\t\"jsonrpc\"\t:\t\"2.0\",\n\t\"error\"\t:\t{\t\"code\":-1,\t\"message\":\"m\"\t}\n}";
+    let ran = answered_with(400, refusal).await?;
+    assert_eq!(
+        (ran.stdout.as_str(), ran.stderr.as_str()),
+        (
+            "{\"id\":1,\t\"jsonrpc\"\t:\t\"2.0\",\t\"error\"\t:\t{\t\"code\":-1,\t\"message\":\"m\"\t}}\n",
+            ""
+        )
+    );
+    Ok(())
+}
+
+/// A key is the characters it spells (the re-review's F5): `"\u0069d"` is the member `id`.
+/// An answer that names its id so is the request's answer, once; a refusal that names
+/// another id so is not given a second one; and a `null` spelled so is replaced like any.
+#[tokio::test]
+async fn a_key_spelled_with_an_escape_is_the_key_it_spells() -> TestResult {
+    let id = format!("\"{}d\"", escape("0069"));
+    let answer = format!("{{\"jsonrpc\":\"2.0\",{id}:1,\"result\":{{}}}}");
+    let ran = answered_with(200, &answer).await?;
+    assert_eq!(
+        (ran.stdout.as_str(), ran.stderr.as_str()),
+        (format!("{answer}\n").as_str(), "")
+    );
+    let other =
+        format!("{{\"jsonrpc\":\"2.0\",{id}:99,\"error\":{{\"code\":-1,\"message\":\"m\"}}}}");
+    let ran = answered_with(400, &other).await?;
+    let (first, second) = some(ran.stdout.trim_end().split_once('\n'), "two lines")?;
+    assert_eq!(first, other);
+    let own = serde_json::from_str::<Value>(second)?;
+    assert_eq!(
+        (own.get("id"), own.pointer("/error/code")),
+        (Some(&json!(1)), Some(&json!(-32603)))
+    );
+    let unnamed =
+        format!("{{\"jsonrpc\":\"2.0\",{id}:null,\"error\":{{\"code\":-1,\"message\":\"m\"}}}}");
+    let ran = answered_with(400, &unnamed).await?;
+    assert_eq!(
+        ran.stdout,
+        format!("{{\"jsonrpc\":\"2.0\",{id}:1,\"error\":{{\"code\":-1,\"message\":\"m\"}}}}\n")
+    );
+    // The version member spelled so is still the version, in its key and in its value.
+    let version = format!(
+        "{{\"{}sonrpc\":\"{}.0\",\"id\":1,\"result\":{{}}}}",
+        escape("006a"),
+        escape("0032")
+    );
+    let ran = answered_with(200, &version).await?;
+    assert_eq!(ran.stdout, format!("{version}\n"));
+    Ok(())
+}
+
+/// An `error` that is no object makes no JSON-RPC error (the re-review's F5): a refusal
+/// whose `error` is a string, a number, an array or `null` is not passed on as the request's
+/// answer. The request gets the relay's own error, which names the status.
+#[tokio::test]
+async fn an_error_that_is_no_object_is_not_a_json_rpc_error() -> TestResult {
+    for error in ["\"m\"", "7", "[{\"code\":-1}]", "null", "true"] {
+        let body = format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{error}}}");
+        let ran = answered_with(400, &body).await?;
+        let lines = ran.lines()?;
+        let only = some(lines.first(), "an answer")?;
+        assert_eq!(
+            (lines.len(), only.get("id"), only.pointer("/error/code")),
+            (1, Some(&json!(1)), Some(&json!(-32603))),
+            "{error}"
+        );
+        assert!(ran.stdout.contains("HTTP 400"), "{error}: {}", ran.stdout);
+    }
+    Ok(())
+}
