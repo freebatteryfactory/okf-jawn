@@ -11,7 +11,11 @@
  *   over the library's lexer (`deepestNesting`): the parser's time grows much faster than the
  *   text when lists stand in lists, brackets in brackets, or `a: a: a:` on one line;
  * - whatever the parser throws is caught and shown as one more problem, never read as an empty or
- *   a valid document;
+ *   a valid document, and in the page's own words (`thrownWords`): a call stack that is full
+ *   (too deep for this browser), the bound on the uses of an anchor, and anything else as "could
+ *   not be read". None of the library's words about itself, and none of the JavaScript engine's,
+ *   reach the person. What the parser records about the text itself (a missing bracket, a key
+ *   that is repeated) is said in its words, at its line;
  * - every error the parser records is a problem, at its line and column; nothing is read from a
  *   document that has one;
  * - a directive is refused, not followed (a `%YAML 1.1` line would turn on merge keys and the 1.1
@@ -179,6 +183,22 @@ export function deepestNesting(text: string): { depth: number; line: number } {
 const refusedWhole = (message: string): YamlRead => ({ ok: false, problems: [whole(message)] });
 
 /**
+ * What the reader threw, in the page's words. The library throws for the bound on alias
+ * expansion; the engine throws when its call stack is full; whatever else is thrown is not
+ * described further.
+ */
+function thrownWords(thrown: unknown): string {
+  const said = thrown instanceof Error ? thrown.message : '';
+  if (thrown instanceof RangeError && /call stack/i.test(said)) {
+    return 'This text nests deeper than this browser can read. Nothing of it was read: put fewer things inside one another on one line.';
+  }
+  if (/alias count/i.test(said)) {
+    return 'This text uses an anchor (&name, and *name where its value is used again) more often than is read here. Nothing of it was read: write the value out where it is used.';
+  }
+  return 'This text could not be read as YAML. Nothing of it was read.';
+}
+
+/**
  * The whole number that the digits of a float denote (`12.0`, `1.2e1`), counted exactly; null
  * when they denote a real fraction. `source` is a float as the YAML core schema writes one, of a
  * finite value: so the power of ten that is raised here is at most that of the largest double,
@@ -312,8 +332,7 @@ export function readYaml(typed: string): YamlRead {
       warnings: document.warnings.map((warning) => at(warning.pos[0], firstLine(warning.message))),
     };
   } catch (thrown) {
-    const said = thrown instanceof Error ? thrown.message : String(thrown);
-    return { ok: false, problems: [whole(`This text could not be read as YAML: ${said}`)] };
+    return refusedWhole(thrownWords(thrown));
   }
 }
 

@@ -643,7 +643,7 @@ test.describe('changing the tree and the naming rules', () => {
     expect(slow.length).toBe(8192);
     await paste(slow);
     await expect(alert).toContainText(
-      /too complex to read here: reading it took more than a second|This text could not be read as YAML/,
+      /too complex to read here: reading it took more than a second|This text nests deeper than this browser can read/,
     );
     await expect(rules).toContainText('a: a: a: a: ');
     await press(page, 'Preview the renames');

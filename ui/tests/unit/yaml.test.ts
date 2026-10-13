@@ -21,8 +21,9 @@ vi.mock('yaml', async (original) => {
     ...actual,
     parseDocument: (text: string, options?: Parameters<typeof actual.parseDocument>[1]) => {
       parsed.push(text);
-      // One text makes the parser throw, as extreme input can.
+      // One text makes the parser throw, as extreme input can; another, something unforeseen.
       if (text === 'the parser throws on this') throw new RangeError('Maximum call stack');
+      if (text === 'the parser breaks on this') throw new TypeError('x is not a function');
       return actual.parseDocument(text, options);
     },
   };
@@ -118,17 +119,35 @@ describe('reading YAML', () => {
     ]);
   });
 
-  it('shows what the parser throws as a problem, never as an empty or a valid document', () => {
+  it('shows what the parser throws as a problem, never as an empty or a valid document, and in the page’s own words', () => {
+    // A full call stack: said as what it means, not as the engine says it.
     expect(readYaml('the parser throws on this')).toEqual({
       ok: false,
       problems: [
         {
-          message: 'This text could not be read as YAML: Maximum call stack',
+          message:
+            'This text nests deeper than this browser can read. Nothing of it was read: put fewer things inside one another on one line.',
           line: null,
           column: null,
         },
       ],
     });
+    // Anything else that is thrown: no word of it is shown.
+    expect(problems('the parser breaks on this')).toEqual([
+      'This text could not be read as YAML. Nothing of it was read.',
+    ]);
+  });
+
+  it('refuses a hundred uses of one anchor in the page’s own words, and reads ninety-nine', () => {
+    const uses = (count: number) =>
+      `a: &a x\nl: [${Array.from({ length: count }, () => '*a').join(', ')}]\n`;
+    const read = readYaml(uses(99));
+    expect(read.ok && (read.value as { l: string[] }).l).toHaveLength(99);
+    expect(problems(uses(100))).toEqual([
+      'This text uses an anchor (&name, and *name where its value is used again) more often than is read here. Nothing of it was read: write the value out where it is used.',
+    ]);
+    // None of the library's words about itself.
+    expect(problems(uses(100)).join(' ')).not.toMatch(/attack|exhaustion|Excessive/);
   });
 
   it('bounds alias expansion: a text that grows without end when read is refused', () => {
@@ -140,7 +159,7 @@ describe('reading YAML', () => {
     ].join('\n');
     const read = readYaml(laughs);
     expect(read.ok).toBe(false);
-    expect(problems(laughs).join(' ')).toMatch(/could not be read as YAML/);
+    expect(problems(laughs).join(' ')).toMatch(/uses an anchor .* more often than is read here/);
   });
 });
 
