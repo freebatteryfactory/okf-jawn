@@ -30,8 +30,10 @@
  *    a page added later needs one too, or focus stays on the body there.
  * So a retry that loaded content ends on what `loaded` names, and one that failed again on the
  * retry button. Step 1 asks whether the operation is failed, not whether a failure is shown: while
- * a retry is in flight the operation is not failed, so a notice that leaves then is followed to
- * steps 2 and 3. And when the operation is failed but the caller no longer shows this hook's
+ * the retry of a first load is in flight the operation is not failed, so a notice that leaves then
+ * is followed to steps 2 and 3. (A further page that failed stays failed while it is asked again;
+ * once its notice has left, nothing is there for step 1 either.) And when the operation is failed
+ * but the caller no longer shows this hook's
  * notice (another failure of its own has the place), nothing is there for step 1, and focus goes
  * to steps 2 and 3 as well.
  *
