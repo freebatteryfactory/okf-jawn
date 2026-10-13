@@ -1306,6 +1306,33 @@ describe('the person’s drafts of items a renaming renames', () => {
     ]);
   });
 
+  it('is said as done before a draft has followed, and the draft’s outcome never replaces what was said since', async () => {
+    const held: Array<() => void> = [];
+    const { api } = service(
+      withDraftOfNote(
+        (body) =>
+          new Promise<Reply>((resolve) => {
+            held.push(() => resolve(ok({ ...draft, base_revision: text(body, 'base_revision') })));
+          }),
+      ),
+    );
+    // The renaming is done and said, though the draft's save has not answered.
+    await rename();
+    await waitFor(() => expect(held).toHaveLength(1));
+    expect(said()).not.toContain('draft');
+    expect(api.callsTo(APPLY)).toHaveLength(1);
+    // Something else is said meanwhile: a new preview.
+    await setPrefix('2026-');
+    await previewNow();
+    await waitFor(() => expect(said()).toBe('The preview is ready. Nothing has been renamed.'));
+    await act(async () => {
+      held.at(0)?.();
+      await Promise.resolve();
+    });
+    await turn();
+    expect(said()).toBe('The preview is ready. Nothing has been renamed.');
+  });
+
   it('say so when one could not follow: the renaming is made all the same', async () => {
     const { api } = service(withDraftOfNote(() => refuse(500, 'internal', 'the store broke')));
     await rename();

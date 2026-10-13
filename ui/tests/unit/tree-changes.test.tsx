@@ -18,7 +18,7 @@ import { act, cleanup, renderHook, screen, waitFor, within } from '@testing-libr
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ItemSummary } from '../../src/api/generated/types.gen';
-import { resetDraftSessions, stopSaving } from '../../src/features/drafts/saving';
+import { headerBehind, resetDraftSessions, stopSaving } from '../../src/features/drafts/saving';
 import { useDeleted, useExplorerStore } from '../../src/features/explorer/store';
 import { fieldInWords } from '../../src/features/tree/fields';
 import {
@@ -1897,6 +1897,49 @@ describe('a draft whose item is ahead of the page, or whose own save is in the w
     await waitFor(() => expect(api.callsTo(SAVE)).toHaveLength(saves + 1));
     expect(api.callsTo(SAVE).at(-1)).toMatchObject({ base_revision: FIRST });
     expect(headerOf(api.callsTo(SAVE).at(-1))).toEqual({ id: NOTE, archived: true });
+  }, 20000);
+
+  it('takes only a refusal at the application’s header for an item changed elsewhere', () => {
+    const refusedAt = (field: string | undefined, code = 'invalid_input') => ({
+      code,
+      message: 'refused',
+      ...(field === undefined ? {} : { field }),
+    });
+    expect(headerBehind(refusedAt('/properties/okf_jawn'))).toBe(true);
+    // Another field, no field, another code, and a failure that is no answer of the service.
+    expect(headerBehind(refusedAt('/properties/owner'))).toBe(false);
+    expect(headerBehind(refusedAt('/body'))).toBe(false);
+    expect(headerBehind(refusedAt(undefined))).toBe(false);
+    expect(headerBehind(refusedAt('/properties/okf_jawn', 'conflict'))).toBe(false);
+    expect(headerBehind(new Error('the network is down'))).toBe(false);
+  });
+
+  it('says nothing of a draft when the change is not on the page and nothing was typed', async () => {
+    const gate: { release: () => void } = { release: () => {} };
+    const holder: { commit: () => string } = { commit: () => '' };
+    const own = service({
+      [LIFE]: () =>
+        new Promise<Reply>((resolve) => {
+          gate.release = () =>
+            resolve(ok({ revision: holder.commit(), receipt_id: RECEIPT, warnings: [] }));
+        }),
+    });
+    holder.commit = own.moveHead;
+    // The editor is open, and nothing is typed: there is no draft.
+    await editing();
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Archive' }));
+    await waitFor(() => expect(own.api.callsTo(LIFE)).toHaveLength(1));
+    own.moveHead();
+    await userEvent.click(await screen.findByRole('button', { name: /^Refresh/ }));
+    await waitFor(() => expect(headLine()).toContain('cccccccccc'));
+    await act(async () => {
+      gate.release();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(statusLine()).toContain('Archived.'));
+    await act(() => new Promise<void>((resolve) => setTimeout(resolve, 50)));
+    expect(statusLine()).not.toContain('Your draft');
+    expect(own.api.callsTo(SAVE)).toEqual([]);
   }, 20000);
 
   it('says that the draft is left on the older version when the change is not on the page', async () => {
