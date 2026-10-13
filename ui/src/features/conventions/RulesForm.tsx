@@ -13,6 +13,7 @@
 import Form from '@rjsf/core';
 import type { IconButtonProps, RJSFSchema, RJSFValidationError } from '@rjsf/utils';
 import { customizeValidator } from '@rjsf/validator-ajv8';
+import { flushSync } from 'react-dom';
 import type { NamingRules } from '../../api/generated/types.gen';
 
 const validator = customizeValidator<NamingRules>();
@@ -54,8 +55,15 @@ function named(errors: RJSFValidationError[]): RJSFValidationError[] {
   });
 }
 
-/** A button of a list of rules, with its action in words (the library's own shows an icon font). */
-function worded(text: string) {
+/**
+ * A button of a list of rules, with its action in words (the library's own shows an icon font).
+ *
+ * Pressing one changes the list under keyboard focus: "Remove this rule" takes its own rule, and
+ * itself, off the page, and a move puts the rule elsewhere. So the change is made at once
+ * (`flushSync`) and focus that fell to the page body with it is put back before anything is
+ * painted: on the button when it is still there, otherwise on "Add a rule", which always is.
+ */
+function worded(text: string, always = false) {
   return function WordedButton(props: IconButtonProps<NamingRules>) {
     const { id, onClick, disabled } = props;
     return (
@@ -65,8 +73,16 @@ function worded(text: string) {
         type="button"
         id={id}
         aria-disabled={disabled === true}
+        {...(always ? { 'data-always-there': '' } : {})}
         onClick={(event) => {
-          if (disabled !== true) onClick?.(event);
+          if (disabled === true) return;
+          const button = event.currentTarget;
+          const form = button.closest('form');
+          flushSync(() => onClick?.(event));
+          const active = document.activeElement;
+          if (active !== null && active !== document.body) return;
+          if (button.isConnected) button.focus();
+          else form?.querySelector<HTMLElement>('button[data-always-there]')?.focus();
         }}
       >
         {text}
@@ -76,7 +92,7 @@ function worded(text: string) {
 }
 
 const BUTTONS = {
-  AddButton: worded('Add a rule'),
+  AddButton: worded('Add a rule', true),
   RemoveButton: worded('Remove this rule'),
   MoveUpButton: worded('Move this rule up'),
   MoveDownButton: worded('Move this rule down'),

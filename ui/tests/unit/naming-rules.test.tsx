@@ -6,11 +6,12 @@
 import type { RJSFSchema } from '@rjsf/utils';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import namingSchema from '../../../api/forms/naming-rules.schema.json';
 import type { ItemSummary, NamingRules } from '../../src/api/generated/types.gen';
 import { staleReason } from '../../src/features/conventions/NamingRules';
-import { RulesForm, rulesProblems } from '../../src/features/conventions/RulesForm';
+import { formHolds, RulesForm, rulesProblems } from '../../src/features/conventions/RulesForm';
 import { type Preview, sameRules } from '../../src/features/conventions/rules';
 import { resetDraftSessions } from '../../src/features/drafts/saving';
 import { type Handler, type Json, mockApi, ok, type Reply } from './support/api';
@@ -270,6 +271,59 @@ describe('the rules form', () => {
     expect(problems.some((problem) => problem.includes('“legacy_flag”'))).toBe(true);
     expect(problems.some((problem) => problem.includes('“note”'))).toBe(true);
     expect(rulesProblems(schema, savedRules)).toEqual([]);
+  });
+});
+
+describe('the list of rules in the form', () => {
+  function Held() {
+    const [value, setValue] = useState<NamingRules>({
+      schema_version: 1,
+      rules: [
+        { ...rule, glob: 'first/*' },
+        { ...rule, glob: 'second/*' },
+      ],
+    });
+    return (
+      <RulesForm
+        schema={schema}
+        value={value}
+        onChange={(next) => {
+          if (formHolds(next)) setValue(next);
+        }}
+      />
+    );
+  }
+  const globs = () =>
+    screen.getAllByRole('textbox', { name: /^glob/ }).map((box) => (box as HTMLInputElement).value);
+  const press = (name: string, index: number) => {
+    const button = screen.getAllByRole('button', { name }).at(index);
+    button?.focus();
+    if (button !== undefined) fireEvent.click(button);
+    return button;
+  };
+
+  it('names each action in words, and keeps focus off the page body when a rule is removed', () => {
+    render(<Held />);
+    expect(screen.getAllByRole('button', { name: 'Remove this rule' })).toHaveLength(2);
+    press('Remove this rule', 1);
+    expect(globs()).toEqual(['first/*']);
+    // The pressed button left with its rule: focus is on the button that is always there.
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Add a rule' }));
+  });
+
+  it('keeps focus on a rule’s button when the rule moves, and ignores one that is unavailable', () => {
+    render(<Held />);
+    const up = press('Move this rule up', 1);
+    expect(globs()).toEqual(['second/*', 'first/*']);
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement?.textContent).toBe('Move this rule up');
+    expect(up).toBeDefined();
+    // The first rule cannot go further up: its button says so and does nothing.
+    const first = screen.getAllByRole('button', { name: 'Move this rule up' }).at(0);
+    expect(first?.getAttribute('aria-disabled')).toBe('true');
+    expect(first).toHaveProperty('disabled', false);
+    press('Move this rule up', 0);
+    expect(globs()).toEqual(['second/*', 'first/*']);
   });
 });
 
