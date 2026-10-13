@@ -7,8 +7,13 @@
  * to what the focused pane showed. The links are in the workspace's bar, which stays whatever is
  * shown, so following one never takes the element that has keyboard focus off the page. A page's
  * own heading is a level-two heading: the page's level-one heading stays the workspace's name.
+ *
+ * The shell is told of every press on a link of the bar (`onFollow`), before the router acts on
+ * it: a link to the place the address already names is no navigation, so the router would not
+ * tell it of that one (`ExplorerShell.tsx`, the naming rules).
  */
 import { Link, useMatches } from '@tanstack/react-router';
+import type { MouseEvent } from 'react';
 import type { Revision } from '../../api/generated/types.gen';
 import { AttentionLink } from '../attention/AttentionLink';
 import { AttentionPage } from '../attention/AttentionPage';
@@ -60,13 +65,15 @@ export interface WorkspaceNavProps {
   query: string | undefined;
   /** The focused pane: "Documents" returns to its open item. */
   documents: Pane | null;
+  /** A link of the bar was pressed; the router acts on the press after this. */
+  onFollow?: ((event: MouseEvent<HTMLAnchorElement>) => void) | undefined;
 }
 
 /**
  * The links to the workspace's places. The link of the place on screen says so: the router sets
  * `aria-current="page"` on a link to the current URL.
  */
-export function WorkspaceNav({ workspaceId, head, query, documents }: WorkspaceNavProps) {
+export function WorkspaceNav({ workspaceId, head, query, documents, onFollow }: WorkspaceNavProps) {
   const kept = query === undefined ? {} : { q: query };
   const params = { workspaceId };
   const shown = documents?.active ?? null;
@@ -74,7 +81,13 @@ export function WorkspaceNav({ workspaceId, head, query, documents }: WorkspaceN
   return (
     <nav aria-label="Workspace" className="workspace-nav">
       {shown === null ? (
-        <Link to="/w/$workspaceId" params={params} search={kept} activeOptions={{ exact: true }}>
+        <Link
+          to="/w/$workspaceId"
+          params={params}
+          search={kept}
+          activeOptions={{ exact: true }}
+          onClick={onFollow}
+        >
           Documents
         </Link>
       ) : (
@@ -87,17 +100,18 @@ export function WorkspaceNav({ workspaceId, head, query, documents }: WorkspaceN
             ...(read.rev === undefined ? {} : { rev: read.rev }),
           }}
           activeOptions={{ exact: true }}
+          onClick={onFollow}
         >
           Documents
         </Link>
       )}
-      <Link to="/w/$workspaceId/import" params={params} search={kept}>
+      <Link to="/w/$workspaceId/import" params={params} search={kept} onClick={onFollow}>
         Import
       </Link>
-      <Link to="/w/$workspaceId/jobs" params={params} search={kept}>
+      <Link to="/w/$workspaceId/jobs" params={params} search={kept} onClick={onFollow}>
         Jobs
       </Link>
-      <AttentionLink workspaceId={workspaceId} head={head} search={kept} />
+      <AttentionLink workspaceId={workspaceId} head={head} search={kept} onFollow={onFollow} />
     </nav>
   );
 }

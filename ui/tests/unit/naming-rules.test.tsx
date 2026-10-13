@@ -2052,3 +2052,96 @@ describe('the rules on screen when the version shown changes', () => {
     );
   });
 });
+
+describe('the naming rules and the workspace’s own pages', () => {
+  const question = () =>
+    screen.queryByRole('group', { name: 'Leave the naming rules without saving?' });
+  const link = (name: string | RegExp) => screen.getByRole('link', { name });
+  const page = (name: string) => screen.queryByRole('heading', { name, level: 2 });
+  const rulesPanel = () => screen.queryByRole('region', { name: 'Naming rules' });
+  const settle = () => act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+
+  it('asks the rules’ question before a page takes their place, and shows the page only after "Discard my changes"', async () => {
+    service();
+    const { router } = await openRules();
+    await setPrefix('unsaved-');
+    const toImport = link('Import');
+    await userEvent.click(toImport);
+    expect(question()).not.toBeNull();
+    expect(document.activeElement).toBe(button('Keep editing'));
+    // Nothing was shown behind the question: the address is as it was and the page is not there.
+    expect(router.state.location.pathname).toBe(`/w/${WS}`);
+    expect(page('Import files')).toBeNull();
+    await userEvent.click(button('Keep editing'));
+    await settle();
+    expect(router.state.location.pathname).toBe(`/w/${WS}`);
+    expect(page('Import files')).toBeNull();
+    expect(prefix()).toHaveProperty('value', 'unsaved-');
+    expect(document.activeElement).toBe(toImport);
+    await userEvent.click(toImport);
+    await userEvent.click(button('Discard my changes'));
+    await waitFor(() => expect(page('Import files')).not.toBeNull());
+    expect(rulesPanel()).toBeNull();
+    expect(router.state.location.pathname).toBe(`/w/${WS}/import`);
+    // The link that was pressed is still in the bar, and focus is on it.
+    expect(document.activeElement).toBe(link('Import'));
+  });
+
+  it('shows a page at once in the rules’ place when the rules hold no edit', async () => {
+    service();
+    const { router } = await openRules();
+    await userEvent.click(link('Jobs'));
+    await waitFor(() => expect(page('Jobs')).not.toBeNull());
+    expect(question()).toBeNull();
+    expect(rulesPanel()).toBeNull();
+    expect(router.state.location.pathname).toBe(`/w/${WS}/jobs`);
+    expect(document.activeElement).toBe(link('Jobs'));
+  });
+
+  it('puts the rules in front of a page that is shown, and the page is there again when they close', async () => {
+    service();
+    const { router } = renderAt(`/w/${WS}/attention`);
+    await waitFor(() => expect(page('Attention')).not.toBeNull());
+    await userEvent.click(button('Naming rules'));
+    await within(panel()).findByRole('textbox', { name: /^prefix/ });
+    // Behind the rules, not gone: hidden from everyone, still the page the address names.
+    expect(page('Attention')).toBeNull();
+    expect(screen.getByRole('heading', { name: 'Attention', level: 2, hidden: true })).toBeTruthy();
+    expect(router.state.location.pathname).toBe(`/w/${WS}/attention`);
+    await userEvent.click(button('Close the naming rules'));
+    expect(rulesPanel()).toBeNull();
+    expect(page('Attention')).not.toBeNull();
+    expect(document.activeElement).toBe(button('Naming rules'));
+  });
+
+  it('gives the documents back for a press of "Documents" while the address already names them, after the question', async () => {
+    service();
+    const { router } = await openRules();
+    await setPrefix('unsaved-');
+    const documents = link('Documents');
+    await userEvent.click(documents);
+    expect(question()).not.toBeNull();
+    await userEvent.click(button('Keep editing'));
+    expect(rulesPanel()).not.toBeNull();
+    expect(prefix()).toHaveProperty('value', 'unsaved-');
+    await userEvent.click(documents);
+    await userEvent.click(button('Discard my changes'));
+    expect(rulesPanel()).toBeNull();
+    expect(router.state.location.pathname).toBe(`/w/${WS}`);
+    expect(document.activeElement).toBe(link('Documents'));
+    expect(screen.getByRole('region', { name: /^Documents/ })).toBeTruthy();
+  });
+
+  it('gives a page back for a press of its own link while the rules stand in front of it', async () => {
+    service();
+    renderAt(`/w/${WS}/import`);
+    await waitFor(() => expect(page('Import files')).not.toBeNull());
+    await userEvent.click(button('Naming rules'));
+    await within(panel()).findByRole('textbox', { name: /^prefix/ });
+    expect(page('Import files')).toBeNull();
+    await userEvent.click(link('Import'));
+    expect(rulesPanel()).toBeNull();
+    expect(page('Import files')).not.toBeNull();
+    expect(document.activeElement).toBe(link('Import'));
+  });
+});

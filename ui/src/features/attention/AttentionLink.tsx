@@ -8,7 +8,7 @@
  * there are none: the list may not have been read.
  */
 import { Link } from '@tanstack/react-router';
-import { useEffect } from 'react';
+import { type MouseEvent, useEffect } from 'react';
 import type { Revision } from '../../api/generated/types.gen';
 import { ATTENTION_AUTO_PAGES, useAttention, warningsOf } from './attention';
 
@@ -18,9 +18,11 @@ export interface AttentionLinkProps {
   head: Revision;
   /** The workspace search the URL carries. */
   search: { q?: string };
+  /** The link was pressed; the router acts on the press after this. */
+  onFollow?: ((event: MouseEvent<HTMLAnchorElement>) => void) | undefined;
 }
 
-export function AttentionLink({ workspaceId, head, search }: AttentionLinkProps) {
+export function AttentionLink({ workspaceId, head, search, onFollow }: AttentionLinkProps) {
   const attention = useAttention(workspaceId, head);
   const { hasNextPage, isFetching, isError, fetchNextPage } = attention;
   const pageCount = attention.data?.pages.length ?? 0;
@@ -31,7 +33,12 @@ export function AttentionLink({ workspaceId, head, search }: AttentionLinkProps)
   }, [hasNextPage, isFetching, isError, pageCount, fetchNextPage]);
   const listed = warningsOf(attention.data?.pages).length;
   return (
-    <Link to="/w/$workspaceId/attention" params={{ workspaceId }} search={search}>
+    <Link
+      to="/w/$workspaceId/attention"
+      params={{ workspaceId }}
+      search={search}
+      onClick={onFollow}
+    >
       Attention{listed > 0 ? ` (${listed}${hasNextPage ? '+' : ''})` : ''}
     </Link>
   );

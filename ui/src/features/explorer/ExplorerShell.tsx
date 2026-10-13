@@ -12,6 +12,16 @@
  *
  * The workspace's own pages (`WorkspacePages.tsx`) are shown in place of the documents; the links
  * to them are in the bar.
+ *
+ * Three things want the documents column: the documents, a page the address names (import, jobs,
+ * Attention) and the naming rules, which are this page's own state and have no address. The
+ * address says which of the first two is there. The naming rules, while open, stand in front of
+ * it: what the address names stays mounted behind them, hidden, and is there again when they
+ * close. Whatever is asked for while the rules are open is shown in their place, after the
+ * rules' own question when edits would be lost: an item opened from the folders, a link of the
+ * bar or any other navigation (the router holds it back until the question is answered), and a
+ * link of the bar to the place the address already names, which is no navigation and is
+ * followed here. Asking for the rules while a page is shown puts them in front of that page.
  */
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -20,9 +30,18 @@ import {
   useBlocker,
   useNavigate,
   useParams,
+  useRouter,
   useSearch,
 } from '@tanstack/react-router';
-import { type Ref, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import {
+  type MouseEvent,
+  type Ref,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import { openWorkspaceQueryKey } from '../../api/generated/@tanstack/react-query.gen';
 import { openWorkspace } from '../../api/generated/sdk.gen';
@@ -188,6 +207,18 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
     enableBeforeUnload: false,
     shouldBlockFn: useCallback<ShouldBlockFn>((navigation) => holdBack.current(navigation), []),
   });
+  // A link of the bar to the place the address already names is no navigation: the router asks
+  // nothing and shows nothing new, and the rules would stay in front of what was asked for. So
+  // that press is followed here, after the same question. A press that opens the link elsewhere
+  // (a modifier key, another button) is the browser's; every other link is the router's.
+  const router = useRouter();
+  const followBar = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (!rulesOpen || event.defaultPrevented || event.button !== 0) return;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    if (event.currentTarget.getAttribute('href') !== router.state.location.href) return;
+    const asker = event.currentTarget;
+    leaveRules(() => showDocuments(asker));
+  };
   const focusRulesButton = useRef(false);
   useLayoutEffect(() => {
     if (!focusRulesButton.current || rulesOpen) return;
@@ -326,6 +357,7 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
             head={head}
             query={query}
             documents={view.panes.find((pane) => pane.id === view.focusedPaneId) ?? null}
+            onFollow={followBar}
           />
           <button
             type="button"
