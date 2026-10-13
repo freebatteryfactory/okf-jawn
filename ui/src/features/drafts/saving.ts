@@ -48,7 +48,7 @@
  * item read says the item is not a Note (it is a Source or a View): the service takes no draft of
  * such an item. The pane tells the session at each read (`refuseSaving`, from `DocumentView`) and
  * the session carries it (`refused`: what the item is, or null). This is the one place that says
- * what follows; every function here and in `snapshot.ts` that sends or waits asks that field.
+ * what follows; the functions here and in `snapshot.ts` that send or wait ask that field.
  * - Nothing of it is sent. Every `save_draft` goes through `save` (the autosave's timer, leaving
  *   the editor, a hidden page, a Snapshot's save, "Keep mine"), and `save` returns at once, with
  *   no request, for a refused session. A request already under way when the refusal comes is let
@@ -57,7 +57,8 @@
  *   the pane shows what was typed, read-only, with "Discard draft" (`KeptText`).
  * - Nothing waits on it. `rebaseSession` ("Keep mine") rejects with `DraftNotKept('refused')`
  *   instead of saving until the text is saved: a result its caller can tell from "saved".
- *   `flushSession` settles at once, and its outcome is the session's state, as ever.
+ *   `flushSession` settles at once, and its outcome is the session's state, as ever:
+ *   `takeSnapshot`, which waits on it, takes a refused session as not saved and asks nothing.
  * - A discard is still sent: it is the way out, and the refusal ends with the session.
  * - A session that holds nothing of the person's (nothing typed, nothing saved, nothing held
  *   back) is ended, not refused: there is nothing to keep, and nothing to discard.

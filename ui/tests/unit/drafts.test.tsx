@@ -20,6 +20,7 @@ import {
   STILL_SENDING_AFTER_MS,
 } from '../../src/features/drafts/saving';
 import { sessionKey, useDraftSessions } from '../../src/features/drafts/sessions';
+import { takeSnapshot, UnsavedSelection } from '../../src/features/drafts/snapshot';
 import { fail, type Handler, type Json, mockApi, ok, type Reply } from './support/api';
 import { findTextBox, replaceText, textBox, textIn, typeInto } from './support/editor';
 import {
@@ -502,6 +503,24 @@ describe('who may edit, and where', () => {
       }
       expect(api.callsTo(SAVE)).toHaveLength(0);
       expect(session()?.baseRevision).toBe(HEAD);
+    }, 20_000);
+
+    it('takes no Snapshot of it, though all of its text was saved before: nothing is asked', async () => {
+      const { api, held } = becomesSource();
+      const { box, queryClient } = await startEditing();
+      typeInto(box, ' and more');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+      await refreshTo(held, NEWER);
+      await eventuallyGet(keptText);
+      const outcome = await takeSnapshot(queryClient, WS, [NOTE], 'Tidy').then(
+        () => 'taken',
+        (thrown: unknown) => thrown,
+      );
+      expect(outcome).toBeInstanceOf(UnsavedSelection);
+      expect(outcome).toHaveProperty('itemIds', [NOTE]);
+      expect(api.callsTo('/api/history/commit-items')).toHaveLength(0);
+      expect(api.callsTo(SAVE)).toHaveLength(1);
     }, 20_000);
 
     it('ends a "Keep mine" that was waiting for a save when the refusal came, as not kept', async () => {
