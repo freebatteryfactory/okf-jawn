@@ -23,7 +23,10 @@
 //!   `Unavailable`.
 //!
 //! A fetch holds up one request only. The cache's lock is held to decide and to store, never
-//! while the issuer is asked. The request that takes the minute's attempt (its `kid` is unknown,
+//! while the issuer is asked. The clock is read under that lock, and an instant later than the
+//! reading counts as no time at all, so of any number of requests at the same moment exactly
+//! one takes the minute's attempt. A set is stamped with the instant its fetch began, and an
+//! answer never replaces a set whose fetch began later. The request that takes the minute's attempt (its `kid` is unknown,
 //! or the set is stale) waits for that fetch; every other request is answered at once from the
 //! cached set as it stands, so a token whose key is cached is verified however slow the issuer
 //! is, and an unknown `kid` that arrives during a fetch, or inside the minute after one, causes
@@ -225,16 +228,19 @@ impl ConnectTokens {
 
     /// The verification key `kid` names, by the timing rules of the module header.
     async fn key(&self, kid: &str) -> Result<DecodingKey, Unverified> {
-        let began = self.clock.now();
-        {
+        let began = {
             let mut cache = self.cache.lock().await;
-            if !cache.needs_fetch(kid, began) {
-                return cache.key(kid, began, false);
+            // Read under the lock that decides who takes the attempt: no request decides on a
+            // reading older than an attempt another request marked in the meantime.
+            let now = self.clock.now();
+            if !cache.needs_fetch(kid, now) {
+                return cache.key(kid, now, false);
             }
             // Taken under the lock, before the issuer is asked: every other request of this
             // minute, also one that arrives while the fetch runs, answers from the cache.
-            cache.attempted_at = Some(began);
-        }
+            cache.attempted_at = Some(now);
+            now
+        };
         // The lock is released. The fetch runs in a task of its own, so it and what it brings
         // outlive this request if its caller goes away.
         let fetching = tokio::spawn(refresh(self.keys.clone(), self.cache.clone(), began));
@@ -309,14 +315,19 @@ async fn refresh(keys: Arc<dyn KeySource>, cache: Arc<Mutex<KeyCache>>, began: I
         return false;
     };
     let mut cache = cache.lock().await;
-    cache.set = Some(set);
-    cache.fetched_at = Some(began);
+    // An answer never replaces a set whose fetch began later.
+    if cache.fetched_at.is_none_or(|held| held <= began) {
+        cache.set = Some(set);
+        cache.fetched_at = Some(began);
+    }
     true
 }
 
-/// How long before `now` the instant `at` was, when there is one and it is not later.
+/// How long before `now` the instant `at` was, when there is one. An instant later than
+/// `now` counts as no time at all: it was stored a moment ago, never long ago, so it can make
+/// neither an attempt look free nor a set look old.
 fn since(at: Option<Instant>, now: Instant) -> Option<Duration> {
-    at.and_then(|at| now.checked_duration_since(at))
+    at.map(|at| now.saturating_duration_since(at))
 }
 
 fn refused() -> ApiError {

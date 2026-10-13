@@ -13,10 +13,10 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_server::config::HostedConfig;
 use okf_jawn_server::connect::{ConnectTokens, KeySource};
-use okf_jawn_server::grants::Clock;
+use okf_jawn_server::grants::{Clock, SystemClock};
 use okf_jawn_server::identity::ConnectVerifier;
 use serde_json::{Value, json};
-use tokio::sync::Notify;
+use tokio::sync::{Barrier, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::error::Elapsed;
 use tokio::time::timeout;
@@ -65,16 +65,22 @@ const SECOND_KEY_SET: &str = include_str!("keys/test-only-rsa-2.jwks.json");
 /// and it decides only a failure.
 const AT_ONCE: Duration = Duration::from_secs(2);
 
+/// Most rounds of the threaded test, and how many requests each round lets go at once.
+const ROUNDS: u32 = 2_000;
+const SIMULTANEOUS: usize = 64;
+
 impl KeySource for Issuer {
     fn fetch(&self) -> PortFuture<'_, JwkSet> {
         Box::pin(async move {
             self.fetches.fetch_add(1, Ordering::SeqCst);
+            // The issuer answers what it published when it was asked, however long the answer
+            // takes to arrive.
+            let published = self.published.lock().map_err(|_| poisoned())?.clone();
             let gate = self.gate.lock().map_err(|_| poisoned())?.take();
             if let Some(gate) = gate {
                 self.waiting.notify_one();
                 gate.notified().await;
             }
-            let published = self.published.lock().map_err(|_| poisoned())?.clone();
             self.answers.fetch_add(1, Ordering::SeqCst);
             self.answered.notify_one();
             published.ok_or_else(|| ApiError::new(ErrorCode::Unavailable, "the issuer is down"))
@@ -83,6 +89,20 @@ impl KeySource for Issuer {
 }
 
 impl Issuer {
+    /// An issuer that publishes `set` (`None`: it is down).
+    fn publishing(set: Option<&str>) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
+        let issuer = Arc::new(Self {
+            published: Mutex::new(None),
+            fetches: AtomicUsize::new(0),
+            gate: Mutex::new(None),
+            waiting: Notify::new(),
+            answers: AtomicUsize::new(0),
+            answered: Notify::new(),
+        });
+        issuer.publish(set)?;
+        Ok(issuer)
+    }
+
     fn publish(&self, set: Option<&str>) -> TestResult {
         let set = set.map(serde_json::from_str::<JwkSet>).transpose()?;
         *self.published.lock().map_err(|_| "poisoned")? = set;
@@ -131,33 +151,30 @@ impl TestClock {
             .fetch_add(u64::try_from(by.as_millis())?, Ordering::SeqCst);
         Ok(())
     }
+
+    /// Read earlier by `by`: what a request sees that read the clock before another request
+    /// did and reaches the cache after it.
+    fn rewind(&self, by: Duration) -> Result<(), std::num::TryFromIntError> {
+        self.elapsed_ms
+            .fetch_sub(u64::try_from(by.as_millis())?, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 impl Setup {
     /// A verifier whose issuer publishes `set` (`None`: the issuer is down).
     fn new(set: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
-        let issuer = Arc::new(Issuer {
-            published: Mutex::new(None),
-            fetches: AtomicUsize::new(0),
-            gate: Mutex::new(None),
-            waiting: Notify::new(),
-            answers: AtomicUsize::new(0),
-            answered: Notify::new(),
-        });
-        issuer.publish(set)?;
+        let issuer = Issuer::publishing(set)?;
         let clock = Arc::new(TestClock {
             start: Instant::now(),
             elapsed_ms: AtomicU64::new(0),
         });
-        let config = HostedConfig {
-            client_id: "client_01".to_owned(),
-            api_key: "not-a-real-api-key".to_owned(),
-            issuer: ISSUER.to_owned(),
-            resource: AUDIENCE.to_owned(),
-            redirect_uri: "https://okf.example.test/auth/callback".to_owned(),
-        };
         Ok(Self {
-            verifier: Arc::new(ConnectTokens::new(issuer.clone(), &config, clock.clone())?),
+            verifier: Arc::new(ConnectTokens::new(
+                issuer.clone(),
+                &config(),
+                clock.clone(),
+            )?),
             issuer,
             clock,
         })
@@ -188,6 +205,16 @@ impl Setup {
 
 fn poisoned() -> ApiError {
     ApiError::new(ErrorCode::Internal, "poisoned")
+}
+
+fn config() -> HostedConfig {
+    HostedConfig {
+        client_id: "client_01".to_owned(),
+        api_key: "not-a-real-api-key".to_owned(),
+        issuer: ISSUER.to_owned(),
+        resource: AUDIENCE.to_owned(),
+        redirect_uri: "https://okf.example.test/auth/callback".to_owned(),
+    }
 }
 
 fn now() -> Result<u64, std::time::SystemTimeError> {
@@ -602,6 +629,88 @@ async fn a_fetch_outlives_the_request_that_began_it() -> TestResult {
     let identity = timeout(AT_ONCE, setup.verifier.verify(&rotated)).await??;
     assert_eq!(identity.subject, "user_01");
     assert_eq!(setup.issuer.fetches(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_request_with_a_clock_reading_older_than_a_marked_attempt_takes_no_second_one()
+-> TestResult {
+    let setup = Setup::new(Some(KEY_SET))?;
+    let valid = sign(&claims()?, Some(KID))?;
+    setup.verifier.verify(&valid).await?;
+    setup.clock.advance(Duration::from_secs(61))?;
+    setup.code_of(&sign(&claims()?, Some("unknown-a"))?).await?;
+    assert_eq!(setup.issuer.fetches(), 2);
+    // A request whose reading is one millisecond earlier than the attempt just marked: the
+    // attempt is taken, not free, and the set just fetched is new, not old.
+    setup.clock.rewind(Duration::from_millis(1))?;
+    let unknown = sign(&claims()?, Some("unknown-b"))?;
+    assert_eq!(
+        setup.refusal_of(&unknown).await?,
+        (ErrorCode::Unavailable, Some(60))
+    );
+    setup.verifier.verify(&valid).await?;
+    assert_eq!(setup.issuer.fetches(), 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn many_requests_at_a_free_attempt_cause_one_fetch_on_real_threads_with_the_real_clock()
+-> TestResult {
+    let token = Arc::new(sign(&claims()?, Some("unknown-kid"))?);
+    let began = Instant::now();
+    // Each round is a new verifier, its attempt free as at a minute's boundary, and
+    // `SIMULTANEOUS` requests let go at once. The rounds end at `ROUNDS` or after twenty seconds.
+    for round in 0..ROUNDS {
+        if began.elapsed() >= Duration::from_secs(20) {
+            break;
+        }
+        let issuer = Issuer::publishing(Some(KEY_SET))?;
+        let verifier = Arc::new(ConnectTokens::new(
+            issuer.clone(),
+            &config(),
+            Arc::new(SystemClock),
+        )?);
+        let barrier = Arc::new(Barrier::new(SIMULTANEOUS));
+        let mut requests = Vec::new();
+        for _ in 0..SIMULTANEOUS {
+            let (verifier, barrier, token) = (verifier.clone(), barrier.clone(), token.clone());
+            requests.push(tokio::spawn(async move {
+                barrier.wait().await;
+                verifier.verify(&token).await.is_ok()
+            }));
+        }
+        for request in requests {
+            assert!(!request.await?, "a token of an unknown key was accepted");
+        }
+        assert_eq!(issuer.fetches(), 1, "round {round}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_older_fetch_that_answers_last_never_replaces_a_newer_set() -> TestResult {
+    let setup = Setup::new(Some(KEY_SET))?;
+    setup.verifier.verify(&sign(&claims()?, Some(KID))?).await?;
+    setup.clock.advance(Duration::from_secs(60))?;
+    // The second fetch is asked while the issuer still publishes the old set, and is held.
+    let gate = setup.issuer.hold_next()?;
+    let slow = setup.verifying(sign(&claims()?, Some("unknown-a"))?);
+    setup.issuer.held().await?;
+    // The issuer rotates its key; a minute later a third fetch brings the new set.
+    setup.issuer.publish(Some(SECOND_KEY_SET))?;
+    setup.clock.advance(Duration::from_secs(60))?;
+    let rotated = sign_with(&claims()?, Some(SECOND_KID), SECOND_PRIVATE_KEY)?;
+    setup.verifier.verify(&rotated).await?;
+    assert_eq!(setup.issuer.fetches(), 3);
+    // The held fetch answers last, with the old set.
+    gate.notify_one();
+    slow.await?;
+    // The newer set stands: the new key verifies, and the withdrawn one is not trusted again.
+    setup.verifier.verify(&rotated).await?;
+    let withdrawn = sign(&claims()?, Some(KID))?;
+    assert_eq!(setup.code_of(&withdrawn).await?, ErrorCode::Unavailable);
+    assert_eq!(setup.issuer.fetches(), 3);
     Ok(())
 }
 
