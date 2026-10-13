@@ -1,6 +1,6 @@
 /**
- * The workspace's own pages, beside its documents: bringing files in (`/import`). Each has a URL,
- * which the router owns.
+ * The workspace's own pages, beside its documents: bringing files in (`/import`) and its jobs
+ * (`/jobs`). Each has a URL, which the router owns.
  *
  * A page is shown in place of the documents, between the same navigation and source columns. The
  * open tabs are kept in the Explorer store and are there again under "Documents", which goes back
@@ -10,15 +10,17 @@
  */
 import { Link, useMatchRoute } from '@tanstack/react-router';
 import { ImportPage } from '../imports/ImportPage';
+import { JobsPage } from '../jobs/JobsPage';
 import { DocumentPanes, type DocumentPanesProps } from './DocumentPanes';
 import { type Pane, tabLocation } from './store';
 
-export type WorkspacePage = 'import';
+export type WorkspacePage = 'import' | 'jobs';
 
 /** The page the URL names; null when it names the documents. */
 export function useWorkspacePage(): WorkspacePage | null {
   const matchRoute = useMatchRoute();
   if (matchRoute({ to: '/w/$workspaceId/import' }) !== false) return 'import';
+  if (matchRoute({ to: '/w/$workspaceId/jobs' }) !== false) return 'jobs';
   return null;
 }
 
@@ -31,7 +33,10 @@ export function DocumentsOrPage({
   const { workspaceId, head, canWrite } = documents;
   return (
     <div className="pane">
-      <ImportPage workspaceId={workspaceId} head={head} canWrite={canWrite} />
+      {page === 'import' && (
+        <ImportPage workspaceId={workspaceId} head={head} canWrite={canWrite} />
+      )}
+      {page === 'jobs' && <JobsPage workspaceId={workspaceId} canWrite={canWrite} />}
     </div>
   );
 }
@@ -75,6 +80,9 @@ export function WorkspaceNav({ workspaceId, query, documents }: WorkspaceNavProp
       )}
       <Link to="/w/$workspaceId/import" params={params} search={kept}>
         Import
+      </Link>
+      <Link to="/w/$workspaceId/jobs" params={params} search={kept}>
+        Jobs
       </Link>
     </nav>
   );

@@ -255,3 +255,70 @@ export function pageShown(shown: boolean) {
 }
 
 export { HEAD };
+
+/** The answer of an operation that accepts durable work: 202 with the job, checked as a Job. */
+export function accepted(job: Job): Reply {
+  return { status: 202, body: zJob.parse(job) };
+}
+
+export interface EventStream {
+  /** The `Last-Event-ID` the request carried; null when it carried none. */
+  lastEventId: string | null;
+  /** The page closed it. */
+  closed: boolean;
+  /** Send one event with this identity. */
+  send: (id: string, data: unknown) => void;
+  /** The service ends the stream. */
+  end: () => void;
+}
+
+/**
+ * The workspace's event stream (`GET /api/workspaces/{id}/events`), driven by the test. Call it
+ * after `mockApi`: every other request goes on to the mocked operations. `refusal` makes the
+ * stream answer that instead of opening, until it is set to null.
+ */
+export function mockEvents(refusal: Reply | null = null) {
+  const operations = globalThis.fetch;
+  const streams: EventStream[] = [];
+  const state = { refusal, requests: 0 };
+  const encoder = new TextEncoder();
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    if (!new URL(request.url).pathname.endsWith('/events')) return operations(input, init);
+    state.requests += 1;
+    if (state.refusal !== null) {
+      return new Response(JSON.stringify(state.refusal.body), {
+        status: state.refusal.status,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    const signal = init?.signal ?? request.signal;
+    let feed: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const stream: EventStream = {
+      lastEventId: request.headers.get('Last-Event-ID'),
+      closed: false,
+      send: (id, data) =>
+        feed?.enqueue(encoder.encode(`id: ${id}\ndata: ${JSON.stringify(data)}\n\n`)),
+      end: () => feed?.close(),
+    };
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        feed = controller;
+      },
+      cancel() {
+        stream.closed = true;
+      },
+    });
+    signal.addEventListener('abort', () => {
+      stream.closed = true;
+    });
+    streams.push(stream);
+    return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+  });
+  return { streams, state };
+}
+
+/** An event of the workspace's stream. */
+export function eventOf(kind: string, id: string, extra: Json = {}) {
+  return { id, kind, at: '2026-01-02T08:15:00.000Z', workspace_id: WS, ...extra };
+}

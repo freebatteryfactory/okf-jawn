@@ -127,6 +127,26 @@ export const EXTRACTION_STATUS: Record<ExtractionStatus, string> = {
   unsupported: 'Bytes kept; text extraction is not supported for this format.',
 };
 
+/**
+ * The mark a source carries wherever it is named (a row of the tree, a tab, a job's list of
+ * items): how its conversion stands, when it is anything but converted. A converted source, and
+ * an item that is not a source, carries none. "format not supported" is its own word: such a
+ * source is never marked, or left unmarked, as converted.
+ */
+export const CONVERSION_MARK: Record<Exclude<ExtractionStatus, 'completed'>, string> = {
+  pending: 'conversion pending',
+  partial: 'partly converted',
+  failed: 'conversion failed',
+  unsupported: 'format not supported',
+};
+
+export function conversionWord(
+  extraction: { status: ExtractionStatus } | null | undefined,
+): string | null {
+  if (extraction === null || extraction === undefined) return null;
+  return extraction.status === 'completed' ? null : CONVERSION_MARK[extraction.status];
+}
+
 export const TEXT_ORIGIN: Record<TextOrigin, string> = {
   converter: 'The text shown is the converter’s.',
   supplied_by_agent:

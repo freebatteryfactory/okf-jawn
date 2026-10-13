@@ -1,0 +1,356 @@
+/**
+ * One job as the service last reported it: what it is, how it stands (in words, never by color),
+ * its progress while it has not ended, and its outcome.
+ *
+ * The wire carries no time for a job, so none is shown; the attempt number is, from the second
+ * attempt on. A finished job leads to the items it made: a link for each, pinned to the revision
+ * the job reports, with the item's conversion state beside it when it is a source. A job that
+ * reports no revision gets no links: a link without a revision would read whatever the workspace
+ * shows, which may not hold the items yet.
+ *
+ * Cancel is offered while the job is waiting or running, and asks first, in place: "Keep it
+ * running" has focus. "Try the job again" is offered for a failed job. Each press is one request
+ * under one idempotency key; the failure notice's retry repeats that request under the same key,
+ * and a later press is a new request under a new key. A failed request is shown in plain words
+ * with its retry (`useRetry`); the job on screen stays as last reported.
+ *
+ * Keyboard focus. The controls of a job leave when its state changes: by the person's own action,
+ * or because the job moved on by itself while a control had focus. Focus that was on a control
+ * that left goes to the question's safe answer when the question has just opened, to "Cancel"
+ * when the question was dismissed, and otherwise to the job's row, which says how the job stands.
+ */
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link } from '@tanstack/react-router';
+import { useId, useLayoutEffect, useRef, useState } from 'react';
+import { cancelJob, retryJob } from '../../api/generated/sdk.gen';
+import type { ArtifactKind, Job, Revision } from '../../api/generated/types.gen';
+import { type HeldFocus, takeHeld, useWatchedPart } from '../../lib/focus';
+import { keyed } from '../../lib/keys';
+import { itemOptions } from '../documents/DocumentView';
+import { conversionWord, short } from '../documents/describe';
+import { FailureNotice } from '../errors/FailureNotice';
+import { classifyFailure, messageFor } from '../errors/failure';
+import { useRetry } from '../errors/retry';
+import { canCancel, canRetry, JOB_STATE, jobName } from './job-words';
+import { rememberJob, unfinished } from './jobs';
+
+export interface JobRowProps {
+  workspaceId: string;
+  job: Job;
+  /** The person may write in this workspace: only then are Cancel and a retry offered. */
+  canWrite: boolean;
+}
+
+/** Item links shown at first, and added by each "Show more". */
+export const JOB_ITEMS_STEP = 25;
+
+const ARTIFACT: Record<ArtifactKind, string> = {
+  export: 'an export of the workspace',
+  workspace_backup: 'a backup of the workspace',
+  installation_backup: 'a backup of the installation',
+  view_export: 'an export of a View',
+};
+
+const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+export function JobRow({ workspaceId, job, canWrite }: JobRowProps) {
+  const client = useQueryClient();
+  const titleId = useId();
+  const name = jobName(job);
+  const rowRef = useRef<HTMLLIElement | null>(null);
+  const body = { workspace_id: workspaceId, job_id: job.id };
+
+  const [asking, setAsking] = useState(false);
+  const cancelKey = useRef<string | null>(null);
+  const cancel = useMutation({
+    mutationFn: async () => {
+      const key = cancelKey.current ?? crypto.randomUUID();
+      cancelKey.current = key;
+      const { data } = await cancelJob({
+        body: { ...body, idempotency_key: key },
+        throwOnError: true,
+      });
+      return data;
+    },
+    onSuccess: (answered) => {
+      cancelKey.current = null;
+      setAsking(false);
+      rememberJob(client, workspaceId, answered);
+    },
+  });
+  const cancelFailure = useRetry({
+    request: job.id,
+    failed: cancel.isError,
+    error: cancel.error,
+    run: () => cancel.mutateAsync(),
+    loaded: () => rowRef.current,
+  });
+
+  const againKey = useRef<string | null>(null);
+  const again = useMutation({
+    mutationFn: async () => {
+      const key = againKey.current ?? crypto.randomUUID();
+      againKey.current = key;
+      const { data } = await retryJob({
+        body: { ...body, idempotency_key: key },
+        throwOnError: true,
+      });
+      return data;
+    },
+    onSuccess: (answered) => {
+      againKey.current = null;
+      rememberJob(client, workspaceId, answered);
+    },
+  });
+  const againFailure = useRetry({
+    request: job.id,
+    failed: again.isError,
+    error: again.error,
+    run: () => again.mutateAsync(),
+    loaded: () => rowRef.current,
+  });
+
+  const cancellable = canWrite && canCancel(job);
+  const retryable = canWrite && canRetry(job);
+  // The question is on screen only while the job can still be cancelled.
+  const question = asking && cancellable;
+
+  // A control that left with keyboard focus on it (see the header).
+  const heldCancel: HeldFocus = useRef<HTMLElement | null>(null);
+  const heldAgain: HeldFocus = useRef<HTMLElement | null>(null);
+  const [cancelButton, cancelRef] = useWatchedPart<HTMLButtonElement>(heldCancel);
+  const [, questionRef] = useWatchedPart<HTMLFieldSetElement>(heldCancel);
+  const [, againRef] = useWatchedPart<HTMLButtonElement>(heldAgain);
+  const keepRef = useRef<HTMLButtonElement | null>(null);
+  useLayoutEffect(() => {
+    if (takeHeld(heldCancel)) {
+      (keepRef.current ?? cancelButton.current ?? rowRef.current)?.focus();
+    }
+    if (takeHeld(heldAgain)) rowRef.current?.focus();
+  });
+
+  const percent = Math.min(100, job.progress);
+  return (
+    <li ref={rowRef} tabIndex={-1} className="job" data-job={job.id} aria-labelledby={titleId}>
+      <p id={titleId} className="job-title">
+        {name}
+      </p>
+      <p>
+        {JOB_STATE[job.state]}
+        {job.attempt > 1 ? `, attempt ${job.attempt}` : ''}.
+        {unfinished(job) && (
+          <>
+            {' '}
+            <progress max={100} value={percent} aria-label={`${name}: progress`} /> {percent}%
+          </>
+        )}
+      </p>
+      <Outcome workspaceId={workspaceId} job={job} />
+      {keyed(job.warnings, (warning) => JSON.stringify(warning)).map(({ key, value: warning }) => (
+        <p key={key} role="note" className="notice">
+          {warning.message}
+          {warning.location ? ` (${warning.location})` : ''}
+        </p>
+      ))}
+
+      {question ? (
+        <fieldset ref={questionRef} className="confirm">
+          <legend>Cancel this job?</legend>
+          <p>
+            The work stops where it is. Files that were uploaded are kept by the service, and
+            nothing that is already in the workspace is removed.
+          </p>
+          <button type="button" ref={keepRef} onClick={() => setAsking(false)}>
+            Keep it running
+          </button>{' '}
+          {/* aria-disabled rather than disabled: the button keeps focus while it works. */}
+          <button
+            type="button"
+            aria-disabled={cancel.isPending}
+            onClick={() => {
+              if (!cancel.isPending) cancel.mutate();
+            }}
+          >
+            {cancel.isPending ? 'Cancelling…' : 'Cancel the job'}
+          </button>
+        </fieldset>
+      ) : cancellable ? (
+        <p className="job-actions">
+          <button type="button" ref={cancelRef} onClick={() => setAsking(true)}>
+            Cancel
+          </button>
+        </p>
+      ) : null}
+      {retryable && (
+        <p className="job-actions">
+          {/* aria-disabled rather than disabled: the button keeps focus while it works. */}
+          <button
+            type="button"
+            ref={againRef}
+            aria-disabled={again.isPending}
+            onClick={() => {
+              if (!again.isPending) again.mutate();
+            }}
+          >
+            {again.isPending ? 'Asking for another try…' : 'Try the job again'}
+          </button>
+        </p>
+      )}
+      {cancelFailure.shown && (
+        <FailureNotice
+          context="Cancelling this job"
+          error={cancelFailure.error}
+          retry={cancelFailure}
+          workspaceId={workspaceId}
+        />
+      )}
+      {againFailure.shown && (
+        <FailureNotice
+          context="Asking for another try of this job"
+          error={againFailure.error}
+          retry={againFailure}
+          workspaceId={workspaceId}
+        />
+      )}
+    </li>
+  );
+}
+
+/** What the job came to, as far as the wire says. */
+function Outcome({ workspaceId, job }: { workspaceId: string; job: Job }) {
+  if (job.state === 'cancelled') {
+    return <p>It was cancelled. Files that were uploaded are kept by the service.</p>;
+  }
+  if (job.state === 'failed') {
+    const error = job.error ?? null;
+    if (error === null) return <p>The service recorded no reason.</p>;
+    return (
+      <p>
+        Why: {messageFor(classifyFailure(error)).title}
+        {error.message.length > 0 ? (
+          <>
+            {' '}
+            The service said: <q>{error.message}</q>
+          </>
+        ) : null}
+        {error.request_id ? (
+          <>
+            {' '}
+            Reference: <code>{error.request_id}</code>
+          </>
+        ) : null}
+      </p>
+    );
+  }
+  if (job.state !== 'succeeded') return null;
+  const revision = job.revision ?? null;
+  const artifact = job.artifact ?? null;
+  const restore = job.restore ?? null;
+  return (
+    <>
+      {revision !== null && (
+        <p>
+          It made revision <code title={revision}>{short(revision)}</code> of the workspace.
+        </p>
+      )}
+      {artifact !== null && (
+        <p>
+          It produced {ARTIFACT[artifact.kind]}: {artifact.size} bytes.
+        </p>
+      )}
+      {restore !== null && (
+        <p>
+          It restored {count(restore.items, 'item', 'items')} and{' '}
+          {count(restore.drafts_restored, 'draft', 'drafts')};{' '}
+          {count(restore.drafts_unassigned, 'draft was', 'drafts were')} left unassigned.
+        </p>
+      )}
+      {job.item_ids.length > 0 &&
+        (revision === null ? (
+          <p>
+            It made {count(job.item_ids.length, 'item', 'items')}. The job reports no revision, so
+            they are not linked from here: refresh the workspace to find them in its folders.
+          </p>
+        ) : (
+          <JobItems
+            workspaceId={workspaceId}
+            itemIds={job.item_ids}
+            revision={revision}
+            label={`Items made by ${jobName(job)}`}
+          />
+        ))}
+    </>
+  );
+}
+
+function JobItems({
+  workspaceId,
+  itemIds,
+  revision,
+  label,
+}: {
+  workspaceId: string;
+  itemIds: readonly string[];
+  revision: Revision;
+  label: string;
+}) {
+  const [shown, setShown] = useState(JOB_ITEMS_STEP);
+  const listRef = useRef<HTMLUListElement | null>(null);
+  // "Show more" moves keyboard focus to the first link it brought; the button may be gone.
+  const focusFrom = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const from = focusFrom.current;
+    if (from === null) return;
+    focusFrom.current = null;
+    listRef.current?.querySelectorAll<HTMLElement>('a').item(from)?.focus();
+  });
+  const rest = itemIds.length - shown;
+  return (
+    <>
+      <ul ref={listRef} className="job-items" aria-label={label}>
+        {itemIds.slice(0, shown).map((itemId) => (
+          <JobItem key={itemId} workspaceId={workspaceId} itemId={itemId} revision={revision} />
+        ))}
+      </ul>
+      {rest > 0 && (
+        <button
+          type="button"
+          onClick={() => {
+            focusFrom.current = shown;
+            setShown(shown + JOB_ITEMS_STEP);
+          }}
+        >
+          Show {count(Math.min(rest, JOB_ITEMS_STEP), 'more item', 'more items')} of {rest}
+        </button>
+      )}
+    </>
+  );
+}
+
+/** A link to one item the job made, read at the revision the job reports. */
+function JobItem({
+  workspaceId,
+  itemId,
+  revision,
+}: {
+  workspaceId: string;
+  itemId: string;
+  revision: Revision;
+}) {
+  const item = useQuery(itemOptions(workspaceId, itemId, revision));
+  const summary = item.data?.summary;
+  const state = summary === undefined ? null : conversionWord(summary.extraction);
+  return (
+    <li>
+      <Link
+        to="/w/$workspaceId/i/$itemId"
+        params={{ workspaceId, itemId }}
+        search={{ rev: revision }}
+      >
+        {summary ? summary.title || summary.path : `Item ${itemId.slice(0, 8)}`}
+      </Link>
+      {summary && summary.title.length > 0 ? <span className="meta"> {summary.path}</span> : null}
+      {state === null ? null : <span className="meta"> ({state})</span>}
+    </li>
+  );
+}

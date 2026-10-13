@@ -636,3 +636,25 @@ main.app-main:has(.explorer) {
   appearance: auto;
   vertical-align: middle;
 }
+.import-form {
+  display: grid;
+  gap: 0.25rem;
+  justify-items: start;
+}
+.import-form input {
+  width: min(100%, 30rem);
+  box-sizing: border-box;
+}
+.job p,
+.job-items {
+  margin: 0.15rem 0;
+}
+.job-items {
+  list-style: disc;
+  padding-left: 1.5rem;
+}
+.job-items a,
+.started-jobs a,
+.attention-row a {
+  text-decoration: underline;
+}
