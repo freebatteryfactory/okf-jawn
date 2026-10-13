@@ -32,6 +32,7 @@ import { ChangesContext } from '../tree/context';
 import { DocumentPanes, matchingLayout } from './DocumentPanes';
 import { FolderTree } from './FolderTree';
 import type { HeadChange } from './head';
+import { useForgetRestored } from './restored';
 import { SourcePanel } from './SourcePanel';
 import { type ItemSelection, validateItemSearch, validateWorkspaceSearch } from './search-params';
 import {
@@ -97,6 +98,8 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
   const repin = useExplorerStore((state) => state.repin);
   const canWrite = workspace.permissions.includes('write');
   useLeaveGuard();
+  // An item remembered as deleted is forgotten when the head shown holds it again.
+  useForgetRestored(workspaceId, head);
   // The naming rules stand in the documents column while they are open. Which column shows what
   // is this page's own state, like its open tabs. Closing gives focus back to the button.
   const [rulesOpen, setRulesOpen] = useState(false);
@@ -182,7 +185,7 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
    * names. An item's identity does not change with its path, so the tabs of a moved item go on
    * reading it.
    */
-  const followSnapshot = (taken: HeadChange) => {
+  const followSnapshot = (taken: Pick<HeadChange, 'revision' | 'previousHead' | 'itemIds'>) => {
     const before = taken.previousHead ?? head;
     repin(workspaceId, taken.itemIds, before, taken.revision);
     if (itemId !== null && taken.itemIds.includes(itemId) && rev === before) {

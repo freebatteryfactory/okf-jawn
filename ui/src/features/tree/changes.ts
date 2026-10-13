@@ -36,7 +36,7 @@ import {
 } from '../../api/generated/sdk.gen';
 import type { ItemSummary, Revision } from '../../api/generated/types.gen';
 import { type DraftAfterChange, followOwnChange } from '../drafts/saving';
-import { adoptHead, checkHeadsAgain, type HeadChange } from '../explorer/head';
+import { adoptHeadFrom, checkHeadsAgain, type HeadChange } from '../explorer/head';
 import { useExplorerStore } from '../explorer/store';
 import { joinPath } from './names';
 
@@ -87,16 +87,20 @@ export const DRAFT_AFTER: Record<DraftAfterChange, string> = {
     'Your draft of this item is kept, but it could not be saved on this version: its own notice says why. Until it is, its next Snapshot may first ask whether to keep your text.',
 };
 
-/** The shell shows the revision a change made; the head checks run again. */
+/**
+ * The shell shows the revision a change made, when it still shows `base`, the head the change was
+ * made on; the head checks run again.
+ */
 function changed(
   client: QueryClient,
   workspaceId: string,
+  base: Revision,
   revision: Revision,
   itemIds: string[],
 ): HeadChange {
-  const previousHead = adoptHead(client, workspaceId, revision);
+  const { previousHead, adopted } = adoptHeadFrom(client, workspaceId, revision, base);
   checkHeadsAgain(client, workspaceId);
-  return { revision, previousHead, itemIds };
+  return { revision, previousHead, itemIds, adopted };
 }
 
 /** The text a new note starts with: its title as the first heading. */
@@ -134,7 +138,7 @@ export async function createNote(
     }).queryKey,
     data,
   );
-  return { ...changed(client, workspaceId, item.revision, [item.id]), item };
+  return { ...changed(client, workspaceId, attempt.base, item.revision, [item.id]), item };
 }
 
 /** Create a folder (with the index the service keeps in it); its path is in NFC (`joinPath`). */
@@ -152,7 +156,7 @@ export async function createNewFolder(
     },
     throwOnError: true,
   });
-  return changed(client, workspaceId, data.revision, []);
+  return changed(client, workspaceId, attempt.base, data.revision, []);
 }
 
 /** Move or rename an item: its path changes, its identity does not. The destination is in NFC (`joinPath`). */
@@ -172,10 +176,12 @@ export async function moveItemTo(
     },
     throwOnError: true,
   });
-  const change = changed(client, workspaceId, data.revision, [itemId]);
-  const draft = await followOwnChange(client, workspaceId, itemId, attempt.base, data.revision, {
-    status: false,
-  });
+  const change = changed(client, workspaceId, attempt.base, data.revision, [itemId]);
+  const draft = change.adopted
+    ? await followOwnChange(client, workspaceId, itemId, attempt.base, data.revision, {
+        status: false,
+      })
+    : 'none';
   return { ...change, draft };
 }
 
@@ -195,11 +201,13 @@ export async function deleteItemNow(
     },
     throwOnError: true,
   });
+  // No tab is moved to the new head: the item is not there. A tab that cites a revision keeps it.
+  // The head first, then the memory: the item is remembered as gone from the head now shown.
+  const change = changed(client, workspaceId, attempt.base, data.revision, []);
   useExplorerStore
     .getState()
     .markDeleted(workspaceId, itemId, { title, at: attempt.base, made: data.revision });
-  // No tab is moved to the new head: the item is not there. A tab that cites a revision keeps it.
-  return changed(client, workspaceId, data.revision, []);
+  return change;
 }
 
 /** Set an item's status word, archive or unarchive it. */
@@ -220,9 +228,11 @@ export async function changeLifecycle(
     },
     throwOnError: true,
   });
-  const change = changed(client, workspaceId, data.revision, [itemId]);
-  const draft = await followOwnChange(client, workspaceId, itemId, attempt.base, data.revision, {
-    status: status !== undefined,
-  });
+  const change = changed(client, workspaceId, attempt.base, data.revision, [itemId]);
+  const draft = change.adopted
+    ? await followOwnChange(client, workspaceId, itemId, attempt.base, data.revision, {
+        status: status !== undefined,
+      })
+    : 'none';
   return { ...change, draft };
 }

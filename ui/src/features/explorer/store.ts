@@ -97,6 +97,8 @@ interface ExplorerState {
   revealInTree: (reveal: TreeReveal | null) => void;
   requestEdit: (request: { workspaceId: string; itemId: string } | null) => void;
   markDeleted: (workspaceId: string, itemId: string, deleted: DeletedItem) => void;
+  /** The item is in the workspace again: it is no longer remembered as deleted. */
+  forgetDeleted: (workspaceId: string, itemId: string) => void;
   /** Show `itemId` at `location` in the focused pane, adding a tab when it has none. */
   openItem: (workspaceId: string, itemId: string, location?: PaneLocation) => void;
   focusPane: (workspaceId: string, paneId: string) => void;
@@ -180,6 +182,11 @@ export const useExplorerStore = create<ExplorerState>()((set, get) => {
     requestEdit: (request) => set({ editRequest: request }),
     markDeleted: (workspaceId, itemId, deleted) =>
       set((state) => ({ deleted: { ...state.deleted, [`${workspaceId}/${itemId}`]: deleted } })),
+    forgetDeleted: (workspaceId, itemId) =>
+      set((state) => {
+        const { [`${workspaceId}/${itemId}`]: _back, ...deleted } = state.deleted;
+        return { deleted };
+      }),
     openItem: (workspaceId, itemId, location = {}) => {
       const current = view(workspaceId);
       const pane = current.panes.find((candidate) => candidate.id === current.focusedPaneId);

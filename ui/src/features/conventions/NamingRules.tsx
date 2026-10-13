@@ -139,11 +139,15 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   const problemsRef = useRef<HTMLDivElement | null>(null);
 
   const schema = useQuery(rulesSchemaOptions());
-  // While the rules are read again at a new head, the ones read before stay on screen.
-  const saved = useQuery({
-    ...rulesOptions(workspaceId, head),
-    placeholderData: (previous) => previous,
-  });
+  // The rules of the version shown. While they are read again at a new head, and when that read
+  // fails, the ones read last stay on screen: a read that fails in the background replaces
+  // nothing, and the line above the rules says which version they are of.
+  const saved = useQuery(rulesOptions(workspaceId, head));
+  const [lastRead, setLastRead] = useState<{ rules: NamingRules; at: Revision } | null>(null);
+  if (saved.data !== undefined && (lastRead?.at !== head || lastRead.rules !== saved.data)) {
+    setLastRead({ rules: saved.data, at: head });
+  }
+  const savedRules = saved.data ?? lastRead?.rules;
   const schemaFailure = useRetry({
     request: workspaceId,
     failed: schema.isError,
@@ -161,7 +165,7 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
 
   // The rules being edited: undefined while they are the saved ones, untouched.
   const [edited, setEdited] = useState<unknown>(undefined);
-  const value = edited === undefined ? saved.data : edited;
+  const value = edited === undefined ? savedRules : edited;
   // Which view is on screen, and the YAML as typed: null while it is the value written out.
   const [view, setView] = useState<'form' | 'yaml'>('form');
   const [typed, setTyped] = useState<{ text: string; read: YamlRead } | null>(null);
@@ -184,11 +188,11 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
       : null;
   const rules = sendableOf(value, !unreadable);
   const changed =
-    edited !== undefined && saved.data !== undefined && !sameRules(edited, saved.data);
+    edited !== undefined && savedRules !== undefined && !sameRules(edited, savedRules);
 
   // The saved rules the edits started from. While nothing is edited they follow the rules of the
   // version shown; once there are edits they stay, so other rules saved meanwhile are seen.
-  const atHead = saved.isPlaceholderData ? undefined : saved.data;
+  const atHead = saved.data;
   const [basis, setBasis] = useState<NamingRules | undefined>(undefined);
   if (atHead !== undefined && !changed && (basis === undefined || !sameRules(basis, atHead))) {
     setBasis(atHead);
@@ -257,7 +261,9 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
     saveRules,
     (result) =>
       setSaid(
-        `The rules are saved. The workspace now shows revision ${short(result.revision)}, which includes them.`,
+        result.adopted
+          ? `The rules are saved. The workspace now shows revision ${short(result.revision)}, which includes them.`
+          : `The rules are saved, at revision ${short(result.revision)}.`,
       ),
     saveButton,
     // A failed save is repeated only while the rules on screen are the ones it carried.
@@ -295,7 +301,10 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
       setPreview(null);
       setAsking(false);
       setSaid(
-        `${count(renamed, 'item was', 'items were')} renamed. The workspace now shows revision ${short(result.revision)}, which includes the change.` +
+        `${count(renamed, 'item was', 'items were')} renamed.` +
+          (result.adopted
+            ? ` The workspace now shows revision ${short(result.revision)}, which includes the change.`
+            : ` The renaming made revision ${short(result.revision)}.`) +
           (result.draftsFollowing > 0
             ? ` ${count(result.draftsFollowing, 'draft of yours follows', 'drafts of yours follow')} the renaming: the next Snapshot will not ask about it.`
             : '') +
@@ -344,7 +353,7 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   const unsavedNow = () => {
     const read = reading.flush();
     if (read === null) return unreadable || changed;
-    return !read.ok || (saved.data !== undefined && !sameRules(read.value, saved.data));
+    return !read.ok || (savedRules !== undefined && !sameRules(read.value, savedRules));
   };
   const leave: LeaveGuard = (proceed) => {
     if (!unsavedNow()) {
@@ -391,7 +400,7 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   };
   const startSave = () => {
     const asked = sendable();
-    if (asked === null || saved.data === undefined || sameRules(asked, saved.data)) return;
+    if (asked === null || savedRules === undefined || sameRules(asked, savedRules)) return;
     setSaid('');
     save.start(asked);
   };
@@ -452,9 +461,21 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
         </fieldset>
       )}
       <p className="meta">
-        How files in this workspace are named. These are the rules of the version shown, revision{' '}
-        <code title={head}>{short(head)}</code>. Changing them here changes nothing until you save
-        them, and a preview renames nothing.
+        How files in this workspace are named.{' '}
+        {saved.data === undefined && lastRead !== null ? (
+          <>
+            These are the rules as they were read at revision{' '}
+            <code title={lastRead.at}>{short(lastRead.at)}</code>: the rules of the version shown,
+            revision <code title={head}>{short(head)}</code>,{' '}
+            {saved.isError ? 'could not be read' : 'are being read'}.
+          </>
+        ) : (
+          <>
+            These are the rules of the version shown, revision{' '}
+            <code title={head}>{short(head)}</code>.
+          </>
+        )}{' '}
+        Changing them here changes nothing until you save them, and a preview renames nothing.
       </p>
       {/* Present from the start, so what an action did is announced. */}
       <p role="status" className="meta rules-said">

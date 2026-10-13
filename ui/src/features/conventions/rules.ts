@@ -37,7 +37,7 @@ import { listedDraft } from '../drafts/drafts-list';
 import { followOwnChange } from '../drafts/saving';
 import { sessionKey, useDraftSessions } from '../drafts/sessions';
 import { listingPageOptions } from '../explorer/folder-listing';
-import { adoptHead, checkHeadsAgain, type HeadChange } from '../explorer/head';
+import { adoptHeadFrom, checkHeadsAgain, type HeadChange } from '../explorer/head';
 import type { Attempt } from '../tree/changes';
 
 /** The name of the naming rules' schema among the service's form schemas. */
@@ -114,9 +114,9 @@ export async function saveRules(
     },
     throwOnError: true,
   });
-  const previousHead = adoptHead(client, workspaceId, data.revision);
+  const { previousHead, adopted } = adoptHeadFrom(client, workspaceId, data.revision, attempt.base);
   checkHeadsAgain(client, workspaceId);
-  return { revision: data.revision, previousHead, itemIds: [] };
+  return { revision: data.revision, previousHead, itemIds: [], adopted };
 }
 
 /**
@@ -201,10 +201,16 @@ export async function applyPreview(
     body: { workspace_id: workspaceId, idempotency_key: attempt.key, plan, rules },
     throwOnError: true,
   });
-  const previousHead = adoptHead(client, workspaceId, data.revision);
+  // The request began on the version the preview was made on.
+  const { previousHead, adopted } = adoptHeadFrom(
+    client,
+    workspaceId,
+    data.revision,
+    plan.base_revision,
+  );
   checkHeadsAgain(client, workspaceId);
   // The person's drafts of the items that were renamed follow their own change.
-  const drafted = plan.entries
+  const drafted = (adopted ? plan.entries : [])
     .filter((entry) => entry.from !== entry.to)
     .map((entry) => entry.item_id)
     .filter(
@@ -223,6 +229,7 @@ export async function applyPreview(
     revision: data.revision,
     previousHead,
     itemIds: plan.entries.map((entry) => entry.item_id),
+    adopted,
     draftsFollowing: outcomes.filter((outcome) => outcome === 'follows').length,
     draftsNotFollowing: outcomes.filter((outcome) => outcome === 'asks' || outcome === 'not-saved')
       .length,

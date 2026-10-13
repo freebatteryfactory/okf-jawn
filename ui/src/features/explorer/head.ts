@@ -26,6 +26,12 @@ export interface HeadChange {
   previousHead: Revision | null;
   /** The items the change touched: a tab of one that cited the old head now cites the new one. */
   itemIds: string[];
+  /**
+   * False when the workspace showed another head than the one the request began on by the time
+   * the answer came (the person refreshed meanwhile, or the answer is a replay of an older one):
+   * the head shown was then left as it is.
+   */
+  adopted: boolean;
 }
 
 const zHeadCheck = z.object({
@@ -58,6 +64,25 @@ export function adoptHead(
     workspace === undefined ? workspace : { ...workspace, head: revision },
   );
   return previous;
+}
+
+/**
+ * Show `revision` as the workspace's head, when the head shown is still `from`, the head the
+ * request began on. An answer that comes after the shown head has moved on (a Refresh made
+ * meanwhile, or a replayed answer of an older request after a later change) is not adopted: it
+ * would put an older or an unseen version in the place of the one the person is looking at. The
+ * head checks, which run after every change, then say whether a newer version exists.
+ */
+export function adoptHeadFrom(
+  client: QueryClient,
+  workspaceId: string,
+  revision: Revision,
+  from: Revision,
+): { previousHead: Revision | null; adopted: boolean } {
+  const headKey = openWorkspaceQueryKey({ body: { workspace_id: workspaceId } });
+  const shown = client.getQueryData<Workspace>(headKey)?.head ?? null;
+  if (shown !== from) return { previousHead: shown, adopted: false };
+  return { previousHead: adoptHead(client, workspaceId, revision), adopted: true };
 }
 
 /**

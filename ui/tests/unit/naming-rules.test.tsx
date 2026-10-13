@@ -1529,3 +1529,66 @@ describe('what the two views of the rules say and keep', () => {
     );
   });
 });
+
+describe('the rules on screen when the version shown changes', () => {
+  const headLine = () => screen.getByText(/Showing the workspace as of/).textContent ?? '';
+
+  it('keeps the form, and focus in it, when the rules cannot be read at the new head, and says which rules these are', async () => {
+    let failing = false;
+    const own = service({
+      [RULES]: () => (failing ? refuse(500, 'internal', 'the store broke') : ok(savedRules)),
+    });
+    await openRules();
+    failing = true;
+    own.moveHead();
+    await userEvent.click(await screen.findByRole('button', { name: /^Refresh/ }));
+    await waitFor(() => expect(headLine()).toContain('cccccccccc'));
+    act(() => prefix().focus());
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Reading the naming rules');
+    // Nothing on screen was replaced: the form is there, with focus where it was.
+    expect(prefix()).toHaveProperty('value', '');
+    expect(document.activeElement).toBe(prefix());
+    expect(panel().textContent).toContain(
+      'These are the rules as they were read at revision aaaaaaaaaa: the rules of the version shown, revision cccccccccc, could not be read.',
+    );
+    // Read again, they are the rules of the version shown.
+    failing = false;
+    await userEvent.click(button('Try again'));
+    await waitFor(() =>
+      expect(panel().textContent).toContain(
+        'These are the rules of the version shown, revision cccccccccc.',
+      ),
+    );
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('says that the rules were saved at a revision the page does not show, when the head moved on meanwhile', async () => {
+    const gate: { release: () => void } = { release: () => {} };
+    const holder: { commit: () => string } = { commit: () => '' };
+    const own = service({
+      [SET]: () =>
+        new Promise<Reply>((resolve) => {
+          gate.release = () =>
+            resolve(ok({ revision: holder.commit(), receipt_id: RECEIPT, warnings: [] }));
+        }),
+    });
+    holder.commit = own.moveHead;
+    await openRules();
+    await setPrefix('2025-');
+    await userEvent.click(button('Save the rules'));
+    await waitFor(() => expect(own.api.callsTo(SET)).toHaveLength(1));
+    own.moveHead();
+    await userEvent.click(await screen.findByRole('button', { name: /^Refresh/ }));
+    await waitFor(() => expect(headLine()).toContain('cccccccccc'));
+    await act(async () => {
+      gate.release();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(said()).toBe('The rules are saved, at revision dddddddddd.'));
+    expect(headLine()).toContain('cccccccccc');
+    expect(panel().parentElement?.textContent).toContain(
+      'The change was made, but the workspace shown here moved on while it was asked',
+    );
+  });
+});

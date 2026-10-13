@@ -110,7 +110,9 @@ export function useChange<T, R extends HeadChange>(
     mutationFn: (attempt: Attempt<T>) => run(client, workspaceId, attempt),
     onSuccess: (result, attempt) => {
       last.current = null;
-      onChanged(result);
+      // Tabs follow to the revision the change made only when the shell shows it.
+      if (result.adopted) onChanged(result);
+      else setSaid(NOT_ADOPTED);
       onDone(result, attempt.values);
     },
     onError: async (error, attempt) => {
@@ -185,6 +187,10 @@ export function useChange<T, R extends HeadChange>(
     withdrawn,
   };
 }
+
+/** Said when a change was made and the head shown had moved on while it was asked. */
+export const NOT_ADOPTED =
+  'The change was made, but the workspace shown here moved on while it was asked, so this page still shows the version it showed. Refresh the workspace to see the change.';
 
 const CONFLICT_WORDS: Record<Moved, string> = {
   checking:

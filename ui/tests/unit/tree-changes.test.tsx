@@ -288,6 +288,9 @@ function service(
     state,
     /** Someone else changes the workspace: the head moves to a revision this page has not seen. */
     moveHead: () => commit((tree) => tree),
+    /** Someone else brings an item back, under its id. */
+    restoreElsewhere: (item: ItemSummary) =>
+      commit((tree) => ({ ...tree, items: [...tree.items, item] })),
     /** Someone else archives an item. */
     archiveElsewhere: (itemId: string) =>
       commit((tree) => ({
@@ -1651,5 +1654,87 @@ describe('the item’s controls while its pane reads it again', () => {
     await userEvent.click(archive);
     await waitFor(() => expect(api.callsTo(LIFE)).toHaveLength(1));
     expect(api.callsTo(LIFE).at(0)).toMatchObject({ archived: true, base_revision: FIRST });
+  });
+});
+
+describe('state that must not outlive its truth', () => {
+  const headLine = () => screen.getByText(/Showing the workspace as of/).textContent ?? '';
+  const refresh = async (shows: string) => {
+    await userEvent.click(await screen.findByRole('button', { name: /^Refresh/ }));
+    await waitFor(() => expect(headLine()).toContain(shows));
+  };
+  async function deleteOpenNote() {
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Delete' }));
+    await userEvent.click(button('Delete it'));
+    await within(pane()).findByText(/You deleted this item/);
+  }
+
+  it('forgets that an item was deleted when a head the page refreshes to holds it again', async () => {
+    const { restoreElsewhere } = service();
+    await deleteOpenNote();
+    // Someone brings the item back, under its id.
+    restoreElsewhere(noteSummary);
+    await refresh('dddddddddd');
+    // The tab reads it as any item: its text, its own name, no word of a delete.
+    expect(await screen.findByText('Text of Meeting notes')).toBeTruthy();
+    expect(screen.queryByText(/You deleted this item/)).toBeNull();
+    expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeTruthy();
+    expect(await row(/Meeting notes/)).toBeTruthy();
+    expect(within(pane()).getByRole('button', { name: 'Delete' })).toBeTruthy();
+  });
+
+  it('goes on saying so while a later head does not hold it, and shows no failure for having asked', async () => {
+    const { api, moveHead } = service();
+    await deleteOpenNote();
+    moveHead();
+    await refresh('dddddddddd');
+    // Asked once at the new head whether it is back; it is not.
+    const second = MADE.at(1) ?? '';
+    await waitFor(() =>
+      expect(
+        api
+          .callsTo(ITEM)
+          .filter((body) => body.item_id === NOTE && revisionAsked(body, '') === second),
+      ).toHaveLength(1),
+    );
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(within(pane()).getByText(/You deleted this item/)).toBeTruthy();
+    expect(screen.getByRole('tab', { name: 'Meeting notes (deleted)' })).toBeTruthy();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('does not adopt the revision of an answer that comes after the head shown moved on', async () => {
+    const gate: { release: () => void } = { release: () => {} };
+    const holder: { commit: () => string } = { commit: () => '' };
+    const { api, moveHead } = service({
+      [FOLDER]: () =>
+        new Promise<Reply>((resolve) => {
+          gate.release = () =>
+            resolve(ok({ revision: holder.commit(), receipt_id: RECEIPT, warnings: [] }));
+        }),
+    });
+    holder.commit = moveHead;
+    renderAt(`/w/${WS}`);
+    await row('notes');
+    await userEvent.click(button('New folder'));
+    await userEvent.type(field('Folder name'), 'fresh');
+    await userEvent.keyboard('{Enter}');
+    await waitFor(() => expect(api.callsTo(FOLDER)).toHaveLength(1));
+    // While the change is asked, the person refreshes to someone else's newer head.
+    moveHead();
+    await refresh('cccccccccc');
+    await act(async () => {
+      gate.release();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(screen.queryByRole('group', { name: 'New folder' })).toBeNull());
+    // The answer names revision d; the page showed c when it came, and goes on showing c.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(headLine()).toContain('cccccccccc');
+    expect(headLine()).not.toContain('dddddddddd');
+    // That a newer version exists is said by the shell, with its Refresh.
+    expect(await screen.findByText(/A newer version of this workspace exists/)).toBeTruthy();
   });
 });
