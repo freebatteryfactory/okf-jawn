@@ -216,6 +216,18 @@ async fn allows(
     Ok(grant.allows(permission))
 }
 
+/// Whether the cache answers `permission` on the caller's tenant as granted.
+async fn tenant_allows(
+    access: &dyn AccessControl,
+    principal: &Principal,
+    permission: Permission,
+) -> Result<bool, ApiError> {
+    Ok(access
+        .authorize_tenant(principal, permission)
+        .await?
+        .allows(permission))
+}
+
 mod grant_cache_ttl {
     use std::sync::Arc;
     use std::time::Duration;
@@ -226,7 +238,7 @@ mod grant_cache_ttl {
     use okf_jawn_server::config::AuthKind;
     use okf_jawn_server::grants::{CachedAccess, select_access};
 
-    use super::{Roles, TestClock, allows, member};
+    use super::{Roles, TestClock, allows, member, tenant_allows};
     use crate::check::{TestResult, err_of};
 
     #[tokio::test]
@@ -469,6 +481,57 @@ mod grant_cache_ttl {
         assert!(slow.await??);
         // A read is answered from the cache: it must be the newer answer, without read.
         assert!(!allows(cache.as_ref(), &principal, Permission::Read).await?);
+        assert_eq!(roles.lookups(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_sixty_seconds_of_a_tenant_grant_count_from_when_the_lookup_began() -> TestResult {
+        let roles = Arc::new(Roles::holding(&[Permission::Read, Permission::Write]));
+        let clock = Arc::new(TestClock::new());
+        // The source reads the tenant role, then takes ten seconds to answer.
+        roles.answer_after(clock.clone(), Duration::from_secs(10))?;
+        let cache = CachedAccess::new(roles.clone(), clock.clone());
+        let principal = member()?;
+        assert!(tenant_allows(&cache, &principal, Permission::Write).await?);
+        // Revoked right after the source read it. 49 seconds after the answer arrived is 59
+        // since the source last saw the role: still answered from the cache.
+        roles.set(&[Permission::Read])?;
+        clock.advance(Duration::from_secs(49))?;
+        assert!(tenant_allows(&cache, &principal, Permission::Write).await?);
+        assert_eq!(roles.lookups(), 1);
+        // One second more is 60 since the lookup began, 50 since its answer: asked again.
+        clock.advance(Duration::from_secs(1))?;
+        assert!(!tenant_allows(&cache, &principal, Permission::Write).await?);
+        assert_eq!(roles.lookups(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_older_tenant_answer_never_replaces_one_whose_lookup_began_later() -> TestResult {
+        let roles = Arc::new(Roles::holding(&[Permission::Read, Permission::Admin]));
+        let clock = Arc::new(TestClock::new());
+        let cache = Arc::new(CachedAccess::new(roles.clone(), clock.clone()));
+        let principal = member()?;
+        // The first tenant lookup (an admin check, always fresh) reads the old role and waits.
+        let gate = roles.hold_next()?;
+        let slow = {
+            let cache = cache.clone();
+            let principal = principal.clone();
+            tokio::spawn(async move {
+                tenant_allows(cache.as_ref(), &principal, Permission::Admin).await
+            })
+        };
+        roles.held().await;
+        // Meanwhile read is revoked and a later lookup caches the newer answer.
+        roles.set(&[Permission::Admin])?;
+        clock.advance(Duration::from_secs(5))?;
+        assert!(tenant_allows(cache.as_ref(), &principal, Permission::Admin).await?);
+        // The first lookup's answer arrives last, carrying the revoked read.
+        gate.notify_one();
+        assert!(slow.await??);
+        // A read is answered from the cache: it must be the newer answer, without read.
+        assert!(!tenant_allows(cache.as_ref(), &principal, Permission::Read).await?);
         assert_eq!(roles.lookups(), 2);
         Ok(())
     }
