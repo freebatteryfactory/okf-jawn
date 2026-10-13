@@ -14,16 +14,18 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Job } from '../../src/api/generated/types.gen';
 import { resetUploads } from '../../src/features/imports/uploading';
-import { JOBS_POLL_MS } from '../../src/features/jobs/jobs';
+import { JOBS_POLL_MS, JOBS_SAFETY_POLL_MS } from '../../src/features/jobs/jobs';
 import { fail, type Handler, mockApi, ok } from './support/api';
 import {
   accepted,
+  eventOf,
   fileOf,
   IMPORTED,
   JOB,
   JOB_ID,
   JOBS,
   jobOf,
+  mockEvents,
   START,
   type UploadService,
   uploadService,
@@ -228,6 +230,71 @@ describe('starting the import', () => {
     // It has ended: it is not asked for again.
     await pass(JOBS_POLL_MS * 10);
     expect(api.callsTo(JOB)).toHaveLength(1);
+  });
+
+  it('asks for the job once the event stream is open: one that ended before then is not left waiting', async () => {
+    // The service answers the job as waiting; its in-process runner then finishes it at once.
+    let job: Job = jobOf('queued');
+    const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {
+      [START]: () => {
+        const answered = job;
+        job = jobOf('succeeded', { item_ids: [NOTE], revision: IMPORTED });
+        return accepted(answered);
+      },
+      [JOB]: () => ok(job),
+    });
+    const events = mockEvents();
+    let open: () => void = () => undefined;
+    events.state.hold = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    fireEvent.click(importButton());
+    await eventually(() => jobRow());
+    // The stream is asked for only now, after the answer, and is not open yet.
+    await eventually(() => expect(events.state.requests).toBe(1));
+    expect(jobRow().textContent).toContain('Waiting to start.');
+    expect(api.callsTo(JOB)).toEqual([]);
+    // It opens. No event follows: every change of the job was before it.
+    open();
+    await eventually(() => expect(events.streams).toHaveLength(1));
+    await later(() => expect(jobRow().textContent).toContain('Finished.'));
+    // Asked once, by the stream's opening: the quick clock has not come round.
+    expect(api.callsTo(JOB)).toEqual([{ workspace_id: WS, job_id: JOB_ID }]);
+    expect(events.streams.at(0)?.closed).toBe(false);
+  });
+
+  it('asks for a started job when the stream says it changed, and on the slow clock only beside it', async () => {
+    let job: Job = jobOf('running', { progress: 20 });
+    const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {
+      [START]: () => accepted(job),
+      [JOB]: () => ok(job),
+    });
+    const events = mockEvents();
+    fireEvent.click(importButton());
+    await eventually(() => jobRow());
+    await eventually(() => expect(events.streams).toHaveLength(1));
+    // Asked once when the stream opened.
+    await later(() => expect(api.callsTo(JOB)).toHaveLength(1));
+    await pass(50);
+    // Not on the quick clock while the stream is open.
+    await pass(JOBS_POLL_MS * 4);
+    expect(api.callsTo(JOB)).toHaveLength(1);
+    // An event asks for the single job, not only for the list.
+    job = jobOf('running', { progress: 60 });
+    act(() => events.streams.at(0)?.send('3', eventOf('job_updated', '3', { job_id: JOB_ID })));
+    await later(() =>
+      expect(within(jobRow()).getByRole('progressbar').getAttribute('value')).toBe('60'),
+    );
+    expect(api.callsTo(JOB)).toHaveLength(2);
+    // No event tells of its end: the slow clock finds it, and then stops.
+    job = jobOf('succeeded', { item_ids: [], revision: IMPORTED });
+    await pass(JOBS_SAFETY_POLL_MS - 1_000);
+    expect(api.callsTo(JOB)).toHaveLength(2);
+    await pass(1_000);
+    await later(() => expect(jobRow().textContent).toContain('Finished.'));
+    expect(api.callsTo(JOB)).toHaveLength(3);
+    await pass(JOBS_SAFETY_POLL_MS * 5);
+    expect(api.callsTo(JOB)).toHaveLength(3);
   });
 
   it('repeats the same request on "Try again", and sends another folder as a new request', async () => {

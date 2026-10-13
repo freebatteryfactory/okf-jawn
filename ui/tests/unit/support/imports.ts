@@ -285,21 +285,36 @@ export interface EventStream {
 /**
  * The workspace's event stream (`GET /api/workspaces/{id}/events`), driven by the test. Call it
  * after `mockApi`: every other request goes on to the mocked operations. `refusal` makes the
- * stream answer that instead of opening, until it is set to null.
+ * stream answer that instead of opening, until it is set to null. `state.mediaType` is the media
+ * type a successful answer names: with anything but an event stream the answer is a short page, as
+ * a proxy would send. `state.hold`, while it is set, is waited for before a request is answered: a
+ * stream that is slow to open.
  */
 export function mockEvents(refusal: Reply | null = null) {
   const operations = globalThis.fetch;
   const streams: EventStream[] = [];
-  const state = { refusal, requests: 0 };
+  const state: {
+    refusal: Reply | null;
+    requests: number;
+    mediaType: string;
+    hold: Promise<void> | null;
+  } = { refusal, requests: 0, mediaType: 'text/event-stream', hold: null };
   const encoder = new TextEncoder();
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(input, init);
     if (!new URL(request.url).pathname.endsWith('/events')) return operations(input, init);
     state.requests += 1;
+    if (state.hold !== null) await state.hold;
     if (state.refusal !== null) {
       return new Response(JSON.stringify(state.refusal.body), {
         status: state.refusal.status,
         headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (state.mediaType !== 'text/event-stream') {
+      return new Response('<!doctype html><title>Sign in</title>', {
+        status: 200,
+        headers: { 'Content-Type': state.mediaType },
       });
     }
     const signal = init?.signal ?? request.signal;
@@ -323,7 +338,11 @@ export function mockEvents(refusal: Reply | null = null) {
       stream.closed = true;
     });
     streams.push(stream);
-    return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    // As a server names it: the media type with a parameter.
+    return new Response(body, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream; charset=utf-8' },
+    });
   });
   return { streams, state };
 }

@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Job } from '../../src/api/generated/types.gen';
 import { MAX_RECONNECT_MS, RECONNECT_MS } from '../../src/features/jobs/feed';
 import { JOB_ITEMS_STEP } from '../../src/features/jobs/JobRow';
-import { JOBS_POLL_MS } from '../../src/features/jobs/jobs';
+import { JOBS_POLL_MS, JOBS_SAFETY_POLL_MS } from '../../src/features/jobs/jobs';
 import { fail, type Handler, type Json, mockApi, ok } from './support/api';
 import {
   accepted,
@@ -39,6 +39,8 @@ const OPEN = '/api/workspaces/open-workspace';
 const ITEM = '/api/items/get-item';
 const EVENTS = `/api/workspaces/${WS}/events`;
 const SECOND = '99999999-9999-4999-8999-999999999999';
+/** What the page says while it follows the event stream. */
+const FOLLOWING = `This list follows the workspace’s events: it is asked again when a job changes, and every ${JOBS_SAFETY_POLL_MS / 1000} seconds while a job is waiting or running.`;
 
 afterEach(() => {
   cleanup();
@@ -384,26 +386,149 @@ describe('how the list stays current with the event stream', () => {
     const events = mockEvents();
     await showJobs();
     await listed();
+    await eventually(() => screen.getByText(FOLLOWING));
+    // The listing asked for once the stream had opened has been answered and drawn: from here on
+    // a test counts what it causes itself. The clock has not moved.
+    await eventually(() => expect(api.callsTo(JOBS)).toHaveLength(2));
     await eventually(() =>
-      screen.getByText(
-        'This list follows the workspace’s events: it is asked again when a job changes.',
-      ),
+      expect(screen.getByRole('button', { name: /^List/ }).textContent).toBe('List again'),
     );
     return { api, events };
   };
 
-  it('asks on no clock while the stream is open, and again when it says a job changed', async () => {
+  it('asks once when the stream has opened, the first time too: a job that ended before then is not left running', async () => {
+    vi.useFakeTimers();
+    let state: Job['state'] = 'running';
+    const api = mockApi(
+      explorerHandlers({
+        [OPEN]: () => ok(writableWorkspace),
+        [JOBS]: () => listOf([jobOf(state)]),
+      }),
+    );
+    const events = mockEvents();
+    let open: () => void = () => undefined;
+    events.state.hold = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    await showJobs();
+    // A millisecond at a time: nothing else draws the page while the stream is not open yet.
+    await later(() => rowOf());
+    expect(events.state.requests).toBe(1);
+    expect(rowOf().textContent).toContain('Running.');
+    expect(api.callsTo(JOBS)).toHaveLength(1);
+    // The job ends now. Its event goes to nobody: the stream is asked for and not open yet.
+    state = 'succeeded';
+    open();
+    await later(() => screen.getByText(FOLLOWING));
+    // A few milliseconds have passed, no clock of the page's: it is the stream's opening that asked.
+    await later(() => expect(rowOf().textContent).toContain('Finished.'));
+    expect(api.callsTo(JOBS)).toHaveLength(2);
+    expect(events.streams).toHaveLength(1);
+  });
+
+  it('gives up a first listing still in flight when the stream opens, and asks anew', async () => {
+    vi.useFakeTimers();
+    let state: Job['state'] = 'running';
+    // The first listing is read by the service at once and answered late.
+    let answerFirst: () => void = () => undefined;
+    let listings = 0;
+    const api = mockApi(
+      explorerHandlers({
+        [OPEN]: () => ok(writableWorkspace),
+        [JOBS]: () => {
+          listings += 1;
+          if (listings > 1) return listOf([jobOf(state)]);
+          const read = listOf([jobOf(state)]);
+          return new Promise((resolve) => {
+            answerFirst = () => resolve(read);
+          });
+        },
+      }),
+    );
+    const events = mockEvents();
+    let open: () => void = () => undefined;
+    events.state.hold = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    await showJobs();
+    await eventually(() => expect(listings).toBe(1));
+    // The job ends after that listing was read and before the stream is open.
+    state = 'succeeded';
+    open();
+    await later(() => screen.getByText(FOLLOWING));
+    await later(() => expect(rowOf().textContent).toContain('Finished.'));
+    // The first answer, late as it is, changes nothing: its request was given up.
+    answerFirst();
+    await pass(50);
+    expect(rowOf().textContent).toContain('Finished.');
+    expect(api.callsTo(JOBS)).toHaveLength(2);
+    expect(events.streams).toHaveLength(1);
+  });
+
+  it('asks when the stream says a job changed, and not on the quick clock while it is open', async () => {
     let state: Job['state'] = 'running';
     const { api, events } = await streaming(() => [jobOf(state)]);
     expect(events.streams).toHaveLength(1);
     expect(events.streams.at(0)?.lastEventId).toBeNull();
     const before = api.callsTo(JOBS).length;
-    await pass(JOBS_POLL_MS * 6);
+    await pass(JOBS_POLL_MS * 5);
     expect(api.callsTo(JOBS)).toHaveLength(before);
     state = 'succeeded';
     act(() => events.streams.at(0)?.send('7', eventOf('job_updated', '7', { job_id: JOB_ID })));
     await eventually(() => expect(rowOf().textContent).toContain('Finished.'));
     expect(api.callsTo(JOBS)).toHaveLength(before + 1);
+  });
+
+  it('asks on the slow clock beside an open stream while a job has not ended, and on none once all have', async () => {
+    let state: Job['state'] = 'running';
+    const { api, events } = await streaming(() => [jobOf(state)]);
+    const before = api.callsTo(JOBS).length;
+    // No event comes: the stream looks open, and says nothing of the job.
+    await pass(JOBS_SAFETY_POLL_MS - 1);
+    expect(api.callsTo(JOBS)).toHaveLength(before);
+    state = 'succeeded';
+    await pass(1);
+    expect(api.callsTo(JOBS)).toHaveLength(before + 1);
+    await later(() => expect(rowOf().textContent).toContain('Finished.'));
+    // Every listed job has ended: no clock at all, with the stream still open.
+    await pass(JOBS_SAFETY_POLL_MS * 10);
+    expect(api.callsTo(JOBS)).toHaveLength(before + 1);
+    expect(events.streams.at(0)?.closed).toBe(false);
+    expect(events.streams).toHaveLength(1);
+  });
+
+  it('does not take an answer that is no event stream for an open one: the quick clock goes on, and it is asked for again', async () => {
+    vi.useFakeTimers();
+    const api = mockApi(
+      explorerHandlers({
+        [OPEN]: () => ok(writableWorkspace),
+        [JOBS]: () => listOf([jobOf('running')]),
+      }),
+    );
+    // A proxy answers the stream's address with a page, and 200.
+    const events = mockEvents();
+    events.state.mediaType = 'text/html';
+    await showJobs();
+    await listed();
+    await eventually(() =>
+      screen.getByText(
+        `While a job is waiting or running, this list is asked again every ${JOBS_POLL_MS / 1000} seconds. It cannot follow the workspace’s events now: the answer was not an event stream.`,
+      ),
+    );
+    expect(screen.queryByText(FOLLOWING)).toBeNull();
+    expect(events.state.requests).toBe(1);
+    // Nothing was asked because of it; the quick clock asks, as with no stream.
+    expect(api.callsTo(JOBS)).toHaveLength(1);
+    await pass(RECONNECT_MS);
+    await later(() => expect(events.state.requests).toBe(2));
+    await pass(JOBS_POLL_MS - RECONNECT_MS);
+    await later(() => expect(api.callsTo(JOBS)).toHaveLength(2));
+    expect(screen.queryByText(FOLLOWING)).toBeNull();
+    // The real stream, once it is there, is followed.
+    events.state.mediaType = 'text/event-stream';
+    await pass(MAX_RECONNECT_MS);
+    await later(() => screen.getByText(FOLLOWING));
+    expect(events.streams).toHaveLength(1);
   });
 
   it('asks again for an imported event and for one it cannot read, not for another kind', async () => {
@@ -436,11 +561,7 @@ describe('how the list stays current with the event stream', () => {
     await pass(1);
     await later(() => expect(events.streams).toHaveLength(2));
     expect(events.streams.at(1)?.lastEventId).toBe('41');
-    await later(() =>
-      screen.getByText(
-        'This list follows the workspace’s events: it is asked again when a job changes.',
-      ),
-    );
+    await later(() => screen.getByText(FOLLOWING));
     // What changed while it was away is asked for.
     await later(() => expect(api.callsTo(JOBS).length).toBeGreaterThan(before));
   });
@@ -469,13 +590,18 @@ describe('how the list stays current with the event stream', () => {
   });
 
   it('holds no stream while the page is hidden, and opens it again when the page is shown', async () => {
-    const { events } = await streaming(() => [jobOf('running')]);
+    const { api, events } = await streaming(() => [jobOf('running')]);
+    const before = api.callsTo(JOBS).length;
     act(() => pageShown(false));
     await eventually(() => expect(events.streams.at(0)?.closed).toBe(true));
-    await pass(MAX_RECONNECT_MS * 2);
+    await pass(JOBS_SAFETY_POLL_MS * 4);
     expect(events.streams).toHaveLength(1);
+    // Nor is anything asked on a clock while it is hidden, the slow one included.
+    expect(api.callsTo(JOBS)).toHaveLength(before);
     act(() => pageShown(true));
     await eventually(() => expect(events.streams).toHaveLength(2));
+    // Shown again: the stream opens, and the jobs are asked.
+    await later(() => expect(api.callsTo(JOBS).length).toBeGreaterThan(before));
   });
 
   it('closes the stream when the page is left', async () => {

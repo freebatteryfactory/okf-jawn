@@ -3,9 +3,10 @@
  * first as the service lists them, each as its row shows it (`JobRow`).
  *
  * How the list stays current is said on the page, in the words of what is happening: it follows
- * the workspace's event stream while that is open (`feed.ts`); otherwise it is asked again every
- * few seconds while a listed job is waiting or running, and not at all once all have ended
- * (`jobs.ts`). "List again" asks at once. A hidden tab asks nothing.
+ * the workspace's event stream while that is open (`feed.ts`), with a slow clock beside it while a
+ * listed job is waiting or running; otherwise it is asked again every few seconds while one is,
+ * and on no clock once all have ended (`jobs.ts`). "List again" asks at once. A hidden tab asks
+ * nothing.
  *
  * A change of a job's state is said in one polite status, by the job's name. The time the list
  * was last answered is shown beside it, outside the status, so a repeated listing that changed
@@ -22,10 +23,10 @@ import { Instant } from '../../lib/instant';
 import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, messageFor } from '../errors/failure';
 import { useRetry } from '../errors/retry';
-import { type Feed, useJobsFeed } from './feed';
+import { type Feed, NotAnEventStream, useJobsFeed } from './feed';
 import { JobRow } from './JobRow';
 import { JOB_STATE, jobName } from './job-words';
-import { JOBS_POLL_MS, jobsOptions } from './jobs';
+import { JOBS_POLL_MS, JOBS_SAFETY_POLL_MS, jobsOptions } from './jobs';
 
 export interface JobsPageProps {
   workspaceId: string;
@@ -36,10 +37,14 @@ export interface JobsPageProps {
 /** How the list stays current, in words. */
 export function describeFeed(feed: Feed): string {
   if (feed.state === 'live') {
-    return 'This list follows the workspace’s events: it is asked again when a job changes.';
+    return `This list follows the workspace’s events: it is asked again when a job changes, and every ${JOBS_SAFETY_POLL_MS / 1000} seconds while a job is waiting or running.`;
   }
   const clock = `While a job is waiting or running, this list is asked again every ${JOBS_POLL_MS / 1000} seconds.`;
   if (feed.error === null || feed.error === undefined) return clock;
+  // The service was reached and answered: the general words for an unknown error would say it was not.
+  if (feed.error instanceof NotAnEventStream) {
+    return `${clock} It cannot follow the workspace’s events now: the answer was not an event stream.`;
+  }
   return `${clock} It cannot follow the workspace’s events now: ${messageFor(classifyFailure(feed.error)).title}`;
 }
 

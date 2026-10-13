@@ -7,17 +7,23 @@
  *
  * The stream is opened through the generated `streamEvents`, whose requests go through the
  * workspace's transport (`sendRequest`: a GET, so no CSRF header; the bounded wait covers the time
- * until the stream begins and never cuts it). While it is open the jobs are not asked on a clock.
+ * until the stream begins and never cuts it). It counts as open only when the answer is a success
+ * whose media type is `text/event-stream`: a 200 that carries something else (a proxy's page, a
+ * fallback document) is a failure to open it, tried again like one that may pass.
  *
- * When it is not open the jobs are asked on a clock instead (`jobs.ts`):
+ * Subscribe, then ask. Every time the stream opens, the first time included, the jobs are asked
+ * once after it has opened: a job that changed between the answer on screen and the stream's
+ * opening sent its event to nobody, and only a question finds it. While it is open the jobs are
+ * asked on the slow clock of `jobs.ts` only (an event can be lost without the stream ending).
+ *
+ * When it is not open the jobs are asked on the quick clock instead (`jobs.ts`):
  * - it could not be opened and a repeat cannot cure that (`not_implemented`, no permission):
  *   nothing more is tried, and the page says why;
  * - it could not be opened for a reason that may pass, or it ended: it is opened again after
  *   `RECONNECT_MS`, doubling up to `MAX_RECONNECT_MS`, from the last event it saw.
  *
  * A hidden page holds no stream: it is closed when the page is hidden and opened again, from the
- * last event seen, when the page is shown. Each time it opens again the jobs are asked once, which
- * covers whatever happened meanwhile.
+ * last event seen, when the page is shown.
  */
 import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
@@ -59,6 +65,23 @@ interface FeedHooks {
 /** A failure a repeat of the same request may cure. */
 function mayPass(error: unknown): boolean {
   return messageFor(classifyFailure(error)).action.kind === 'retry';
+}
+
+/** The media type of an event stream, as `api/transports.json` declares it for `stream_events`. */
+const EVENT_STREAM = 'text/event-stream';
+
+/** The request for the stream was answered as a success, with something that is not a stream. */
+export class NotAnEventStream extends Error {
+  constructor() {
+    super('The answer to the event stream request was not an event stream');
+    this.name = 'NotAnEventStream';
+  }
+}
+
+/** A success whose body is an event stream: its media type says so, parameters aside. */
+function isEventStream(response: Response): boolean {
+  const type = response.headers.get('Content-Type') ?? '';
+  return type.split(';').at(0)?.trim().toLowerCase() === EVENT_STREAM;
 }
 
 /** What a refused request answered: the service's error when it sent one. */
@@ -104,6 +127,11 @@ export function followEvents(
     async (input: RequestInfo | URL, init?: RequestInit) => {
       const response = await sendRequest(input, init);
       if (!response.ok) throw await refusalOf(response);
+      if (!isEventStream(response)) {
+        // Not a stream: nothing of it is read, and nothing is declared open.
+        void response.body?.cancel();
+        throw new NotAnEventStream();
+      }
       hooks.onState({ state: 'live', error: null });
       return response;
     },
@@ -165,7 +193,8 @@ function concernsJobs(data: unknown): boolean {
 
 /**
  * Keep the workspace's jobs current from its event stream while the calling component is mounted
- * and the page is shown. `live` says the stream is open: the jobs are then not asked on a clock.
+ * and the page is shown. `live` says the stream is open: the jobs are then asked on the slow clock
+ * only.
  */
 export function useJobsFeed(workspaceId: string): Feed & { live: boolean } {
   const client = useQueryClient();
@@ -173,17 +202,14 @@ export function useJobsFeed(workspaceId: string): Feed & { live: boolean } {
   useEffect(() => {
     let stop: (() => string | undefined) | null = null;
     let lastEventId: string | undefined;
-    let wasLive = false;
     const open = () => {
       setFeed({ state: 'opening', error: null });
       stop = followEvents(workspaceId, lastEventId, {
         onState: (next) => {
           setFeed(next);
-          if (next.state !== 'live') return;
-          // Open again after a time without it: whatever changed meanwhile is asked for once.
-          // The first time, the jobs were asked when the component mounted.
-          if (wasLive) jobsChanged(client, workspaceId);
-          wasLive = true;
+          // Subscribe, then ask: what changed before the stream was open sent its event to
+          // nobody, the first time as after a time without it.
+          if (next.state === 'live') jobsChanged(client, workspaceId);
         },
         onEvent: (data) => {
           if (concernsJobs(data)) jobsChanged(client, workspaceId);

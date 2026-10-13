@@ -6,10 +6,13 @@
  * A job is the service's record of durable work; its acknowledgement is not completion. Nothing
  * here guesses a state: a job is shown in the state its last answer reported.
  *
- * How the list stays current (see `feed.ts` for the event stream):
- * - while the workspace's event stream is open, the jobs are asked again when it says one changed;
- * - otherwise the jobs are asked again every `JOBS_POLL_MS` while one that is listed is waiting or
- *   running, and not at all once every listed job has ended;
+ * How the jobs on screen stay current (see `feed.ts` for the event stream):
+ * - while the workspace's event stream is open, the jobs are asked again when it says one changed,
+ *   once each time it opens, and every `JOBS_SAFETY_POLL_MS` while one on screen is waiting or
+ *   running: an event can be lost while the stream still looks open;
+ * - otherwise the jobs are asked again every `JOBS_POLL_MS` while one on screen is waiting or
+ *   running;
+ * - either way, not at all on a clock once every job on screen has ended;
  * - a hidden tab asks nothing either way (TanStack Query holds an interval while the page is
  *   hidden; the stream is closed while it is);
  * - returning to the window, or to the page, asks once when what is held is older than
@@ -20,6 +23,7 @@ import {
   type InfiniteData,
   infiniteQueryOptions,
   type QueryClient,
+  type QueryFilters,
   queryOptions,
 } from '@tanstack/react-query';
 import { z } from 'zod';
@@ -33,6 +37,22 @@ export const JOBS_PAGE = 50;
 /** How often the jobs are asked again while one is waiting or running and no event stream is open. */
 export const JOBS_POLL_MS = 5_000;
 
+/**
+ * How often they are asked while one is waiting or running and the event stream is open. The
+ * stream is the way they stay current; this clock only bounds how long a job can be shown in a
+ * state it has left when an event did not arrive (a proxy that holds events back, a change the
+ * service announced to a stream that had just been replaced). 30 seconds: six times slower than
+ * the clock without a stream, the same as the longest wait before the stream is opened again, and
+ * one request a time for each page of jobs or each started job on screen.
+ */
+export const JOBS_SAFETY_POLL_MS = 30_000;
+
+/** The clock for jobs on screen: none once all have ended. */
+function pollEvery(live: boolean, anyUnfinished: boolean): number | false {
+  if (!anyUnfinished) return false;
+  return live ? JOBS_SAFETY_POLL_MS : JOBS_POLL_MS;
+}
+
 type JobPages = InfiniteData<ListJobsResponse, string | null>;
 
 /** A job that has not ended: the only kind worth asking about again. */
@@ -43,7 +63,7 @@ export function jobsQueryKey(workspaceId: string) {
   return [{ ...listJobsQueryKey({ body })[0], _infinite: true }] as const;
 }
 
-/** The workspace's jobs. `live`: its event stream is open, so nothing is asked on a clock. */
+/** The workspace's jobs. `live`: its event stream is open, so the clock is the slow one. */
 export function jobsOptions(workspaceId: string, live: boolean) {
   return infiniteQueryOptions({
     queryKey: jobsQueryKey(workspaceId),
@@ -60,9 +80,10 @@ export function jobsOptions(workspaceId: string, live: boolean) {
     staleTime: JOBS_POLL_MS,
     refetchOnWindowFocus: true,
     refetchInterval: (query) =>
-      !live && (query.state.data?.pages ?? []).some((page) => page.items.some(unfinished))
-        ? JOBS_POLL_MS
-        : false,
+      pollEvery(
+        live,
+        (query.state.data?.pages ?? []).some((page) => page.items.some(unfinished)),
+      ),
   });
 }
 
@@ -73,9 +94,7 @@ export function jobOptions(workspaceId: string, jobId: string, live: boolean) {
     staleTime: JOBS_POLL_MS,
     refetchOnWindowFocus: true,
     refetchInterval: (query) =>
-      !live && query.state.data !== undefined && unfinished(query.state.data)
-        ? JOBS_POLL_MS
-        : false,
+      pollEvery(live, query.state.data !== undefined && unfinished(query.state.data)),
   });
 }
 
@@ -116,8 +135,25 @@ export function rememberJob(client: QueryClient, workspaceId: string, job: Job) 
   });
 }
 
-/** The workspace's event stream said its jobs changed: ask for them again. */
+/**
+ * Ask again for what `filters` names. A request in flight was sent before the reason to ask, so
+ * its answer may be the older one: it is given up and asked anew. TanStack Query does that by
+ * itself for a query that holds an answer; a first request it would wait for instead (`Query.fetch`
+ * cancels only when there is data), so that one is cancelled here.
+ */
+async function askAgain(client: QueryClient, filters: QueryFilters) {
+  await client.cancelQueries({
+    ...filters,
+    predicate: (query) => query.state.data === undefined && (filters.predicate?.(query) ?? true),
+  });
+  await client.invalidateQueries(filters);
+}
+
+/**
+ * The workspace's event stream opened, or said its jobs changed: ask for them again, the list and
+ * each single job.
+ */
 export function jobsChanged(client: QueryClient, workspaceId: string) {
-  void client.invalidateQueries({ queryKey: jobsQueryKey(workspaceId) });
-  void client.invalidateQueries({ predicate: (query) => readsJob(query.queryKey, workspaceId) });
+  void askAgain(client, { queryKey: jobsQueryKey(workspaceId) });
+  void askAgain(client, { predicate: (query) => readsJob(query.queryKey, workspaceId) });
 }
