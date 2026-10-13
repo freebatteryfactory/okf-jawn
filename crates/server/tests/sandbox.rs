@@ -325,6 +325,18 @@ fn the_service_does_not_start_with_an_application_origin_that_is_not_an_origin()
         "http://*.example.test",
         "http://a_b",
         "http://a'b",
+        // A host is labels joined by dots: none empty, none beginning or ending with a hyphen.
+        "http://.",
+        "http://-",
+        "http://---",
+        "http://a..b",
+        "http://.a",
+        "http://a.",
+        "http://example.test.",
+        "http://-a.b",
+        "http://a-.b",
+        "http://a.-b",
+        "http://a.b-",
         "http://",
         "http://[::1",
         "http://::1",
@@ -360,6 +372,9 @@ fn the_service_does_not_start_with_an_application_origin_that_is_not_an_origin()
         "https://a-b.example.test:443",
         "http://h:1",
         "http://h:65535",
+        "http://a-b.c-d",
+        "http://xn--bcher-kva.example",
+        "http://1.2.3.4",
         "http://LOCALHOST:8080",
     ] {
         let headers = isolation_headers(origin)?;

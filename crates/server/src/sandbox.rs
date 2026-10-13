@@ -16,6 +16,12 @@
 //! grants nothing. No isolation header is ever skipped: the application origin named in the
 //! policy must be an origin and nothing else, and the service does not start otherwise. The
 //! token is never logged or echoed.
+//!
+//! Known limit: a bracketed IPv6 address is accepted as the application origin, but by the
+//! policy grammar a host source is letters, digits, hyphens and dots, so a browser may match no
+//! page against `frame-ancestors http://[::1]:7711`. The sandbox viewer may then not load when
+//! the application is served from an IPv6 literal. That fails closed: the representation is
+//! framed by nobody, never by another page. Not observed in a browser.
 
 use std::net::Ipv6Addr;
 use std::str::FromStr as _;
@@ -133,8 +139,10 @@ pub fn isolation_headers(app_origin: &str) -> Result<HeaderMap, ApiError> {
 }
 
 /// Whether `text` is an origin and nothing else: `http` or `https`, `://`, a host, and an
-/// optional `:` and port. A host is ASCII letters, digits, hyphens and dots, or an IPv6 address
-/// in brackets; a port is at most five digits and names a port from 1 to 65535. Every other
+/// optional `:` and port. A host is labels joined by dots ([`is_label`]: no empty label, so
+/// no leading, trailing or doubled dot, and no label that begins or ends with a hyphen), or an
+/// IPv6 address in brackets; a port is at most five digits and names a port from 1 to 65535.
+/// Every other
 /// character is refused, so nothing that means something in a policy (`;`, `,`, `*`, a quote,
 /// whitespace) can enter the header through the origin.
 fn is_origin(text: &str) -> bool {
@@ -156,11 +164,7 @@ fn is_origin(text: &str) -> bool {
             Some((host, port)) => (host, Some(port)),
             None => (authority, None),
         };
-        let named = !host.is_empty()
-            && host
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.'));
-        (named, port)
+        (host.split('.').all(is_label), port)
     };
     let port_ok = port.is_none_or(|port| {
         port.len() <= 5
@@ -168,6 +172,17 @@ fn is_origin(text: &str) -> bool {
             && port.parse::<u16>().is_ok_and(|number| number >= 1)
     });
     matches!(scheme, "http" | "https") && host_ok && port_ok
+}
+
+/// Whether `text` is one label of a host name: ASCII letters, digits and hyphens, not empty,
+/// and neither beginning nor ending with a hyphen.
+fn is_label(text: &str) -> bool {
+    !text.is_empty()
+        && !text.starts_with('-')
+        && !text.ends_with('-')
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
 /// Serve the representation a capability is bound to.
