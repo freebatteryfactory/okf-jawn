@@ -880,6 +880,17 @@ Findings that were judged not load-bearing at merge, each with its home. They ar
 - **The CSRF cookie name in the UI (workspace-ui M2).** The generated client sends `x-okf-csrf`. workspace-ui reads the `okf-csrf` cookie name from generated output, or from one constant whose test checks it against the OpenAPI document.
 - **Screen readers on the tree (the Wave 3 accessibility check).** The tree's scrolling list is an unnamed `group` tab stop that forwards focus to the active row. Check how NVDA and VoiceOver announce it.
 - **R-I11 (core M1.4, with the cancel operation).** A point-of-no-return seal on `RecordStore`: `cancel_job` refuses with `Conflict` once a restore has called `restore_import`. Until M1.4, no production path cancels a running job.
+- **The mutation ledger after a purge (carry-over sweep, part 2).** A purge empties the ledger rows of its workspace (PR #20). Still open, each stated in the storage and core headers:
+  - a live row completed before records schema 2 records no workspace and keeps its response until it expires;
+  - a row whose `complete` lands after the purge's last pass over the rows keeps its response;
+  - an emptied row keeps its idempotency key and the digest of its request, from which a guessed text could be confirmed;
+  - a refused retry of an emptied row restarts that row's seven days;
+  - a pre-migration copy taken later carries the first two with it, and a copy does not expire;
+  - a `mutations` table that lacks a column the purge reads is skipped without a report.
+
+  The design to weigh: a terminal "purged" row state that keeps no digest and is refused by `begin` itself, and a purge check inside `complete`'s own transaction.
+- **An installation archive is tracked before it is kept (carry-over sweep, part 2; PR #20 last bot pass).** `backup_installation` publishes the archive to the object store and then records it. A process that stops in between leaves a blob that no `backup_archives`, artifact or pending-put row names, and a retry publishes another. The workspace path records a pending put first; the tenant path must do the same, or reconcile the staged digest on retry. Its test: stop after the publish, retry, and find one archive and no unnamed blob.
+- **A resumed purge reports what it removed (carry-over sweep, part 2; PR #20 last bot pass).** If a purge stops after deleting objects and before it records the objects step, the retry finds them absent and counts each as kept because another workspace shares it. The durable purge record can then claim no removals. Keep the counts with the step's progress, or tell "already removed by this purge" from "kept because shared". Its test: stop mid-step, resume, and compare the record with what was removed.
 
 ## 7. Risks by wave
 
