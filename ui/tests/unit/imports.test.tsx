@@ -672,6 +672,119 @@ describe('uploading', () => {
     expect(service.slots).toHaveLength(2);
   });
 
+  it('says the service holds part of the file, not that the file is too large, when a slot holds more than it says', async () => {
+    const service = uploadService();
+    // The bytes arrive and are kept; the answer is lost.
+    service.script.put.push((transfer, usual) => {
+      usual();
+      transfer.breakConnection();
+      return undefined;
+    });
+    const { api } = setup(service);
+    await openImport();
+    choose('Choose files…', [fileOf('a.txt', 'abc')]);
+    upload();
+    await notUploaded('a.txt');
+    // The service's record of the slot is behind the bytes it kept: asked again, it says it holds
+    // none (the real store brings the record up to date on other calls, not on this one).
+    service.script.create.push(async (_body, usual) => {
+      const reply = await usual();
+      return ok({ ...(reply.body as object), received_bytes: '0' });
+    });
+    fireEvent.click(within(rowOf('a.txt')).getByRole('button', { name: 'Try again' }));
+    await waitFor(() =>
+      expect(rowOf('a.txt').textContent).toContain(
+        'Uploading a.txt: The service already holds part of this file, and did not take the rest.',
+      ),
+    );
+    const row = rowOf('a.txt');
+    expect(row.textContent).toContain('Send it again: the file goes into a new upload.');
+    expect(row.textContent).not.toContain('larger than the service accepts');
+    expect(row.textContent).not.toContain('Remove it from the list');
+    // The slot it leaves holds bytes, and the row says they stay.
+    expect(row.textContent).toContain(
+      'What was sent of it before stays with the service until it expires: this page has no way to remove it.',
+    );
+    fireEvent.click(within(row).getByRole('button', { name: 'Send it again' }));
+    await uploaded('a.txt');
+    expect(service.slots).toHaveLength(2);
+    expect(api.callsTo(CREATE).at(2)?.idempotency_key).not.toBe(
+      api.callsTo(CREATE).at(0)?.idempotency_key,
+    );
+    expect(await service.held(service.slots.at(0))).toBe('abc');
+    expect(service.slots.map((slot) => slot.complete)).toEqual([false, true]);
+    expect(rowOf('a.txt').textContent).toContain(
+      'What was sent of it before stays with the service',
+    );
+  });
+
+  it('reads a first refusal of the bytes as too large for the service, with nothing left behind', async () => {
+    const service = uploadService();
+    service.script.put.push(() =>
+      fail(413, 'too_large', 'the upload would exceed the limit; nothing was appended'),
+    );
+    setup(service);
+    await openImport();
+    choose('Choose files…', [fileOf('a.txt', 'abc')]);
+    upload();
+    await notUploaded('a.txt');
+    const row = rowOf('a.txt');
+    expect(row.textContent).toContain(
+      'Uploading a.txt: This file is larger than the service accepts.',
+    );
+    expect(within(row).queryByRole('button', { name: /again/i })).toBeNull();
+    expect(row.textContent).not.toContain('stays with the service');
+    // The service kept nothing of it: removing it leaves nothing to say.
+    fireEvent.click(screen.getByRole('button', { name: 'Remove a.txt' }));
+    expect(screen.queryByText(/stays with the service/)).toBeNull();
+  });
+
+  it('says on the row that the earlier upload stays with the service when a refused slot is left for a new one', async () => {
+    const service = uploadService();
+    service.script.complete.push(() => fail(409, 'conflict', 'the digest differs'));
+    setup(service);
+    await openImport();
+    choose('Choose files…', [fileOf('a.txt', 'abc'), fileOf('b.txt', 'abc')]);
+    upload();
+    await notUploaded('a.txt');
+    await uploaded('b.txt');
+    expect(rowOf('a.txt').textContent).toContain(
+      'What was sent of it before stays with the service until it expires: this page has no way to remove it.',
+    );
+    // A file whose one slot was verified left nothing behind.
+    expect(rowOf('b.txt').textContent).not.toContain('stays with the service');
+  });
+
+  it('says, when a file is removed, that what was sent of it stays with the service', async () => {
+    const service = uploadService();
+    // The first transfer is left open: that file stays under way.
+    service.script.put.push(() => undefined);
+    const { sent } = setup(service);
+    await openImport();
+    choose('Choose files…', [fileOf('under-way.txt', 'abc'), fileOf('listed.txt', 'abc')]);
+    // Never sent: removing it says nothing of the service.
+    fireEvent.click(screen.getByRole('button', { name: 'Remove listed.txt' }));
+    expect(screen.queryByText(/stays with the service/)).toBeNull();
+    upload();
+    await waitFor(() => expect(sent.transfers).toHaveLength(1));
+    choose('Choose files…', [fileOf('done.txt', 'abc')]);
+    upload();
+    await uploaded('done.txt');
+    // Under way: its request is aborted, and what had gone is the service's.
+    fireEvent.click(screen.getByRole('button', { name: 'Remove under-way.txt' }));
+    const said = screen.getByText(
+      '“under-way.txt” was removed from the list. What was already sent of it stays with the service until it expires: this page has no way to remove it.',
+    );
+    expect(said.getAttribute('role')).toBe('status');
+    // Uploaded and not imported: its slot is the service's too.
+    fireEvent.click(screen.getByRole('button', { name: 'Remove done.txt' }));
+    expect(
+      screen.getByText(
+        '“done.txt” was removed from the list. What was already sent of it stays with the service until it expires: this page has no way to remove it.',
+      ),
+    ).toBeDefined();
+  });
+
   it('keeps a failed file in its place with a retry, while the others go on', async () => {
     const service = uploadService();
     service.script.put.push((transfer) => {
@@ -810,6 +923,10 @@ describe('uploading', () => {
     expect(await sent.transfers.at(1)?.bytes.text()).toBe('xyz');
     expect(await service.held(service.slots.at(1))).toBe('xyz');
     expect(service.slots.map((slot) => slot.complete)).toEqual([false, true]);
+    // The slot that holds "ab" stays where it is, and the row says so.
+    expect(rowOf('a.txt').textContent).toContain(
+      'What was sent of it before stays with the service until it expires',
+    );
   });
 
   it('asks nothing for a file whose length is not the one it was listed with, and says it changed', async () => {

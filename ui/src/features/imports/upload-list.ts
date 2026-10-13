@@ -77,8 +77,18 @@ export interface UploadEntry extends NamedPath {
   problem: PathProblem | null;
   /** Bytes the service holds or the browser reports gone, for the progress shown. */
   sent: number;
-  /** What the last try threw, and where it stood. */
-  failure: { error: unknown; step: UploadStep } | null;
+  /**
+   * What the last try threw, and where it stood. `resumed`: bytes had been sent to its slot by an
+   * earlier try, so the slot may hold more than it says.
+   */
+  failure: { error: unknown; step: UploadStep; resumed: boolean } | null;
+  /**
+   * Bytes have been sent to the slot of `slotKey` and the service did not refuse them: it holds,
+   * or may hold, some of this file.
+   */
+  slotBegan: boolean;
+  /** Slots this file was sent to and that were then left for a new one: they stay with the service. */
+  leftBehind: number;
   /** The key `create_upload` is repeated under: the slot's identity while the slot can be used. */
   slotKey: string;
   /** The key `complete_upload` is repeated under, for that slot. */
@@ -164,6 +174,8 @@ const fresh = () => ({
   id: crypto.randomUUID(),
   sent: 0,
   failure: null,
+  slotBegan: false,
+  leftBehind: 0,
   problem: null,
   slotKey: crypto.randomUUID(),
   finishKey: crypto.randomUUID(),

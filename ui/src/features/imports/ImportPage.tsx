@@ -21,6 +21,11 @@
  * that is not drawn itself shown as a mark of its code point (`shownName`), so a right-to-left
  * override cannot make a name read as another; what is sent is the name itself.
  *
+ * What stays with the service. The client cannot remove an upload from the service. So a file
+ * whose upload was left for a new one says, on its row, that the earlier one stays with the
+ * service until it expires; and removing a file some of which was sent says the same in the
+ * list's status.
+ *
  * Uploading starts when the person asks. Each file shows how it stands, in words: its own percent
  * while it is sent, and "uploaded" only once the service has verified its length and hash. A file
  * that failed keeps its place, with its failure in plain words and its retry (`useRetry`); the
@@ -270,7 +275,12 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
               held={held}
               onRemove={() => {
                 removedAt.current = index;
-                removeUpload(entry.id);
+                const path = shownName(pathOf(entry));
+                if (removeUpload(entry.id).leftWithService) {
+                  setChoiceNote(
+                    `“${path}” was removed from the list. What was already sent of it stays with the service until it expires: this page has no way to remove it.`,
+                  );
+                }
               }}
             />
           ))}
@@ -390,7 +400,14 @@ function UploadRow({
       <span className="upload-state">
         <Standing entry={entry} />
       </span>
-      <Collision entry={entry} others={collidesWith} />{' '}
+      <Collision entry={entry} others={collidesWith} />
+      {entry.leftBehind > 0 && (
+        <span className="upload-state">
+          {' '}
+          What was sent of it before stays with the service until it expires: this page has no way
+          to remove it.
+        </span>
+      )}{' '}
       {entry.state === 'sending' && (
         <progress max={entry.size} value={entry.sent} aria-label={`${path}: bytes sent`} />
       )}{' '}

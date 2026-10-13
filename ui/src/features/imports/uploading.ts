@@ -32,12 +32,20 @@
  * the file), the slot is gone (`not_found`), its count of bytes could not be read, or its finish
  * was not confirmed. Then the next try reads the file again and opens a new slot under new keys.
  * A slot that says it holds more than the file is one of these through its finish: no bytes are
- * sent, the finish is asked, and the service refuses it. The old slot stays with the service: the
- * client has no operation that lists or removes a slot.
+ * sent, the finish is asked, and the service refuses it. So is a slot that holds more than it
+ * says: an earlier try sent it bytes, and now it refuses, as `too_large`, the bytes its own answer
+ * said it lacks (the service's record of a slot can be behind the bytes it kept). That is not a
+ * file too large for the service, and it is not worded as one.
  *
- * For the same reason a slot is opened only when its file's turn comes, never for the whole list
- * up front, so a file removed before its turn leaves nothing behind. Removing a file under way
- * aborts its requests.
+ * What stays with the service. The client has no operation that lists or removes a slot, so a slot
+ * that was sent bytes and is then left (for a new slot, or because its file was removed from the
+ * list) stays there with those bytes until the service lets it expire. The page says so, in one
+ * line: on the file's row when its slot was left for a new one (`leftBehind`), and in the list's
+ * status when the file is removed (`removeUpload` answers whether anything is left). For the same
+ * reason a slot is opened only when its file's turn comes, never for the whole list up front, so a
+ * file removed before its turn leaves nothing behind. Removing a file under way aborts its
+ * requests. Limit: a slot that was opened and sent no byte is not mentioned; and a removal that
+ * aborts `create_upload` in flight cannot know whether the service opened the slot.
  *
  * Progress is written to the list when the whole-percent value changes, not at every report of
  * the browser, so a large list is not redrawn many times a second.
@@ -146,9 +154,21 @@ function readInTurn(file: File, signal: AbortSignal): Promise<FileReading> {
   return turn;
 }
 
+/**
+ * The slot refused, as too large, bytes that its own answer said it lacks, after an earlier try
+ * had sent it some: it holds more of the file than it says.
+ */
+export function slotIsAhead(failure: { error: unknown; step: UploadStep; resumed: boolean }) {
+  if (failure.step !== 'bytes' || !failure.resumed) return false;
+  const classified = classifyFailure(failure.error);
+  return classified.kind === 'api' && classified.error.code === 'too_large';
+}
+
 /** After this failure the slot cannot take the file: the next try opens another. */
-function needsNewSlot(error: unknown, step: UploadStep): boolean {
+function needsNewSlot(failed: { error: unknown; step: UploadStep; resumed: boolean }): boolean {
+  const { error, step } = failed;
   if (error instanceof UploadNotConfirmed || error instanceof SlotUnusable) return true;
+  if (slotIsAhead(failed)) return true;
   const failure = classifyFailure(error);
   if (failure.kind !== 'api') return false;
   if (failure.error.code === 'not_found') return true;
@@ -160,6 +180,8 @@ async function run(id: string): Promise<void> {
   running.set(id, controller);
   const { signal } = controller;
   let step: UploadStep = 'read';
+  // Bytes had been sent to the slot this try uses before the try began.
+  let resumed = false;
   try {
     const entry = entryOf(id);
     if (entry === undefined) return;
@@ -176,7 +198,15 @@ async function run(id: string): Promise<void> {
     const changed = entry.sha256 !== null && entry.sha256 !== sha256;
     const slotKey = changed ? crypto.randomUUID() : entry.slotKey;
     const finishKey = changed ? crypto.randomUUID() : entry.finishKey;
-    uploads().change(id, { sha256, slotKey, finishKey });
+    resumed = entry.slotBegan && !changed;
+    uploads().change(id, {
+      sha256,
+      slotKey,
+      finishKey,
+      slotBegan: resumed,
+      // The slot the earlier try sent bytes to is left where it is.
+      leftBehind: entry.leftBehind + (changed && entry.slotBegan ? 1 : 0),
+    });
 
     step = 'slot';
     const { data: slot } = await createUpload({
@@ -196,7 +226,7 @@ async function run(id: string): Promise<void> {
 
     if (held < size) {
       step = 'bytes';
-      uploads().change(id, { state: 'sending', sent: held });
+      uploads().change(id, { state: 'sending', sent: held, slotBegan: true });
       const rest = held === 0 ? bytes : bytes.slice(held);
       let shown = Math.floor((100 * held) / size);
       const { data: sent } = await uploadContent({
@@ -234,11 +264,25 @@ async function run(id: string): Promise<void> {
   } catch (error) {
     // Removed by the person: its requests were aborted and the entry is gone.
     if (signal.aborted) return;
+    const failure = { error, step, resumed };
+    // The service refused the bytes of this try: it kept none of them, so the slot holds what it
+    // held before. (Bytes whose answer was lost, or that stalled, may be there.)
+    const refusedBytes = step === 'bytes' && classifyFailure(error).kind === 'api';
+    const began = refusedBytes ? resumed : entryOf(id)?.slotBegan === true;
+    const leftBehind = entryOf(id)?.leftBehind ?? 0;
     uploads().change(id, {
       state: 'failed',
-      failure: { error, step },
-      ...(needsNewSlot(error, step)
-        ? { slotKey: crypto.randomUUID(), finishKey: crypto.randomUUID(), sha256: null }
+      failure,
+      slotBegan: began,
+      ...(needsNewSlot(failure)
+        ? {
+            slotKey: crypto.randomUUID(),
+            finishKey: crypto.randomUUID(),
+            sha256: null,
+            slotBegan: false,
+            // A slot that was sent bytes stays with the service when it is left for a new one.
+            leftBehind: leftBehind + (began ? 1 : 0),
+          }
         : {}),
     });
   } finally {
@@ -286,11 +330,16 @@ export function retryUpload(id: string): Promise<void> {
   });
 }
 
-/** Take a file off the list; one under way has its requests aborted. */
-export function removeUpload(id: string) {
+/**
+ * Take a file off the list; one under way has its requests aborted. Answers whether bytes of it
+ * were sent to a slot that now stays with the service: the client cannot remove it.
+ */
+export function removeUpload(id: string): { leftWithService: boolean } {
+  const leftWithService = entryOf(id)?.slotBegan === true;
   running.get(id)?.abort();
   uploads().remove([id]);
   pump();
+  return { leftWithService };
 }
 
 /**

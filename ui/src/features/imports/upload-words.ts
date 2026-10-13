@@ -2,7 +2,9 @@
  * The words of an upload's failure, where the general words of `features/errors/failure.ts` would
  * mislead: a failure the page found by itself (the file could not be read, the service's answer
  * did not confirm the upload) is not "the service could not be reached", `too_large` for an upload
- * is not "too large to show", and a `conflict` here is not a version that changed.
+ * is not "too large to show", and a `conflict` here is not a version that changed. A `too_large`
+ * answered to the rest of a file whose slot an earlier try had sent bytes to is not a file too
+ * large for the service either: the slot holds more than it said (`slotIsAhead`).
  *
  * The action each allows is what a retry does (`uploading.ts`): "Try again" goes on with the same
  * slot, "Send it again" opens a new one. Every other failure keeps its general words.
@@ -10,7 +12,13 @@
 import { classifyFailure, type FailureMessage } from '../errors/failure';
 import { FileUnreadable, HashUnavailable } from './hash';
 import type { UploadStep } from './upload-list';
-import { FileChanged, SlotUnusable, UploadIncomplete, UploadNotConfirmed } from './uploading';
+import {
+  FileChanged,
+  SlotUnusable,
+  slotIsAhead,
+  UploadIncomplete,
+  UploadNotConfirmed,
+} from './uploading';
 
 const TRY_AGAIN = { kind: 'retry', label: 'Try again' } as const;
 const SEND_AGAIN = { kind: 'retry', label: 'Send it again' } as const;
@@ -18,6 +26,7 @@ const SEND_AGAIN = { kind: 'retry', label: 'Send it again' } as const;
 export function uploadWords(failure: {
   error: unknown;
   step: UploadStep;
+  resumed: boolean;
 }): FailureMessage | undefined {
   const { error, step } = failure;
   if (error instanceof FileUnreadable) {
@@ -62,6 +71,14 @@ export function uploadWords(failure: {
     return {
       title: 'The service’s answer about this upload could not be read.',
       advice: 'It did not say how many bytes of the file it holds. Send it again.',
+      action: SEND_AGAIN,
+    };
+  }
+  if (slotIsAhead(failure)) {
+    return {
+      title: 'The service already holds part of this file, and did not take the rest.',
+      advice:
+        'It holds more of the file than it said when it was asked, so what was sent would have been too much. Send it again: the file goes into a new upload.',
       action: SEND_AGAIN,
     };
   }
