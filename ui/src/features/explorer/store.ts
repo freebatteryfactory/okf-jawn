@@ -7,6 +7,12 @@
  * paths, the workspace head and content live in the Query cache and are read from there; nothing
  * the server owns is copied here. The router owns what the focused pane shows; this store
  * remembers the rest. Nothing here is persisted: it lasts as long as the page.
+ *
+ * It also carries what one part of the page asks of another after a change of the tree: the row
+ * the tree is to show focused, the note that is to open on its editor, and which items the person
+ * deleted here (so their tabs can say so). The last is what the person did in this page, by item
+ * id and the title it had; it is not a copy of what the service holds, and an item brought back
+ * later (Rewind, a later package) must be taken out of it.
  */
 import { create } from 'zustand';
 import type { ItemSelection } from './search-params';
@@ -53,6 +59,20 @@ export interface CloseResult {
   focus: FocusTarget;
 }
 
+/**
+ * Where keyboard focus goes in the folder tree once it lists the head a change made: the row of
+ * what was created or moved, or the entry now at the place of what was deleted.
+ */
+export type TreeReveal = {
+  workspaceId: string;
+  /** The revision the change made: the tree shows the row once it lists that head. */
+  revision: string;
+} & (
+  | { kind: 'item'; itemId: string; path: string }
+  | { kind: 'folder'; folder: string }
+  | { kind: 'place'; index: number }
+);
+
 /** Sizes of a resizable group, by panel id, as percentages. */
 export type PanelLayout = Record<string, number>;
 
@@ -64,6 +84,18 @@ interface ExplorerState {
   layouts: Record<string, PanelLayout>;
   nextPane: number;
   focusRequest: FocusTarget | null;
+  /** What the folder tree is to show focused next, once it lists it. */
+  treeReveal: TreeReveal | null;
+  /** The note just created: its pane opens on its editor, with keyboard focus in the text. */
+  editRequest: { workspaceId: string; itemId: string } | null;
+  /**
+   * The items the person deleted in this page, by workspace and item, with the title each had: a
+   * tab of one says so. It is what the person did here, not a copy of what the service holds.
+   */
+  deleted: Record<string, string>;
+  revealInTree: (reveal: TreeReveal | null) => void;
+  requestEdit: (request: { workspaceId: string; itemId: string } | null) => void;
+  markDeleted: (workspaceId: string, itemId: string, title: string) => void;
   /** Show `itemId` at `location` in the focused pane, adding a tab when it has none. */
   openItem: (workspaceId: string, itemId: string, location?: PaneLocation) => void;
   focusPane: (workspaceId: string, paneId: string) => void;
@@ -130,6 +162,13 @@ export const useExplorerStore = create<ExplorerState>()((set, get) => {
     layouts: {},
     nextPane: 2,
     focusRequest: null,
+    treeReveal: null,
+    editRequest: null,
+    deleted: {},
+    revealInTree: (reveal) => set({ treeReveal: reveal }),
+    requestEdit: (request) => set({ editRequest: request }),
+    markDeleted: (workspaceId, itemId, title) =>
+      set((state) => ({ deleted: { ...state.deleted, [`${workspaceId}/${itemId}`]: title } })),
     openItem: (workspaceId, itemId, location = {}) => {
       const current = view(workspaceId);
       const pane = current.panes.find((candidate) => candidate.id === current.focusedPaneId);
@@ -260,3 +299,8 @@ export function useWorkspaceView(workspaceId: string): WorkspaceView {
 }
 
 const EMPTY = emptyView();
+
+/** The title an item had when the person deleted it in this page; undefined when they did not. */
+export function useDeleted(workspaceId: string, itemId: string): string | undefined {
+  return useExplorerStore((state) => state.deleted[`${workspaceId}/${itemId}`]);
+}

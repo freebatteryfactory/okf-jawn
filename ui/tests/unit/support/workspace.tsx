@@ -161,6 +161,9 @@ export function renderAt(url: string) {
     layouts: {},
     nextPane: 2,
     focusRequest: null,
+    treeReveal: null,
+    editRequest: null,
+    deleted: {},
   });
   const router = createAppRouter(createMemoryHistory({ initialEntries: [url] }));
   const queryClient = createQueryClient();

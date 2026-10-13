@@ -16,6 +16,17 @@
  * version the workspace shows and the person may write; a pane that reads another revision says
  * so and offers that version. The switch is one element whatever it says, so it keeps keyboard
  * focus; "Edit" moves focus into the text box, and after a discard focus is on the switch.
+ *
+ * Where a draft can be started, the item's own changes are offered too (`tree/ItemActions.tsx`):
+ * rename or move, delete, its status word and Archive. They stay on the page while the pane reads
+ * the item again at the head a change made, showing the item as last read, so none of them drops
+ * keyboard focus. A note the person has just created opens on its editor, with focus in its text.
+ *
+ * An item the person deleted in this page is said to be deleted, and its tab offers to close. A
+ * tab that reads the workspace's head then shows nothing else and asks the service nothing: there
+ * is no current text. A tab that cites a revision goes on showing that revision, under the same
+ * notice, which says that what is below is how the item was. When the delete was made from this
+ * pane, keyboard focus goes to "Close this tab".
  */
 import {
   type UseMutationResult,
@@ -25,7 +36,7 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import {
   getItemOptions,
   openWorkspaceQueryKey,
@@ -33,21 +44,26 @@ import {
 } from '../../api/generated/@tanstack/react-query.gen';
 import { openWorkspace, readItem } from '../../api/generated/sdk.gen';
 import type {
+  ItemSummary,
   ReadItemRequest,
   ReadItemResponse,
   Revision,
   Workspace,
 } from '../../api/generated/types.gen';
+import { takeHeld, useWatchedPart } from '../../lib/focus';
 import { Instant } from '../../lib/instant';
 import { keyed } from '../../lib/keys';
 import { ConflictNotice } from '../drafts/ConflictNotice';
 import { DraftEditor } from '../drafts/DraftEditor';
+import { draftMarkOf } from '../drafts/marks';
 import { beginSession } from '../drafts/saving';
 import { saveStateOf, useConflict, useDraftSession } from '../drafts/sessions';
 import type { Snapshotted } from '../drafts/snapshot';
 import { FailureNotice } from '../errors/FailureNotice';
 import { type FailureRetry, useRetry } from '../errors/retry';
 import type { ItemSelection } from '../explorer/search-params';
+import { useDeleted, useExplorerStore } from '../explorer/store';
+import { ItemActions } from '../tree/ItemActions';
 import { describeSelection, extractionLabels, short } from './describe';
 import { Properties } from './Properties';
 import { PropertiesForm } from './PropertiesForm';
@@ -76,6 +92,8 @@ export interface DocumentViewProps {
   onOpenCurrent: () => void;
   /** A Snapshot of this item was taken here ("keep mine"). */
   onSnapshotted: (snapshotted: Snapshotted) => void;
+  /** Close this tab. */
+  onClose: () => void;
 }
 
 /** The words for a draft that is not on screen: the reader shows the committed text. */
@@ -279,10 +297,17 @@ export function DocumentView({
   canWrite,
   onOpenCurrent,
   onSnapshotted,
+  onClose,
 }: DocumentViewProps) {
   const titleId = useId();
-  const item = useQuery(itemOptions(workspaceId, itemId, revision));
+  // The person deleted this item in this page: at the head there is nothing of it to read.
+  const deletedTitle = useDeleted(workspaceId, itemId);
+  const gone = deletedTitle !== undefined && revision === head;
+  const item = useQuery({ ...itemOptions(workspaceId, itemId, revision), enabled: !gone });
   const document = item.data;
+  // The item as this pane last read it: its controls stay while it is read again at a new head.
+  const [lastRead, setLastRead] = useState<ItemSummary | undefined>(document?.summary);
+  if (document !== undefined && document.summary !== lastRead) setLastRead(document.summary);
   const conflict = useConflict(workspaceId, itemId);
 
   // Reading or editing. Until the person chooses, an item with a draft opens on the draft.
@@ -319,7 +344,7 @@ export function DocumentView({
     initialPageParam: { body: request },
     getNextPageParam: (last) => last.next_cursor ?? undefined,
     // The editor shows the draft's own text; the committed text is read when it is shown.
-    enabled: !wantsEdit && !undecided,
+    enabled: !wantsEdit && !undecided && !gone,
   });
 
   const pages = read.data?.pages ?? [];
@@ -327,7 +352,7 @@ export function DocumentView({
   const last = pages.at(-1);
   const summary = document?.summary;
   const path = summary?.path ?? first?.source.path;
-  const title = summary?.title || path || 'Item';
+  const title = summary?.title || path || deletedTitle || 'Item';
   const warnings = pages.flatMap((page) => page.warnings);
   const extraction = first?.extraction;
 
@@ -379,6 +404,25 @@ export function DocumentView({
       target.focus();
     }
   });
+  // A note just created opens on its editor: the next thing done with an empty note is writing.
+  const editRequest = useExplorerStore((state) => state.editRequest);
+  const requestEdit = useExplorerStore((state) => state.requestEdit);
+  useLayoutEffect(() => {
+    if (editRequest?.workspaceId !== workspaceId || editRequest.itemId !== itemId) return;
+    if (!editable || document === undefined) return;
+    requestEdit(null);
+    beginSession(workspaceId, revision, document);
+    focusNext.current = 'text';
+    setChosen('edit');
+  }, [editRequest, requestEdit, workspaceId, itemId, editable, document, revision]);
+  // The item's own controls leave with a deleted item. When keyboard focus was in them (the
+  // delete was confirmed here), it goes to the way out of the notice that takes their place.
+  const heldFocus = useRef<HTMLElement | null>(null);
+  const [, actionsRef] = useWatchedPart<HTMLDivElement>(heldFocus);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+  useLayoutEffect(() => {
+    if (takeHeld(heldFocus) && deletedTitle !== undefined) closeRef.current?.focus();
+  });
   const reading = JSON.stringify(request);
   const itemFailure = useRetry({
     request: reading,
@@ -425,6 +469,32 @@ export function DocumentView({
         {summary?.description ? <p>{summary.description}</p> : null}
       </header>
 
+      {deletedTitle !== undefined && (
+        <div role="note" className="notice">
+          <p>
+            <strong>You deleted this item.</strong> It is not in the workspace as it is now; its
+            history is kept.{' '}
+            {gone
+              ? 'There is no current text to show here.'
+              : 'What is below is how it was at the revision this tab cites, not something current.'}
+            {hasDraft
+              ? ' Your draft of it is still in your Drafts: it can be copied from or discarded, but not snapshotted.'
+              : ''}
+          </p>
+          <button type="button" ref={closeRef} onClick={onClose}>
+            Close this tab
+          </button>
+        </div>
+      )}
+      {editable && deletedTitle === undefined && lastRead !== undefined && (
+        <div ref={actionsRef}>
+          <ItemActions
+            item={lastRead}
+            mark={draftMarkOf(session, heldDraft !== null)}
+            busy={document === undefined}
+          />
+        </div>
+      )}
       {pinned && (
         <PinnedRevision
           workspaceId={workspaceId}
@@ -433,7 +503,7 @@ export function DocumentView({
           onReadLatest={onReadLatest}
         />
       )}
-      {canWrite && !editable && (
+      {canWrite && !editable && deletedTitle === undefined && (
         <p role="note" className="notice">
           {hasDraft ? 'You have a draft of this item. ' : ''}
           Editing starts from the version this workspace shows, and this tab reads another revision.{' '}
@@ -442,7 +512,7 @@ export function DocumentView({
           </button>
         </p>
       )}
-      {editable && (
+      {editable && !gone && (
         <p className="document-actions">
           {/* aria-disabled, not disabled, until the item has been read: it may hold focus. */}
           <button
@@ -496,7 +566,7 @@ export function DocumentView({
         </p>
       )}
 
-      {itemFailure.shown ? (
+      {gone ? null : itemFailure.shown ? (
         <FailureNotice
           context="Reading this item’s properties"
           error={itemFailure.error}
@@ -511,7 +581,7 @@ export function DocumentView({
         <p role="status">Loading properties…</p>
       )}
 
-      {editing ? (
+      {gone ? null : editing ? (
         <DraftEditor
           session={session}
           title={title}

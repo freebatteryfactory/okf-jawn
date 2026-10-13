@@ -11,7 +11,7 @@
  *
  * A tab's name carries how the item's draft stands, in brackets after its title: "(draft)",
  * "(unsaved)" or "(not saved)". The mark is the item's, so a tab that shows a cited revision has it
- * too.
+ * too. The tab of an item the person deleted in this page reads "(deleted)" after the title it had.
  */
 import { Tabs } from '@base-ui/react/tabs';
 import { useQuery } from '@tanstack/react-query';
@@ -28,6 +28,7 @@ import {
   type PaneLocation,
   type PanelLayout,
   tabLocation,
+  useDeleted,
   useExplorerStore,
 } from './store';
 
@@ -263,6 +264,7 @@ function DocumentPane({
                 canWrite={canWrite}
                 onOpenCurrent={() => onOpenCurrent(active)}
                 onSnapshotted={onSnapshotted}
+                onClose={() => onClose(pane.id, active)}
               />
             </Tabs.Panel>
           )}
@@ -286,9 +288,20 @@ function TabLabel({
   itemId: string;
   head: Revision;
 }) {
-  const item = useQuery(itemOptions(workspaceId, itemId, head));
+  // An item the person deleted in this page is not at the head: its tab says so, by the title
+  // it had, and nothing is asked.
+  const deleted = useDeleted(workspaceId, itemId);
+  const item = useQuery({
+    ...itemOptions(workspaceId, itemId, head),
+    enabled: deleted === undefined,
+  });
   const summary = item.data?.summary;
-  const name = summary ? summary.title || summary.path : `Item ${itemId.slice(0, 8)}`;
+  const name =
+    deleted !== undefined
+      ? `${deleted} (deleted)`
+      : summary
+        ? summary.title || summary.path
+        : `Item ${itemId.slice(0, 8)}`;
   // The service holds a draft when `get_item` carries one or `list_drafts` lists the item.
   const listed = useDraftMarks(workspaceId)(itemId);
   const mark = listed ?? ((item.data?.draft ?? null) !== null ? 'draft' : null);

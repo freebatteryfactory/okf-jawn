@@ -23,16 +23,23 @@ import { itemOptions } from '../documents/DocumentView';
 import { short } from '../documents/describe';
 import { DraftsPanel } from '../drafts/DraftsPanel';
 import { useLeaveGuard } from '../drafts/leave-guard';
-import type { Snapshotted } from '../drafts/snapshot';
 import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, messageFor } from '../errors/failure';
 import { useRetry } from '../errors/retry';
 import { SearchForm, SearchResults } from '../search/SearchPanel';
+import { ChangesContext } from '../tree/context';
 import { DocumentPanes, matchingLayout } from './DocumentPanes';
 import { FolderTree } from './FolderTree';
+import type { HeadChange } from './head';
 import { SourcePanel } from './SourcePanel';
 import { type ItemSelection, validateItemSearch, validateWorkspaceSearch } from './search-params';
-import { type PaneLocation, tabLocation, useExplorerStore, useWorkspaceView } from './store';
+import {
+  type PaneLocation,
+  tabLocation,
+  useDeleted,
+  useExplorerStore,
+  useWorkspaceView,
+} from './store';
 
 /** The resolved head the shell is pinned to: when it was resolved, and how to resolve it again. */
 export interface HeadState {
@@ -136,13 +143,15 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
     });
 
   /**
-   * A Snapshot moved the shown head to the revision it made (`snapshot.ts`). A tab that reads the
-   * shown head follows by itself. One that cited the head as it was (a search result's link, the
-   * latest version read) would go on reading the version before the person's own change, so each
-   * such tab of a snapshotted item now cites the revision the Snapshot made: in the store, and in
-   * the URL when it is the item the URL names.
+   * The person's own change moved the shown head to the revision it made (`head.ts`): a
+   * Snapshot, a move or rename, a status word. A tab that reads the shown head follows by itself.
+   * One that cited the head as it was (a search result's link, the latest version read) would go
+   * on reading the version before the person's own change, so each such tab of a changed item now
+   * cites the revision the change made: in the store, and in the URL when it is the item the URL
+   * names. An item's identity does not change with its path, so the tabs of a moved item go on
+   * reading it.
    */
-  const followSnapshot = (taken: Snapshotted) => {
+  const followSnapshot = (taken: HeadChange) => {
     const before = taken.previousHead ?? head;
     repin(workspaceId, taken.itemIds, before, taken.revision);
     if (itemId !== null && taken.itemIds.includes(itemId) && rev === before) {
@@ -157,9 +166,11 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
   const revision = search.rev ?? head;
   // The tree lists the head, so the item is revealed where it is at the head, found by its
   // id: a cited revision may have held it at another path, or the head may no longer hold it.
+  // An item the person deleted in this page is not at the head: nothing is asked about it there.
+  const gone = useDeleted(workspaceId, itemId ?? '') !== undefined && search.rev === undefined;
   const atListedHead = useQuery({
     ...itemOptions(workspaceId, itemId ?? '', head),
-    enabled: itemId !== null,
+    enabled: itemId !== null && !gone,
   });
   const layouts = useExplorerStore((state) => state.layouts);
   const columns = matchingLayout(layouts[COLUMNS_GROUP], COLUMN_IDS);
@@ -180,100 +191,113 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
       ? { ...(sel === undefined ? {} : { sel }), ...(rev === undefined ? {} : { rev }) }
       : paneLocation(paneId);
 
+  const changes = {
+    workspaceId,
+    head,
+    canWrite,
+    refresh: headState.refresh,
+    onChanged: followSnapshot,
+  };
   return (
-    <div className="explorer">
-      <div className="explorer-bar">
-        <h1 className="workspace-name" ref={nameRef} tabIndex={-1}>
-          {workspace.name}
-        </h1>
-        {workspace.description ? <p className="meta">{workspace.description}</p> : null}
-        <HeadLine workspace={workspace} state={headState} />
-      </div>
-      <Group
-        orientation="horizontal"
-        id={COLUMNS_GROUP}
-        className="explorer-columns"
-        {...(columns === undefined ? {} : { defaultLayout: columns })}
-        onLayoutChanged={(next) => setLayout(COLUMNS_GROUP, next)}
-      >
-        <Panel id="navigation" defaultSize="24%" minSize="12%">
-          <div className="sidebar">
-            <SearchForm query={query} onSearch={setQuery} />
-            {query === undefined ? (
-              <FolderTree
-                workspaceId={workspaceId}
-                revision={head}
-                selectedItemId={itemId}
-                selectedItemPath={atListedHead.data?.summary.path ?? null}
-                onOpenItem={(target) => goToItem(target)}
-              />
-            ) : (
-              <SearchResults
+    <ChangesContext.Provider value={changes}>
+      <div className="explorer">
+        <div className="explorer-bar">
+          <h1 className="workspace-name" ref={nameRef} tabIndex={-1}>
+            {workspace.name}
+          </h1>
+          {workspace.description ? <p className="meta">{workspace.description}</p> : null}
+          <HeadLine workspace={workspace} state={headState} />
+        </div>
+        <Group
+          orientation="horizontal"
+          id={COLUMNS_GROUP}
+          className="explorer-columns"
+          {...(columns === undefined ? {} : { defaultLayout: columns })}
+          onLayoutChanged={(next) => setLayout(COLUMNS_GROUP, next)}
+        >
+          <Panel id="navigation" defaultSize="24%" minSize="12%">
+            <div className="sidebar">
+              <SearchForm query={query} onSearch={setQuery} />
+              {query === undefined ? (
+                <FolderTree
+                  workspaceId={workspaceId}
+                  revision={head}
+                  selectedItemId={itemId}
+                  selectedItemPath={atListedHead.data?.summary.path ?? null}
+                  onOpenItem={(target) => goToItem(target)}
+                />
+              ) : (
+                <SearchResults
+                  workspaceId={workspaceId}
+                  head={head}
+                  query={query}
+                  onClear={() => setQuery(undefined)}
+                />
+              )}
+              <DraftsPanel
                 workspaceId={workspaceId}
                 head={head}
-                query={query}
-                onClear={() => setQuery(undefined)}
+                canWrite={canWrite}
+                onSnapshotted={followSnapshot}
+                onOpenItem={(target) => goToItem(target)}
               />
-            )}
-            <DraftsPanel
+            </div>
+          </Panel>
+          <Separator className="separator" aria-label="Resize the navigation column" />
+          <Panel id="documents" minSize="30%">
+            <DocumentPanes
               workspaceId={workspaceId}
               head={head}
+              panes={view.panes}
+              focusedPaneId={view.focusedPaneId}
+              urlItemId={itemId}
+              invalidItemLink={invalidItemLink}
+              selection={search.sel}
+              revision={search.rev}
+              onActivate={(paneId, target) => {
+                focusPane(workspaceId, paneId);
+                // A tab returned to reads where it read: its selection and cited revision.
+                goToItem(target, paneLocation(paneId, target));
+              }}
+              onFocusPane={(paneId) => {
+                focusPane(workspaceId, paneId);
+                navigateToPane(paneId);
+              }}
+              onClose={(paneId, target) => {
+                const result = closeTab(workspaceId, paneId, target);
+                if (result === null) return;
+                // Keyboard focus never drops to the page: it goes where WAI-ARIA tabs put it.
+                requestFocus(result.focus);
+                if (!result.focusedChanged) return;
+                if (result.show === null) goToWorkspace();
+                else goToItem(result.show.itemId, { ...result.show.location, replace: true });
+              }}
+              onSplit={(paneId, target) => {
+                const location = locationOf(paneId);
+                splitRight(workspaceId, paneId, target, location);
+                goToItem(target, { ...location, replace: true });
+              }}
+              onSelect={(target, location) => goToItem(target, location)}
+              onReadLatest={(target, location) => goToItem(target, location)}
               canWrite={canWrite}
+              onOpenCurrent={(target) => goToItem(target)}
               onSnapshotted={followSnapshot}
-              onOpenItem={(target) => goToItem(target)}
             />
-          </div>
-        </Panel>
-        <Separator className="separator" aria-label="Resize the navigation column" />
-        <Panel id="documents" minSize="30%">
-          <DocumentPanes
-            workspaceId={workspaceId}
-            head={head}
-            panes={view.panes}
-            focusedPaneId={view.focusedPaneId}
-            urlItemId={itemId}
-            invalidItemLink={invalidItemLink}
-            selection={search.sel}
-            revision={search.rev}
-            onActivate={(paneId, target) => {
-              focusPane(workspaceId, paneId);
-              // A tab returned to reads where it read: its selection and cited revision.
-              goToItem(target, paneLocation(paneId, target));
-            }}
-            onFocusPane={(paneId) => {
-              focusPane(workspaceId, paneId);
-              navigateToPane(paneId);
-            }}
-            onClose={(paneId, target) => {
-              const result = closeTab(workspaceId, paneId, target);
-              if (result === null) return;
-              // Keyboard focus never drops to the page: it goes where WAI-ARIA tabs put it.
-              requestFocus(result.focus);
-              if (!result.focusedChanged) return;
-              if (result.show === null) goToWorkspace();
-              else goToItem(result.show.itemId, { ...result.show.location, replace: true });
-            }}
-            onSplit={(paneId, target) => {
-              const location = locationOf(paneId);
-              splitRight(workspaceId, paneId, target, location);
-              goToItem(target, { ...location, replace: true });
-            }}
-            onSelect={(target, location) => goToItem(target, location)}
-            onReadLatest={(target, location) => goToItem(target, location)}
-            canWrite={canWrite}
-            onOpenCurrent={(target) => goToItem(target)}
-            onSnapshotted={followSnapshot}
-          />
-        </Panel>
-        <Separator className="separator" aria-label="Resize the source panel" />
-        <Panel id="sources" defaultSize="26%" minSize="12%">
-          <section aria-label="Source panel" className="source-column">
-            <SourcePanel workspaceId={workspaceId} itemId={itemId} revision={revision} />
-          </section>
-        </Panel>
-      </Group>
-      <Outlet />
-    </div>
+          </Panel>
+          <Separator className="separator" aria-label="Resize the source panel" />
+          <Panel id="sources" defaultSize="26%" minSize="12%">
+            <section aria-label="Source panel" className="source-column">
+              <SourcePanel
+                workspaceId={workspaceId}
+                itemId={gone ? null : itemId}
+                revision={revision}
+              />
+            </section>
+          </Panel>
+        </Group>
+        <Outlet />
+      </div>
+    </ChangesContext.Provider>
   );
 }
 
