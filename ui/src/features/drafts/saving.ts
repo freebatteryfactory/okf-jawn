@@ -419,8 +419,9 @@ export type DraftAfterChange =
 
 /**
  * The person changed an item themselves, on `base`, and the service made `revision`: their draft
- * of it follows. It takes the returned item's header and, when the change set the status word
- * (`took.status`), that word; everything else of the draft is kept. It is saved once: on
+ * of it follows. It takes, when the change set the status word (`took.status`), the returned
+ * item's word; its save carries the returned item's header, as every save carries the header of
+ * the head shown; everything else of the draft is kept. It is saved once: on
  * `revision` when it was on `base` (the explicit rebase), else on the base it has. A draft the
  * page did not hold yet (the service's, carried by `get_item`) becomes a session, as when its tab
  * opens. Never rejects: the outcome says how the draft stands.
@@ -459,14 +460,11 @@ export async function followOwnChange(
     sessions().change(key, { ...committed, committed, baseRevision: revision });
     return 'none';
   }
-  const header = withProperty(
-    session.properties,
-    APP_HEADER_KEY,
-    document.properties[APP_HEADER_KEY],
-  );
+  // The header is taken by the save itself, like every save: from the head shown, which is the
+  // revision this change made.
   const properties = took.status
-    ? withProperty(header, STATUS_KEY, document.properties[STATUS_KEY])
-    : header;
+    ? withProperty(session.properties, STATUS_KEY, document.properties[STATUS_KEY])
+    : session.properties;
   const onBase = session.baseRevision === base;
   sessions().change(key, {
     properties,

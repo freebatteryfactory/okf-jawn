@@ -1345,6 +1345,9 @@ describe('a draft of an item the person changes themselves', () => {
     await waitFor(() => expect(statusLine()).toContain('Archived.'));
     const archived = api.callsTo(SAVE).at(-1) ?? {};
     expect((archived.properties as Record<string, unknown>).status).toBe('deprecated');
+    // The header changed where it stood: no property moved.
+    expect(Object.keys(archived.properties as object)).toEqual(['type', 'okf_jawn', 'status']);
+    expect(headerOf(archived)).toEqual({ id: NOTE, archived: true });
     expect(archived).toMatchObject({ base_revision: MADE.at(1) });
     expect(state.refusedSaves).toBe(0);
   }, 20000);

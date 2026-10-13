@@ -1223,5 +1223,9 @@ describe('the person’s drafts of items a renaming renames', () => {
     await rename();
     expect(said()).not.toContain('draft');
     expect(api.callsTo(SAVE_DRAFT)).toEqual([]);
+    // Nor is any renamed item read for a draft: at 10,000 items that would be 10,000 requests.
+    expect(
+      api.callsTo('/api/items/get-item').filter((body) => revisionAsked(body, '') === FIRST),
+    ).toEqual([]);
   });
 });
