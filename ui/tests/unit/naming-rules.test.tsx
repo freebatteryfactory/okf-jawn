@@ -1270,22 +1270,27 @@ describe('leaving the naming rules with edits that are not saved', () => {
     // Put back in the YAML view (the form drops a text it is emptied of).
     await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
     const box = await findTextBox('The naming rules as YAML');
-    typeYaml(box, textIn(box).replace(/prefix: .*/, 'prefix: ""'));
+    // Typed a moment ago and not read yet: it is read, and found to be the saved rules.
+    replaceText(box, textIn(box).replace(/prefix: .*/, 'prefix: ""'));
     expect(leavingAsks()).toBe(false);
     await userEvent.click(close());
     expect(screen.queryByRole('region', { name: 'Naming rules' })).toBeNull();
   });
 
   it('asks before an item is opened from the folders, and opens it only after "Discard my changes"', async () => {
-    service();
-    await openRules();
+    const { api } = service();
+    const { router } = await openRules();
     await setPrefix('unsaved-');
     const tree = screen.getByRole('tree', { name: 'Folders' });
     const report = within(tree).getByRole('treeitem', { name: /Annual report/ });
+    const readsBefore = api.callsTo('/api/reads/read-item').length;
     await userEvent.click(report);
     expect(question()).not.toBeNull();
-    expect(screen.queryByText('Text of Annual report')).toBeNull();
     await userEvent.click(button('Keep editing'));
+    // Nothing was opened behind the question: the address and the requests are as they were.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(router.state.location.pathname).toBe(`/w/${WS}`);
+    expect(api.callsTo('/api/reads/read-item')).toHaveLength(readsBefore);
     // Back to what asked to leave: the row that was pressed.
     expect(document.activeElement).toBe(report);
     expect(prefix()).toHaveProperty('value', 'unsaved-');
@@ -1317,6 +1322,18 @@ describe('leaving the naming rules with edits that are not saved', () => {
     expect(question()).not.toBeNull();
     await userEvent.click(button('Keep editing'));
     typeYaml(await findTextBox('The naming rules as YAML'), 'rules: [\n');
+    expect(leavingAsks()).toBe(true);
+    await userEvent.click(close());
+    expect(question()).not.toBeNull();
+  });
+
+  it('counts text that cannot be read as an edit though the rules are the saved ones', async () => {
+    service();
+    await openRules();
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    typeYaml(await findTextBox('The naming rules as YAML'), 'rules: [\n');
+    // The rules are still the last that could be read: the saved ones. The text is the edit.
+    expect(panel().textContent).toContain('These are the saved rules, unchanged.');
     expect(leavingAsks()).toBe(true);
     await userEvent.click(close());
     expect(question()).not.toBeNull();
