@@ -21,7 +21,17 @@
  * made, whichever of the save and the commit answered first: what was committed becomes the text
  * it started from, its base becomes that revision, and it is saved at once. The service removes a
  * draft at a Snapshot only if it is still the content it committed, so a draft saved in between
- * is still held, on its old base; that save moves it. The status says how many items go on so.
+ * is still held, on its old base; that save moves it onto the Snapshot's revision while that
+ * revision is the head. The status says how many items go on so. Whether that text is in the
+ * Snapshot the page often cannot know (a save sent while the Snapshot was taken may have reached
+ * the service before or after it read the drafts), so the status says it "may not be in it".
+ *
+ * Known limit: when someone else commits right after the Snapshot, the revision it made is no
+ * longer the head, and the service moves a draft only onto the head. That one save then leaves
+ * the draft on its old base (the session takes the base the service answers, and sends no
+ * other). The next Snapshot of the item conflicts, and what the Conflict flow shows as changed
+ * underneath is the person's own earlier Snapshot: SPEC section 8 blocks a Snapshot when the item
+ * "was itself changed ... since that draft's base". "Keep mine" resolves it.
  * A session that holds input of the properties form that is held back goes on too, on that
  * revision: no save carried that input, so the Snapshot does not have it, and the status says so.
  *
@@ -65,7 +75,7 @@ export interface Snapshotted {
   /** The head the workspace showed before, when it was known. */
   previousHead: Revision | null;
   itemIds: string[];
-  /** Those of them whose text went on while the Snapshot was taken: each is still a draft. */
+  /** Those of them whose text went on while the Snapshot was taken: each goes on as a draft. */
   stillDrafts: string[];
   /** Those of them whose properties form holds input back: no save carried it, so it is not in. */
   heldBack: string[];
@@ -128,7 +138,8 @@ function draftHeld(client: QueryClient, workspaceId: string, itemId: string): st
 /**
  * Say, where the drafts are listed, what a Snapshot did. It says what the answer shows: that the
  * Snapshot was taken, of how many items (the service takes all that were asked or none), and the
- * revision it made. Each item was committed as it was last saved before the Snapshot was asked.
+ * revision it made. Of text that went on while it was taken it says only what holds in either
+ * order of the save and the commit: it may not be in the Snapshot, and it goes on as a draft.
  */
 export function saySnapshotted(workspaceId: string, message: string, snapshotted: Snapshotted) {
   const items = snapshotted.itemIds.length;
@@ -140,7 +151,7 @@ export function saySnapshotted(workspaceId: string, message: string, snapshotted
       `The workspace now shows revision ${short(snapshotted.revision)}, which the Snapshot made.` +
       (still === 0
         ? ''
-        : ` What you typed in ${still === 1 && items === 1 ? 'it' : `${still} of them`} while it was taken is not in it, and is still a draft.`) +
+        : ` What you typed in ${still === 1 && items === 1 ? 'it' : `${still} of them`} while it was taken may not be in it, and goes on as a draft.`) +
       (held === 0
         ? ''
         : ` What you changed in ${held === 1 && items === 1 ? 'its properties' : `the properties of ${held} of them`} is held back, and is not in the Snapshot.`),

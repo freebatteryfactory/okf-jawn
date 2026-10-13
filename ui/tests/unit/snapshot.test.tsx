@@ -171,7 +171,8 @@ const nameField = () => within(panel()).getByRole('textbox', { name: 'Snapshot n
 const snapshotButton = () => within(panel()).getByRole('button', { name: /^(Snapshot \d|Taking)/ });
 const headLine = () => document.querySelector('.head-line')?.textContent ?? '';
 /** What the status adds when the text of the one snapshotted item went on meanwhile. */
-const STILL_A_DRAFT = 'What you typed in it while it was taken is not in it, and is still a draft.';
+const STILL_A_DRAFT =
+  'What you typed in it while it was taken may not be in it, and goes on as a draft.';
 
 /** Open the workspace with its two drafts listed, name the Snapshot, and press the button. */
 async function pressSnapshot(name: string) {
@@ -672,8 +673,17 @@ describe('taking a Snapshot', () => {
      * `commit_items` commits the draft it read when it started and removes the draft only if it
      * is still that content (crates/core/src/application/history.rs: "A draft saved again in
      * between ... stays in place"). With `holdSaves` a save is applied when the test answers it.
+     * `commitReads` says when the commit reads the draft it commits: when it is asked, or only as
+     * it answers (a save sent meanwhile reached the service first). `headAfter` is the head once
+     * the commit has answered: the revision it made, unless someone else committed right after.
      */
-    function remembering(holdSaves = false) {
+    function remembering(
+      holdSaves = false,
+      {
+        commitReads = 'when asked',
+        headAfter = MADE,
+      }: { commitReads?: string; headAfter?: string } = {},
+    ) {
       const held = {
         head: HEAD,
         committed: '# Meeting notes',
@@ -713,12 +723,13 @@ describe('taking a Snapshot', () => {
             });
           },
           [COMMIT]: () => {
-            const read = held.draft;
+            const asked = held.draft;
             return new Promise<Reply>((resolve) => {
               commit = () => {
+                const read = commitReads === 'when asked' ? asked : held.draft;
                 held.committed = read ?? held.committed;
                 if (held.draft === read) held.draft = null;
-                held.head = MADE;
+                held.head = headAfter;
                 resolve(committed());
               };
             });
@@ -783,6 +794,72 @@ describe('taking a Snapshot', () => {
         base_revision: MADE,
         body: `${DRAFT_BODY} second part!`,
       });
+    });
+
+    // The page cannot tell this order from the one above: the status is true in both.
+    it('saved, and read by the commit, before the Snapshot answers: the text is in it, and nothing says it is not', async () => {
+      const { api, held, answerCommit } = remembering(false, { commitReads: 'as it answers' });
+      renderAt(`/w/${WS}/i/${NOTE}`);
+      const box = await findTextBox('Text of Meeting notes');
+      await screen.findByRole('region', { name: 'Drafts (1)' });
+      vi.useFakeTimers();
+      await pressSnapshot('First part');
+      await eventually(() => expect(api.callsTo(COMMIT)).toHaveLength(1));
+      typeInto(box, ' second part');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      await pass(10);
+      answerCommit();
+      await eventually(() => expect(said()).toMatch(/^Snapshot “First part” taken: 1 item\./));
+      // What was typed meanwhile is in the Snapshot this time.
+      expect(held.committed).toBe(`${DRAFT_BODY} second part`);
+      expect(said()).toContain(STILL_A_DRAFT);
+      expect(said()).not.toMatch(/is not in it|is still a draft/);
+      // The text is kept either way: it goes on as a draft on the revision the Snapshot made.
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+      expect(api.callsTo(SAVE).at(1)).toMatchObject({
+        base_revision: MADE,
+        body: `${DRAFT_BODY} second part`,
+      });
+      await eventually(() =>
+        expect(document.querySelector('.save-state')?.textContent).toMatch(/^Saved as a draft at/),
+      );
+      expect(textIn(textBox('Text of Meeting notes'))).toBe(`${DRAFT_BODY} second part`);
+    });
+
+    // A known limit (the header of `snapshot.ts`): the service moves a draft only onto the head.
+    it('someone else commits right after the Snapshot: one more save, and the draft stays on its old base', async () => {
+      const { api, held, answerCommit } = remembering(false, { headAfter: THEIRS });
+      renderAt(`/w/${WS}/i/${NOTE}`);
+      const box = await findTextBox('Text of Meeting notes');
+      await screen.findByRole('region', { name: 'Drafts (1)' });
+      vi.useFakeTimers();
+      await pressSnapshot('First part');
+      await eventually(() => expect(api.callsTo(COMMIT)).toHaveLength(1));
+      typeInto(box, ' second part');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      answerCommit();
+      await eventually(() => expect(said()).toMatch(/^Snapshot “First part” taken: 1 item\./));
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+      // The save names the Snapshot's revision, which is not the head: the service leaves the base.
+      expect(api.callsTo(SAVE).map((sent) => sent.base_revision)).toEqual([HEAD, MADE]);
+      expect(held).toEqual({
+        head: THEIRS,
+        committed: DRAFT_BODY,
+        draft: `${DRAFT_BODY} second part`,
+        base: HEAD,
+      });
+      await eventually(() =>
+        expect(document.querySelector('.save-state')?.textContent).toMatch(/^Saved as a draft at/),
+      );
+      // One save, not a loop; and the editor says the base the draft is really on.
+      await pass(60_000);
+      expect(api.callsTo(SAVE)).toHaveLength(2);
+      expect(screen.getByText('Draft.').parentElement?.textContent).toContain(
+        `It started from revision ${HEAD.slice(0, 7)}`,
+      );
+      expect(textIn(textBox('Text of Meeting notes'))).toBe(`${DRAFT_BODY} second part`);
     });
 
     it('being saved when the Snapshot answers: once the save has answered, the draft is moved onto that revision', async () => {
