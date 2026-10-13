@@ -3,6 +3,7 @@
  * revision it made; and the per-item Conflict flow (what changed underneath as a diff, keep mine,
  * take theirs).
  */
+import { QueryObserver } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { REQUEST_TIMEOUT_MS } from '../../src/app/api-client';
@@ -1361,6 +1362,152 @@ describe('a draft of a Source or a View made elsewhere', () => {
     expect(row()).not.toContain('It can be discarded here.');
     expect(within(panel()).queryByRole('button', { name: /^Discard draft/ })).toBeNull();
     expect(within(panel()).queryByRole('checkbox')).toBeNull();
+  });
+
+  // Until a row's item is read the row says "checking…". A read that fails is not a read that
+  // is still under way: the row says so, with the failure and its retry, and can be discarded.
+  describe('a draft whose item cannot be read', () => {
+    const asSource = summary(SOURCE, 'things/it.md', 'Annual report', 'report', 'source');
+    const asNote = summary(SOURCE, 'things/it.md', 'Annual report', 'report', 'note');
+    const UNREAD = 'Item 44444444';
+    const unreadRow = () => {
+      const li = within(panel()).getByRole('button', { name: UNREAD }).closest('li');
+      if (li === null) throw new Error('the row is not in a list');
+      return li;
+    };
+    const unreadBox = () =>
+      within(panel()).getByRole('checkbox', { name: `Include ${UNREAD} in the Snapshot` });
+
+    /**
+     * The person has a draft of the note and one of another item, whose read fails (and is not
+     * tried again by itself) until the test lets it answer; then that item is `then`.
+     */
+    async function unreadable(then = asSource, overrides: Record<string, Handler> = {}) {
+      const read = { failing: true };
+      const made = withOther('source', {
+        [ITEM]: (body) => {
+          if (String(body.item_id) === NOTE) return ok(itemDocument(noteSummary));
+          return read.failing
+            ? fail(500, 'internal', 'the item could not be read')
+            : ok(itemDocument(then));
+        },
+        ...overrides,
+      });
+      const view = renderAt(`/w/${WS}`);
+      await screen.findByRole('region', { name: 'Drafts (2)' });
+      await eventuallyReal(() => expect(unreadRow().textContent).toContain('not read'));
+      return { ...made, ...view, read };
+    }
+
+    it('says so with the failure and its retry, not "checking…", and stays unticked and out of the Snapshot', async () => {
+      const { api, read } = await unreadable();
+      expect(unreadRow().textContent).not.toContain('checking…');
+      expect(unreadRow().textContent).toContain(
+        'This draft’s item could not be read, so it is not known whether it can be snapshotted. It can be discarded here.',
+      );
+      expect(
+        within(unreadRow()).getByText(`Reading ${UNREAD}: Something went wrong in the service.`),
+      ).toBeDefined();
+      expect(unreadBox()).toHaveProperty('checked', false);
+      expect(unreadBox().getAttribute('aria-disabled')).toBe('true');
+      fireEvent.click(unreadBox());
+      expect(unreadBox()).toHaveProperty('checked', false);
+      expect(snapshotButton().textContent).toBe('Snapshot 1 draft');
+      await pressSnapshot('Tidy');
+      await eventuallyReal(() => expect(said()).toMatch(/^Snapshot “Tidy” taken: 1 item\./));
+      expect(api.callsTo(COMMIT).map((sent) => sent.item_ids)).toEqual([[NOTE]]);
+      // The retry reads the item; focus that was on it ends on the row's item, not on the page.
+      read.failing = false;
+      const again = within(unreadRow()).getByRole('button', { name: 'Try again' });
+      act(() => again.focus());
+      fireEvent.click(again);
+      await eventuallyReal(() => expect(row()).toContain('cannot be snapshotted'));
+      expect(within(panel()).queryByText(/could not be read, so it is not known/)).toBeNull();
+      expect(document.activeElement).toBe(
+        within(panel()).getByRole('button', { name: 'Annual report' }),
+      );
+      expect(api.violations).toEqual([]);
+    });
+
+    it('offers "Discard draft", which asks first; then the service is asked and the row is gone', async () => {
+      const { api, state } = await unreadable();
+      const discard = within(panel()).getByRole('button', { name: `Discard draft of ${UNREAD}` });
+      fireEvent.click(discard);
+      const question = within(panel()).getByRole('group', {
+        name: `Discard the draft of ${UNREAD}?`,
+      });
+      // The kind of the item is not known, so the question does not name one.
+      expect(question.textContent).toContain(
+        'The draft will be removed. The committed item stays as it is.',
+      );
+      expect(document.activeElement).toBe(
+        within(question).getByRole('button', { name: 'Keep the draft' }),
+      );
+      expect(api.callsTo(DISCARD)).toHaveLength(0);
+      fireEvent.click(within(question).getByRole('button', { name: 'Discard the draft' }));
+      await screen.findByRole('region', { name: 'Drafts (1)' });
+      expect(api.callsTo(DISCARD)).toHaveLength(1);
+      expect(api.callsTo(DISCARD).at(0)).toMatchObject({ workspace_id: WS, item_id: SOURCE });
+      expect(state.drafts.has(SOURCE)).toBe(false);
+      expect(said()).toBe(`Your draft of ${UNREAD} was discarded.`);
+    });
+
+    it('moves focus from "Discard draft" to the row’s item when the item is read after all and is a Note', async () => {
+      const { read, queryClient } = await unreadable(asNote);
+      const discard = within(panel()).getByRole('button', { name: `Discard draft of ${UNREAD}` });
+      act(() => discard.focus());
+      read.failing = false;
+      // Asked again by another hand than the notice's retry (the network is back, say).
+      await act(() =>
+        queryClient.refetchQueries({ queryKey: itemOptions(WS, SOURCE, HEAD).queryKey }),
+      );
+      await eventuallyReal(() => expect(discard.isConnected).toBe(false));
+      expect(document.activeElement).toBe(
+        within(panel()).getByRole('button', { name: 'Annual report' }),
+      );
+      // A Note's draft after all: ticked like any other, with nothing to discard here.
+      expect(snapshotButton().textContent).toBe('Snapshot 2 drafts');
+      expect(within(panel()).queryByRole('button', { name: /^Discard draft/ })).toBeNull();
+    });
+
+    it('is said with its retry to a person who may only read, with no discard', async () => {
+      await unreadable(asSource, {
+        [OPEN]: () => ok({ ...writableWorkspace, permissions: ['read'] }),
+      });
+      expect(unreadRow().textContent).toContain(
+        'This draft’s item could not be read, so it is not known whether it can be snapshotted.',
+      );
+      expect(unreadRow().textContent).not.toContain('It can be discarded here.');
+      expect(within(unreadRow()).getByRole('button', { name: 'Try again' })).toBeDefined();
+      expect(within(panel()).queryByRole('button', { name: /^Discard draft/ })).toBeNull();
+    });
+
+    it('keeps a row that was read as it is when a later read of its item fails', async () => {
+      const { read, queryClient } = await unreadable();
+      read.failing = false;
+      fireEvent.click(within(unreadRow()).getByRole('button', { name: 'Try again' }));
+      await eventuallyReal(() => expect(row()).toContain('Source · saved'));
+      read.failing = true;
+      // The page is told of a read's outcome a turn after the cache has it. A watcher of the same
+      // read, added after the page's own, is told after it: once it has heard of the failure, so
+      // has the row.
+      let told = false;
+      const stop = new QueryObserver(queryClient, itemOptions(WS, SOURCE, HEAD)).subscribe(
+        (result) => {
+          told = told || result.isError;
+        },
+      );
+      await act(() =>
+        queryClient.refetchQueries({ queryKey: itemOptions(WS, SOURCE, HEAD).queryKey }),
+      );
+      await eventuallyReal(() => expect(told).toBe(true));
+      stop();
+      // Nothing is to appear, so there is nothing to wait for but the drawing that follows.
+      await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+      expect(row()).toContain('Source · saved');
+      expect(row()).toContain('cannot be snapshotted');
+      expect(within(panel()).queryByText(/could not be read/)).toBeNull();
+    });
   });
 });
 
