@@ -573,6 +573,65 @@ fn mcp_stdio_credential_is_removed_in_the_buffer_the_line_stands_in() -> TestRes
             Some(cut),
             "{cut}"
         );
+        // The same after a credential was removed, when what follows has to be moved back.
+        assert_eq!(
+            credential
+                .redact_line(format!("\"{TOKEN}\",{cut}"))
+                .as_deref(),
+            Some(format!("\"[credential]\",{cut}").as_str()),
+            "{cut}"
+        );
+    }
+    Ok(())
+}
+
+/// The search goes on from where a failed match leaves it (the re-review's F3). A credential
+/// whose own start comes again inside it is found when a line holds a part of it and then
+/// the whole of it: the search must fall back to the part that still matches, not start
+/// over. By the function, and through the relay with such a credential: the line the
+/// service wrote reaches the output without it.
+#[tokio::test]
+async fn a_credential_that_follows_a_part_of_itself_is_still_removed() -> TestResult {
+    for (secret, line, clean) in [
+        (
+            "tok-tok-5f1c2a9e7d",
+            r#"{"s":"tok-tok-tok-5f1c2a9e7d"}"#,
+            r#"{"s":"tok-[credential]"}"#,
+        ),
+        (
+            "aXaXaXaXaXaXaXaY",
+            r#"{"s":"aXaXaXaXaXaXaXaXaY"}"#,
+            r#"{"s":"aX[credential]"}"#,
+        ),
+        (
+            "abcabcabcabcabcabd",
+            r#"{"s":"abcabcabcabcabcabcabd abcabcabcabcabcab"}"#,
+            r#"{"s":"abc[credential] abcabcabcabcabcab"}"#,
+        ),
+    ] {
+        let credential = some(Credential::parse(secret, "the test")?, "a credential")?;
+        assert_eq!(
+            credential.redact_line(line.to_owned()).as_deref(),
+            Some(clean),
+            "{secret}"
+        );
+        let answer = format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{line}}}");
+        let transport = FakeTransport::scripted(move |_| status(200, Body::Json(answer.clone())));
+        let setup = Setup {
+            token: secret,
+            ..Setup::new(&transport)
+        };
+        let ran = relay(
+            setup,
+            request(&json!(1), "tools/call", &json!({})).as_bytes(),
+        )
+        .await?;
+        assert_eq!(
+            ran.stdout,
+            format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{clean}}}\n"),
+            "{secret}"
+        );
+        assert!(!ran.stdout.contains(secret), "{}", ran.stdout);
     }
     Ok(())
 }
