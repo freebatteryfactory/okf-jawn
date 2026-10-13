@@ -559,6 +559,67 @@ describe('who may edit, and where', () => {
       expect(api.callsTo(SAVE)).toHaveLength(1);
     }, 20_000);
 
+    // The fourth re-check's probes P5b and P5. The conflict notice is the one part a refusal takes
+    // off the page that could leave with keyboard focus in it: that focus goes to the kept text.
+    describe('focus in the conflict notice when the refusal takes the notice away', () => {
+      /** The text is saved and a Snapshot of it conflicted: the notice is up, focus on "Keep mine". */
+      async function focusOnKeepMine(overrides: Record<string, Handler> = {}) {
+        const made = becomesSource(asSource, overrides);
+        const view = await startEditing();
+        act(() => view.box.focus());
+        typeInto(view.box, ' and more');
+        await pass(AUTOSAVE_DELAY_MS);
+        await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+        act(() => useDraftSessions.getState().setConflicts(WS, 'Tidy', [conflictOfNote]));
+        const keep = await eventuallyGet(() => screen.getByRole('button', { name: 'Keep mine' }));
+        act(() => keep.focus());
+        return { ...made, ...view, keep };
+      }
+
+      it('goes to the kept text, with nothing in flight', async () => {
+        const { api, held, keep } = await focusOnKeepMine();
+        await refreshTo(held, NEWER);
+        const kept = await eventuallyGet(keptText);
+        expect(keep.isConnected).toBe(false);
+        expect(document.activeElement).toBe(kept);
+        await pass(AUTOSAVE_DELAY_MS * 3);
+        expect(api.callsTo(SAVE)).toHaveLength(1);
+      }, 20_000);
+
+      it('goes to the kept text while "Keep mine" is rebasing, which then ends: nothing more is sent, and no Snapshot is asked', async () => {
+        const answers: Array<() => void> = [];
+        let hold = false;
+        const { api, held, keep } = await focusOnKeepMine({
+          [SAVE]: (body) =>
+            hold
+              ? new Promise<Reply>((resolve) => answers.push(() => resolve(saved(body))))
+              : saved(body),
+        });
+        hold = true;
+        fireEvent.click(keep);
+        await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+        expect(api.callsTo(SAVE).at(1)?.base_revision).toBe(NEWER);
+        expect(document.activeElement).toBe(keep);
+        const guard = spinGuard();
+        try {
+          await refreshTo(held, NEWER);
+          const kept = await eventuallyGet(keptText);
+          expect(keep.isConnected).toBe(false);
+          expect(document.activeElement).toBe(kept);
+          // The save that was under way answers: "Keep mine" ends as not kept, and nothing follows.
+          act(() => answers.at(0)?.());
+          await pass(AUTOSAVE_DELAY_MS * 12);
+          expect(guard.spun()).toBe(false);
+        } finally {
+          guard.release();
+        }
+        expect(api.callsTo(SAVE)).toHaveLength(2);
+        expect(api.callsTo('/api/history/commit-items')).toHaveLength(0);
+        expect(screen.queryByRole('button', { name: /Keep mine|Keeping yours/ })).toBeNull();
+        expect(document.activeElement).toBe(keptText());
+      }, 30_000);
+    });
+
     describe('when a later read says it is a Note again', () => {
       /** A head after the newer one, where the item is a Note once more. */
       const AGAIN = 'f'.repeat(40);

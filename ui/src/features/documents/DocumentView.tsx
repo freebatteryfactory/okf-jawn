@@ -475,6 +475,13 @@ export function DocumentView({
   // it goes to the switch at once (the text box is not there yet) and from there into the text box.
   const heldKept = useRef<HTMLElement | null>(null);
   const [, keptPartRef] = useWatchedPart<HTMLDivElement>(heldKept);
+  // The conflict notice leaves when the session is refused (nothing of it may be saved, so "Keep
+  // mine" is not offered), and when the conflict is resolved. Focus that was in it goes to the
+  // kept text when that is what took its place, else to the switch, which is there whenever the
+  // kept text is not: both need the pane to be editable, and a conflict is of a draft the service
+  // holds, so its session is never ended at the refusal.
+  const heldNotice = useRef<HTMLElement | null>(null);
+  const [, noticePartRef] = useWatchedPart<HTMLDivElement>(heldNotice);
   // The switch itself leaves when the pane stops being editable (a read says the item is not a
   // Note any more, or the pane no longer reads the version shown). Focus on it goes to the page's
   // heading.
@@ -484,6 +491,7 @@ export function DocumentView({
     if (takeHeld(heldFocus)) (switchRef.current ?? pageHeading())?.focus();
     if (takeHeld(heldSwitch)) pageHeading()?.focus();
     if (takeHeld(heldEditor)) keptRef.current?.focus();
+    if (takeHeld(heldNotice)) (keptRef.current ?? switchRef.current)?.focus();
     if (takeHeld(heldKept) && editing && notANote === null) {
       switchRef.current?.focus();
       focusNext.current = 'text';
@@ -587,17 +595,19 @@ export function DocumentView({
       {/* Not for a refused session: "Keep mine" would save, and nothing of it is saved. The
           conflict stays with the item, and its notice is back when the refusal is lifted. */}
       {editable && conflict !== undefined && notANote === null && (
-        <ConflictNotice
-          workspaceId={workspaceId}
-          itemId={itemId}
-          title={title}
-          conflict={conflict}
-          onSnapshotted={onSnapshotted}
-          onResolved={() => {
-            focusNext.current = 'switch';
-            setChosen('read');
-          }}
-        />
+        <div ref={noticePartRef}>
+          <ConflictNotice
+            workspaceId={workspaceId}
+            itemId={itemId}
+            title={title}
+            conflict={conflict}
+            onSnapshotted={onSnapshotted}
+            onResolved={() => {
+              focusNext.current = 'switch';
+              setChosen('read');
+            }}
+          />
+        </div>
       )}
       {editable && !editing && session !== undefined && (
         <p role="note" className="notice">
