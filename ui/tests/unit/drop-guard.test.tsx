@@ -169,12 +169,21 @@ describe('a drag that carries no file', () => {
 });
 
 describe('the root guard once the page is gone', () => {
-  it('lets go of both listeners: a drag of files is no longer cancelled', async () => {
+  // happy-dom ignores the capture flag when it removes a listener, so what a browser would do is
+  // pinned by what the guard asks for: it removes each listener it added, in the same phase.
+  it('removes both listeners in the phase it added them in', async () => {
     serve(EMPTY_TREE);
+    const added = vi.spyOn(window, 'addEventListener');
+    const removed = vi.spyOn(window, 'removeEventListener');
     renderAt(`/w/${WS}/import`);
     await screen.findByRole('heading', { name: 'Import files' });
-    expect(dragOnto(document.body, files())).toEqual(CANCELLED);
     cleanup();
-    expect(dragOnto(document.body, files())).toEqual(UNTOUCHED);
+    for (const type of ['dragover', 'drop']) {
+      const add = added.mock.calls.find(([name]) => name === type);
+      const remove = removed.mock.calls.find(([name]) => name === type);
+      expect(add?.[2]).toEqual({ capture: true });
+      expect(remove?.[1]).toBe(add?.[1]);
+      expect(remove?.[2]).toEqual({ capture: true });
+    }
   });
 });
