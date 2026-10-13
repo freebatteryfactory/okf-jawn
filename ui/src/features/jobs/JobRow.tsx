@@ -9,10 +9,18 @@
  * shows, which may not hold the items yet.
  *
  * Cancel is offered while the job is waiting or running, and asks first, in place: "Keep it
- * running" has focus. "Try the job again" is offered for a failed job. Each press is one request
- * under one idempotency key; the failure notice's retry repeats that request under the same key,
- * and a later press is a new request under a new key. A failed request is shown in plain words
- * with its retry (`useRetry`); the job on screen stays as last reported.
+ * running" has focus. "Try the job again" is offered for a failed job.
+ *
+ * Idempotency. A press of "Cancel the job" or of "Try the job again" is a new request under a new
+ * idempotency key, every time. Only the failure notice's "Try again" repeats a request, the one
+ * that failed, under the key it had: its answer may have been lost, and the service answers a
+ * repeated key with the job as it stands instead of doing the work twice.
+ *
+ * A request that failed leaves it unknown what the service holds, so the job is asked again at
+ * once (`jobUncertain`) and the row shows what is answered. The failure is shown in plain words
+ * with its retry (`useRetry`). A `conflict` is said as what it is here: the job changed or ended
+ * before the request reached it. It offers no retry: the same request would be refused again, and
+ * the row, read again, shows what can be done now.
  *
  * Keyboard focus. The controls of a job leave when its state changes: by the person's own action,
  * or because the job moved on by itself while a control had focus. Focus that was on a control
@@ -29,10 +37,10 @@ import { keyed } from '../../lib/keys';
 import { itemOptions } from '../documents/DocumentView';
 import { conversionWord, short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
-import { classifyFailure, messageFor } from '../errors/failure';
+import { classifyFailure, type FailureMessage, messageFor } from '../errors/failure';
 import { useRetry } from '../errors/retry';
 import { canCancel, canRetry, JOB_STATE, jobName } from './job-words';
-import { rememberJob, unfinished } from './jobs';
+import { jobUncertain, rememberJob, unfinished } from './jobs';
 
 export interface JobRowProps {
   workspaceId: string;
@@ -53,6 +61,20 @@ const ARTIFACT: Record<ArtifactKind, string> = {
 
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
+/** A `conflict` on a cancel or a retry: not "this changed since it was loaded", and no reload. */
+const JOB_MOVED_ON: FailureMessage = {
+  title: 'The job changed before this could be done.',
+  advice:
+    'It ended, was cancelled or was started again meanwhile. The job was read again: its row shows how it stands now, and what can be done with it.',
+  action: { kind: 'none' },
+};
+
+/** The words of a failed cancel or retry, where the general ones would mislead. */
+function jobWords(error: unknown): FailureMessage | undefined {
+  const failure = classifyFailure(error);
+  return failure.kind === 'api' && failure.error.code === 'conflict' ? JOB_MOVED_ON : undefined;
+}
+
 export function JobRow({ workspaceId, job, canWrite }: JobRowProps) {
   const client = useQueryClient();
   const titleId = useId();
@@ -61,11 +83,9 @@ export function JobRow({ workspaceId, job, canWrite }: JobRowProps) {
   const body = { workspace_id: workspaceId, job_id: job.id };
 
   const [asking, setAsking] = useState(false);
-  const cancelKey = useRef<string | null>(null);
+  // Each mutation is given its idempotency key: a new one at a press, the failed one's at a retry.
   const cancel = useMutation({
-    mutationFn: async () => {
-      const key = cancelKey.current ?? crypto.randomUUID();
-      cancelKey.current = key;
+    mutationFn: async (key: string) => {
       const { data } = await cancelJob({
         body: { ...body, idempotency_key: key },
         throwOnError: true,
@@ -73,40 +93,37 @@ export function JobRow({ workspaceId, job, canWrite }: JobRowProps) {
       return data;
     },
     onSuccess: (answered) => {
-      cancelKey.current = null;
       setAsking(false);
       rememberJob(client, workspaceId, answered);
     },
+    onError: () => jobUncertain(client, workspaceId, job.id),
   });
   const cancelFailure = useRetry({
     request: job.id,
     failed: cancel.isError,
     error: cancel.error,
-    run: () => cancel.mutateAsync(),
+    // The failed request's own key (for the type: a request that failed always had one).
+    run: () => cancel.mutateAsync(cancel.variables ?? crypto.randomUUID()),
     loaded: () => rowRef.current,
   });
 
-  const againKey = useRef<string | null>(null);
   const again = useMutation({
-    mutationFn: async () => {
-      const key = againKey.current ?? crypto.randomUUID();
-      againKey.current = key;
+    mutationFn: async (key: string) => {
       const { data } = await retryJob({
         body: { ...body, idempotency_key: key },
         throwOnError: true,
       });
       return data;
     },
-    onSuccess: (answered) => {
-      againKey.current = null;
-      rememberJob(client, workspaceId, answered);
-    },
+    onSuccess: (answered) => rememberJob(client, workspaceId, answered),
+    onError: () => jobUncertain(client, workspaceId, job.id),
   });
   const againFailure = useRetry({
     request: job.id,
     failed: again.isError,
     error: again.error,
-    run: () => again.mutateAsync(),
+    // The failed request's own key, as for the cancel.
+    run: () => again.mutateAsync(again.variables ?? crypto.randomUUID()),
     loaded: () => rowRef.current,
   });
 
@@ -168,7 +185,7 @@ export function JobRow({ workspaceId, job, canWrite }: JobRowProps) {
             type="button"
             aria-disabled={cancel.isPending}
             onClick={() => {
-              if (!cancel.isPending) cancel.mutate();
+              if (!cancel.isPending) cancel.mutate(crypto.randomUUID());
             }}
           >
             {cancel.isPending ? 'Cancelling…' : 'Cancel the job'}
@@ -189,7 +206,7 @@ export function JobRow({ workspaceId, job, canWrite }: JobRowProps) {
             ref={againRef}
             aria-disabled={again.isPending}
             onClick={() => {
-              if (!again.isPending) again.mutate();
+              if (!again.isPending) again.mutate(crypto.randomUUID());
             }}
           >
             {again.isPending ? 'Asking for another try…' : 'Try the job again'}
@@ -202,6 +219,7 @@ export function JobRow({ workspaceId, job, canWrite }: JobRowProps) {
           error={cancelFailure.error}
           retry={cancelFailure}
           workspaceId={workspaceId}
+          words={jobWords(cancelFailure.error)}
         />
       )}
       {againFailure.shown && (
@@ -210,6 +228,7 @@ export function JobRow({ workspaceId, job, canWrite }: JobRowProps) {
           error={againFailure.error}
           retry={againFailure}
           workspaceId={workspaceId}
+          words={jobWords(againFailure.error)}
         />
       )}
     </li>

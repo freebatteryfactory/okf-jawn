@@ -150,6 +150,18 @@ async function askAgain(client: QueryClient, filters: QueryFilters) {
 }
 
 /**
+ * A request about one job failed, so what the service now holds of it is not known (it may have
+ * been carried out with its answer lost, or refused because the job had moved on): ask for the
+ * job again, as a single job and as a row of the list, whichever is on screen.
+ */
+export function jobUncertain(client: QueryClient, workspaceId: string, jobId: string) {
+  void askAgain(client, { queryKey: jobsQueryKey(workspaceId) });
+  void askAgain(client, {
+    queryKey: getJobOptions({ body: { workspace_id: workspaceId, job_id: jobId } }).queryKey,
+  });
+}
+
+/**
  * The workspace's event stream opened, or said its jobs changed: ask for them again, the list and
  * each single job.
  */

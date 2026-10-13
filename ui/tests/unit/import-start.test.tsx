@@ -19,6 +19,7 @@ import { JOBS_POLL_MS, JOBS_SAFETY_POLL_MS } from '../../src/features/jobs/jobs'
 import { fail, type Handler, mockApi, ok } from './support/api';
 import {
   accepted,
+  CANCEL,
   eventOf,
   fileOf,
   IMPORTED,
@@ -381,6 +382,30 @@ describe('starting the import', () => {
     expect(api.callsTo(JOB)).toHaveLength(3);
     await pass(JOBS_SAFETY_POLL_MS * 5);
     expect(api.callsTo(JOB)).toHaveLength(3);
+  });
+
+  it('reads a started job again after a cancel that failed', async () => {
+    let job: Job = jobOf('running');
+    const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {
+      [START]: () => accepted(job),
+      [JOB]: () => ok(job),
+      [CANCEL]: () => {
+        // Carried out; the answer is lost on the way.
+        job = jobOf('cancelled');
+        return fail(503, 'unavailable', 'the answer was lost');
+      },
+    });
+    fireEvent.click(importButton());
+    await eventually(() => jobRow());
+    expect(api.callsTo(JOB)).toEqual([]);
+    fireEvent.click(within(jobRow()).getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(within(jobRow()).getByRole('button', { name: 'Cancel the job' }));
+    await eventually(() =>
+      screen.getByText('Cancelling this job: The service is temporarily unavailable.'),
+    );
+    // The single job was asked for, with no clock moved, and the row shows what was answered.
+    await later(() => expect(jobRow().textContent).toContain('Cancelled.'));
+    expect(api.callsTo(JOB)).toEqual([{ workspace_id: WS, job_id: JOB_ID }]);
   });
 
   it('repeats the same request on "Try again", and sends another folder as a new request', async () => {

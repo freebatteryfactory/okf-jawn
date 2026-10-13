@@ -859,6 +859,148 @@ describe('cancelling a job, and trying a failed one again', () => {
     expect(api.violations).toEqual([]);
   });
 
+  it('reads the job again after a retry whose answer was lost, and sends a later press under a new key', async () => {
+    let state: Job['state'] = 'failed';
+    let attempt = 1;
+    let answers = 0;
+    const { api } = await openJobs({
+      [JOBS]: () => listOf([jobOf(state, { attempt })]),
+      [RETRY]: () => {
+        answers += 1;
+        if (answers === 1) {
+          // Carried out; the answer is lost on the way.
+          state = 'queued';
+          attempt = 2;
+          return fail(503, 'unavailable', 'the answer was lost');
+        }
+        return accepted(jobOf(state, { attempt }));
+      },
+    });
+    await listed();
+    const press = button('Try the job again');
+    if (press) fireEvent.click(press);
+    await eventually(() => expect(api.callsTo(RETRY)).toHaveLength(1));
+    // Nobody pressed "List again", and the clock has not come round: the failure itself made
+    // the page ask, and the row shows what the service holds.
+    await later(() => expect(rowOf().textContent).toContain('Waiting to start, attempt 2.'));
+    expect(button('Try the job again')).toBeNull();
+    // It runs and fails again. A new press is a new request, not the lost one's key again (the
+    // service would answer that key with the job as it stands and queue nothing).
+    state = 'failed';
+    await pass(JOBS_POLL_MS);
+    await later(() => expect(rowOf().textContent).toContain('Failed, attempt 2.'));
+    const pressAgain = button('Try the job again');
+    if (pressAgain) fireEvent.click(pressAgain);
+    await eventually(() => expect(api.callsTo(RETRY)).toHaveLength(2));
+    expect(api.callsTo(RETRY).at(1)?.idempotency_key).not.toBe(
+      api.callsTo(RETRY).at(0)?.idempotency_key,
+    );
+  });
+
+  it('reads the job again after a cancel that failed, so the row shows what the service holds', async () => {
+    let state: Job['state'] = 'running';
+    const { api } = await openJobs({
+      [JOBS]: () => listOf([jobOf(state)]),
+      [CANCEL]: () => {
+        // Carried out; the answer is lost on the way.
+        state = 'cancelled';
+        return fail(503, 'unavailable', 'the answer was lost');
+      },
+    });
+    await listed();
+    const before = api.callsTo(JOBS).length;
+    const cancel = button('Cancel');
+    if (cancel) fireEvent.click(cancel);
+    const confirm = button('Cancel the job');
+    if (confirm) fireEvent.click(confirm);
+    await eventually(() =>
+      screen.getByText('Cancelling this job: The service is temporarily unavailable.'),
+    );
+    await later(() => expect(rowOf().textContent).toContain('Cancelled.'));
+    expect(api.callsTo(JOBS).length).toBeGreaterThan(before);
+    // A second press of a cancel is another request under another key, were there one to press.
+    expect(button('Cancel')).toBeNull();
+    expect(within(rowOf()).queryByRole('group')).toBeNull();
+  });
+
+  it('sends each press of "Cancel the job" under a new key, and the notice’s retry under the failed one’s', async () => {
+    const { api } = await openJobs({
+      [JOBS]: () => listOf([jobOf('running')]),
+      [CANCEL]: () => fail(503, 'unavailable', 'busy'),
+    });
+    await listed();
+    const cancel = button('Cancel');
+    if (cancel) fireEvent.click(cancel);
+    const confirm = () => within(rowOf()).getByRole('button', { name: 'Cancel the job' });
+    fireEvent.click(confirm());
+    await eventually(() => expect(api.callsTo(CANCEL)).toHaveLength(1));
+    await eventually(() => expect(confirm().getAttribute('aria-disabled')).toBe('false'));
+    // The question is still there (the job is still running): pressed again, a new request.
+    fireEvent.click(confirm());
+    await eventually(() => expect(api.callsTo(CANCEL)).toHaveLength(2));
+    await eventually(() => expect(confirm().getAttribute('aria-disabled')).toBe('false'));
+    const keys = () => api.callsTo(CANCEL).map((body) => body.idempotency_key);
+    expect(keys().at(1)).not.toBe(keys().at(0));
+    // The notice's retry repeats the request that failed last.
+    fireEvent.click(within(rowOf()).getByRole('button', { name: 'Try again' }));
+    await eventually(() => expect(api.callsTo(CANCEL)).toHaveLength(3));
+    expect(keys().at(2)).toBe(keys().at(1));
+  });
+
+  it('says that the job changed when a cancel meets a conflict, reads it again, and offers no repeat', async () => {
+    let state: Job['state'] = 'running';
+    const { api } = await openJobs({
+      [JOBS]: () => listOf([jobOf(state)]),
+      [CANCEL]: () => {
+        // The job ended between the listing and the press.
+        state = 'succeeded';
+        return fail(409, 'conflict', 'the job is not running');
+      },
+    });
+    await listed();
+    const cancel = button('Cancel');
+    if (cancel) fireEvent.click(cancel);
+    const confirm = button('Cancel the job');
+    if (confirm) fireEvent.click(confirm);
+    await eventually(() =>
+      screen.getByText('Cancelling this job: The job changed before this could be done.'),
+    );
+    expect(rowOf().textContent).toContain(
+      'The job was read again: its row shows how it stands now',
+    );
+    expect(rowOf().textContent).toContain('The service said: the job is not running');
+    expect(screen.queryByText(/This changed since it was loaded/)).toBeNull();
+    // No way to send the same cancel again; the row is what the service holds.
+    expect(within(rowOf()).queryByRole('button', { name: /Reload|Try again/ })).toBeNull();
+    await later(() => expect(rowOf().textContent).toContain('Finished.'));
+    expect(button('Cancel')).toBeNull();
+    expect(api.callsTo(CANCEL)).toHaveLength(1);
+  });
+
+  it('says that the job changed when a retry meets a conflict, reads it again, and offers no repeat', async () => {
+    let state: Job['state'] = 'failed';
+    const { api } = await openJobs({
+      [JOBS]: () => listOf([jobOf(state, { attempt: state === 'failed' ? 1 : 2 })]),
+      [RETRY]: () => {
+        // Someone else asked for another try a moment before.
+        state = 'running';
+        return fail(409, 'conflict', 'the job is not failed');
+      },
+    });
+    await listed();
+    const press = button('Try the job again');
+    if (press) fireEvent.click(press);
+    await eventually(() =>
+      screen.getByText(
+        'Asking for another try of this job: The job changed before this could be done.',
+      ),
+    );
+    expect(within(rowOf()).queryByRole('button', { name: /Reload|Try again/ })).toBeNull();
+    await later(() => expect(rowOf().textContent).toContain('Running, attempt 2.'));
+    expect(button('Try the job again')).toBeNull();
+    expect(api.callsTo(RETRY)).toHaveLength(1);
+  });
+
   it('puts focus on the job when another try is accepted and its button leaves', async () => {
     await openJobs({
       [JOBS]: () => listOf([jobOf('failed')]),
