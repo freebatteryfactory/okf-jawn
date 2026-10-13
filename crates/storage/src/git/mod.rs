@@ -310,9 +310,10 @@ impl VersionStore for GitVersions {
                 };
                 let (commit, given) =
                     stage_and_commit(repositories, scope, &repository, write, &*check)?;
-                // Kept before the commit lands, so a replay of it answers them; a row a
-                // failed landing leaves is replaced by the next attempt.
-                warnings::keep(&records, scope, mutation_id, &given)?;
+                // Kept before the commit lands, for this commit by its identity, so a replay
+                // of it answers them; a row a failed landing leaves is replaced by the next
+                // attempt.
+                warnings::keep(&records, scope, mutation_id, commit, &given)?;
                 move_reference(&repository, HEAD_REF, commit, Some(current))?;
                 let committed = Committed {
                     revision: revision_of(commit)?,
@@ -615,7 +616,7 @@ fn promote(
         .map_err(|error| git(&error))?;
     sync_directories(repository, &["objects"])?;
     // No check ran, so the answer kept for a replay is the empty one this call gives.
-    warnings::keep(records, scope, promotion.mutation_id, &[])?;
+    warnings::keep(records, scope, promotion.mutation_id, commit, &[])?;
     move_reference(repository, HEAD_REF, commit, Some(current))?;
     Ok(Committed {
         revision: revision_of(commit)?,

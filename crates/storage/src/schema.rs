@@ -389,8 +389,10 @@ CREATE INDEX pending_puts_by_object ON pending_puts (tenant_id, workspace_id, di
 ///
 /// One row for each commit `commit` or `promote_candidate` wrote, keyed by the workspace and the
 /// commit's mutation; `warnings` is the JSON list the check returned, `[]` when it returned
-/// none. The row is written before the commit lands, so it can stand without a commit (a crash
-/// in between), and the next attempt replaces it. A warning can quote a path or a title, so the
+/// none, and `commit_id` is the commit they were kept for (its 40 hexadecimal digits). The row
+/// is written before the commit lands, so it can stand without a commit (a crash in between),
+/// and the next attempt replaces it, commit and warnings together. A replay answers the row
+/// only to the commit it names. A warning can quote a path or a title, so the
 /// rows are content: a workspace purge removes them with the workspace's other rows
 /// (`purge::rows`, which finds the table by its two scope columns), from the live database and
 /// from every pre-migration copy. A workspace archive leaves the table empty
@@ -401,6 +403,7 @@ CREATE TABLE commit_warnings (
     tenant_id TEXT NOT NULL,
     workspace_id TEXT NOT NULL,
     mutation_id TEXT NOT NULL,
+    commit_id TEXT NOT NULL,
     warnings TEXT NOT NULL,
     PRIMARY KEY (tenant_id, workspace_id, mutation_id)
 ) STRICT;

@@ -2448,12 +2448,13 @@ async fn a_replay_of_a_commit_without_kept_warnings_answers_the_one_unavailable_
     assert_unavailable(&created, "kept none")?;
     // A row that is not a list of warnings is no reason to fail a commit that landed.
     rusqlite::Connection::open(&records)?.execute(
-        "INSERT INTO commit_warnings (tenant_id, workspace_id, mutation_id, warnings)
-         VALUES (?1, ?2, ?3, '{\"not\": \"a list\"}')",
+        "INSERT INTO commit_warnings (tenant_id, workspace_id, mutation_id, commit_id, warnings)
+         VALUES (?1, ?2, ?3, ?4, '{\"not\": \"a list\"}')",
         [
             scope.tenant_id.as_str().to_owned(),
             scope.workspace_id.0.to_string(),
             uuid_text(20),
+            first.revision.as_str().to_owned(),
         ],
     )?;
     let unread = versions
@@ -2465,6 +2466,149 @@ async fn a_replay_of_a_commit_without_kept_warnings_answers_the_one_unavailable_
         .await?;
     assert_eq!(unread.revision, first.revision);
     assert_unavailable(&unread, "could not be read")?;
+    Ok(())
+}
+
+/// The commit the row storage keeps for `mutation` in `scope` names, when it keeps one.
+fn kept_commit(storage: &Storage, scope: &StorageScope, mutation: u32) -> Fallible<Option<String>> {
+    let connection = rusqlite::Connection::open(storage.data().records_path())?;
+    let mut statement = connection.prepare(
+        "SELECT commit_id FROM commit_warnings
+         WHERE tenant_id = ?1 AND workspace_id = ?2 AND mutation_id = ?3",
+    )?;
+    let mut rows = statement.query_map(
+        [
+            scope.tenant_id.as_str().to_owned(),
+            scope.workspace_id.0.to_string(),
+            uuid_text(mutation),
+        ],
+        |row| row.get::<_, String>(0),
+    )?;
+    Ok(rows.next().transpose()?)
+}
+
+/// Review N1: a replay answers the warnings its commit was given, or says they are unavailable;
+/// never another attempt's. A later attempt of a mutation misses the mutation's own commit (its
+/// expected head is that commit), passes its check, keeps its warnings and then cannot land:
+/// the row of the mutation is now that attempt's and names its commit. The one commit that
+/// carries the mutation is the first, and it is answered with the one unavailable warning by
+/// `find_commit` and by `commit`, not with the second attempt's warnings. (Reviewer probe PV6,
+/// adopted with the ruled expectation.)
+#[tokio::test]
+async fn a_later_attempt_that_does_not_land_never_lends_its_warnings_to_the_landed_commit()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let first_given = vec![finding("first", "a.md")];
+    let first_edits = || -> Fallible<_> { Ok(vec![note(uuid!(10)?, "a.md", "A")?]) };
+    let first = versions
+        .commit(
+            &scope,
+            changes(20, &initial, first_edits()?)?,
+            Arc::new(Warns::of(first_given.clone())),
+        )
+        .await?;
+    assert_eq!(
+        kept_commit(&storage, &scope, 20)?.as_deref(),
+        Some(first.revision.as_str()),
+        "the row names the commit it was kept for"
+    );
+    let second_given = vec![finding("second", "b.md")];
+    let stranding = Arc::new(WarnsAsTheHeadMoves {
+        interloper: Interloper {
+            repository: repository_path(directory.path(), &scope),
+            moved_to: std::sync::Mutex::new(None),
+        },
+        warnings: second_given.clone(),
+    });
+    let refused = err_of(
+        versions
+            .commit(
+                &scope,
+                changes(20, &first.revision, vec![note(uuid!(11)?, "b.md", "B")?])?,
+                stranding.clone(),
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Conflict, "{}", refused.message);
+    // The second attempt landed nothing: the head is the concurrent writer's commit, and the
+    // row is the second attempt's, kept for a commit that is not on the line.
+    let interloper = some(
+        *stranding
+            .interloper
+            .moved_to
+            .lock()
+            .map_err(|_| "poisoned")?,
+        "the concurrent commit",
+    )?;
+    assert_eq!(
+        versions.head(&scope).await?.as_str(),
+        interloper.to_string()
+    );
+    assert_eq!(kept_row(&storage, &scope, 20)?, Some(wire(&second_given)?));
+    let stranded = some(kept_commit(&storage, &scope, 20)?, "the row's commit")?;
+    assert_ne!(stranded, first.revision.as_str());
+    assert_ne!(stranded, interloper.to_string());
+    // The commit that carries the mutation is still the first, and it is not answered with
+    // the second attempt's warnings.
+    for since in [Some(&initial), None] {
+        let answer = versions.find_commit(&scope, uuid!(20)?, since).await?;
+        let answer = some(answer, "the first commit")?;
+        assert_eq!(answer.revision, first.revision, "the first commit is found");
+        assert_unavailable(&answer, "another attempt")?;
+    }
+    let retry = Arc::new(Counting::default());
+    let again = versions
+        .commit(
+            &scope,
+            changes(20, &initial, first_edits()?)?,
+            retry.clone(),
+        )
+        .await?;
+    assert_eq!(again.revision, first.revision);
+    assert_eq!(
+        retry.runs.load(Ordering::SeqCst),
+        0,
+        "a replay runs no check"
+    );
+    assert_unavailable(&again, "another attempt")?;
+    Ok(())
+}
+
+/// Review N1, the rule by itself: the row of a mutation is answered only to the commit it
+/// names. The row is pointed at another commit of the workspace (its first) behind the store,
+/// and the commit that carries the mutation is then answered with the unavailable warning;
+/// pointed back, it is answered with its warnings again.
+#[tokio::test]
+async fn a_row_kept_for_another_commit_is_not_answered() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let given = vec![finding("lint_a", "a.md")];
+    let first = versions
+        .commit(
+            &scope,
+            changes(20, &initial, vec![note(uuid!(10)?, "a.md", "A")?])?,
+            Arc::new(Warns::of(given.clone())),
+        )
+        .await?;
+    let point_at = |commit: &Revision| -> Fallible<usize> {
+        Ok(
+            rusqlite::Connection::open(storage.data().records_path())?.execute(
+                "UPDATE commit_warnings SET commit_id = ?1 WHERE mutation_id = ?2",
+                [commit.as_str().to_owned(), uuid_text(20)],
+            )?,
+        )
+    };
+    assert_eq!(point_at(&initial)?, 1, "the row now names another commit");
+    let answer = versions.find_commit(&scope, uuid!(20)?, None).await?;
+    let answer = some(answer, "the commit")?;
+    assert_eq!(answer.revision, first.revision);
+    assert_unavailable(&answer, "another attempt")?;
+    assert_eq!(point_at(&first.revision)?, 1);
+    let answer = versions.find_commit(&scope, uuid!(20)?, None).await?;
+    assert_eq!(wire(&some(answer, "the commit")?.warnings)?, wire(&given)?);
     Ok(())
 }
 

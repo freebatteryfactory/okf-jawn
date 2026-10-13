@@ -369,7 +369,9 @@ pub struct Committed {
     /// Findings the candidate check returned when the commit was written. A replay answers the
     /// warnings the store kept with that commit, so a retry answers what its first attempt
     /// did; for a commit the store kept no warnings for it answers the one warning
-    /// `replay_warnings_unavailable` instead.
+    /// `replay_warnings_unavailable` instead. Warnings kept under the same mutation for another
+    /// attempt's commit are not this commit's, and are never answered for it
+    /// (`VersionStore::commit`).
     pub warnings: Vec<Warning>,
 }
 
@@ -529,14 +531,21 @@ pub trait VersionStore: Send + Sync {
     /// commit; its warnings are returned in the result.
     ///
     /// The store keeps those warnings, an empty list included, in a record of its own keyed by
-    /// the workspace and the mutation, written before the commit lands, and a replay answers
-    /// them: a retry gets the warnings its first attempt was given. A crash between that record
-    /// and the commit leaves a record without a commit; the next attempt finds no commit, runs
-    /// the check again, replaces the record and commits. A replay of a commit the store holds
-    /// no such record for (a commit written before the store kept them, one a restore brought
-    /// from an archive, which carries none, or a record that no longer reads) answers the one
-    /// warning `replay_warnings_unavailable` (`REPLAY_WARNINGS_UNAVAILABLE`) and still
-    /// succeeds: the commit has landed. The records are removed only with their workspace, by
+    /// the workspace and the mutation, written before the commit lands, and the record names
+    /// the commit it was kept for. The rule a caller can rely on: a replay answers the warnings
+    /// that commit was given, or says they are unavailable; never another attempt's. A crash
+    /// between that record and the commit leaves a record without a commit; the next attempt
+    /// finds no commit, runs the check again, replaces the record and commits. A replay of a
+    /// commit the store holds no such record for (a commit written before the store kept them,
+    /// one a restore brought from an archive, which carries none, or a record that no longer
+    /// reads) answers the one warning `replay_warnings_unavailable`
+    /// (`REPLAY_WARNINGS_UNAVAILABLE`) and still succeeds: the commit has landed. So does a
+    /// replay of a commit whose record a later attempt replaced: an attempt of the same
+    /// mutation whose `expected_head` is at or after the landed commit does not find it, runs
+    /// its check and keeps its own warnings, and when it then cannot land (the head moved) the
+    /// record is that attempt's. The landed commit is from then on answered with the one
+    /// warning, not with the warnings of an attempt that wrote another tree; what its own check
+    /// gave is no longer held. The records are removed only with their workspace, by
     /// its purge (`Purger`), so they grow by one for each commit. An item purge is not built;
     /// when it is, it has to remove the records of the workspace too, because a warning can
     /// quote a path or a title.
@@ -571,10 +580,12 @@ pub trait VersionStore: Send + Sync {
     /// commit does not lie after.
     ///
     /// The commit is answered as a replay of it by `commit` is: `replayed` set, with the
-    /// warnings the store kept for it, or the one warning `replay_warnings_unavailable` when it
-    /// kept none. A commit no check ran for and that neither `commit` nor `promote_candidate`
-    /// wrote (the one `Backups::restore_import` writes, a workspace's first) has no such record,
-    /// so it is answered with that one warning; its caller reads the revision only.
+    /// warnings the store kept for that commit, or the one warning
+    /// `replay_warnings_unavailable` when it kept none or holds only those of another attempt's
+    /// commit under the mutation. A commit no check ran for and that neither `commit` nor
+    /// `promote_candidate` wrote (the one `Backups::restore_import` writes, a workspace's first)
+    /// has no such record, so it is answered with that one warning; its caller reads the
+    /// revision only.
     fn find_commit<'a>(
         &'a self,
         scope: &'a StorageScope,
