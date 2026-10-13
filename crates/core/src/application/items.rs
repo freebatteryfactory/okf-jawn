@@ -54,7 +54,7 @@ use crate::storage::{TreeEdit, derive_item_id};
 ///
 /// # Errors
 /// Returns `InvalidInput` on `/folder` for a folder that is not a workspace path, on
-/// `/page/cursor` for a cursor this operation did not issue or one that continues a read of
+/// `/page/cursor` for a cursor that is not this operation's (see `shared::resolve_page`) or one that continues a read of
 /// another revision than `at` names; the typed `NotFound` of an invalidated revision; or any
 /// port error.
 pub(super) async fn list_items(
@@ -69,8 +69,14 @@ pub(super) async fn list_items(
         Some(WorkspacePath::try_from(request.folder).map_err(|error| invalid(error.0, "/folder"))?)
     };
     let continued = request.page.cursor.is_some();
-    let (revision, page, carried) =
-        resolve_page(service, &scope, &request.at, request.page).await?;
+    let (revision, page, carried) = resolve_page(
+        service,
+        &scope,
+        context.operation,
+        &request.at,
+        request.page,
+    )
+    .await?;
     let ports = service.ports();
     let current = match (continued, carried, &request.at) {
         // A later page: what the first page decided.
@@ -101,7 +107,12 @@ pub(super) async fn list_items(
         })
         .collect();
     Ok(ListItemsResponse {
-        next_cursor: next_page(&revision, listing.next_cursor, Some(current))?,
+        next_cursor: next_page(
+            context.operation,
+            &revision,
+            listing.next_cursor,
+            Some(current),
+        )?,
         revision,
         items,
         folders: listing

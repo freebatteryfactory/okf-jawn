@@ -15,7 +15,7 @@ use okf_jawn_contract::history::{
     LogRequest, LogResponse, RestoreRequest,
 };
 use okf_jawn_contract::identity::{At, IdempotencyKey, ItemId, PurgeId};
-use okf_jawn_contract::item::ItemDocument;
+use okf_jawn_contract::item::{ItemDocument, ListItemsRequest};
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::source::{SourceLocation, SourceLocator};
@@ -267,8 +267,8 @@ async fn a_snapshot_between_two_pages_of_a_timeline_repeats_and_skips_no_commit(
 }
 
 #[tokio::test]
-async fn a_timeline_cursor_is_refused_unless_this_operation_issued_it_for_the_revision_named()
--> TestResult {
+async fn a_timeline_cursor_is_refused_unless_it_is_a_timelines_for_the_revision_named() -> TestResult
+{
     let world = paged_timeline()?;
     let caller = alice(OperationName::LogItems, None)?;
     let first = world
@@ -289,8 +289,11 @@ async fn a_timeline_cursor_is_refused_unless_this_operation_issued_it_for_the_re
         "not-a-cursor".to_owned(),
         "2".to_owned(),
         shaped(json!({})),
-        shaped(json!({ "tip": "a".repeat(40), "next": "2", "limit": 500 })),
-        shaped(json!({ "tip": "not a revision", "next": "2" })),
+        shaped(json!({ "op": "log_items", "tip": "a".repeat(40), "next": "2", "limit": 500 })),
+        shaped(json!({ "op": "log_items", "tip": "not a revision", "next": "2" })),
+        // The right shape with no operation, and with another operation's name.
+        shaped(json!({ "tip": "a".repeat(40), "next": "2" })),
+        shaped(json!({ "op": "list_items", "tip": "a".repeat(40), "next": "2" })),
         cursor
             .chars()
             .take(cursor.len().saturating_sub(3))
@@ -321,6 +324,36 @@ async fn a_timeline_cursor_is_refused_unless_this_operation_issued_it_for_the_re
         asked,
         "no refused cursor reached the store"
     );
+    // The Timeline's own cursor is no listing's cursor.
+    let elsewhere = err_of(
+        world
+            .service
+            .list_items(
+                &alice(OperationName::ListItems, None)?,
+                ListItemsRequest {
+                    workspace_id: scope()?.workspace_id,
+                    at: At::Latest,
+                    folder: String::new(),
+                    extraction: None,
+                    page: PageRequest {
+                        cursor: Some(cursor.clone()),
+                        limit: 2,
+                    },
+                },
+            )
+            .await,
+    )?;
+    assert_eq!(elsewhere.code, ErrorCode::InvalidInput);
+    assert_eq!(elsewhere.field.as_deref(), Some("/page/cursor"));
+    assert_eq!(world.versions.list_queries()?.len(), 0);
+    // The cursor is not signed: one a caller writes in the Timeline's shape, with its name, is
+    // accepted, and reads what `at` naming that tip reads, from that position.
+    let written = shaped(json!({ "op": "log_items", "tip": "a".repeat(40), "next": "2" }));
+    let read = world
+        .service
+        .log_items(&caller, timeline(At::Latest, Some(written), 2)?)
+        .await?;
+    assert_eq!(read.commits.len(), 1);
     // Naming the revision it continues is the same read.
     let continued = world
         .service

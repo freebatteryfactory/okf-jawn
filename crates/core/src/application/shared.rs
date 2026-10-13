@@ -3,7 +3,8 @@
 //!
 //! A paginated read that resolves `at` (`log_items`, `list_items`, `search_items`, `get_links`)
 //! resolves it for its first page only. Its cursor is this service's, not the store's: it
-//! carries the tip that page resolved beside the store's own position, and every later page
+//! carries the operation's name and the tip that page resolved beside the store's own position
+//! (and nothing of the query; it is not signed), and every later page
 //! reads at that tip (`resolve_page`, `next_page`), so a write that lands between two pages of
 //! a read at `latest` cannot repeat or skip an entry. `read_item` has its own cursor, which
 //! carries its revision the same way.
@@ -34,6 +35,7 @@ use okf_jawn_contract::identity::{
     At, ItemId, MutationId, ReceiptId, Revision, Timestamp, WorkspacePath,
 };
 use okf_jawn_contract::item::ItemDocument;
+use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::source::SourceReference;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -80,6 +82,8 @@ pub(super) struct Touched {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PageCursor {
+    /// The operation the cursor continues, by its name: another operation's cursor is refused.
+    op: String,
     /// The revision the first page resolved; every later page reads at it.
     tip: Revision,
     /// The store's own continuation within the listing at `tip`.
@@ -192,13 +196,22 @@ pub(super) async fn resolve(
 /// revision, and means nothing in another's. The tip is checked against the revision map again,
 /// so a continuation never reads a revision a purge invalidated meanwhile.
 ///
+/// What a cursor is bound to, exactly: the operation that issued it (its name is in the
+/// cursor) and the tip. It is not signed and not bound to the query. So a cursor a caller
+/// writes in this shape with this operation's name is accepted, and reads what `at` naming
+/// that tip would read, from a position the store checks; and a cursor given to another
+/// query of the same operation (another item, folder, text or direction) reads that query at
+/// the tip from the position.
+///
 /// # Errors
-/// Returns `InvalidInput` on `/page/cursor` for a cursor this service did not issue, or one
-/// whose tip is not the revision `at` names; the typed `NotFound` of an invalidated revision; or
-/// any port error.
+/// Returns `InvalidInput` on `/page/cursor` for a cursor that is not base64url JSON of this
+/// shape (another field included), one that names another operation, or one whose tip is not
+/// the revision `at` names; the typed `NotFound` of an invalidated revision; or any port
+/// error.
 pub(super) async fn resolve_page(
     service: &ApplicationService,
     scope: &StorageScope,
+    operation: OperationName,
     at: &At,
     page: PageRequest,
 ) -> Result<(Revision, Page, Option<bool>), ApiError> {
@@ -209,7 +222,13 @@ pub(super) async fn resolve_page(
         .decode(text)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .ok_or_else(|| invalid("the cursor was not issued by this operation", PAGE_CURSOR))?;
+        .ok_or_else(|| invalid("the cursor is not one this operation issues", PAGE_CURSOR))?;
+    if cursor.op != operation.as_str() {
+        return Err(invalid(
+            "the cursor was issued by another operation",
+            PAGE_CURSOR,
+        ));
+    }
     if matches!(at, At::Revision { revision } if revision != &cursor.tip) {
         return Err(invalid(
             "the cursor continues a read of another revision than the one named",
@@ -227,19 +246,21 @@ pub(super) async fn resolve_page(
     ))
 }
 
-/// The cursor of the page after one read at `tip`: the store's continuation, bound to `tip`
-/// (`resolve_page` reads it back), with a folder listing's "current" answer when `current`
+/// The cursor of the page after one read of `operation` at `tip`: the store's continuation,
+/// bound to both (`resolve_page` reads it back), with a folder listing's "current" answer when `current`
 /// gives one. `None` when the store has no more.
 ///
 /// # Errors
 /// Returns `Internal` when the cursor cannot be serialized.
 pub(super) fn next_page(
+    operation: OperationName,
     tip: &Revision,
     next: Option<String>,
     current: Option<bool>,
 ) -> Result<Option<String>, ApiError> {
     next.map(|next| {
         serde_json::to_vec(&PageCursor {
+            op: operation.as_str().to_owned(),
             tip: tip.clone(),
             next,
             current,

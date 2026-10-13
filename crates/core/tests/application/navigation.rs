@@ -824,6 +824,14 @@ async fn a_search_continues_at_the_revision_its_first_page_resolved() -> TestRes
         vec![(at.clone(), None, 2), (at, Some("2".to_owned()), 2)]
     );
     assert_eq!(world.search.builds(), 0, "`b` was never asked for");
+    // A search cursor is no cursor of an item's links.
+    let mut request = links(LinkDirection::Both, At::Latest)?;
+    request.page.cursor = Some(cursor.clone());
+    let as_links = alice(OperationName::GetLinks, None)?;
+    let elsewhere = err_of(world.service.get_links(&as_links, request).await)?;
+    assert_eq!(elsewhere.code, ErrorCode::InvalidInput);
+    assert_eq!(elsewhere.field.as_deref(), Some("/page/cursor"));
+    assert_eq!(world.search.link_queries()?.len(), 0);
     // A cursor this operation did not issue, and one that continues another revision's search.
     let named_b = At::Revision {
         revision: revision('b')?,
@@ -961,6 +969,14 @@ async fn an_items_links_continue_at_the_revision_their_first_page_resolved() -> 
         asked,
         vec![(at.clone(), None, 2), (at, Some("2".to_owned()), 2)]
     );
+    // A links cursor is no search cursor.
+    let mut request = search("plan", false)?;
+    request.page.cursor = Some(cursor.clone());
+    let as_search = alice(OperationName::SearchItems, None)?;
+    let elsewhere = err_of(world.service.search_items(&as_search, request).await)?;
+    assert_eq!(elsewhere.code, ErrorCode::InvalidInput);
+    assert_eq!(elsewhere.field.as_deref(), Some("/page/cursor"));
+    assert_eq!(world.search.queries()?.len(), 0);
     // A cursor this operation did not issue, and one that continues another revision's links.
     let named_b = At::Revision {
         revision: revision('b')?,

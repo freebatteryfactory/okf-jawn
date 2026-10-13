@@ -4,6 +4,9 @@
 
 use std::path::PathBuf;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
 use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::common::PageRequest;
 use okf_jawn_contract::error::{ErrorCode, ErrorDetail};
@@ -312,11 +315,18 @@ async fn a_listing_continues_at_the_revision_its_first_page_resolved() -> TestRe
             ),
         ]
     );
-    // A cursor this operation did not issue, and one that continues another revision's listing.
+    // A cursor this operation did not issue; one that continues another revision's listing;
+    // and a listing's cursor in every part but the answer its first page gave.
     let named_b = At::Revision {
         revision: revision('b')?,
     };
-    for (at, text) in [(At::Latest, "next".to_owned()), (named_b, cursor)] {
+    let no_answer = URL_SAFE_NO_PAD
+        .encode(json!({ "op": "list_items", "tip": "a".repeat(40), "next": "next" }).to_string());
+    for (at, text) in [
+        (At::Latest, "next".to_owned()),
+        (named_b, cursor),
+        (At::Latest, no_answer),
+    ] {
         let refused = err_of(
             world
                 .service

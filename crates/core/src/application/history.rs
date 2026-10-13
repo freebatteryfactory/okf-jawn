@@ -105,7 +105,7 @@ const FOLDER_PAGE: u16 = 500;
 /// a Snapshot that lands between two pages of a Timeline at `latest` repeats no commit.
 ///
 /// # Errors
-/// Returns `InvalidInput` on `/page/cursor` for a cursor this operation did not issue or one
+/// Returns `InvalidInput` on `/page/cursor` for a cursor that is not this operation's (see `shared::resolve_page`) or one
 /// that continues a read of another revision than `at` names, the typed `NotFound` of an
 /// invalidated revision, or any port error.
 pub(super) async fn log_items(
@@ -114,7 +114,14 @@ pub(super) async fn log_items(
     request: LogRequest,
 ) -> Result<LogResponse, ApiError> {
     let scope = workspace_scope(context)?;
-    let (tip, page, _) = resolve_page(service, &scope, &request.at, request.page).await?;
+    let (tip, page, _) = resolve_page(
+        service,
+        &scope,
+        context.operation,
+        &request.at,
+        request.page,
+    )
+    .await?;
     let response = service
         .ports()
         .versions
@@ -130,7 +137,7 @@ pub(super) async fn log_items(
     // Commit metadata only: the receipt names no item content.
     record_receipt(service, context, &scope, None, Vec::new()).await?;
     Ok(LogResponse {
-        next_cursor: next_page(&tip, response.next_cursor, None)?,
+        next_cursor: next_page(context.operation, &tip, response.next_cursor, None)?,
         commits: response.commits,
     })
 }
@@ -393,8 +400,8 @@ pub(super) async fn restore_items(
 /// before the delete. When that path is not the one `target` holds it at, and nothing holds it
 /// now, the Rewind is three edits (R-I14):
 ///
-/// 1. `RestoreItem` from the last revision that held the item (`last_held`), which puts it
-///    back where the links still point;
+/// 1. `RestoreItem` from the last revision that held the item (found as said below), which
+///    puts it back where the links still point;
 /// 2. `MoveItem` to its path at `target`, which rewrites every link that points at it, as a
 ///    move does;
 /// 3. `RestoreItem` from `target`, which sets the item and its companions to their state there.
@@ -406,6 +413,13 @@ pub(super) async fn restore_items(
 /// both and refuses a move between them; the links then keep the spelling they have, which may
 /// be the last path's and not the restored one's); another item, or a folder, took that last
 /// path since (its links are that one's now); or the history of `base` never held the item.
+///
+/// The last holder is the first parent of the newest commit, at or before `base`, that changed
+/// the item: `VersionStore::log` of the item from `base`, one commit. Its cost is the store's
+/// walk, which does not end at that commit: it runs on to the item's second-newest change, or
+/// to the root, and storage reads every item file of two trees at each commit it walks. The
+/// review measured 34 s for 200 items and 301 commits in a debug build; it grows with items
+/// times commits walked. Only a Rewind of an item `base` does not hold pays it.
 ///
 /// # Errors
 /// Returns any port error of reading the item, its history or the folder of its last path.
@@ -483,10 +497,13 @@ async fn path_at(
     }
 }
 
-/// Whether `revision` holds an item or a folder at `path`, compared as the store compares
-/// paths for a collision (`WorkspacePath::collision_key`), so a path differing only in letter
-/// case counts as taken. The folder `path` lies in is listed, every page of it; the store lists
-/// a folder the revision does not hold as empty.
+/// Whether the folder `path` lies in, listed at `revision` by the spelling `path` gives it,
+/// holds an item or a child folder whose path has `path`'s collision key
+/// (`WorkspacePath::collision_key`), so a path differing only in letter case counts as taken.
+/// Every page of the listing is read; the store lists a folder the revision does not hold as
+/// empty. This is narrower than the store's own check of a destination, which compares every
+/// path of the tree by key and also counts a file standing where a folder of the path is
+/// needed: a taker this does not see makes the store refuse the three edits with `Conflict`.
 ///
 /// # Errors
 /// Returns any error of listing the folder.

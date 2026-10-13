@@ -67,8 +67,7 @@ const WINDOW_PAGE: u16 = 250;
 ///
 /// # Errors
 /// Returns `InvalidInput` on `/folder` for a folder that is not a workspace path, on `/query`
-/// for a blank query without an extraction filter, on `/page/cursor` for a cursor this
-/// operation did not issue or one that continues a read of another revision than `at` names;
+/// for a blank query without an extraction filter, on `/page/cursor` for a cursor that is not this operation's (see `shared::resolve_page`) or one that continues a read of another revision than `at` names;
 /// the typed `NotFound` of an invalidated revision; or any port error.
 pub(super) async fn search_items(
     service: &ApplicationService,
@@ -77,7 +76,14 @@ pub(super) async fn search_items(
 ) -> Result<SearchResponse, ApiError> {
     let scope = workspace_scope(context)?;
     let folder = folder_of(request.folder)?;
-    let (revision, page, _) = resolve_page(service, &scope, &request.at, request.page).await?;
+    let (revision, page, _) = resolve_page(
+        service,
+        &scope,
+        context.operation,
+        &request.at,
+        request.page,
+    )
+    .await?;
     let query = SearchQuery {
         revision: revision.clone(),
         text: request.query,
@@ -95,7 +101,7 @@ pub(super) async fn search_items(
     let returned = response.hits.iter().map(|hit| hit.source.clone()).collect();
     record_receipt(service, context, &scope, None, returned).await?;
     Ok(SearchResponse {
-        next_cursor: next_page(&revision, response.next_cursor, None)?,
+        next_cursor: next_page(context.operation, &revision, response.next_cursor, None)?,
         revision,
         hits: response.hits,
     })
@@ -106,7 +112,7 @@ pub(super) async fn search_items(
 /// resolved (`shared::resolve_page`).
 ///
 /// # Errors
-/// Returns `InvalidInput` on `/page/cursor` for a cursor this operation did not issue or one
+/// Returns `InvalidInput` on `/page/cursor` for a cursor that is not this operation's (see `shared::resolve_page`) or one
 /// that continues a read of another revision than `at` names, the typed `NotFound` of an
 /// invalidated revision, or any port error.
 pub(super) async fn get_links(
@@ -115,7 +121,14 @@ pub(super) async fn get_links(
     request: GetLinksRequest,
 ) -> Result<GetLinksResponse, ApiError> {
     let scope = workspace_scope(context)?;
-    let (revision, page, _) = resolve_page(service, &scope, &request.at, request.page).await?;
+    let (revision, page, _) = resolve_page(
+        service,
+        &scope,
+        context.operation,
+        &request.at,
+        request.page,
+    )
+    .await?;
     let query = LinkQuery {
         revision: revision.clone(),
         item_id: request.item_id,
@@ -130,7 +143,7 @@ pub(super) async fn get_links(
     let sources = link_citations(service, &scope, &revision, &response.links).await?;
     record_receipt(service, context, &scope, None, sources).await?;
     Ok(GetLinksResponse {
-        next_cursor: next_page(&revision, response.next_cursor, None)?,
+        next_cursor: next_page(context.operation, &revision, response.next_cursor, None)?,
         revision,
         links: response.links,
     })
