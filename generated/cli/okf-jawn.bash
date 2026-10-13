@@ -563,17 +563,13 @@ _okf__jawn() {
 
     case "${cmd}" in
         okf__jawn)
-            opts="-h -V --server --json --help --version list_workspaces workspaces create_workspace open_workspace update_workspace archive_workspace unarchive_workspace purge_workspace get_purge export_workspace export backup_workspace restore_workspace backup_installation list_items ls get_item create_item save_draft list_drafts discard_draft move_item set_lifecycle delete_item purge_item create_folder list_types set_type read_item show get_sources sources get_object read_object create_sandbox_capability search_items grep get_links links get_graph log_items log timeline diff_items diff changes commit_items snapshot restore_items rewind blame_item blame who open_proposal propose list_proposals get_proposal accept_proposal approve decline_proposal decline add_comment create_confirmation create_review verify list_reviews create_upload complete_upload start_import import get_job list_jobs get_tenant_job list_tenant_jobs retry_job cancel_job redigest_item correct_digest get_rules set_rules preview_names apply_names get_attention attention rebuild_index get_view present_view present resolve_view export_view get_catalog catalog get_receipt list_events list_tenant_events get_session create_connector list_connectors revoke_connector get_health get_readiness help"
+            opts="-h -V --server --help --version list_workspaces workspaces create_workspace open_workspace update_workspace archive_workspace unarchive_workspace purge_workspace get_purge export_workspace export backup_workspace restore_workspace backup_installation list_items ls get_item create_item save_draft list_drafts discard_draft move_item set_lifecycle delete_item purge_item create_folder list_types set_type read_item show get_sources sources get_object read_object create_sandbox_capability search_items grep get_links links get_graph log_items log timeline diff_items diff changes commit_items snapshot restore_items rewind blame_item blame who open_proposal propose list_proposals get_proposal accept_proposal approve decline_proposal decline add_comment create_confirmation create_review verify list_reviews create_upload complete_upload start_import import get_job list_jobs get_tenant_job list_tenant_jobs retry_job cancel_job redigest_item correct_digest get_rules set_rules preview_names apply_names get_attention attention rebuild_index get_view present_view present resolve_view export_view get_catalog catalog get_receipt list_events list_tenant_events get_session create_connector list_connectors revoke_connector get_health get_readiness help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --server)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -585,17 +581,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__accept_proposal)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -607,17 +603,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__add_comment)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -629,17 +625,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__apply_names)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -651,17 +647,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__archive_workspace)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -673,17 +669,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__backup_installation)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -695,17 +691,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__backup_workspace)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -717,17 +713,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__blame_item)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -739,17 +735,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__cancel_job)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -761,17 +757,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__commit_items)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -783,17 +779,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__complete_upload)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -805,17 +801,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__correct_digest)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -827,17 +823,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__create_confirmation)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -849,17 +845,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__create_connector)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -871,17 +867,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__create_folder)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -893,17 +889,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__create_item)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -915,17 +911,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__create_review)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -937,17 +933,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__create_sandbox_capability)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -959,17 +955,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__create_upload)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -981,17 +977,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__create_workspace)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1003,17 +999,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__decline_proposal)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1025,17 +1021,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__delete_item)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1047,17 +1043,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__diff_items)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1069,17 +1065,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__discard_draft)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1091,17 +1087,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__export_view)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1113,17 +1109,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__export_workspace)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1135,17 +1131,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__get_attention)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1157,17 +1153,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__get_catalog)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1179,17 +1175,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__get_graph)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1201,17 +1197,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__get_health)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1223,17 +1219,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__get_item)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1245,17 +1241,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__get_job)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1267,17 +1263,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__get_links)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1289,17 +1285,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__get_object)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1311,17 +1307,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__get_proposal)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1333,17 +1329,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__get_purge)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1355,17 +1351,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__get_readiness)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1377,17 +1373,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__get_receipt)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1399,17 +1395,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__get_rules)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1421,17 +1417,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__get_session)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1443,17 +1439,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__get_sources)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1465,17 +1461,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__get_tenant_job)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1487,17 +1483,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__get_view)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2615,17 +2611,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__list_connectors)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2637,17 +2633,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__list_drafts)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2659,17 +2655,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__list_events)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2681,17 +2677,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__list_items)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2703,17 +2699,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__list_jobs)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2725,17 +2721,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__list_proposals)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2747,17 +2743,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__list_reviews)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2769,17 +2765,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__list_tenant_events)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2791,17 +2787,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__list_tenant_jobs)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2813,17 +2809,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__list_types)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2835,17 +2831,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__list_workspaces)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2857,17 +2853,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__log_items)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2879,17 +2875,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__move_item)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2901,17 +2897,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__open_proposal)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2923,17 +2919,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__open_workspace)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2945,17 +2941,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__present_view)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2967,17 +2963,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__preview_names)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2989,17 +2985,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__purge_item)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3011,17 +3007,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__purge_workspace)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3033,17 +3029,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__read_item)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3055,17 +3051,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__rebuild_index)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3077,17 +3073,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__redigest_item)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3099,17 +3095,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__resolve_view)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3121,17 +3117,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__restore_items)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3143,17 +3139,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__restore_workspace)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3165,17 +3161,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__retry_job)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3187,17 +3183,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__revoke_connector)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3209,17 +3205,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__save_draft)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3231,17 +3227,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__search_items)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3253,17 +3249,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__set_lifecycle)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3275,17 +3271,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__set_rules)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3297,17 +3293,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__set_type)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3319,17 +3315,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__start_import)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3341,17 +3337,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__unarchive_workspace)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3363,17 +3359,17 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__update_workspace)
-            opts="-h --server --json --help"
+            opts="-h --json --server --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --server)
+                --json)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --json)
+                --server)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

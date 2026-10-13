@@ -21,8 +21,7 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
 
     $completions = @(switch ($command) {
         'okf-jawn' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('-V', '-V ', [CompletionResultType]::ParameterName, 'Print version')
@@ -132,708 +131,708 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             break
         }
         'okf-jawn;list_workspaces' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;workspaces' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;create_workspace' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;open_workspace' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;update_workspace' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;archive_workspace' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;unarchive_workspace' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;purge_workspace' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;get_purge' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;export_workspace' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;export' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;backup_workspace' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;restore_workspace' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;backup_installation' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;list_items' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;ls' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;get_item' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;create_item' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;save_draft' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;list_drafts' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;discard_draft' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;move_item' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;set_lifecycle' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;delete_item' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;purge_item' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;create_folder' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;list_types' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;set_type' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;read_item' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;show' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;get_sources' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;sources' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;get_object' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;read_object' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;create_sandbox_capability' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;search_items' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;grep' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;get_links' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;links' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;get_graph' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;log_items' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;log' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;timeline' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;diff_items' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;diff' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;changes' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;commit_items' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;snapshot' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;restore_items' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;rewind' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;blame_item' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;blame' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;who' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;open_proposal' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;propose' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;list_proposals' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;get_proposal' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;accept_proposal' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;approve' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;decline_proposal' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;decline' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;add_comment' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;create_confirmation' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;create_review' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;verify' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;list_reviews' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;create_upload' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;complete_upload' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;start_import' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;import' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;get_job' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;list_jobs' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;get_tenant_job' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;list_tenant_jobs' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;retry_job' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;cancel_job' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;redigest_item' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;correct_digest' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;get_rules' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;set_rules' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;preview_names' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;apply_names' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;get_attention' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;attention' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;rebuild_index' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;get_view' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;present_view' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;present' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;resolve_view' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;export_view' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;get_catalog' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;catalog' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;get_receipt' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;list_events' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;list_tenant_events' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;get_session' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;create_connector' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;list_connectors' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;revoke_connector' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;get_health' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'okf-jawn;get_readiness' {
-            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

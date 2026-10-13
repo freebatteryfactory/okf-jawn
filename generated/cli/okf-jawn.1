@@ -4,16 +4,13 @@
 .SH NAME
 okf\-jawn \- A document workspace for people and their AI tools
 .SH SYNOPSIS
-\fBokf\-jawn\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
+\fBokf\-jawn\fR [\fB\-\-server\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
 .SH DESCRIPTION
 A document workspace for people and their AI tools
 .SH OPTIONS
 .TP
-\fB\-\-server\fR [default: http://127.0.0.1:7711]
-
-.TP
-\fB\-\-json\fR [default: {}]
-JSON request, @file, or \- for stdin
+\fB\-\-server\fR \fI<URL>\fR [default: http://127.0.0.1:7711]
+The service address: HTTPS, or HTTP for a loopback address
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help
@@ -252,5 +249,7 @@ Read process liveness, not feature qualification.
 .TP
 okf\-jawn\-get_readiness(1)
 Read configured dependency readiness.
+.SH EXTRA
+The bearer token is read from the OKF_JAWN_TOKEN environment variable and is never an argument.
 .SH VERSION
 v0.1.0

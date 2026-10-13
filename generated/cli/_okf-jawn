@@ -15,8 +15,7 @@ _okf-jawn() {
 
     local context curcontext="$curcontext" state line
     _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 '-V[Print version]' \
@@ -32,808 +31,808 @@ _okf-jawn() {
         case $line[1] in
             (list_workspaces)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (workspaces)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (create_workspace)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (open_workspace)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (update_workspace)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (archive_workspace)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (unarchive_workspace)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (purge_workspace)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (get_purge)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (export_workspace)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (export)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (backup_workspace)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (restore_workspace)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (backup_installation)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (list_items)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (ls)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (get_item)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (create_item)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (save_draft)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (list_drafts)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (discard_draft)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (move_item)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (set_lifecycle)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (delete_item)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (purge_item)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (create_folder)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (list_types)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (set_type)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (read_item)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (show)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (get_sources)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (sources)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (get_object)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (read_object)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (create_sandbox_capability)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (search_items)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (grep)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (get_links)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (links)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (get_graph)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (log_items)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (log)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (timeline)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (diff_items)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (diff)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (changes)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (commit_items)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (snapshot)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (restore_items)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (rewind)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (blame_item)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (blame)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (who)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (open_proposal)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (propose)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (list_proposals)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (get_proposal)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (accept_proposal)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (approve)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (decline_proposal)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (decline)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (add_comment)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (create_confirmation)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (create_review)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (verify)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (list_reviews)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (create_upload)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (complete_upload)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (start_import)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (import)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (get_job)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (list_jobs)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (get_tenant_job)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (list_tenant_jobs)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (retry_job)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (cancel_job)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (redigest_item)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (correct_digest)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (get_rules)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (set_rules)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (preview_names)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (apply_names)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (get_attention)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (attention)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (rebuild_index)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (get_view)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (present_view)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (present)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (resolve_view)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (export_view)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (get_catalog)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (catalog)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (get_receipt)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (list_events)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (list_tenant_events)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (get_session)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (create_connector)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (list_connectors)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (revoke_connector)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (get_health)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (get_readiness)
 _arguments "${_arguments_options[@]}" : \
-'--server=[]: :_default' \
-'--json=[JSON request, @file, or - for stdin]: :_default' \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0

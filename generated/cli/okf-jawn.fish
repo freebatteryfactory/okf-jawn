@@ -1,6 +1,6 @@
 # Print an optspec for argparse to handle cmd's options that are independent of any subcommand.
 function __fish_okf_jawn_global_optspecs
-    string join \n server= json= h/help V/version
+    string join \n server= h/help V/version
 end
 
 function __fish_okf_jawn_needs_command
@@ -24,8 +24,7 @@ function __fish_okf_jawn_using_subcommand
     contains -- $cmd[1] $argv
 end
 
-complete -c okf-jawn -n "__fish_okf_jawn_needs_command" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_needs_command" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_needs_command" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_needs_command" -s h -l help -d 'Print help'
 complete -c okf-jawn -n "__fish_okf_jawn_needs_command" -s V -l version -d 'Print version'
 complete -c okf-jawn -n "__fish_okf_jawn_needs_command" -f -a "list_workspaces" -d 'List the workspaces this connection may read, each with its current head revision. Treat head as a pin: pass it to later reads as at = {"kind": "revision", "revision": head} so every call sees one consistent state, and compare it with a later listing to detect change.'
@@ -130,308 +129,308 @@ complete -c okf-jawn -n "__fish_okf_jawn_needs_command" -f -a "revoke_connector"
 complete -c okf-jawn -n "__fish_okf_jawn_needs_command" -f -a "get_health" -d 'Read process liveness, not feature qualification.'
 complete -c okf-jawn -n "__fish_okf_jawn_needs_command" -f -a "get_readiness" -d 'Read configured dependency readiness.'
 complete -c okf-jawn -n "__fish_okf_jawn_needs_command" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_workspaces" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_workspaces" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_workspaces" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_workspaces" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_workspaces" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand workspaces" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand workspaces" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand workspaces" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand workspaces" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand workspaces" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_workspace" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_workspace" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_workspace" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_workspace" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_workspace" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand open_workspace" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand open_workspace" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand open_workspace" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand open_workspace" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand open_workspace" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand update_workspace" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand update_workspace" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand update_workspace" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand update_workspace" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand update_workspace" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand archive_workspace" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand archive_workspace" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand archive_workspace" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand archive_workspace" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand archive_workspace" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand unarchive_workspace" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand unarchive_workspace" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand unarchive_workspace" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand unarchive_workspace" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand unarchive_workspace" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand purge_workspace" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand purge_workspace" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand purge_workspace" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand purge_workspace" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand purge_workspace" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_purge" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_purge" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_purge" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_purge" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_purge" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand export_workspace" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand export_workspace" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand export_workspace" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand export_workspace" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand export_workspace" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand export" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand export" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand export" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand export" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand export" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand backup_workspace" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand backup_workspace" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand backup_workspace" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand backup_workspace" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand backup_workspace" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand restore_workspace" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand restore_workspace" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand restore_workspace" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand restore_workspace" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand restore_workspace" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand backup_installation" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand backup_installation" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand backup_installation" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand backup_installation" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand backup_installation" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_items" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_items" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_items" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_items" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_items" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand ls" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand ls" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand ls" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand ls" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand ls" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_item" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_item" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_item" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_item" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_item" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_item" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_item" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_item" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_item" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_item" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand save_draft" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand save_draft" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand save_draft" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand save_draft" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand save_draft" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_drafts" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_drafts" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_drafts" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_drafts" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_drafts" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand discard_draft" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand discard_draft" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand discard_draft" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand discard_draft" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand discard_draft" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand move_item" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand move_item" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand move_item" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand move_item" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand move_item" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand set_lifecycle" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand set_lifecycle" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand set_lifecycle" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand set_lifecycle" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand set_lifecycle" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand delete_item" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand delete_item" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand delete_item" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand delete_item" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand delete_item" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand purge_item" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand purge_item" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand purge_item" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand purge_item" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand purge_item" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_folder" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_folder" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_folder" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_folder" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_folder" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_types" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_types" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_types" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_types" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_types" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand set_type" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand set_type" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand set_type" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand set_type" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand set_type" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand read_item" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand read_item" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand read_item" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand read_item" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand read_item" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand show" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand show" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand show" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand show" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand show" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_sources" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_sources" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_sources" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_sources" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_sources" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand sources" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand sources" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand sources" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand sources" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand sources" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_object" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_object" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_object" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_object" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_object" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand read_object" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand read_object" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand read_object" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand read_object" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand read_object" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_sandbox_capability" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_sandbox_capability" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_sandbox_capability" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_sandbox_capability" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_sandbox_capability" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand search_items" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand search_items" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand search_items" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand search_items" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand search_items" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand grep" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand grep" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand grep" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand grep" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand grep" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_links" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_links" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_links" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_links" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_links" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand links" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand links" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand links" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand links" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand links" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_graph" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_graph" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_graph" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_graph" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_graph" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand log_items" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand log_items" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand log_items" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand log_items" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand log_items" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand log" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand log" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand log" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand log" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand log" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand timeline" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand timeline" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand timeline" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand timeline" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand timeline" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand diff_items" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand diff_items" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand diff_items" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand diff_items" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand diff_items" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand diff" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand diff" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand diff" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand diff" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand diff" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand changes" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand changes" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand changes" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand changes" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand changes" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand commit_items" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand commit_items" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand commit_items" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand commit_items" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand commit_items" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand snapshot" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand snapshot" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand snapshot" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand snapshot" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand snapshot" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand restore_items" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand restore_items" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand restore_items" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand restore_items" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand restore_items" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand rewind" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand rewind" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand rewind" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand rewind" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand rewind" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand blame_item" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand blame_item" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand blame_item" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand blame_item" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand blame_item" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand blame" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand blame" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand blame" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand blame" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand blame" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand who" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand who" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand who" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand who" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand who" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand open_proposal" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand open_proposal" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand open_proposal" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand open_proposal" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand open_proposal" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand propose" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand propose" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand propose" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand propose" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand propose" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_proposals" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_proposals" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_proposals" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_proposals" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_proposals" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_proposal" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_proposal" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_proposal" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_proposal" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_proposal" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand accept_proposal" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand accept_proposal" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand accept_proposal" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand accept_proposal" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand accept_proposal" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand approve" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand approve" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand approve" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand approve" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand approve" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand decline_proposal" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand decline_proposal" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand decline_proposal" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand decline_proposal" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand decline_proposal" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand decline" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand decline" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand decline" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand decline" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand decline" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand add_comment" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand add_comment" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand add_comment" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand add_comment" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand add_comment" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_confirmation" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_confirmation" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_confirmation" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_confirmation" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_confirmation" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_review" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_review" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_review" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_review" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_review" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand verify" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand verify" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand verify" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand verify" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand verify" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_reviews" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_reviews" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_reviews" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_reviews" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_reviews" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_upload" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_upload" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_upload" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_upload" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_upload" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand complete_upload" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand complete_upload" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand complete_upload" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand complete_upload" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand complete_upload" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand start_import" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand start_import" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand start_import" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand start_import" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand start_import" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand import" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand import" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand import" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand import" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand import" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_job" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_job" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_job" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_job" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_job" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_jobs" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_jobs" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_jobs" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_jobs" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_jobs" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_tenant_job" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_tenant_job" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_tenant_job" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_tenant_job" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_tenant_job" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_tenant_jobs" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_tenant_jobs" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_tenant_jobs" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_tenant_jobs" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_tenant_jobs" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand retry_job" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand retry_job" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand retry_job" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand retry_job" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand retry_job" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand cancel_job" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand cancel_job" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand cancel_job" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand cancel_job" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand cancel_job" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand redigest_item" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand redigest_item" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand redigest_item" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand redigest_item" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand redigest_item" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand correct_digest" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand correct_digest" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand correct_digest" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand correct_digest" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand correct_digest" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_rules" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_rules" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_rules" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_rules" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_rules" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand set_rules" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand set_rules" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand set_rules" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand set_rules" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand set_rules" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand preview_names" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand preview_names" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand preview_names" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand preview_names" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand preview_names" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand apply_names" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand apply_names" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand apply_names" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand apply_names" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand apply_names" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_attention" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_attention" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_attention" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_attention" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_attention" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand attention" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand attention" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand attention" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand attention" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand attention" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand rebuild_index" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand rebuild_index" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand rebuild_index" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand rebuild_index" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand rebuild_index" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_view" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_view" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_view" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_view" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_view" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand present_view" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand present_view" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand present_view" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand present_view" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand present_view" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand present" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand present" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand present" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand present" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand present" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand resolve_view" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand resolve_view" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand resolve_view" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand resolve_view" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand resolve_view" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand export_view" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand export_view" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand export_view" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand export_view" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand export_view" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_catalog" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_catalog" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_catalog" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_catalog" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_catalog" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand catalog" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand catalog" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand catalog" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand catalog" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand catalog" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_receipt" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_receipt" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_receipt" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_receipt" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_receipt" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_events" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_events" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_events" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_events" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_events" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_tenant_events" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_tenant_events" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_tenant_events" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_tenant_events" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_tenant_events" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_session" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_session" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_session" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_session" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_session" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_connector" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_connector" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_connector" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_connector" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand create_connector" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_connectors" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_connectors" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_connectors" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_connectors" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand list_connectors" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand revoke_connector" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand revoke_connector" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand revoke_connector" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand revoke_connector" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand revoke_connector" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_health" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_health" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_health" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_health" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_health" -s h -l help -d 'Print help'
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_readiness" -l server -r
-complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_readiness" -l json -d 'JSON request, @file, or - for stdin' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_readiness" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_readiness" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_readiness" -s h -l help -d 'Print help'
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand help; and not __fish_seen_subcommand_from list_workspaces create_workspace open_workspace update_workspace archive_workspace unarchive_workspace purge_workspace get_purge export_workspace backup_workspace restore_workspace backup_installation list_items get_item create_item save_draft list_drafts discard_draft move_item set_lifecycle delete_item purge_item create_folder list_types set_type read_item get_sources get_object create_sandbox_capability search_items get_links get_graph log_items diff_items commit_items restore_items blame_item open_proposal list_proposals get_proposal accept_proposal decline_proposal add_comment create_confirmation create_review list_reviews create_upload complete_upload start_import get_job list_jobs get_tenant_job list_tenant_jobs retry_job cancel_job redigest_item correct_digest get_rules set_rules preview_names apply_names get_attention rebuild_index get_view present_view resolve_view export_view get_catalog get_receipt list_events list_tenant_events get_session create_connector list_connectors revoke_connector get_health get_readiness help" -f -a "list_workspaces" -d 'List the workspaces this connection may read, each with its current head revision. Treat head as a pin: pass it to later reads as at = {"kind": "revision", "revision": head} so every call sees one consistent state, and compare it with a later listing to detect change.'
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand help; and not __fish_seen_subcommand_from list_workspaces create_workspace open_workspace update_workspace archive_workspace unarchive_workspace purge_workspace get_purge export_workspace backup_workspace restore_workspace backup_installation list_items get_item create_item save_draft list_drafts discard_draft move_item set_lifecycle delete_item purge_item create_folder list_types set_type read_item get_sources get_object create_sandbox_capability search_items get_links get_graph log_items diff_items commit_items restore_items blame_item open_proposal list_proposals get_proposal accept_proposal decline_proposal add_comment create_confirmation create_review list_reviews create_upload complete_upload start_import get_job list_jobs get_tenant_job list_tenant_jobs retry_job cancel_job redigest_item correct_digest get_rules set_rules preview_names apply_names get_attention rebuild_index get_view present_view resolve_view export_view get_catalog get_receipt list_events list_tenant_events get_session create_connector list_connectors revoke_connector get_health get_readiness help" -f -a "create_workspace" -d 'Create a blank workspace; no example content is inserted.'
