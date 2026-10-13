@@ -2,9 +2,9 @@
 //!
 //! The input is read inline, from a file (`@path`) or from standard input (`-`), within the
 //! contract's request-body limit, and is sent as it was given once it is known to be JSON.
-//! A success body is copied to the output as it arrives and nothing else is written there. A
-//! refusal is returned as the service's own `ApiError`; an answer that carries none is given
-//! the code its HTTP status stands for.
+//! A success body is copied to the output as it arrives, followed by one line feed when it does
+//! not end with one; nothing else is written there. A refusal is returned as the service's own
+//! `ApiError`; an answer that carries none is given the code its HTTP status stands for.
 
 use std::io::Read;
 use std::time::Duration;

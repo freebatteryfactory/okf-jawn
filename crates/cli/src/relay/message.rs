@@ -11,8 +11,8 @@
 //!   `Mcp-Name` when its method names a tool, prompt, resource or task.
 //!
 //! An error the relay writes for a message whose id it could not read has no `id` member, as
-//! the `2026-07-28` revision says; a batch (a JSON array) is refused, as every revision since
-//! `2025-06-18` has no batches.
+//! the `2026-07-28` revision says. A batch (a JSON array) is refused: `rmcp` 3.5.0 has no batch
+//! message.
 
 use serde_json::{Map, Value, json};
 

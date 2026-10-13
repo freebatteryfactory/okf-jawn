@@ -2,8 +2,8 @@
 //!
 //! Exit codes: 0 for success, help and version; 2 for a usage error, as clap reports it; 1 for
 //! every other failure, which is written to the error stream in plain words with its error
-//! code. An operation writes its response body to the output stream and nothing else. Whatever
-//! the CLI itself writes to the error stream passes through [`Credential::redact`] first.
+//! code. An operation writes its response body, and a line feed when it has none, to the output
+//! stream and nothing else. What the CLI writes to stderr passes through [`Credential::redact`].
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
