@@ -25,13 +25,19 @@
  * Bounds. A dropped folder can hold more than a page can list, upload and keep on screen: every
  * file becomes a row, and `add` in `upload-list.ts` is quadratic in the rows (ten thousand files
  * took about four seconds in a measurement, with the tab frozen and nothing said). So the walk
- * stops at `MAX_DROP_FILES` files and goes no deeper than `MAX_DROP_DEPTH` folders below a dropped
- * one; what it found is listed, and `tooMany` / `tooDeep` say that there was more. Five thousand
- * is more than a notes vault or a documentation tree holds and a few seconds' work for the page;
- * thirty-two levels is deeper than any tree a person keeps, and it ends a walk that a link back to
- * a folder above would otherwise follow until the browser stopped answering. While a folder is
- * read, the caller is told how many files were found, every `PROGRESS_EVERY` files, so the page can
- * say so.
+ * stops at `MAX_DROP_FILES` files, at `MAX_DROP_ENTRIES` entries and goes no deeper than
+ * `MAX_DROP_DEPTH` folders below a dropped one; what it found is listed, and `tooMany` (the file
+ * limit or the entry limit) / `tooDeep` say that there was more. Five thousand files is more than a
+ * notes vault or a documentation tree holds and a few seconds' work for the page; thirty-two levels
+ * is deeper than any tree a person keeps, and it ends a walk that a link back to a folder above
+ * would otherwise follow until the browser stopped answering. The file limit alone does not bound
+ * a walk: a tree of folders with no files in it never reaches it, yet each folder costs a directory
+ * read and a line in `emptyFolders`. So one budget counts every entry the walk visits, the files,
+ * the folders, the empty ones and the ones that cannot be read alike: when it is spent no further
+ * folder is read, and `emptyFolders`, `unreadable` and `unlistedFolders` can hold no more than it
+ * allows. Twenty thousand is several times the files that may be read, so the folders of a real
+ * tree fit within it. While a folder is read, the caller is told how many files were found, every
+ * `PROGRESS_EVERY` files, so the page can say so.
  *
  * Uppy's `getDroppedFiles` did the walk before. It gives up the whole walk of a dropped folder at
  * the first file it cannot read and then lists the folder itself as a file, so it is not used any
@@ -91,6 +97,15 @@ export function carriesFiles(transfer: DataTransfer | null): boolean {
 
 /** The most files of one drop that are read; the 5,001st is not, and the drop says so. */
 export const MAX_DROP_FILES = 5_000;
+/**
+ * The most entries of one drop that are visited, files and folders alike; the 20,001st is not, and
+ * the drop says so. The file limit alone does not bound a walk: a tree of folders with no files in
+ * it never reaches that limit, yet every folder costs a directory read and a line in
+ * `emptyFolders`. This one bounds the work and the memory of a walk whatever the tree's shape.
+ * Five thousand files and the folders a real notes vault or documentation tree holds fit well
+ * within it.
+ */
+export const MAX_DROP_ENTRIES = 20_000;
 /** The deepest folder read, counting a dropped folder as level 0; one level deeper is not read. */
 export const MAX_DROP_DEPTH = 32;
 /** How many files are found between two reports of progress. */
@@ -104,7 +119,10 @@ export interface Dropped {
   emptyFolders: string[];
   /** Folders whose entries could not be listed, or not all of them. */
   unlistedFolders: string[];
-  /** The drop holds more files than `MAX_DROP_FILES`: the first ones are listed. */
+  /**
+   * The drop holds more files than `MAX_DROP_FILES`, or more entries (files and folders) than
+   * `MAX_DROP_ENTRIES`: what was read before the limit is listed.
+   */
   tooMany: boolean;
   /** Folders deeper than `MAX_DROP_DEPTH` were not read. */
   tooDeep: boolean;
@@ -124,10 +142,11 @@ function fileOfEntry(entry: FileSystemFileEntry): Promise<File> {
 /**
  * The entries of a folder. A browser gives them in batches and says the end with an empty one;
  * `complete` is false when a batch failed, with what was read before it; `capped` when there were
- * more than the page reads, and the rest were not asked for.
+ * more than `room`, the most of them the walk may still visit, and the rest were not asked for.
  */
 async function entriesOf(
   folder: FileSystemDirectoryEntry,
+  room: number,
 ): Promise<{ entries: FileSystemEntry[]; complete: boolean; capped: boolean }> {
   const reader = folder.createReader();
   const entries: FileSystemEntry[] = [];
@@ -142,9 +161,9 @@ async function entriesOf(
     }
     if (batch.length === 0) return { entries, complete: true, capped: false };
     entries.push(...batch);
-    // More entries in one folder than files the page reads: no need to know how many more.
-    if (entries.length > MAX_DROP_FILES) {
-      return { entries: entries.slice(0, MAX_DROP_FILES), complete: true, capped: true };
+    // More entries in one folder than the page visits: no need to know how many more.
+    if (entries.length > room) {
+      return { entries: entries.slice(0, room), complete: true, capped: true };
     }
   }
 }
@@ -152,20 +171,34 @@ async function entriesOf(
 /** The path of `name` in `folder`; a thing dropped by itself is in no folder. */
 const within = (folder: string, name: string) => (folder === '' ? name : `${folder}/${name}`);
 
+/** A walk as it goes: what it has found, who is told, and how many entries it has visited. */
+interface Walking {
+  found: Dropped;
+  progress: DropProgress | undefined;
+  /** Entries visited so far, files and folders alike; at most `MAX_DROP_ENTRIES`. */
+  visited: number;
+}
+
 /**
- * Walk one entry of a drop into `found`. `offered` is the File the browser offers for a thing
- * dropped by itself: used when the entry is a file that cannot be handed over as an entry (a link
- * to a file, in Chromium), never for a folder.
+ * Walk one entry of a drop into `walking.found`. Every entry that is walked is counted, and the one
+ * after `MAX_DROP_ENTRIES` is not walked: the drop says there was more. `offered` is the File the
+ * browser offers for a thing dropped by itself: used when the entry is a file that cannot be handed
+ * over as an entry (a link to a file, in Chromium), never for a folder.
  */
 async function walk(
   entry: FileSystemEntry,
   folder: string,
   depth: number,
-  found: Dropped,
+  walking: Walking,
   offered: File | null,
-  progress: DropProgress | undefined,
 ): Promise<void> {
+  const { found, progress } = walking;
   if (found.tooMany) return;
+  if (walking.visited >= MAX_DROP_ENTRIES) {
+    found.tooMany = true;
+    return;
+  }
+  walking.visited += 1;
   if (isFileEntry(entry)) {
     if (found.files.length >= MAX_DROP_FILES) {
       found.tooMany = true;
@@ -187,11 +220,14 @@ async function walk(
     return;
   }
   const path = within(folder, entry.name);
-  const { entries, complete, capped } = await entriesOf(entry);
+  // No more of the folder than the walk may still visit, and no more than a page lists of a folder.
+  const room = Math.min(MAX_DROP_FILES, MAX_DROP_ENTRIES - walking.visited);
+  const { entries, complete, capped } = await entriesOf(entry, room);
   if (!complete) found.unlistedFolders.push(path);
-  else if (entries.length === 0) found.emptyFolders.push(path);
+  // Capped with nothing kept: the folder holds entries, and the budget left no room to visit one.
+  else if (entries.length === 0 && !capped) found.emptyFolders.push(path);
   // One after another: what fails inside one entry is that entry's own.
-  for (const child of entries) await walk(child, path, depth + 1, found, null, progress);
+  for (const child of entries) await walk(child, path, depth + 1, walking, null);
   // After them: the files of the entries that were read are listed before the rest is refused.
   if (capped) found.tooMany = true;
 }
@@ -209,6 +245,7 @@ export async function chosenFromDrop(
     tooMany: false,
     tooDeep: false,
   };
+  const walking: Walking = { found, progress, visited: 0 };
   // What the drag carries is asked for in this same turn: a browser empties it once the drop's
   // handler has returned.
   // (A thing that is no file, such as dragged text, has neither an entry nor a File.)
@@ -219,7 +256,7 @@ export async function chosenFromDrop(
   // A folder takes a while to read: say so before the first of its files is found.
   if (carried.some(({ entry }) => entry?.isDirectory === true)) progress?.(0);
   for (const { entry, offered } of carried) {
-    if (entry !== null) await walk(entry, '', 0, found, offered, progress);
+    if (entry !== null) await walk(entry, '', 0, walking, offered);
     // No entry: the browser knows the thing only as a File (a drag a page made, an older browser).
     else if (offered !== null) {
       if (found.files.length >= MAX_DROP_FILES) found.tooMany = true;
