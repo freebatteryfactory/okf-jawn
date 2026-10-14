@@ -92,7 +92,7 @@ describe('a drop that holds more than the page reads', () => {
     await dropOn([droppedFolder('big', plain(MAX_DROP_FILES + 1))]);
     await waitFor(() => expect(choiceNote()).toContain('files added.'), { timeout: 30_000 });
     expect(choiceNote()).toBe(
-      `${MAX_DROP_FILES} files added. The drop holds more than this page reads at once: only the first 5,000 files are listed, and the rest were not read. Drop the rest in smaller parts.`,
+      `${MAX_DROP_FILES} files added. The drop holds more than this page reads at once: what was read is listed, and the rest was not read. Drop the rest in smaller parts.`,
     );
     expect(
       screen.getByRole('heading', { name: `Files to import (${MAX_DROP_FILES})` }),

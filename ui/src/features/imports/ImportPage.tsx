@@ -14,8 +14,9 @@
  * says how many were listed, and what of a drop was not: a file that could not be read, a folder
  * that is empty (nothing is kept of it), a folder that could not be listed in full. While a dropped
  * folder is being read the same status says so and how many files were found so far (every
- * `PROGRESS_EVERY` files, not each one); a drop of more than `MAX_DROP_FILES` files, or of folders
- * nested deeper than `MAX_DROP_DEPTH`, lists what was read and says plainly that there was more.
+ * `PROGRESS_EVERY` files, not each one); a drop of more than `MAX_DROP_FILES` files or `MAX_DROP_ENTRIES` entries,
+ * or of folders nested deeper than `MAX_DROP_DEPTH`, lists what was read and says plainly that
+ * there was more, naming no number the walk may not have reached.
  *
  * Paths the person did not mean (`paths.ts`). A file whose path the page can see is wrong is
  * listed as one that cannot be imported, with the reason, and is never sent. Two files whose paths
@@ -55,7 +56,6 @@ import {
   type Dropped,
   describeSize,
   MAX_DROP_DEPTH,
-  MAX_DROP_FILES,
   pathOf,
 } from './files';
 import { ImportStart, StartedJobs } from './ImportStart';
@@ -147,7 +147,7 @@ function describeChoice(
   }
   if (rest.tooMany) {
     parts.push(
-      `The drop holds more than this page reads at once: only the first ${MAX_DROP_FILES.toLocaleString('en-US')} files are listed, and the rest were not read. Drop the rest in smaller parts.`,
+      'The drop holds more than this page reads at once: what was read is listed, and the rest was not read. Drop the rest in smaller parts.',
     );
   }
   if (rest.tooDeep) {
