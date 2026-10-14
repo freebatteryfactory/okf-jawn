@@ -133,16 +133,21 @@ impl Staged {
 
     /// The files the edits made this store rewrite on its own, for the candidate check
     /// (`CandidateCheck::check`, `rewritten`): the referrers every move so far rewrote that
-    /// are still files of the staged tree, in path order, each once. A referrer a later edit
-    /// removed or moved away is left out (its new path, if any, is one the caller's own edit
-    /// names), and so is one whose path is no `WorkspacePath`: no item has such a path
-    /// (`refuse_collisions`), so only a file that is no item can be left out for it.
-    pub(crate) fn rewritten(&self) -> Vec<WorkspacePath> {
-        self.rewritten
+    /// the staged tree still holds in that exact spelling, in path order, each once. A
+    /// referrer a later edit removed, moved away or renamed by letter case is left out (its
+    /// new path, if any, is one the caller's own edit names), and so is one whose path is no
+    /// `WorkspacePath`: no item has such a path (`refuse_collisions`), so only a file that is
+    /// no item can be left out for it. The spelling is compared with the staged tree's own
+    /// listing (`files_under`), because on a filesystem that holds `Ref.md` and `ref.md` as one
+    /// file, a path lookup finds either spelling.
+    pub(crate) fn rewritten(&self) -> Result<Vec<WorkspacePath>, ApiError> {
+        let files: BTreeSet<String> = files_under(&self.root, "")?.into_iter().collect();
+        Ok(self
+            .rewritten
             .iter()
-            .filter(|path| self.root.join(path).is_file())
+            .filter(|path| files.contains(*path))
             .filter_map(|path| WorkspacePath::try_from(path.clone()).ok())
-            .collect()
+            .collect())
     }
 
     /// Refuse two paths of the staged tree that share a collision key (Stage 1b design section

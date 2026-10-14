@@ -851,6 +851,43 @@ async fn a_case_only_rename_writes_what_a_direct_move_writes() -> TestResult {
     Ok(())
 }
 
+/// A referrer that a move rewrote and the same commit then renamed by letter case is not told
+/// to the check at the spelling it no longer has, on any filesystem: the check is told only
+/// paths the committed tree holds, as it spells them, each once.
+#[tokio::test]
+async fn a_referrer_renamed_by_case_after_a_move_is_told_only_as_the_tree_spells_it() -> TestResult
+{
+    for (edits, told) in [
+        (vec![moved(10, "b.md")?, moved(12, "ref.md")?], vec![]),
+        (
+            vec![moved(10, "b.md")?, moved(12, "ref.md")?, moved(10, "c.md")?],
+            vec!["ref.md".to_owned()],
+        ),
+    ] {
+        let space = Workspace::new().await?;
+        let seeded = space
+            .commit(
+                2,
+                &space.initial,
+                vec![
+                    note(10, "a.md", "Ten.")?,
+                    note(12, "Ref.md", "See [a](a.md).")?,
+                ],
+            )
+            .await?;
+        let recording = Arc::new(Recording::default());
+        let committed = space
+            .commit_with(3, &seeded, edits, recording.clone())
+            .await?
+            .revision;
+        assert_eq!(recording.seen()?, [told]);
+        let files = space.files(&committed)?;
+        assert!(files.iter().any(|file| file == "ref.md"), "{files:?}");
+        assert!(!files.iter().any(|file| file == "Ref.md"), "{files:?}");
+    }
+    Ok(())
+}
+
 // B1: the private name an item is parked under is a free name.
 
 /// Item 10 at `Notes/Report.md` with a referrer, and `taken` held by a person's note (item 11)

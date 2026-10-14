@@ -542,7 +542,7 @@ fn stage_and_commit(
         staged.refuse_collisions()?;
         maintain(&staged_root, &write.message)?;
         // The check is told the files the edits made the store rewrite on its own.
-        let warnings = check.check(&staged_root, &staged.rewritten())?;
+        let warnings = check.check(&staged_root, &staged.rewritten()?)?;
         Ok((staged_tree(repository, &staged_root)?, warnings))
     };
     let (tree, warnings) = candidate().map_err(|error| without_staging(error, &staging.path))?;
