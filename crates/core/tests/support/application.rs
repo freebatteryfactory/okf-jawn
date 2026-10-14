@@ -1917,8 +1917,8 @@ impl EventLog for FakeEvents {
                 connector_id: event.connector_id,
                 actor: event.actor,
                 operation: event.operation,
-                proposal_id: None,
-                count: None,
+                proposal_id: event.proposal_id,
+                count: event.count,
             })
         })
     }

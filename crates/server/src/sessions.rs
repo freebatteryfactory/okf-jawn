@@ -185,6 +185,8 @@ pub async fn record_sign_in(events: &dyn EventLog, principal: &Principal) -> Res
             client_id: principal.client_id.clone(),
         }),
         operation: None,
+        proposal_id: None,
+        count: None,
     };
     events.append(&scope, None, event).await.map(|_| ())
 }

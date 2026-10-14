@@ -8,7 +8,9 @@
 
 use okf_jawn_contract::access::Principal;
 use okf_jawn_contract::events::{Event, EventActor, EventKind, ListEventsResponse};
-use okf_jawn_contract::identity::{ConnectorId, ItemId, JobId, MutationId, Revision, TenantId};
+use okf_jawn_contract::identity::{
+    ConnectorId, ItemId, JobId, MutationId, ProposalId, Revision, TenantId,
+};
 use okf_jawn_contract::metadata::OperationName;
 
 use crate::ports::PortFuture;
@@ -40,6 +42,11 @@ pub struct NewEvent {
     pub actor: Option<EventActor>,
     /// The refused operation of a `permission_denied` event.
     pub operation: Option<OperationName>,
+    /// Affected proposal.
+    pub proposal_id: Option<ProposalId>,
+    /// How many occurrences this one event stands for; `None` means one (a `sign_in_refused`
+    /// aggregate past its source's allowance).
+    pub count: Option<u32>,
 }
 
 /// Which notifications to read.
@@ -56,7 +63,8 @@ pub trait EventLog: Send + Sync {
     /// Append one notification after the durable change it projects.
     ///
     /// With a `mutation_id`, an identical notification already appended under that mutation is
-    /// not appended again and the prior event is returned. Without one, as for job progress, the
+    /// not appended again and the prior event is returned; two that differ in any field, the
+    /// proposal or the count included, are both appended. Without one, as for job progress, the
     /// notification is always appended.
     ///
     /// An append to `EventScope::Workspace` for a workspace the tenant does not hold (never
@@ -93,6 +101,8 @@ impl NewEvent {
                 client_id: principal.client_id.clone(),
             }),
             operation: Some(operation),
+            proposal_id: None,
+            count: None,
         }
     }
 }

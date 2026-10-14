@@ -605,10 +605,7 @@ async fn backup_an_installation_archive_holds_no_workspace_content() -> TestResu
         kind: EventKind::Changed,
         revision: Some(fixture.head.clone()),
         item_id: Some(uuid!(10)?),
-        job_id: None,
-        connector_id: None,
-        actor: None,
-        operation: None,
+        ..sign_in()
     };
     let tenant_event = NewEvent {
         kind: EventKind::SignedIn,
@@ -1347,6 +1344,8 @@ async fn backup_a_replacement_restore_run_again_restores_each_tenant_event_once(
                     connector_id: None,
                     actor: None,
                     operation: None,
+                    proposal_id: None,
+                    count: None,
                 },
             )
             .await?;
@@ -1681,6 +1680,8 @@ async fn backup_an_unfiltered_set_writes_the_archive_of_a_tenant_only_an_event_n
                 connector_id: None,
                 actor: None,
                 operation: None,
+                proposal_id: None,
+                count: None,
             },
         )
         .await?;
@@ -1715,6 +1716,8 @@ async fn backup_a_later_archive_of_one_installation_restores_each_event_once() -
             connector_id: None,
             actor: None,
             operation: None,
+            proposal_id: None,
+            count: None,
         };
         let scope = EventScope::Tenant(tenant("local")?);
         storage.events().append(&scope, None, event()).await?;
@@ -1882,6 +1885,8 @@ fn sign_in() -> NewEvent {
         connector_id: None,
         actor: None,
         operation: None,
+        proposal_id: None,
+        count: None,
     }
 }
 

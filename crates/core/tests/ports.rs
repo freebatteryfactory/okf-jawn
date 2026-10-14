@@ -702,6 +702,8 @@ async fn event_calls(
         connector_id: None,
         actor: None,
         operation: None,
+        proposal_id: None,
+        count: None,
     };
     let workspace = EventScope::Workspace(scope.clone());
     events.append(&workspace, None, progress.clone()).await?;

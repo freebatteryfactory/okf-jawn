@@ -661,6 +661,8 @@ pub(crate) fn job_event(
         connector_id: None,
         actor: None,
         operation: None,
+        proposal_id: None,
+        count: None,
     }
 }
 

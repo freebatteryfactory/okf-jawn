@@ -611,6 +611,8 @@ async fn seed_review(seeded: &Seeded) -> TestResult {
         connector_id: None,
         actor: None,
         operation: None,
+        proposal_id: None,
+        count: None,
     };
     storage
         .events()
@@ -687,6 +689,8 @@ async fn seed_installation(seeded: &Seeded) -> TestResult {
         connector_id: None,
         actor: None,
         operation: None,
+        proposal_id: None,
+        count: None,
     };
     storage
         .events()

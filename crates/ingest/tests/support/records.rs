@@ -152,8 +152,8 @@ impl EventLog for FakeEvents {
                         connector_id: event.connector_id,
                         actor: event.actor,
                         operation: event.operation,
-                        proposal_id: None,
-                        count: None,
+                        proposal_id: event.proposal_id,
+                        count: event.count,
                     })
                 });
         Box::pin(async move { appended })
@@ -742,6 +742,8 @@ mod tests {
             connector_id: None,
             actor: None,
             operation: None,
+            proposal_id: None,
+            count: None,
         };
         // The second `imported` append; an append of another kind is not counted.
         events.fail_on(EventKind::Imported, 2)?;
