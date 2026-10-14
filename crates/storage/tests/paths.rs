@@ -61,6 +61,56 @@ struct Workspace {
 /// The private name a case-only rename parks its item under, in any folder.
 const PARKED: &str = "okf-jawn-recase-";
 
+/// The frontmatter of note 10 as `note` writes it, and of note 12.
+const NOTE_10: &str = "---\ntype: Note\ntitle: Note 10\nokf_jawn:\n  item_id: \
+                       00000000-0000-4000-8000-000000000010\n  kind: note\n---\n\n";
+const NOTE_12: &str = "---\ntype: Note\ntitle: Note 12\nokf_jawn:\n  item_id: \
+                       00000000-0000-4000-8000-000000000012\n  kind: note\n---\n\n";
+
+/// A referrer of `Notes/Report.md` in three link styles, with a link in another spelling that
+/// never pointed at it; and the referrer after the item is renamed to `Notes/report.md`.
+const REFERRER: &str = "Read [a](Notes/Report.md), [b](./Notes/Report.md#sec), \
+                        [c](/Notes/Report.md), [d](notes/report.md).";
+const REFERRER_MOVED: &str = "Read [a](Notes/report.md), [b](Notes/report.md#sec), \
+                              [c](/Notes/report.md), [d](notes/report.md).";
+
+/// Bodies of `Notes/Report.md`, by link style, and the body its file holds after it is renamed
+/// to `Notes/report.md` as a direct okf-core move writes it. Recorded on Linux (WSL Ubuntu
+/// 24.04, okf-core 0.2.7), where `Report.md` and `report.md` are two files, from this branch at
+/// ad6415c with the parking removed (`let from = if false` in `move_item`), so that the rename
+/// was one `move_concept` from `Notes/Report` to `Notes/report`; each file was printed whole
+/// and its body is kept here (the frontmatter is `NOTE_10`; the referrer's is `REFERRER_MOVED`).
+const DIRECT_MOVES: [(&str, &str, &str); 5] = [
+    (
+        "above the root",
+        "Up [a](../../outside.pdf) and [b](../../../x.md#t).",
+        "Up [a](../outside.pdf) and [b](../x.md#t).",
+    ),
+    (
+        "dot slash",
+        "Here [p](./plan.md) and [me](./Report.md).",
+        "Here [p](plan.md) and [me](Report.md).",
+    ),
+    (
+        "anchor",
+        "Anchors [p](plan.md#part) and [s](#section).",
+        "Anchors [p](plan.md#part) and [s](#section).",
+    ),
+    (
+        "absolute",
+        "Absolute [p](/Notes/plan.md) and [r](/ref.md#top).",
+        "Absolute [p](/Notes/plan.md) and [r](/ref.md#top).",
+    ),
+    // This value includes the `.md` okf-core 0.2.7 appends to a relative link to a file that is
+    // not Markdown on every move, direct or not (review N8). A later package changes that, and
+    // this expected value with it.
+    (
+        "not Markdown",
+        "File ![i](pics/p.png) and [f](../files/a.pdf).",
+        "File ![i](pics/p.png.md) and [f](../files/a.pdf.md).",
+    ),
+];
+
 impl CandidateCheck for Accept {
     fn check(&self, _root: &Path, _rewritten: &[WorkspacePath]) -> Result<Vec<Warning>, ApiError> {
         Ok(Vec::new())
@@ -589,8 +639,10 @@ async fn an_item_whose_name_ends_in_md_md_moves_as_itself() -> TestResult {
 /// A note at `at` (item 10) that links to a sibling at `plan` (item 11), and a note at the root
 /// (item 12) that links to it as `at`, are committed; item 10 is renamed to `to`, which differs
 /// from `at` only in letter case. The rename is one move in one commit: the committed tree holds
-/// only `to`, with the bytes `at` held; the referrer points at `to` and is the one file the
-/// check is told; no private path is in the tree, in `rewritten` or in `log.md`.
+/// only `to`, with the bytes `at` held (its one link is a sibling's, which okf-core leaves as it
+/// is; `a_case_only_rename_writes_what_a_direct_move_writes` covers links it rewrites); the
+/// referrer points at `to` and is the one file the check is told; no private path is in the
+/// tree, in `rewritten` or in `log.md`.
 async fn renamed_by_case_only(at: &str, plan: &str, to: &str) -> TestResult {
     let space = Workspace::new().await?;
     let seeded = space
@@ -617,7 +669,7 @@ async fn renamed_by_case_only(at: &str, plan: &str, to: &str) -> TestResult {
     assert_eq!(
         space.file(&renamed, to)?,
         space.file(&seeded, at)?,
-        "the moved item's file is byte for byte what it was"
+        "a sibling link: the moved item's file is byte for byte what it was"
     );
     let referrer = space.body(&renamed, 12).await?;
     assert!(referrer.contains(&format!("]({to})")), "{referrer}");
@@ -757,6 +809,45 @@ async fn a_move_below_the_items_own_file_is_still_refused_as_taken() -> TestResu
         .refused(3, &seeded, vec![moved(10, "a.md/inner.md")?])
         .await?;
     assert_conflict_naming(&error, &["a.md/inner.md", "already taken"]);
+    Ok(())
+}
+
+/// A rename by letter case writes the moved item's file, and its referrer's, byte for byte as a
+/// direct move writes them on Linux (`DIRECT_MOVES`): a link that climbs above the bundle root,
+/// `./` links (one of them to the item itself), anchors, absolute links and links to files
+/// that are not Markdown. okf-core rewrites the item's own links on each hop, and not
+/// idempotently, so only the first hop's bytes are a direct move's.
+#[tokio::test]
+async fn a_case_only_rename_writes_what_a_direct_move_writes() -> TestResult {
+    for (style, body, direct) in DIRECT_MOVES {
+        let space = Workspace::new().await?;
+        let seeded = space
+            .commit(
+                2,
+                &space.initial,
+                vec![
+                    note(10, "Notes/Report.md", body)?,
+                    note(11, "Notes/plan.md", "Plan.")?,
+                    note(12, "ref.md", REFERRER)?,
+                ],
+            )
+            .await?;
+        let renamed = space
+            .commit(3, &seeded, vec![moved(10, "Notes/report.md")?])
+            .await?;
+        let item = some(space.file(&renamed, "Notes/report.md")?, "the item")?;
+        assert_eq!(
+            String::from_utf8(item)?,
+            format!("{NOTE_10}{direct}\n"),
+            "{style}"
+        );
+        let referrer = some(space.file(&renamed, "ref.md")?, "the referrer")?;
+        assert_eq!(
+            String::from_utf8(referrer)?,
+            format!("{NOTE_12}{REFERRER_MOVED}\n"),
+            "{style}"
+        );
+    }
     Ok(())
 }
 

@@ -21,13 +21,16 @@
 //! The staged tree is on the server's own filesystem, where Windows and macOS hold `Report.md`
 //! and `report.md` as one file and Linux and Git hold two. A move whose destination differs
 //! from the item's path only that way (the two share a collision key) is a rename that changes
-//! only letter case, and it goes in two hops, each with its links (`relink`): first to a private
-//! path beside the item (`park`), then to the destination. In one hop okf-core would write the
-//! destination and then remove the source, which on such a filesystem is the file it just
-//! wrote. The private path is in no commit's tree, in no `rewritten` list and in no log entry:
-//! the person sees one move in one commit. For that move only, the item's own file does not
-//! count as taking the destination (`Staged::occupied`); a move onto any other item's or file's
-//! key is refused as taken.
+//! only letter case, and it goes in two hops, each with its links (`relink`): first to a free
+//! private path beside the item (`park`), then to the destination. In one hop okf-core would
+//! write the destination and then remove the source, which on such a filesystem is the file it
+//! just wrote. okf-core also rewrites the item's own links on every hop, even within one folder
+//! (`./plan.md` becomes `plan.md`), and not idempotently, so the item's file is written at the
+//! destination as the first hop left it, which is what a direct move writes (`move_item`). The
+//! private path is in no commit's tree, in no `rewritten` list and in no log entry: the person
+//! sees one move in one commit. For that move only, the item's own file does not count as
+//! taking the destination (`Staged::occupied`); a move onto any other item's or file's key is
+//! refused as taken.
 //!
 //! For the same reason, every write that names a new path checks the folders it names against
 //! the staged tree's own spellings before that path is written there
@@ -688,15 +691,26 @@ fn move_item(
             destination.as_str()
         )));
     }
-    let from = if collision_key(&source) == destination.collision_key() {
-        // A rename that changes only letter case goes by a private path (the module header).
-        park(staged, item, &source, "recase", Some("/destination"))?
-            .as_str()
-            .to_owned()
-    } else {
-        source
-    };
-    relink(staged, &from, destination.as_str(), Some("/destination"))
+    if collision_key(&source) != destination.collision_key() {
+        return relink(staged, &source, destination.as_str(), Some("/destination"));
+    }
+    // A rename that changes only letter case goes by a private path (the module header). The
+    // first hop is a move within the item's own folder, which is the destination's (S2 refuses
+    // another spelling of it), so the item's file is then what a direct move writes. The second
+    // hop would rewrite the item's own links once more, and okf-core's rewrite is not
+    // idempotent (`../../a.pdf` becomes `../a.pdf`, then `../a.pdf.md`), so the first hop's
+    // bytes are written at the destination after it.
+    let private = park(staged, item, &source, "recase", Some("/destination"))?;
+    let parked = staged.root.join(private.as_str());
+    let bytes = std::fs::read(&parked).map_err(|error| io_error("read", &parked, &error))?;
+    relink(
+        staged,
+        private.as_str(),
+        destination.as_str(),
+        Some("/destination"),
+    )?;
+    let landed = staged.root.join(destination.as_str());
+    std::fs::write(&landed, bytes).map_err(|error| io_error("write", &landed, &error))
 }
 
 /// Move the item file at `current` to a private path beside it, with every link that points at
