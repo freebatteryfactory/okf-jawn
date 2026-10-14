@@ -15,6 +15,17 @@
 //! move rewrote besides the moved item's own (the referrers) are remembered, and the candidate
 //! check is told them (`Staged::rewritten`, `CandidateCheck::check`).
 //! Conformance is the `CandidateCheck`'s decision, not this module's.
+//!
+//! The staged tree is on the server's own filesystem, where Windows and macOS hold `Report.md`
+//! and `report.md` as one file and Linux and Git hold two. A move whose destination differs
+//! from the item's path only that way (the two share a collision key) is a rename that changes
+//! only letter case, and it goes in two hops, each with its links (`relink`): first to a private
+//! path beside the item (`park`), then to the destination. In one hop okf-core would write the
+//! destination and then remove the source, which on such a filesystem is the file it just
+//! wrote. The private path is in no commit's tree, in no `rewritten` list and in no log entry:
+//! the person sees one move in one commit. For that move only, the item's own file does not
+//! count as taking the destination (`Staged::occupied`); a move onto any other item's or file's
+//! key is refused as taken.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -138,9 +149,20 @@ impl Staged {
 
     /// Whether a file or folder of the staged tree, or an item, already holds `path`'s
     /// collision key (or a folder above it holds a file's).
-    fn occupied(&self, path: &WorkspacePath) -> Result<bool, ApiError> {
+    ///
+    /// `own` is the moved item's own file, for a move. Only when it holds `path`'s own key (a
+    /// rename that changes only letter case, see the module header) is it not counted; then,
+    /// on a filesystem that holds both spellings as one file, `path` exists because of it, so
+    /// only a folder at `path` counts there. Every other file, folder and item counts.
+    fn occupied(&self, path: &WorkspacePath, own: Option<&str>) -> Result<bool, ApiError> {
         let key = path.collision_key();
-        if self.root.join(path.as_str()).exists() {
+        let own = own.filter(|own| collision_key(own) == key);
+        let target = self.root.join(path.as_str());
+        let there = match own {
+            Some(_) => target.is_dir(),
+            None => target.exists(),
+        };
+        if there {
             return Ok(true);
         }
         let folder_prefix = format!("{key}/");
@@ -150,6 +172,9 @@ impl Staged {
             .filter_map(|(at, _)| key.get(..at))
             .collect();
         Ok(files_under(&self.root, "")?.iter().any(|existing| {
+            if own == Some(existing.as_str()) {
+                return false;
+            }
             let existing = collision_key(existing);
             existing == key
                 || existing.starts_with(&folder_prefix)
@@ -157,7 +182,7 @@ impl Staged {
         }) || self
             .items
             .values()
-            .any(|existing| collision_key(existing) == key))
+            .any(|existing| own != Some(existing.as_str()) && collision_key(existing) == key))
     }
 }
 
@@ -293,7 +318,7 @@ fn create_item(
     if staged.items.contains_key(&header.item_id) {
         return Err(conflict("an item with this identity already exists"));
     }
-    if staged.occupied(path)? {
+    if staged.occupied(path, None)? {
         return Err(conflict(format!("{} is already taken", path.as_str())));
     }
     properties.insert("type".to_owned(), serde_json::Value::String(type_name));
@@ -318,7 +343,7 @@ fn create_folder(staged: &Staged, folder: &WorkspacePath) -> Result<(), ApiError
         .with_field("/folder"));
     }
     let target = staged.root.join(folder.as_str());
-    if target.exists() || staged.occupied(folder)? {
+    if target.exists() || staged.occupied(folder, None)? {
         return Err(conflict(format!("{} is already taken", folder.as_str())));
     }
     std::fs::create_dir_all(&target).map_err(|error| io_error("create", &target, &error))?;
@@ -452,7 +477,7 @@ fn restore_items(
             remove(&staged.root.join(restored))?;
         }
         if let Some(earlier) = earlier {
-            if staged.occupied(earlier)? {
+            if staged.occupied(earlier, None)? {
                 return Err(conflict(format!("{} is already taken", earlier.as_str())));
             }
             restore_file(repository, tree, &staged.root, earlier.as_str())?;
@@ -471,10 +496,12 @@ fn restore_items(
 /// path has nothing to move; an item listed twice moves to its last listing's path.
 ///
 /// Items that traded paths since `from` would block each other, so the movers go first to a
-/// private path each, then the other listed items' files are removed (they are restored from
-/// `from` after this), then each mover goes to its `from` path, refused as `Conflict` when that
-/// path is taken (`Staged::occupied`). Each step rewrites the links, so a link that pointed at
-/// a mover ends pointing at its restored path.
+/// private path each (`park`, beside its current path), then the other listed items' files are
+/// removed (they are restored from `from` after this), then each mover goes to its `from` path,
+/// refused as `Conflict` when that path is taken (`Staged::occupied`). Each step rewrites the
+/// links, so a link that pointed at a mover ends pointing at its restored path. A mover whose
+/// `from` path differs from its current one only in letter case is parked like any other, so
+/// it never moves straight between the two spellings.
 fn move_back(
     staged: &mut Staged,
     found: &[(ItemId, git2::Tree<'_>, Option<WorkspacePath>)],
@@ -496,12 +523,7 @@ fn move_back(
     }
     let mut parked = Vec::with_capacity(movers.len());
     for (item, current, destination) in movers {
-        let private = WorkspacePath::try_from(format!("okf-jawn-rewind-{}.md", item.0))
-            .map_err(|error| internal(format!("a private restore path is invalid: {error}")))?;
-        if staged.occupied(&private)? {
-            return Err(conflict(format!("{} is already taken", private.as_str())));
-        }
-        relink(staged, &current, private.as_str(), None)?;
+        let private = park(staged, item, &current, "rewind", None)?;
         parked.push((private, destination));
     }
     for item in destinations.keys() {
@@ -519,7 +541,7 @@ fn move_back(
         remove(&staged.root.join(current))?;
     }
     for (private, destination) in parked {
-        if staged.occupied(destination)? {
+        if staged.occupied(destination, None)? {
             return Err(conflict(format!(
                 "{} is already taken",
                 destination.as_str()
@@ -602,13 +624,48 @@ fn move_item(
     if source == destination.as_str() {
         return Ok(());
     }
-    if staged.occupied(destination)? {
+    if staged.occupied(destination, Some(&source))? {
         return Err(conflict(format!(
             "{} is already taken",
             destination.as_str()
         )));
     }
-    relink(staged, &source, destination.as_str(), Some("/destination"))
+    let from = if collision_key(&source) == destination.collision_key() {
+        // A rename that changes only letter case goes by a private path (the module header).
+        park(staged, item, &source, "recase", Some("/destination"))?
+            .as_str()
+            .to_owned()
+    } else {
+        source
+    };
+    relink(staged, &from, destination.as_str(), Some("/destination"))
+}
+
+/// Move the item file at `current` to a private path beside it, `okf-jawn-<purpose>-<item
+/// id>.md` in the same folder, with every link that points at it (`relink`), and answer that
+/// path; a private path that is taken is `Conflict`. The caller moves the item on from there
+/// within the same commit, so the private path reaches no commit's tree. Being in the same
+/// folder, the item's own relative links resolve from the private path as they did from
+/// `current`. `field` is passed to `relink`.
+fn park(
+    staged: &mut Staged,
+    item: ItemId,
+    current: &str,
+    purpose: &str,
+    field: Option<&str>,
+) -> Result<WorkspacePath, ApiError> {
+    let name = format!("okf-jawn-{purpose}-{}.md", item.0);
+    let private = match current.rsplit_once('/') {
+        Some((folder, _)) => format!("{folder}/{name}"),
+        None => name,
+    };
+    let private = WorkspacePath::try_from(private)
+        .map_err(|error| internal(format!("a private path is invalid: {error}")))?;
+    if staged.occupied(&private, None)? {
+        return Err(conflict(format!("{} is already taken", private.as_str())));
+    }
+    relink(staged, current, private.as_str(), field)?;
+    Ok(private)
 }
 
 /// Move the item file at `source` to `destination` with `okf_core::move_concept`, which rewrites
@@ -715,7 +772,7 @@ fn write_card(staged: &mut Staged, card: &SourceCard) -> Result<(), ApiError> {
         }
         None => false,
     };
-    if staged.occupied(&card.path)? {
+    if staged.occupied(&card.path, None)? {
         return Err(conflict(format!("{} is already taken", card.path.as_str())));
     }
     let mut header = card.header(archived)?;

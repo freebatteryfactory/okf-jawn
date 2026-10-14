@@ -11,18 +11,19 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use git2::Repository;
 use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::history::FileChangeKind;
 use okf_jawn_contract::identity::{ItemId, Revision, TenantId, WorkspacePath};
 use okf_jawn_contract::item::ItemKind;
 use okf_jawn_core::search::{GraphQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
-    CandidateCheck, CommitChanges, Committed, NewWorkspace, Page, Provenance, SourceCard,
-    StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
+    CandidateCheck, CommitChanges, Committed, DiffQuery, LogQuery, NewWorkspace, Page, Provenance,
+    SourceCard, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
 };
 use okf_jawn_storage::Storage;
 use serde_json::json;
@@ -41,6 +42,13 @@ type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 /// Accepts every candidate.
 struct Accept;
 
+/// A check that records the rewritten paths each run was told (`CandidateCheck::check`) and
+/// accepts.
+#[derive(Default)]
+struct Recording {
+    told: Mutex<Vec<Vec<String>>>,
+}
+
 /// A data directory with one blank workspace.
 struct Workspace {
     directory: tempfile::TempDir,
@@ -50,8 +58,33 @@ struct Workspace {
     initial: Revision,
 }
 
+/// The private name a case-only rename parks its item under, in any folder.
+const PARKED: &str = "okf-jawn-recase-";
+
 impl CandidateCheck for Accept {
     fn check(&self, _root: &Path, _rewritten: &[WorkspacePath]) -> Result<Vec<Warning>, ApiError> {
+        Ok(Vec::new())
+    }
+}
+
+impl Recording {
+    /// What each run of the check was told the store rewrote, in run order.
+    fn seen(&self) -> Fallible<Vec<Vec<String>>> {
+        Ok(self.told.lock().map_err(|_| "poisoned")?.clone())
+    }
+}
+
+impl CandidateCheck for Recording {
+    fn check(&self, _root: &Path, rewritten: &[WorkspacePath]) -> Result<Vec<Warning>, ApiError> {
+        self.told
+            .lock()
+            .map_err(|_| ApiError::new(ErrorCode::Internal, "poisoned"))?
+            .push(
+                rewritten
+                    .iter()
+                    .map(|path| path.as_str().to_owned())
+                    .collect(),
+            );
         Ok(Vec::new())
     }
 }
@@ -146,6 +179,24 @@ impl Workspace {
         )?)
     }
 
+    /// Every file path of `revision`, read straight from Git.
+    fn files(&self, revision: &Revision) -> Fallible<Vec<String>> {
+        let repository = self.repository()?;
+        let tree = repository
+            .find_commit(git2::Oid::from_str(revision.as_str())?)?
+            .tree()?;
+        let mut found = Vec::new();
+        tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
+            if entry.kind() == Some(git2::ObjectType::Blob)
+                && let Ok(name) = entry.name()
+            {
+                found.push(format!("{root}{name}"));
+            }
+            git2::TreeWalkResult::Ok
+        })?;
+        Ok(found)
+    }
+
     /// The bytes of the file at `at` in `revision`, read straight from Git.
     fn file(&self, revision: &Revision, at: &str) -> Fallible<Option<Vec<u8>>> {
         let repository = self.repository()?;
@@ -198,6 +249,16 @@ impl Workspace {
             .await?
             .map(|summary| summary.id))
     }
+
+    /// The body of item `item` at `revision`.
+    async fn body(&self, revision: &Revision, item: u32) -> Fallible<String> {
+        Ok(self
+            .storage
+            .versions()
+            .show(&self.scope, revision, uuid!(item)?)
+            .await?
+            .body)
+    }
 }
 
 /// A fixed UUID spelling numbered `n`.
@@ -233,6 +294,13 @@ fn moved(item: u32, to: &str) -> Fallible<TreeEdit> {
     Ok(TreeEdit::MoveItem {
         item_id: uuid!(item)?,
         destination: path(to)?,
+    })
+}
+
+fn restore(item: u32, from: &Revision) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::RestoreItem {
+        item_id: uuid!(item)?,
+        from: from.clone(),
     })
 }
 
@@ -408,6 +476,182 @@ async fn search_does_not_index_an_upper_case_md_file_as_an_item() -> TestResult 
         .await?;
     let nodes: Vec<ItemId> = graph.nodes.iter().map(|node| node.id).collect();
     assert_eq!(nodes, vec![uuid!(11)?]);
+    Ok(())
+}
+
+// S1: a rename that changes only letter case.
+
+/// A note at `at` (item 10) that links to a sibling at `plan` (item 11), and a note at the root
+/// (item 12) that links to it as `at`, are committed; item 10 is renamed to `to`, which differs
+/// from `at` only in letter case. The rename is one move in one commit: the committed tree holds
+/// only `to`, with the bytes `at` held; the referrer points at `to` and is the one file the
+/// check is told; no private path is in the tree, in `rewritten` or in `log.md`.
+async fn renamed_by_case_only(at: &str, plan: &str, to: &str) -> TestResult {
+    let space = Workspace::new().await?;
+    let seeded = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, at, "The report.\n\nSee [the plan](plan.md).")?,
+                note(11, plan, "The plan.")?,
+                note(12, "ref.md", &format!("Read [the report]({at})."))?,
+            ],
+        )
+        .await?;
+    let recording = Arc::new(Recording::default());
+    let renamed = space
+        .commit_with(3, &seeded, vec![moved(10, to)?], recording.clone())
+        .await?
+        .revision;
+    let files = space.files(&renamed)?;
+    assert!(files.iter().any(|file| file == to), "{files:?}");
+    assert!(!files.iter().any(|file| file == at), "{files:?}");
+    assert!(!files.iter().any(|file| file.contains(PARKED)), "{files:?}");
+    assert_eq!(space.item_at(&renamed, to).await?, Some(uuid!(10)?));
+    assert_eq!(
+        space.file(&renamed, to)?,
+        space.file(&seeded, at)?,
+        "the moved item's file is byte for byte what it was"
+    );
+    let referrer = space.body(&renamed, 12).await?;
+    assert!(referrer.contains(&format!("]({to})")), "{referrer}");
+    assert_eq!(recording.seen()?, [vec!["ref.md".to_owned()]]);
+    let log = String::from_utf8(some(space.file(&renamed, "log.md")?, "log.md")?)?;
+    assert_eq!(log.matches("change 3").count(), 1, "{log}");
+    assert!(!log.contains(PARKED), "{log}");
+    one_move_in_history(&space, &seeded, &renamed, at, to).await
+}
+
+/// The history of item 10 from `before` to `after` is one commit with one moved file.
+async fn one_move_in_history(
+    space: &Workspace,
+    before: &Revision,
+    after: &Revision,
+    at: &str,
+    to: &str,
+) -> TestResult {
+    let versions = space.storage.versions();
+    let history = versions
+        .log(
+            &space.scope,
+            LogQuery {
+                tip: after.clone(),
+                item_id: Some(uuid!(10)?),
+                page: Page {
+                    cursor: None,
+                    limit: 10,
+                },
+            },
+        )
+        .await?;
+    assert_eq!(history.commits.len(), 2, "created, then renamed once");
+    let compared = versions
+        .diff(
+            &space.scope,
+            DiffQuery {
+                from: before.clone(),
+                to: after.clone(),
+                item_id: Some(uuid!(10)?),
+            },
+        )
+        .await?;
+    let change = some(compared.changes.first(), "the rename")?;
+    assert_eq!(compared.changes.len(), 1, "{:?}", compared.changes);
+    assert_eq!(change.kind, FileChangeKind::Moved);
+    assert_eq!(change.old_path.as_deref(), Some(at));
+    assert_eq!(change.new_path.as_deref(), Some(to));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rename_that_changes_only_letter_case_at_the_top_level_is_one_move() -> TestResult {
+    renamed_by_case_only("Report.md", "plan.md", "report.md").await
+}
+
+#[tokio::test]
+async fn a_rename_that_changes_only_letter_case_in_a_folder_is_one_move() -> TestResult {
+    renamed_by_case_only("Notes/Report.md", "Notes/plan.md", "Notes/report.md").await
+}
+
+/// The Rewind of a case-only rename puts the earlier spelling back, with its links (`move_back`
+/// parks the item beside itself first, as the rename did).
+#[tokio::test]
+async fn a_rewind_of_a_case_only_rename_puts_the_earlier_spelling_back() -> TestResult {
+    let space = Workspace::new().await?;
+    let seeded = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "Notes/Report.md", "The report.")?,
+                note(12, "ref.md", "Read [the report](Notes/Report.md).")?,
+            ],
+        )
+        .await?;
+    let renamed = space
+        .commit(3, &seeded, vec![moved(10, "Notes/report.md")?])
+        .await?;
+    let rewound = space
+        .commit(4, &renamed, vec![restore(10, &seeded)?])
+        .await?;
+    let files = space.files(&rewound)?;
+    assert!(
+        files.iter().any(|file| file == "Notes/Report.md"),
+        "{files:?}"
+    );
+    assert!(
+        !files
+            .iter()
+            .any(|file| file == "Notes/report.md" || file.contains("okf-jawn-")),
+        "{files:?}"
+    );
+    assert_eq!(
+        space.file(&rewound, "Notes/Report.md")?,
+        space.file(&seeded, "Notes/Report.md")?
+    );
+    let referrer = space.body(&rewound, 12).await?;
+    assert!(referrer.contains("](Notes/Report.md)"), "{referrer}");
+    Ok(())
+}
+
+/// A move onto another item's path, or a plain file's, in another letter case is refused as
+/// taken, as before: only the moved item's own file is not counted.
+#[tokio::test]
+async fn a_move_onto_another_files_path_in_another_case_is_still_refused() -> TestResult {
+    let space = Workspace::new().await?;
+    let seeded = space
+        .commit(
+            2,
+            &space.initial,
+            vec![note(10, "a.md", "Ten.")?, note(11, "b.md", "Eleven.")?],
+        )
+        .await?;
+    let plain = space.raw(900, &[], &[("C.MD", b"plain".to_vec())])?;
+    for (mutation, to) in [(3, "B.md"), (4, "c.md")] {
+        let error = space
+            .refused(mutation, &plain, vec![moved(10, to)?])
+            .await?;
+        assert_conflict_naming(&error, &[to, "already taken"]);
+    }
+    assert_eq!(space.body(&plain, 11).await?, "Eleven.");
+    assert_eq!(space.file(&plain, "C.MD")?, Some(b"plain".to_vec()));
+    assert_eq!(space.file(&plain, "a.md")?, space.file(&seeded, "a.md")?);
+    Ok(())
+}
+
+/// The moved item's own file is not counted only for the path it already holds in another
+/// case: as a folder above the destination, it still takes that path.
+#[tokio::test]
+async fn a_move_below_the_items_own_file_is_still_refused_as_taken() -> TestResult {
+    let space = Workspace::new().await?;
+    let seeded = space
+        .commit(2, &space.initial, vec![note(10, "a.md", "Ten.")?])
+        .await?;
+    let error = space
+        .refused(3, &seeded, vec![moved(10, "a.md/inner.md")?])
+        .await?;
+    assert_conflict_naming(&error, &["a.md/inner.md", "already taken"]);
     Ok(())
 }
 
