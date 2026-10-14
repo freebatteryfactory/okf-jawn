@@ -156,7 +156,8 @@ fn candidate_check_of_an_edit_reports_lint_only_for_the_files_it_touched() -> Te
 fn candidate_check_of_an_edit_reports_validator_warnings_only_for_the_files_it_touched()
 -> TestResult {
     let staged = Staged::new()?;
-    // A broken cross-link is permitted; the validator reports it as an info naming no file.
+    // A broken cross-link is permitted; the validator reports it as an info naming the concept
+    // that holds it, and the check locates it at that concept's file.
     staged.write(
         "notes/plan.md",
         "---\ntype: Note\ntitle: Plan\ndescription: The plan.\n---\n# Plan\n\nSee [gone](gone.md).\n",
@@ -174,12 +175,12 @@ fn candidate_check_of_an_edit_reports_validator_warnings_only_for_the_files_it_t
             .collect()
     };
     let odd = Some("notes/odd.md".to_owned());
-    // The whole-bundle check reports the warning about the odd file and the unlocated info.
+    // The whole-bundle check reports the warning about the odd file, and the plan's broken link
+    // located at the plan: no finding of this bundle is left without a location.
     let whole = validator(&OkfConformance.check(&staged.0, &[])?);
     assert!(whole.contains(&odd), "{whole:?}");
-    assert!(whole.contains(&None), "{whole:?}");
-    // An edit of the plan reports nothing about the file it did not touch, nor any warning
-    // that names no file.
+    assert!(!whole.contains(&None), "{whole:?}");
+    // An edit of the plan reports nothing about the file it did not touch.
     let plan = EditCheck::new(
         &[WorkspacePath::try_from("notes/plan.md".to_owned())?],
         None,
@@ -252,6 +253,96 @@ fn candidate_check_of_an_edit_counts_the_files_the_store_rewrote_as_touched() ->
     // The conformance check alone reports no lint, whatever was rewritten.
     let conformance_only = OkfConformance.check(&staged.0, &rewritten)?;
     assert_eq!(located(&conformance_only, "okf_lint"), Vec::<String>::new());
+    Ok(())
+}
+
+/// The broken-link findings among `warnings`, as (location, message), sorted.
+fn broken_links(warnings: &[Warning]) -> Vec<(Option<String>, String)> {
+    let mut broken: Vec<(Option<String>, String)> = warnings
+        .iter()
+        .filter(|warning| warning.message.contains("does not resolve to a concept"))
+        .map(|warning| (warning.location.clone(), warning.message.clone()))
+        .collect();
+    broken.sort();
+    broken
+}
+
+/// The broken-link finding the validator gives for the link target `raw`, located at `file`.
+fn broken_at(file: &str, raw: &str) -> (Option<String>, String) {
+    (
+        Some(file.to_owned()),
+        format!("link target does not resolve to a concept in the bundle: {raw}"),
+    )
+}
+
+/// A note that is conformant and links to `target`, which the tests leave out of the bundle.
+fn note_linking_to(title: &str, target: &str) -> String {
+    format!(
+        "---\ntype: Note\ntitle: {title}\ndescription: A note.\n---\n# {title}\n\nSee [it]({target}).\n"
+    )
+}
+
+/// The validator's broken-link info names the concept that holds the link and no file. The
+/// check locates it at the file the validated bundle holds that concept in, as the tree spells
+/// it, once for each broken link; a file with no broken link gets none.
+#[test]
+fn candidate_check_locates_a_finding_that_names_a_concept_at_that_concepts_file() -> TestResult {
+    let staged = Staged::new()?;
+    staged.write("notes/plan.md", &note_linking_to("Plan", "gone.md"))?;
+    staged.write("notes/Mixed-Case.md", &note_linking_to("Mixed", "lost.md"))?;
+    staged.write(
+        "notes/whole.md",
+        "---\ntype: Note\ntitle: Whole\ndescription: A note.\n---\n# Whole\n\nSee [the plan](plan.md).\n",
+    )?;
+    let warnings = OkfConformance.check(&staged.0, &[])?;
+    assert_eq!(
+        broken_links(&warnings),
+        [
+            broken_at("notes/Mixed-Case.md", "lost.md"),
+            broken_at("notes/plan.md", "gone.md"),
+        ]
+    );
+    assert!(
+        warnings
+            .iter()
+            .filter(|warning| warning.message.contains("does not resolve to a concept"))
+            .all(|warning| warning.code == "okf_validator_info"),
+        "{warnings:?}"
+    );
+    // Every finding of this bundle is located: none is left for the wrappers to drop.
+    assert!(
+        warnings.iter().all(|warning| warning.location.is_some()),
+        "{warnings:?}"
+    );
+    Ok(())
+}
+
+/// An edit of a note with a broken link reports the link, located at the note; a broken link in
+/// a file the edit did not touch is not reported, unless the store rewrote that file.
+#[test]
+fn candidate_check_of_an_edit_reports_the_broken_links_of_the_files_it_touched_only() -> TestResult
+{
+    let staged = Staged::new()?;
+    staged.write("notes/plan.md", &note_linking_to("Plan", "gone.md"))?;
+    staged.write("notes/other.md", &note_linking_to("Other", "lost.md"))?;
+    let plan = WorkspacePath::try_from("notes/plan.md".to_owned())?;
+    let other = WorkspacePath::try_from("notes/other.md".to_owned())?;
+    let edit = EditCheck::new(std::slice::from_ref(&plan), None);
+    assert_eq!(
+        broken_links(&edit.check(&staged.0, &[])?),
+        [broken_at("notes/plan.md", "gone.md")]
+    );
+    // An edit that touched neither file reports neither link.
+    let elsewhere = EditCheck::new(&[], None);
+    assert_eq!(broken_links(&elsewhere.check(&staged.0, &[])?), Vec::new());
+    // The store rewrote the other file: its link is reported too.
+    assert_eq!(
+        broken_links(&edit.check(&staged.0, std::slice::from_ref(&other))?),
+        [
+            broken_at("notes/other.md", "lost.md"),
+            broken_at("notes/plan.md", "gone.md"),
+        ]
+    );
     Ok(())
 }
 

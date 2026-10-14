@@ -8,7 +8,10 @@
 //! - an `error` diagnostic is a conformance violation, so the candidate is refused as
 //!   `InvalidInput` and the message carries the validator's error diagnostics;
 //! - `warning` and `info` diagnostics never refuse; they come back as warnings, located at the
-//!   workspace-relative path when the diagnostic names a file.
+//!   workspace-relative path when the diagnostic names a file, or, when it names only a concept
+//!   (a broken link names the concept that holds it), at the file the validated bundle holds
+//!   that concept in. A finding that names neither, or a concept the bundle does not hold, has
+//!   no location.
 //!
 //! Lint is not conformance and never refuses: an edit's check (`EditCheck`) adds okf-validator's
 //! lint findings about the files the edit touched as warnings, and an import's
@@ -172,11 +175,99 @@ fn conformance(root: &Path, bundle: &okf_core::Bundle) -> Result<Vec<Warning>, A
         .into_iter()
         .map(|diagnostic| Warning {
             code: format!("{VALIDATOR_CODE}_{}", diagnostic.severity.as_str()),
+            location: location(root, bundle, &diagnostic),
             message: diagnostic.message,
-            location: diagnostic
-                .path
-                .as_deref()
-                .and_then(|path| relative_path(root, path)),
         })
         .collect())
+}
+
+/// Where a validator finding is located: the file it names, else the file of the concept it
+/// names, as a workspace-relative path the way the tree spells it; `None` when it names neither,
+/// or a concept the bundle does not hold.
+///
+/// okf-validator 0.2.7 names a concept and no file in one finding only, the broken-link info
+/// (`validate.rs`, "link target does not resolve to a concept in the bundle"), and that concept
+/// is the one holding the link. The bundle resolves a concept to its file itself
+/// (`okf_core::Bundle::get`): it keys its concepts by id, and an id is the file's path below the
+/// root without `.md` (`ConceptId::from_path`), so two files never share one.
+fn location(
+    root: &Path,
+    bundle: &okf_core::Bundle,
+    diagnostic: &okf_validator::Diagnostic,
+) -> Option<String> {
+    match (&diagnostic.path, &diagnostic.concept) {
+        (Some(path), _) => relative_path(root, path),
+        (None, Some(concept)) => bundle
+            .get(concept)
+            .and_then(|found| relative_path(root, &found.path)),
+        (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use okf_core::ConceptId;
+    use okf_validator::{Diagnostic, Severity};
+
+    use super::location;
+
+    /// Result of a test that reports failure through `?` instead of panicking.
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// A bundle directory under the system temporary directory, removed when dropped.
+    struct Staged(PathBuf);
+
+    impl Drop for Staged {
+        fn drop(&mut self) {
+            // Best effort: a leftover directory under the temporary directory harms nothing.
+            let _left = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A finding of the validator's shape that names `path` and `concept`.
+    fn finding(path: Option<PathBuf>, concept: Option<&str>) -> Result<Diagnostic, String> {
+        Ok(Diagnostic {
+            severity: Severity::Info,
+            path,
+            concept: concept
+                .map(ConceptId::parse)
+                .transpose()
+                .map_err(|error| error.to_string())?,
+            message: "a finding".to_owned(),
+            fixable: false,
+        })
+    }
+
+    /// The real validator names a concept and no file only for a concept the bundle holds (the
+    /// one holding a broken link), so the cases it cannot give are built here: a finding that
+    /// names a concept the bundle does not hold, or nothing, has no location.
+    #[test]
+    fn a_finding_is_located_at_its_file_else_at_its_concepts_file_else_nowhere() -> TestResult {
+        let staged = Staged(
+            std::env::temp_dir().join(format!("okf-jawn-location-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(staged.0.join("notes"))?;
+        std::fs::write(
+            staged.0.join("notes/plan.md"),
+            "---\ntype: Note\n---\n# Plan\n",
+        )?;
+        let bundle = okf_core::Bundle::load(&staged.0)?;
+        let at_concept = finding(None, Some("notes/plan"))?;
+        assert_eq!(
+            location(&staged.0, &bundle, &at_concept).as_deref(),
+            Some("notes/plan.md")
+        );
+        let unknown = finding(None, Some("notes/gone"))?;
+        assert_eq!(location(&staged.0, &bundle, &unknown), None);
+        assert_eq!(location(&staged.0, &bundle, &finding(None, None)?), None);
+        // A file it names comes first, whatever concept it names.
+        let named = finding(Some(staged.0.join("notes/other.md")), Some("notes/plan"))?;
+        assert_eq!(
+            location(&staged.0, &bundle, &named).as_deref(),
+            Some("notes/other.md")
+        );
+        Ok(())
+    }
 }

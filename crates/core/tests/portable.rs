@@ -17,6 +17,7 @@ use okf_jawn_contract::item::{APP_HEADER_KEY, ItemDocument, ItemKind, ItemStatus
 use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::review::{ImportedClaim, Review, ReviewCoverage};
 use okf_jawn_contract::source::SourceReference;
+use okf_jawn_core::conformance::OkfConformance;
 use okf_jawn_core::portable::{
     ImportCheck, VERIFIED_KEY, claim_coverage, coverage_at, exported_verified,
     imported_verification, item_content_digest, lint_imported,
@@ -591,6 +592,66 @@ fn lint_at_import_never_overrides_a_conformance_refusal() -> TestResult {
     let fault = err_of(lint_imported(&missing, &[]))?;
     assert_eq!(fault.code, ErrorCode::Internal);
     assert!(!fault.message.contains(&missing.display().to_string()));
+    Ok(())
+}
+
+/// An import commit checked by the production conformance check (`OkfConformance`), not a
+/// scripted one. A card the commit writes holds a broken link: the import reports that link,
+/// located at the card, once. A broken link in a file the commit does not write is not
+/// reported, and no warning about that file is. A non-conformant file elsewhere still refuses
+/// the commit.
+#[test]
+fn an_import_reports_a_broken_link_of_the_card_it_wrote_located_at_the_card_once() -> TestResult {
+    let candidate = Candidate::new()?;
+    let linking = |title: &str, target: &str| {
+        format!("---\ntype: Note\ntitle: {title}\n---\n# {title}\n\nSee [it]({target}).\n")
+    };
+    candidate.write(
+        "notes/imported.md",
+        &linking("Imported", "missing-thing.md"),
+    )?;
+    candidate.write("notes/other.md", &linking("Other", "elsewhere.md"))?;
+    let imported = WorkspacePath::try_from("notes/imported.md".to_owned())?;
+    let check = ImportCheck::new(Arc::new(OkfConformance), vec![imported]);
+    let warnings = check.check(&candidate.0, &[])?;
+    let broken: Vec<(Option<&str>, &str)> = warnings
+        .iter()
+        .filter(|warning| warning.message.contains("does not resolve to a concept"))
+        .map(|warning| (warning.location.as_deref(), warning.message.as_str()))
+        .collect();
+    assert_eq!(
+        broken,
+        [(
+            Some("notes/imported.md"),
+            "link target does not resolve to a concept in the bundle: missing-thing.md"
+        )]
+    );
+    assert!(
+        warnings
+            .iter()
+            .all(|warning| warning.location.as_deref() == Some("notes/imported.md")),
+        "{warnings:?}"
+    );
+    // The production check does report the other file's link, located there: the import's
+    // check is what leaves it out.
+    let whole = OkfConformance.check(&candidate.0, &[])?;
+    assert!(
+        whole.iter().any(|warning| {
+            warning.location.as_deref() == Some("notes/other.md")
+                && warning.message.ends_with("elsewhere.md")
+        }),
+        "{whole:?}"
+    );
+
+    // A refusal is a refusal as before, whatever file it names.
+    candidate.write("notes/bad.md", "---\ntitle: No type\n---\nBody\n")?;
+    let refused = err_of(check.check(&candidate.0, &[]))?;
+    assert_eq!(refused.code, ErrorCode::InvalidInput);
+    assert!(
+        refused.message.contains("notes/bad.md"),
+        "{}",
+        refused.message
+    );
     Ok(())
 }
 

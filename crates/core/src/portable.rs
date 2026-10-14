@@ -49,8 +49,10 @@ use crate::storage::CandidateCheck;
 /// refusal stands whatever file it names, but of its warnings only those located at an
 /// imported file, or at a file the store reports it rewrote, are passed on: the production
 /// conformance check (`conformance::OkfConformance`) answers the validator's findings for the
-/// whole candidate on every commit, the files this commit did not write included. A warning
-/// that names no file is left out, as `conformance::EditCheck` leaves it out.
+/// whole candidate on every commit, the files this commit did not write included. It locates a
+/// broken link at the file of the concept that holds it, so a broken link in an imported card
+/// is passed on, located at the card. A warning that names no file is left out, as
+/// `conformance::EditCheck` leaves it out.
 ///
 /// Lint findings never refuse a commit; okf-validator's lint is not a conformance check.
 /// The paths the store reports it rewrote on its own (`CandidateCheck::check`, `rewritten`) are
