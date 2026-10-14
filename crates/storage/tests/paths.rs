@@ -1656,6 +1656,39 @@ async fn a_tree_with_two_spellings_of_a_file_refuses_every_commit_but_a_whole_re
     Ok(())
 }
 
+/// A tree built in Git with two files whose names differ only in Unicode normalization (`café`
+/// with a precomposed `é`, and `cafe` with a combining accent, as macOS merges them) refuses
+/// every commit naming both, as two spellings of one path.
+#[tokio::test]
+async fn a_tree_with_two_normalizations_of_a_name_refuses_every_commit() -> TestResult {
+    let space = Workspace::new().await?;
+    let seeded = space
+        .commit(2, &space.initial, vec![note(10, "notes/a.md", "Ten.")?])
+        .await?;
+    let composed = "notes/caf\u{e9}.txt";
+    let decomposed = "notes/cafe\u{301}.txt";
+    let spelled = space.raw(
+        900,
+        &[],
+        &[(composed, b"one".to_vec()), (decomposed, b"two".to_vec())],
+    )?;
+    for (mutation, edit) in [(3, edited(10, "Changed.")?), (4, set_type("Memo"))] {
+        let error = space.refused(mutation, &spelled, vec![edit]).await?;
+        assert_conflict_naming(&error, &[composed, decomposed, "collides with"]);
+    }
+    let repaired = space
+        .commit(
+            5,
+            &spelled,
+            vec![TreeEdit::RestoreWorkspace {
+                from: seeded.clone(),
+            }],
+        )
+        .await?;
+    assert_eq!(space.files(&repaired)?, space.files(&seeded)?);
+    Ok(())
+}
+
 // R1: every path the server writes has one spelling.
 
 /// Respellings of the names the server writes, for a tree seeded with `Notes/a.md`, a card of

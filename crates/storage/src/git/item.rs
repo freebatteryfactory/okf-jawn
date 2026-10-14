@@ -361,11 +361,25 @@ fn is_item_id(text: &str) -> bool {
     uuid::Uuid::parse_str(text).is_ok_and(|id| id.to_string() == text)
 }
 
-/// The key two paths collide on (`WorkspacePath::collision_key`); a path that is not a valid
-/// workspace path is lower-cased as it is.
+/// The key two paths collide on (`WorkspacePath::collision_key`: NFC, then lower case), for a
+/// path of a tree whether or not it is a valid workspace path. A path that is not one (not in
+/// NFC, or with a segment Windows refuses) is keyed segment by segment: a segment that is a
+/// valid path once in NFC (`WorkspacePath::from_supplied`, contract's only NFC) gets its key,
+/// so `café` and `cafe` with a combining accent collide; one that is not valid even in NFC (a
+/// reserved character, a trailing dot or space, a device name) is lower-cased without NFC.
 pub(crate) fn collision_key(path: &str) -> String {
-    WorkspacePath::try_from(path.to_owned())
-        .map_or_else(|_| path.to_lowercase(), |valid| valid.collision_key())
+    WorkspacePath::try_from(path.to_owned()).map_or_else(
+        |_| {
+            path.split('/')
+                .map(|segment| {
+                    WorkspacePath::from_supplied(segment)
+                        .map_or_else(|_| segment.to_lowercase(), |valid| valid.collision_key())
+                })
+                .collect::<Vec<_>>()
+                .join("/")
+        },
+        |valid| valid.collision_key(),
+    )
 }
 
 fn properties_of(document: &Document) -> BTreeMap<String, Json> {
