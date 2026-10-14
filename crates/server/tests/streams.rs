@@ -323,6 +323,11 @@ impl Transfers for Bytes {
                 upload_path: String::new(),
                 received_bytes: count.to_string(),
                 complete: false,
+                filename: None,
+                relative_path: None,
+                size: None,
+                created_at: None,
+                consumed_by: None,
             })
         })
     }

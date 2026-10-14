@@ -178,8 +178,8 @@ pub trait RequestScope {
     /// one longer than `item::MAX_ITEM_TEXT_BYTES` here.
     ///
     /// # Errors
-    /// Returns `InvalidInput`, or `TooLarge` for an item text over the bound, naming the
-    /// offending field.
+    /// Returns `InvalidInput`, or `TooLarge` for an item text, an upload's name or an import's
+    /// list of uploads over its bound, naming the offending field as a JSON Pointer.
     fn check_rules(&self) -> Result<(), ApiError> {
         Ok(())
     }
@@ -216,7 +216,6 @@ workspace_read!(
     GetJobRequest,
     ListJobsRequest,
     GetRulesRequest,
-    PreviewNamesRequest,
     GetAttentionRequest,
     GetViewRequest,
     ResolveViewRequest,
@@ -234,9 +233,7 @@ workspace_keyed!(Write:
     SetTypeRequest,
     CommitRequest,
     RestoreRequest,
-    CreateUploadRequest,
     CompleteUploadRequest,
-    StartImportRequest,
     RetryJobRequest,
     CancelJobRequest,
     RedigestRequest,
@@ -376,6 +373,45 @@ impl RequestScope for CorrectDigestRequest {
     }
     fn check_rules(&self) -> Result<(), ApiError> {
         check_item_text(&self.corrected_markdown, "/corrected_markdown")
+    }
+}
+
+impl RequestScope for CreateUploadRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Write)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        Some(&self.idempotency_key)
+    }
+    /// A name within its byte bound, and a `filename` that gives its source card a path.
+    fn check_rules(&self) -> Result<(), ApiError> {
+        self.check_names()
+    }
+}
+
+impl RequestScope for StartImportRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Write)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        Some(&self.idempotency_key)
+    }
+    /// Between one and `import::MAX_IMPORT_UPLOADS` uploads, each listed once.
+    fn check_rules(&self) -> Result<(), ApiError> {
+        self.check_uploads()
+    }
+}
+
+impl RequestScope for PreviewNamesRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Read)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        None
+    }
+    /// An `items` selection names at least one item.
+    fn check_rules(&self) -> Result<(), ApiError> {
+        self.selection.check("/selection")
     }
 }
 

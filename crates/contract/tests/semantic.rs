@@ -1211,4 +1211,44 @@ fn the_application_header_key_is_one_constant() {
     assert_eq!(APP_HEADER_KEY, "okf_jawn");
 }
 
+/// The security events, by wire word: sign-ins and refused sign-ins, connector issue and
+/// revocation, and refused requests. Every other kind is a content or work notification.
+#[test]
+fn security_events_are_sign_ins_connectors_and_refusals() -> Result<(), Box<dyn Error>> {
+    let mut security = Vec::new();
+    for word in enum_words::<EventKind>()? {
+        let kind: EventKind = serde_json::from_value(json!(word))?;
+        if kind.is_security() {
+            security.push(word);
+        }
+    }
+    assert_eq!(
+        security,
+        [
+            "connector_issued",
+            "connector_revoked",
+            "signed_in",
+            "sign_in_refused",
+            "permission_denied"
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_refused_sign_in_may_name_no_actor_and_count_its_refusals() -> Result<(), Box<dyn Error>> {
+    let aggregate = json!({
+        "id": "e-3",
+        "kind": "sign_in_refused",
+        "at": "2026-10-08T14:04:00.000Z",
+        "count": 37
+    });
+    let event: Event = serde_json::from_value(aggregate.clone())?;
+    assert_eq!(event.kind, EventKind::SignInRefused);
+    assert!(event.actor.is_none() && event.workspace_id.is_none());
+    assert_eq!(event.count, Some(37));
+    assert_eq!(serde_json::to_value(&event)?, aggregate);
+    Ok(())
+}
+
 okf_jawn_contract::for_each_operation!(operation_schemas);

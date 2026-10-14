@@ -127,7 +127,7 @@ export const applyNames = <ThrowOnError extends boolean = false>(options: Option
 /**
  * Conventions
  *
- * Read the same naming conventions used by the form, YAML editor, and import process.
+ * Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with set_rules.
  */
 export const getRules = <ThrowOnError extends boolean = false>(options: Options<GetRulesData, ThrowOnError>): RequestResult<GetRulesResponses, GetRulesErrors, ThrowOnError> => (options.client ?? client).post<GetRulesResponses, GetRulesErrors, ThrowOnError>({
     security: [
@@ -239,7 +239,7 @@ export const getReceipt = <ThrowOnError extends boolean = false>(options: Option
 /**
  * Activity
  *
- * Read resumable notifications without treating them as authoritative document content.
+ * Read resumable notifications without treating them as authoritative document content. A workspace's security events are returned only to a caller holding `admin` on it, checked on every call; a page may therefore hold fewer rows than asked, or none, and still carry a cursor.
  */
 export const listEvents = <ThrowOnError extends boolean = false>(options: Options<ListEventsData, ThrowOnError>): RequestResult<ListEventsResponses, ListEventsErrors, ThrowOnError> => (options.client ?? client).post<ListEventsResponses, ListEventsErrors, ThrowOnError>({
     security: [
@@ -2102,7 +2102,7 @@ export const openWorkspace = <ThrowOnError extends boolean = false>(options: Opt
 /**
  * Purge
  *
- * Permanently remove a workspace's originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge.
+ * Permanently remove a workspace's originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request returns the purge: an unfinished one resumed, a completed one as it is.
  */
 export const purgeWorkspace = <ThrowOnError extends boolean = false>(options: Options<PurgeWorkspaceData, ThrowOnError>): RequestResult<PurgeWorkspaceResponses, PurgeWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<PurgeWorkspaceResponses, PurgeWorkspaceErrors, ThrowOnError>({
     security: [
@@ -2229,7 +2229,7 @@ export const downloadArtifact = <ThrowOnError extends boolean = false>(options: 
 /**
  * stream_events
  *
- * Resume workspace notifications with Last-Event-ID; notifications are projections, not canonical content.
+ * Resume workspace notifications with Last-Event-ID; notifications are projections, not canonical content. A workspace's security events are returned only to a caller holding `admin` on it, checked on every call; a page may therefore hold fewer rows than asked, or none, and still carry a cursor.
  */
 export const streamEvents = <ThrowOnError extends boolean = false>(options: Options<StreamEventsData, ThrowOnError, StreamEventsResponse>): Promise<ServerSentEventsResult<StreamEventsResponses>> => (options.client ?? client).sse.get<StreamEventsResponses, unknown, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }, {

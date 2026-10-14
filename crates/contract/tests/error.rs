@@ -168,3 +168,60 @@ fn an_invalidated_revision_is_a_typed_not_found_with_its_replacement() -> Result
     assert_eq!(serde_json::to_value(&detail)?, workspace_purge);
     Ok(())
 }
+
+#[test]
+fn an_upload_mismatch_states_both_lengths_and_compares_the_digest_only_at_one_length()
+-> Result<(), Box<dyn Error>> {
+    let length = json!({
+        "code": "conflict",
+        "message": "received 3 bytes of the 4 announced",
+        "detail": {"kind": "upload_mismatch", "expected_bytes": "4", "received_bytes": "3"}
+    });
+    let error: ApiError = serde_json::from_value(length.clone())?;
+    assert_eq!(
+        error.detail.as_deref(),
+        Some(&ErrorDetail::UploadMismatch {
+            expected_bytes: "4".to_owned(),
+            received_bytes: "3".to_owned(),
+            digest_matches: None,
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(&error)?,
+        length,
+        "no digest_matches is written"
+    );
+    let digest = ErrorDetail::UploadMismatch {
+        expected_bytes: "4".to_owned(),
+        received_bytes: "4".to_owned(),
+        digest_matches: Some(false),
+    };
+    assert_eq!(
+        serde_json::to_value(&digest)?,
+        json!({
+            "kind": "upload_mismatch",
+            "expected_bytes": "4",
+            "received_bytes": "4",
+            "digest_matches": false
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn a_stale_base_names_the_head_and_the_field_it_was_compared_with() -> Result<(), Box<dyn Error>> {
+    let stale = json!({
+        "code": "conflict",
+        "message": "the workspace head moved since the change was prepared",
+        "field": "/base_revision",
+        "detail": {"kind": "stale_base", "head": "c".repeat(40)}
+    });
+    let error: ApiError = serde_json::from_value(stale.clone())?;
+    let Some(ErrorDetail::StaleBase { head }) = error.detail.as_deref() else {
+        return Err("expected a stale_base detail".into());
+    };
+    assert_eq!(head.as_str(), "c".repeat(40));
+    assert_eq!(error.field.as_deref(), Some("/base_revision"));
+    assert_eq!(serde_json::to_value(&error)?, stale);
+    Ok(())
+}

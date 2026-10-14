@@ -38,7 +38,7 @@ okf\-jawn\-unarchive_workspace(1)
 Return an archived workspace to ordinary listings; its history and records were kept.
 .TP
 okf\-jawn\-purge_workspace(1)
-Permanently remove a workspace\*(Aqs originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge.
+Permanently remove a workspace\*(Aqs originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request returns the purge: an unfinished one resumed, a completed one as it is.
 .TP
 okf\-jawn\-get_purge(1)
 Read a purge\*(Aqs progress and counts; available after the workspace is gone.
@@ -191,7 +191,7 @@ okf\-jawn\-correct_digest(1)
 Save a correction separately from generated extraction.
 .TP
 okf\-jawn\-get_rules(1)
-Read the same naming conventions used by the form, YAML editor, and import process.
+Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with set_rules.
 .TP
 okf\-jawn\-set_rules(1)
 Save explicit rules as versioned context.
@@ -227,7 +227,7 @@ okf\-jawn\-get_receipt(1)
 Inspect the exact sources returned through this server, not an external model internal state.
 .TP
 okf\-jawn\-list_events(1)
-Read resumable notifications without treating them as authoritative document content.
+Read resumable notifications without treating them as authoritative document content. A workspace\*(Aqs security events are returned only to a caller holding `admin` on it, checked on every call; a page may therefore hold fewer rows than asked, or none, and still carry a cursor.
 .TP
 okf\-jawn\-list_tenant_events(1)
 Read installation\-level notifications: sign\-ins, connector issue and revocation, and refusals outside a workspace.

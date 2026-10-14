@@ -125,7 +125,7 @@
             "description": "Typed context for conflict, replay, and in-progress outcomes."
           },
           "field": {
-            "description": "Input field needing correction.",
+            "description": "Input field needing correction. A JSON Pointer into the request (`/base_revision`,\n`/changes/2/body`).",
             "type": [
               "string",
               "null"
@@ -293,6 +293,17 @@
             "$ref": "#/components/schemas/OperationName",
             "description": "Suggested existing operation, never executable code."
           },
+          "item": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ItemSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The item at the response's `revision`; absent when the observation is about no one\nitem or the item was purged."
+          },
           "item_id": {
             "anyOf": [
               {
@@ -311,6 +322,17 @@
           "message": {
             "description": "Concrete explanation.",
             "type": "string"
+          },
+          "selection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Selection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The place inside the item the observation is about, in the form `read_item` takes;\nabsent when it is about the whole item."
           }
         },
         "required": [
@@ -377,6 +399,11 @@
             "const": "unparseable_header",
             "description": "An imported file's header does not parse; its bytes are kept and nothing is blocked.\nAction `get_item`.",
             "type": "string"
+          },
+          {
+            "const": "uploads_waiting",
+            "description": "Uploads that are complete and not imported, with their count and total size in the\nmessage; one row a workspace when any exist. Action `list_uploads`.",
+            "type": "string"
           }
         ]
       },
@@ -391,6 +418,22 @@
         },
         "required": [
           "idempotency_key"
+        ],
+        "type": "object"
+      },
+      "BackupReport": {
+        "additionalProperties": false,
+        "description": "What a workspace backup did.",
+        "properties": {
+          "rows_left_out": {
+            "description": "Rows left out of the archive because they named a managed backup or a written history.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rows_left_out"
         ],
         "type": "object"
       },
@@ -962,16 +1005,19 @@
           {
             "const": "reject",
             "description": "Require an explicit decision.",
+            "title": "Ask for a decision",
             "type": "string"
           },
           {
             "const": "suffix",
             "description": "Add a deterministic suffix.",
+            "title": "Add a number",
             "type": "string"
           },
           {
             "const": "keep_existing",
             "description": "Keep the original name and report the collision.",
+            "title": "Keep the existing name",
             "type": "string"
           }
         ]
@@ -1032,6 +1078,17 @@
               }
             ],
             "description": "The purge that invalidated the comment's `source`, whose stored path was scrubbed."
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceReference"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The line or range under discussion, resolved when the comment was added."
           },
           "text": {
             "description": "Discussion text.",
@@ -1813,10 +1870,11 @@
       },
       "CreateUploadRequest": {
         "additionalProperties": false,
-        "description": "Register immutable upload intent before streaming bytes.",
+        "description": "Register immutable upload intent before streaming bytes.\n\n`filename` and `relative_path` are bounded in UTF-8 bytes (`MAX_UPLOAD_FILENAME_BYTES`,\n`MAX_UPLOAD_RELATIVE_PATH_BYTES`): the schema states the bound in characters, which a text\nwithin it never exceeds, and `check_rules` counts the bytes and refuses a longer name as\n`too_large` on its field. A `filename` that gives no workspace path for its source card\n(`conventions::source_card_name`, then `WorkspacePath::from_supplied`) is refused as\n`invalid_input` on `/filename` when the slot is opened; an import that later places the\ncard in a folder where the path cannot be written still refuses the job.",
         "properties": {
           "filename": {
-            "description": "Original filename, preserved.",
+            "description": "Original filename, preserved; at most 1024 bytes of UTF-8.",
+            "maxLength": 1024,
             "type": "string"
           },
           "idempotency_key": {
@@ -1824,7 +1882,8 @@
             "description": "Retry identity."
           },
           "relative_path": {
-            "description": "Supplied folder context.",
+            "description": "Supplied folder context, preserved; at most 4096 bytes of UTF-8.",
+            "maxLength": 4096,
             "type": "string"
           },
           "sha256": {
@@ -1839,7 +1898,7 @@
             "description": "Expected content hash if caller knows it."
           },
           "size": {
-            "description": "Expected decimal byte count.",
+            "description": "Expected decimal byte count. A size over `limits.upload_bytes` is refused as\n`too_large` on `/size` when the slot is opened.",
             "type": "string"
           },
           "workspace_id": {
@@ -1988,21 +2047,25 @@
           {
             "const": "ymd",
             "description": "Year, month, day.",
+            "title": "Year, month, day",
             "type": "string"
           },
           {
             "const": "mdy",
             "description": "Month, day, year.",
+            "title": "Month, day, year",
             "type": "string"
           },
           {
             "const": "dmy",
             "description": "Day, month, year.",
+            "title": "Day, month, year",
             "type": "string"
           },
           {
             "const": "reject_ambiguous",
             "description": "Require unambiguous dates or a human choice.",
+            "title": "Ask when unclear",
             "type": "string"
           }
         ]
@@ -2628,12 +2691,62 @@
               "purge_id"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "An upload's received bytes do not match what was announced for it: their length, or\ntheir SHA-256. The code is `conflict`, and nothing was retained.",
+            "properties": {
+              "digest_matches": {
+                "description": "Whether the received bytes have the digest asked for; absent when the length\nalready differs, so the digest was not compared.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "expected_bytes": {
+                "description": "The byte count announced when the slot was opened, as a decimal string.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "upload_mismatch",
+                "type": "string"
+              },
+              "received_bytes": {
+                "description": "The byte count the slot holds, as a decimal string.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "expected_bytes",
+              "received_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The request's base revision (or expected head) is not the workspace's head; `field`\nnames that request field. The code is `conflict`.",
+            "properties": {
+              "head": {
+                "$ref": "#/components/schemas/Revision",
+                "description": "The head the request was compared with."
+              },
+              "kind": {
+                "const": "stale_base",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "head"
+            ],
+            "type": "object"
           }
         ]
       },
       "Event": {
         "additionalProperties": false,
-        "description": "A resumable change notification, not canonical content.\n\nA tenant-level event (a sign-in, a connector issued or revoked, a refusal outside a\nworkspace) has no `workspace_id`. Security events carry their `actor`.",
+        "description": "A resumable change notification, not canonical content.\n\nA tenant-level event (a sign-in or a refused one, a connector issued or revoked, a refusal\noutside a workspace) has no `workspace_id`. Security events (`EventKind::is_security`) carry\ntheir `actor`, except a `sign_in_refused` event before a subject was established.",
         "properties": {
           "actor": {
             "anyOf": [
@@ -2660,6 +2773,15 @@
               }
             ],
             "description": "Affected connector."
+          },
+          "count": {
+            "description": "How many occurrences this one event stands for; absent means one. A `sign_in_refused`\nevent past its source's allowance counts that source's refusals of the minute, and a\n`permission_denied` event may count the same way when the server bounds its flood.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "id": {
             "description": "Opaque monotonic event cursor.",
@@ -2701,6 +2823,17 @@
               }
             ],
             "description": "The refused operation of a `permission_denied` event."
+          },
+          "proposal_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProposalId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Affected proposal."
           },
           "revision": {
             "anyOf": [
@@ -2802,6 +2935,11 @@
             "type": "string"
           },
           {
+            "const": "sign_in_refused",
+            "description": "A sign-in was refused (tenant-level). It carries `at`, and `actor` only when a subject\nwas established.\n\nEach refusal from one source is recorded as its own event up to an allowance a minute;\npast it, the refusals of that source in that minute are recorded as one event with their\n`count`, written at the end of that minute or when the server stops. So every refusal is\ncounted, and what one source can write is bounded. The source and the allowance are the\nserver's. A refusal before any tenant is known (a hosted callback that names no\norganization) belongs to no tenant's log: the server's ingress limit and its diagnostics\ncount it.",
+            "type": "string"
+          },
+          {
             "const": "permission_denied",
             "description": "An authenticated request was refused for lack of a grant or by its route.",
             "type": "string"
@@ -2872,16 +3010,19 @@
           {
             "const": "preserve",
             "description": "Leave the extension unchanged.",
+            "title": "Keep",
             "type": "string"
           },
           {
             "const": "lowercase",
             "description": "Lower-case the extension.",
+            "title": "Lower case",
             "type": "string"
           },
           {
             "const": "strip",
             "description": "Drop the extension from the normalized note path (never from originals).",
+            "title": "Remove",
             "type": "string"
           }
         ]
@@ -3649,6 +3790,42 @@
         ],
         "type": "object"
       },
+      "GetRulesResponse": {
+        "additionalProperties": false,
+        "description": "The naming rules at one revision, or the stored file when it cannot be read as rules.\n\nNever `internal` for a file a person or an import wrote: a file this build cannot read is\nanswered as `unreadable`, so a person can repair it in the YAML editor and save typed rules\nwith `set_rules`, which replaces the file whatever it held.",
+        "properties": {
+          "revision": {
+            "$ref": "#/components/schemas/Revision",
+            "description": "The revision the rules were read at."
+          },
+          "rules": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NamingRules"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The rules; absent when no rules were saved at `revision`, and when the stored file\ncannot be read as this build's rules (then `unreadable` is present)."
+          },
+          "unreadable": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UnreadableRules"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The stored file and what was wrong with it; present exactly when a file is stored at\n`revision` and it cannot be read as this build's rules."
+          }
+        },
+        "required": [
+          "revision"
+        ],
+        "type": "object"
+      },
       "GetSourcesRequest": {
         "additionalProperties": false,
         "description": "Retrieve sources and provenance for one item.",
@@ -3996,7 +4173,7 @@
       },
       "Job": {
         "additionalProperties": false,
-        "description": "Durable work status; acknowledgement is not a claim of completion.\n\n`workspace_id` is present exactly for a workspace job kind and absent exactly for a tenant\njob kind (`JobKind::is_tenant`); `check` enforces it.",
+        "description": "Durable work status; acknowledgement is not a claim of completion.\n\n`workspace_id` is present exactly for a workspace job kind and absent exactly for a tenant\njob kind (`JobKind::is_tenant`); `check` enforces it. The store writes the job's instants\nand `retryable` as its state changes; a job accepted before a field existed reads it as\nabsent.",
         "properties": {
           "artifact": {
             "anyOf": [
@@ -4015,6 +4192,28 @@
             "minimum": 0,
             "type": "integer"
           },
+          "backup": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BackupReport"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What a completed workspace backup left out of its archive."
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the job was accepted; absent on a job accepted before this field existed."
+          },
           "error": {
             "anyOf": [
               {
@@ -4024,7 +4223,18 @@
                 "type": "null"
               }
             ],
-            "description": "Last failure."
+            "description": "The refusal as the job's handler gave it; `field` is a JSON Pointer into the request\nthat started the job."
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the job reached a terminal state; cleared when a retry queues it again."
           },
           "id": {
             "$ref": "#/components/schemas/JobId",
@@ -4059,6 +4269,13 @@
             ],
             "description": "What a completed restore did."
           },
+          "retryable": {
+            "description": "Present exactly when `state` is `failed`: whether `retry_job` will accept it.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "revision": {
             "anyOf": [
               {
@@ -4069,6 +4286,17 @@
               }
             ],
             "description": "Committed result revision."
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the current attempt was claimed; absent while the job waits, and cleared when a\nretry queues it again."
           },
           "state": {
             "$ref": "#/components/schemas/JobState",
@@ -4184,7 +4412,7 @@
           },
           {
             "const": "failed",
-            "description": "Failure retained with retry information.",
+            "description": "Failure retained; `retryable` says whether `retry_job` accepts it.",
             "type": "string"
           },
           {
@@ -4200,31 +4428,37 @@
           {
             "const": "preserve",
             "description": "Preserve case.",
+            "title": "Keep as written",
             "type": "string"
           },
           {
             "const": "lower",
             "description": "Lower case.",
+            "title": "Lower case",
             "type": "string"
           },
           {
             "const": "upper",
             "description": "Upper case.",
+            "title": "Upper case",
             "type": "string"
           },
           {
             "const": "title",
             "description": "Title case.",
+            "title": "Title case",
             "type": "string"
           },
           {
             "const": "snake",
             "description": "Snake case.",
+            "title": "Snake case",
             "type": "string"
           },
           {
             "const": "kebab",
             "description": "Kebab case.",
+            "title": "Kebab case",
             "type": "string"
           }
         ]
@@ -4952,32 +5186,104 @@
         ],
         "type": "object"
       },
+      "NameSelection": {
+        "description": "Which items a preview covers.\n\nArchived items are never renamed: whichever selection is made, they are counted in the\nplan's `archived_left_out`.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The items named; at least one, or the request is `invalid_input` on\n`/selection/item_ids`.",
+            "properties": {
+              "item_ids": {
+                "description": "Selected items.",
+                "items": {
+                  "$ref": "#/components/schemas/ItemId"
+                },
+                "minItems": 1,
+                "type": "array"
+              },
+              "kind": {
+                "const": "items",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "item_ids"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The items of one folder.",
+            "properties": {
+              "folder": {
+                "$ref": "#/components/schemas/WorkspacePath",
+                "description": "The folder."
+              },
+              "kind": {
+                "const": "folder",
+                "type": "string"
+              },
+              "recursive": {
+                "description": "Also the items of every folder under it.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "kind",
+              "folder",
+              "recursive"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Every item of the workspace.",
+            "properties": {
+              "kind": {
+                "const": "workspace",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "NamingRule": {
         "additionalProperties": false,
         "description": "A typed rule scoped by glob and optional OKF type.",
         "properties": {
           "alias_preservation": {
             "description": "When true, preserve existing path aliases while renaming the primary path.",
+            "title": "Keep old paths as aliases",
             "type": "boolean"
           },
           "case": {
             "$ref": "#/components/schemas/LetterCase",
-            "description": "Case transformation."
+            "description": "Case transformation.",
+            "title": "Letter case"
           },
           "collision": {
             "$ref": "#/components/schemas/CollisionPolicy",
-            "description": "Collision behavior."
+            "description": "Collision behavior.",
+            "title": "When names collide"
           },
           "date_format": {
             "description": "Explicit output format.",
+            "title": "Date format",
             "type": "string"
           },
           "date_order": {
             "$ref": "#/components/schemas/DateOrder",
-            "description": "Declared incoming date convention."
+            "description": "Declared incoming date convention.",
+            "title": "Date order"
           },
           "destination": {
             "description": "Relative destination template.",
+            "title": "Destination folder",
             "type": [
               "string",
               "null"
@@ -4985,26 +5291,32 @@
           },
           "extension_policy": {
             "$ref": "#/components/schemas/ExtensionPolicy",
-            "description": "How the filename extension is transformed on normalized notes."
+            "description": "How the filename extension is transformed on normalized notes.",
+            "title": "File extension"
           },
           "glob": {
             "description": "Match against the supplied relative path.",
+            "title": "Applies to paths",
             "type": "string"
           },
           "prefix": {
             "description": "Optional literal prefix.",
+            "title": "Prefix",
             "type": "string"
           },
           "separator": {
             "description": "Word separator.",
+            "title": "Word separator",
             "type": "string"
           },
           "strip_version_suffix": {
             "description": "Remove filename suffixes only from normalized notes, never originals.",
+            "title": "Remove version suffixes",
             "type": "boolean"
           },
           "suffix": {
             "description": "Optional literal suffix applied to the normalized base name.",
+            "title": "Suffix",
             "type": [
               "string",
               "null"
@@ -5012,6 +5324,7 @@
           },
           "type_name": {
             "description": "Optional OKF type selector.",
+            "title": "Applies to type",
             "type": [
               "string",
               "null"
@@ -5041,12 +5354,14 @@
             "items": {
               "$ref": "#/components/schemas/NamingRule"
             },
+            "title": "Rules",
             "type": "array"
           },
           "schema_version": {
             "description": "Format version; this release emits 1.",
             "format": "uint32",
             "minimum": 0,
+            "title": "Format version",
             "type": "integer"
           }
         },
@@ -5845,22 +6160,19 @@
       },
       "PreviewNamesRequest": {
         "additionalProperties": false,
-        "description": "Calculate a rename plan with no persistent mutation.",
+        "description": "Calculate a rename plan with no persistent mutation.\n\nA plan too large for one request body is applied folder by folder: `apply_names` refuses an\nover-large body as every request does (`transport::MAX_REQUEST_BODY_BYTES`).",
         "properties": {
           "at": {
             "$ref": "#/components/schemas/At",
             "description": "Requested revision selector; latest is resolved once before reading."
           },
-          "item_ids": {
-            "description": "Selected items.",
-            "items": {
-              "$ref": "#/components/schemas/ItemId"
-            },
-            "type": "array"
-          },
           "rules": {
             "$ref": "#/components/schemas/NamingRules",
             "description": "Candidate rules, not necessarily saved."
+          },
+          "selection": {
+            "$ref": "#/components/schemas/NameSelection",
+            "description": "The items to preview."
           },
           "workspace_id": {
             "$ref": "#/components/schemas/WorkspaceId",
@@ -5870,7 +6182,7 @@
         "required": [
           "workspace_id",
           "at",
-          "item_ids",
+          "selection",
           "rules"
         ],
         "type": "object"
@@ -5978,6 +6290,13 @@
           "title": {
             "description": "Human-readable reason.",
             "type": "string"
+          },
+          "warnings": {
+            "description": "Findings of the check that ran when the candidate was written.",
+            "items": {
+              "$ref": "#/components/schemas/Warning"
+            },
+            "type": "array"
           },
           "workspace_id": {
             "$ref": "#/components/schemas/WorkspaceId",
@@ -6254,7 +6573,7 @@
           },
           {
             "const": "failed",
-            "description": "Stopped; repeating the request resumes it.",
+            "description": "Set, with `error`, when the purge's job failed and will not run again by itself;\nrepeating the request resumes it.",
             "type": "string"
           }
         ]
@@ -6714,11 +7033,23 @@
       },
       "RenamePlan": {
         "additionalProperties": false,
-        "description": "A preview bound to source state and exact conventions.",
+        "description": "A preview bound to source state and exact conventions.\n\nThe counts are for the person reading the preview; `apply_names` does not check them.",
         "properties": {
+          "archived_left_out": {
+            "description": "Archived items the selection holds; they are never renamed.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "base_revision": {
             "$ref": "#/components/schemas/Revision",
             "description": "Workspace revision inspected."
+          },
+          "considered": {
+            "description": "Items the selection holds that are not archived.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           },
           "duplicate_observations": {
             "description": "Duplicate path observations recorded during preview.",
@@ -6728,7 +7059,7 @@
             "type": "array"
           },
           "entries": {
-            "description": "Proposed changes.",
+            "description": "Proposed changes: only the items whose path would change.",
             "items": {
               "$ref": "#/components/schemas/RenameEntry"
             },
@@ -6737,6 +7068,12 @@
           "rules_digest": {
             "$ref": "#/components/schemas/Digest",
             "description": "Digest of the exact canonical rules."
+          },
+          "unchanged": {
+            "description": "Considered items whose path would not change; they are not in `entries`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           },
           "warnings": {
             "description": "Plan-level warnings.",
@@ -6751,7 +7088,10 @@
           "rules_digest",
           "entries",
           "duplicate_observations",
-          "warnings"
+          "warnings",
+          "considered",
+          "unchanged",
+          "archived_left_out"
         ],
         "type": "object"
       },
@@ -6858,6 +7198,15 @@
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
+          },
+          "rows_left_out": {
+            "description": "Rows the archive's own backup left out; they were not restored.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -6914,7 +7263,7 @@
       },
       "RestoreWorkspaceRequest": {
         "additionalProperties": false,
-        "description": "Fill a blank workspace of this installation from an uploaded workspace archive.\n\nThe restore keeps item ids, rewrites View bindings to this workspace, gives each draft\nwhose editor is a validated subject with `write` here back to that editor, and keeps the\nothers in the archive, unassigned and counted. An archive of this tenant whose workspace\nstill exists, or has a purge record, is refused: purged content never comes back through\nan import. The upload is consumed when the restore completes.",
+        "description": "Fill a blank workspace of this installation from an uploaded workspace archive.\n\nThe restore keeps item ids, rewrites View bindings to this workspace, gives each draft\nwhose editor is a validated subject with `write` here back to that editor, and keeps the\nothers in the archive, unassigned and counted. An archive of this tenant whose workspace\nstill exists, or has a purge record, is refused: purged content never comes back through\nan import. The upload is consumed when the restore starts, before the archive is applied. A\nrestore cancelled before that leaves the upload usable; one that fails after it leaves the\nupload consumed by its job, and only a retry of that job can use it.",
         "properties": {
           "idempotency_key": {
             "$ref": "#/components/schemas/IdempotencyKey",
@@ -7770,7 +8119,7 @@
       },
       "StartImportRequest": {
         "additionalProperties": false,
-        "description": "Convert finalized uploads into source cards in the user-selected folder.",
+        "description": "Convert finalized uploads into source cards in the user-selected folder.\n\n`upload_ids` holds between one and `MAX_IMPORT_UPLOADS` uploads (`check_rules`): a longer\nlist is `too_large` on `/upload_ids`, an empty one `invalid_input` on `/upload_ids`, and an\nupload listed twice `invalid_input` on `/upload_ids/<index of the second>`.",
         "properties": {
           "apply_naming_rules": {
             "description": "Apply the explicit workspace conventions after preview acceptance.",
@@ -7778,7 +8127,7 @@
           },
           "base_revision": {
             "$ref": "#/components/schemas/Revision",
-            "description": "Exact revision on which this change is based; stale writes conflict."
+            "description": "The revision the import was prepared against; card names are chosen there. It must be\na revision of the workspace. A head that moved since does not refuse the import. A card\npath taken since fails the job, which is not retried."
           },
           "destination": {
             "description": "Relative destination folder; empty for root.",
@@ -7800,10 +8149,12 @@
             "description": "Converter settings; absent means the deployment's defaults, resolved into the job at\nacceptance so a retry converts with the same settings."
           },
           "upload_ids": {
-            "description": "Completed upload slots.",
+            "description": "Completed upload slots, each listed once.",
             "items": {
               "$ref": "#/components/schemas/UploadId"
             },
+            "maxItems": 5000,
+            "minItems": 1,
             "type": "array"
           },
           "workspace_id": {
@@ -8002,6 +8353,28 @@
           }
         ]
       },
+      "UnreadableRules": {
+        "additionalProperties": false,
+        "description": "A stored rules file this build cannot read as rules.",
+        "properties": {
+          "problems": {
+            "description": "What was wrong; a `schema_version` this build does not know is one such problem.",
+            "items": {
+              "$ref": "#/components/schemas/Warning"
+            },
+            "type": "array"
+          },
+          "text": {
+            "description": "The file's text as stored, at most `item::MAX_ITEM_TEXT_BYTES`; a longer file is\n`too_large`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "problems"
+        ],
+        "type": "object"
+      },
       "UnresolvedReason": {
         "description": "Why a location is not known; one variant per reason the producing rule states.",
         "oneOf": [
@@ -8190,11 +8563,40 @@
       },
       "Upload": {
         "additionalProperties": false,
-        "description": "An authenticated upload slot for a specific source occurrence.",
+        "description": "An authenticated upload slot for a specific source occurrence.\n\nA slot stays until it is discarded, imported or its workspace is purged; nothing expires,\nand a completed upload is never removed by the service on its own.",
         "properties": {
           "complete": {
             "description": "Whether expected bytes and digest have been verified.",
             "type": "boolean"
+          },
+          "consumed_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The job that took this upload."
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the slot was opened."
+          },
+          "filename": {
+            "description": "Original filename, as supplied.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "id": {
             "$ref": "#/components/schemas/UploadId",
@@ -8203,6 +8605,20 @@
           "received_bytes": {
             "description": "Durably retained byte count.",
             "type": "string"
+          },
+          "relative_path": {
+            "description": "Supplied folder context, as supplied.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size": {
+            "description": "The announced byte count, as a decimal string.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "upload_path": {
             "description": "Same-origin binary PUT target.",
@@ -8971,7 +9387,7 @@
     },
     "/api/conventions/get-rules": {
       "post": {
-        "description": "Read the same naming conventions used by the form, YAML editor, and import process.",
+        "description": "Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with set_rules.",
         "operationId": "get_rules",
         "requestBody": {
           "content": {
@@ -8988,7 +9404,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/NamingRules"
+                  "$ref": "#/components/schemas/GetRulesResponse"
                 }
               }
             },
@@ -9555,7 +9971,7 @@
     },
     "/api/events/list-events": {
       "post": {
-        "description": "Read resumable notifications without treating them as authoritative document content.",
+        "description": "Read resumable notifications without treating them as authoritative document content. A workspace's security events are returned only to a caller holding `admin` on it, checked on every call; a page may therefore hold fewer rows than asked, or none, and still carry a cursor.",
         "operationId": "list_events",
         "requestBody": {
           "content": {
@@ -19231,7 +19647,7 @@
     },
     "/api/workspaces/purge-workspace": {
       "post": {
-        "description": "Permanently remove a workspace's originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge.",
+        "description": "Permanently remove a workspace's originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request returns the purge: an unfinished one resumed, a completed one as it is.",
         "operationId": "purge_workspace",
         "requestBody": {
           "content": {
@@ -19865,7 +20281,7 @@
     },
     "/api/workspaces/{workspace_id}/events": {
       "get": {
-        "description": "Resume workspace notifications with Last-Event-ID; notifications are projections, not canonical content.",
+        "description": "Resume workspace notifications with Last-Event-ID; notifications are projections, not canonical content. A workspace's security events are returned only to a caller holding `admin` on it, checked on every call; a page may therefore hold fewer rows than asked, or none, and still carry a cursor.",
         "operationId": "stream_events",
         "parameters": [
           {
@@ -19886,7 +20302,7 @@
                 }
               }
             },
-            "description": "Resume workspace notifications with Last-Event-ID; notifications are projections, not canonical content."
+            "description": "Resume workspace notifications with Last-Event-ID; notifications are projections, not canonical content. A workspace's security events are returned only to a caller holding `admin` on it, checked on every call; a page may therefore hold fewer rows than asked, or none, and still carry a cursor."
           }
         },
         "security": [

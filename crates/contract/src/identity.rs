@@ -155,6 +155,9 @@ pub struct IdentityError(pub &'static str);
 /// value.
 pub const LOCAL_TENANT_ID: &str = "local";
 
+/// The most UTF-8 bytes of a `WorkspacePath`: 4096.
+pub const MAX_WORKSPACE_PATH_BYTES: usize = 4096;
+
 /// The part of the workspace-path rule a regular expression can state: `/`-separated
 /// segments, none empty, none containing `\`, `:`, `<`, `>`, `"`, `|`, `?`, `*` or a C0
 /// control. Not expressible by the pattern, and enforced by `TryFrom<String>`: the `.`, `..`
@@ -234,7 +237,7 @@ impl JsonSchema for WorkspacePath {
         schemars::json_schema!({
             "type": "string",
             "minLength": 1,
-            "maxLength": 4096,
+            "maxLength": MAX_WORKSPACE_PATH_BYTES,
             "pattern": WORKSPACE_PATH_PATTERN
         })
     }
@@ -395,7 +398,10 @@ impl TryFrom<String> for Digest {
 impl TryFrom<String> for WorkspacePath {
     type Error = IdentityError;
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control) {
+        if value.is_empty()
+            || value.len() > MAX_WORKSPACE_PATH_BYTES
+            || value.chars().any(char::is_control)
+        {
             return Err(IdentityError(
                 "path must be normalized, relative, and outside .git",
             ));

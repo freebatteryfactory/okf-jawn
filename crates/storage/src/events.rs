@@ -51,6 +51,8 @@ impl EventLog for SqliteEvents {
                 connector_id: event.connector_id,
                 actor: event.actor,
                 operation: event.operation,
+                proposal_id: None,
+                count: None,
             };
             let replay_key = mutation_id
                 .map(|mutation| {

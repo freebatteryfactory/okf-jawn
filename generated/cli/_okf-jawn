@@ -1194,7 +1194,7 @@ _okf-jawn_commands() {
 'update_workspace:Update workspace metadata at the supplied base revision.' \
 'archive_workspace:Archive without deleting historical content.' \
 'unarchive_workspace:Return an archived workspace to ordinary listings; its history and records were kept.' \
-'purge_workspace:Permanently remove a workspace'\''s originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge.' \
+'purge_workspace:Permanently remove a workspace'\''s originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request returns the purge\: an unfinished one resumed, a completed one as it is.' \
 'get_purge:Read a purge'\''s progress and counts; available after the workspace is gone.' \
 'export_workspace:Build a portable export with resolvable referenced assets; current app reviews are written into the files as OKF verified. Drafts, sessions and credentials are never included.' \
 'export:Build a portable export with resolvable referenced assets; current app reviews are written into the files as OKF verified. Drafts, sessions and credentials are never included.' \
@@ -1265,7 +1265,7 @@ _okf-jawn_commands() {
 'cancel_job:Cancel work while retaining completed uploads and recorded state.' \
 'redigest_item:Re-run extraction with declared settings; preserve prior digests and separate corrections.' \
 'correct_digest:Save a correction separately from generated extraction.' \
-'get_rules:Read the same naming conventions used by the form, YAML editor, and import process.' \
+'get_rules:Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with set_rules.' \
 'set_rules:Save explicit rules as versioned context.' \
 'preview_names:Compute before and after naming changes without mutating content.' \
 'apply_names:Apply the checked preview and rewrite references in one versioned action.' \
@@ -1280,7 +1280,7 @@ _okf-jawn_commands() {
 'get_catalog:Describe the allowed visual components; the catalog never grants capabilities.' \
 'catalog:Describe the allowed visual components; the catalog never grants capabilities.' \
 'get_receipt:Inspect the exact sources returned through this server, not an external model internal state.' \
-'list_events:Read resumable notifications without treating them as authoritative document content.' \
+'list_events:Read resumable notifications without treating them as authoritative document content. A workspace'\''s security events are returned only to a caller holding \`admin\` on it, checked on every call; a page may therefore hold fewer rows than asked, or none, and still carry a cursor.' \
 'list_tenant_events:Read installation-level notifications\: sign-ins, connector issue and revocation, and refusals outside a workspace.' \
 'get_session:Read the current authenticated principal without exposing credentials.' \
 'create_connector:Issue a local MCP connector credential scoped to read, or read and propose; never review or approve. Local owner only; hosted agents use WorkOS Connect.' \
@@ -1512,7 +1512,7 @@ _okf-jawn__subcmd__help_commands() {
 'update_workspace:Update workspace metadata at the supplied base revision.' \
 'archive_workspace:Archive without deleting historical content.' \
 'unarchive_workspace:Return an archived workspace to ordinary listings; its history and records were kept.' \
-'purge_workspace:Permanently remove a workspace'\''s originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge.' \
+'purge_workspace:Permanently remove a workspace'\''s originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request returns the purge\: an unfinished one resumed, a completed one as it is.' \
 'get_purge:Read a purge'\''s progress and counts; available after the workspace is gone.' \
 'export_workspace:Build a portable export with resolvable referenced assets; current app reviews are written into the files as OKF verified. Drafts, sessions and credentials are never included.' \
 'backup_workspace:Back up the workspace'\''s history, retained objects and application records, drafts included, into one self-contained archive. Human administrator session only.' \
@@ -1563,7 +1563,7 @@ _okf-jawn__subcmd__help_commands() {
 'cancel_job:Cancel work while retaining completed uploads and recorded state.' \
 'redigest_item:Re-run extraction with declared settings; preserve prior digests and separate corrections.' \
 'correct_digest:Save a correction separately from generated extraction.' \
-'get_rules:Read the same naming conventions used by the form, YAML editor, and import process.' \
+'get_rules:Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with set_rules.' \
 'set_rules:Save explicit rules as versioned context.' \
 'preview_names:Compute before and after naming changes without mutating content.' \
 'apply_names:Apply the checked preview and rewrite references in one versioned action.' \
@@ -1575,7 +1575,7 @@ _okf-jawn__subcmd__help_commands() {
 'export_view:Export the spec, source references, data table and rendering.' \
 'get_catalog:Describe the allowed visual components; the catalog never grants capabilities.' \
 'get_receipt:Inspect the exact sources returned through this server, not an external model internal state.' \
-'list_events:Read resumable notifications without treating them as authoritative document content.' \
+'list_events:Read resumable notifications without treating them as authoritative document content. A workspace'\''s security events are returned only to a caller holding \`admin\` on it, checked on every call; a page may therefore hold fewer rows than asked, or none, and still carry a cursor.' \
 'list_tenant_events:Read installation-level notifications\: sign-ins, connector issue and revocation, and refusals outside a workspace.' \
 'get_session:Read the current authenticated principal without exposing credentials.' \
 'create_connector:Issue a local MCP connector credential scoped to read, or read and propose; never review or approve. Local owner only; hosted agents use WorkOS Connect.' \

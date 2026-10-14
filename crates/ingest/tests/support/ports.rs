@@ -1059,6 +1059,7 @@ impl Backups for FakeBackups {
                     items: 3,
                     drafts_restored: 1,
                     drafts_unassigned: 1,
+                    rows_left_out: None,
                 })
         })
     }

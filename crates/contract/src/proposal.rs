@@ -114,6 +114,9 @@ pub struct Proposal {
     pub client_id: Option<String>,
     /// Creation time.
     pub created_at: crate::identity::Timestamp,
+    /// Findings of the check that ran when the candidate was written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<crate::common::Warning>,
 }
 
 /// Suggest changes without changing the accepted workspace.
@@ -232,6 +235,9 @@ pub struct Comment {
     /// The purge that invalidated the comment's `source`, whose stored path was scrubbed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invalidated_by: Option<crate::identity::PurgeId>,
+    /// The line or range under discussion, resolved when the comment was added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::source::SourceReference>,
 }
 
 impl Change {

@@ -81,7 +81,8 @@ export type ApiError = {
      */
     detail?: ErrorDetail | null;
     /**
-     * Input field needing correction.
+     * Input field needing correction. A JSON Pointer into the request (`/base_revision`,
+     * `/changes/2/body`).
      */
     field?: string | null;
     /**
@@ -175,6 +176,11 @@ export type AttentionItem = {
      */
     action: OperationName;
     /**
+     * The item at the response's `revision`; absent when the observation is about no one
+     * item or the item was purged.
+     */
+    item?: ItemSummary | null;
+    /**
      * Relevant item.
      */
     item_id?: ItemId | null;
@@ -186,12 +192,17 @@ export type AttentionItem = {
      * Concrete explanation.
      */
     message: string;
+    /**
+     * The place inside the item the observation is about, in the form `read_item` takes;
+     * absent when it is about the whole item.
+     */
+    selection?: Selection | null;
 };
 
 /**
  * Known maintenance conditions.
  */
-export type AttentionKind = 'broken_link' | 'stale' | 'unreviewed' | 'duplicate' | 'missing_description' | 'unprocessed' | 'extraction_warnings' | 'newer_source' | 'instruction_like' | 'invalidated' | 'unparseable_header';
+export type AttentionKind = 'broken_link' | 'stale' | 'unreviewed' | 'duplicate' | 'missing_description' | 'unprocessed' | 'extraction_warnings' | 'newer_source' | 'instruction_like' | 'invalidated' | 'unparseable_header' | 'uploads_waiting';
 
 /**
  * Start an installation archive: identities, tenant grants, connector records without
@@ -202,6 +213,16 @@ export type BackupInstallationRequest = {
      * Retry identity.
      */
     idempotency_key: IdempotencyKey;
+};
+
+/**
+ * What a workspace backup did.
+ */
+export type BackupReport = {
+    /**
+     * Rows left out of the archive because they named a managed backup or a written history.
+     */
+    rows_left_out: number;
 };
 
 /**
@@ -544,6 +565,10 @@ export type Comment = {
      * The purge that invalidated the comment's `source`, whose stored path was scrubbed.
      */
     invalidated_by?: PurgeId | null;
+    /**
+     * The line or range under discussion, resolved when the comment was added.
+     */
+    source?: SourceReference | null;
     /**
      * Discussion text.
      */
@@ -1041,10 +1066,18 @@ export type CreateSandboxCapabilityRequest = {
 
 /**
  * Register immutable upload intent before streaming bytes.
+ *
+ * `filename` and `relative_path` are bounded in UTF-8 bytes (`MAX_UPLOAD_FILENAME_BYTES`,
+ * `MAX_UPLOAD_RELATIVE_PATH_BYTES`): the schema states the bound in characters, which a text
+ * within it never exceeds, and `check_rules` counts the bytes and refuses a longer name as
+ * `too_large` on its field. A `filename` that gives no workspace path for its source card
+ * (`conventions::source_card_name`, then `WorkspacePath::from_supplied`) is refused as
+ * `invalid_input` on `/filename` when the slot is opened; an import that later places the
+ * card in a folder where the path cannot be written still refuses the job.
  */
 export type CreateUploadRequest = {
     /**
-     * Original filename, preserved.
+     * Original filename, preserved; at most 1024 bytes of UTF-8.
      */
     filename: string;
     /**
@@ -1052,7 +1085,7 @@ export type CreateUploadRequest = {
      */
     idempotency_key: IdempotencyKey;
     /**
-     * Supplied folder context.
+     * Supplied folder context, preserved; at most 4096 bytes of UTF-8.
      */
     relative_path: string;
     /**
@@ -1060,7 +1093,8 @@ export type CreateUploadRequest = {
      */
     sha256?: Digest | null;
     /**
-     * Expected decimal byte count.
+     * Expected decimal byte count. A size over `limits.upload_bytes` is refused as
+     * `too_large` on `/size` when the slot is opened.
      */
     size: string;
     /**
@@ -1497,13 +1531,35 @@ export type ErrorDetail = {
      * workspace purge.
      */
     replacement?: Revision | null;
+} | {
+    /**
+     * Whether the received bytes have the digest asked for; absent when the length
+     * already differs, so the digest was not compared.
+     */
+    digest_matches?: boolean | null;
+    /**
+     * The byte count announced when the slot was opened, as a decimal string.
+     */
+    expected_bytes: string;
+    kind: 'upload_mismatch';
+    /**
+     * The byte count the slot holds, as a decimal string.
+     */
+    received_bytes: string;
+} | {
+    /**
+     * The head the request was compared with.
+     */
+    head: Revision;
+    kind: 'stale_base';
 };
 
 /**
  * A resumable change notification, not canonical content.
  *
- * A tenant-level event (a sign-in, a connector issued or revoked, a refusal outside a
- * workspace) has no `workspace_id`. Security events carry their `actor`.
+ * A tenant-level event (a sign-in or a refused one, a connector issued or revoked, a refusal
+ * outside a workspace) has no `workspace_id`. Security events (`EventKind::is_security`) carry
+ * their `actor`, except a `sign_in_refused` event before a subject was established.
  */
 export type Event = {
     /**
@@ -1518,6 +1574,12 @@ export type Event = {
      * Affected connector.
      */
     connector_id?: ConnectorId | null;
+    /**
+     * How many occurrences this one event stands for; absent means one. A `sign_in_refused`
+     * event past its source's allowance counts that source's refusals of the minute, and a
+     * `permission_denied` event may count the same way when the server bounds its flood.
+     */
+    count?: number | null;
     /**
      * Opaque monotonic event cursor.
      */
@@ -1538,6 +1600,10 @@ export type Event = {
      * The refused operation of a `permission_denied` event.
      */
     operation?: OperationName | null;
+    /**
+     * Affected proposal.
+     */
+    proposal_id?: ProposalId | null;
     /**
      * Content revision when applicable.
      */
@@ -1569,7 +1635,7 @@ export type EventActor = {
 /**
  * Kinds of workspace change notification.
  */
-export type EventKind = 'changed' | 'imported' | 'job_updated' | 'reviewed' | 'proposal_updated' | 'connector_issued' | 'connector_revoked' | 'signed_in' | 'permission_denied';
+export type EventKind = 'changed' | 'imported' | 'job_updated' | 'reviewed' | 'proposal_updated' | 'connector_issued' | 'connector_revoked' | 'signed_in' | 'sign_in_refused' | 'permission_denied';
 
 /**
  * Export the visual specification, sources, data table, and rendering assets.
@@ -2047,6 +2113,30 @@ export type GetRulesRequest = {
 };
 
 /**
+ * The naming rules at one revision, or the stored file when it cannot be read as rules.
+ *
+ * Never `internal` for a file a person or an import wrote: a file this build cannot read is
+ * answered as `unreadable`, so a person can repair it in the YAML editor and save typed rules
+ * with `set_rules`, which replaces the file whatever it held.
+ */
+export type GetRulesResponse = {
+    /**
+     * The revision the rules were read at.
+     */
+    revision: Revision;
+    /**
+     * The rules; absent when no rules were saved at `revision`, and when the stored file
+     * cannot be read as this build's rules (then `unreadable` is present).
+     */
+    rules?: NamingRules | null;
+    /**
+     * The stored file and what was wrong with it; present exactly when a file is stored at
+     * `revision` and it cannot be read as this build's rules.
+     */
+    unreadable?: UnreadableRules | null;
+};
+
+/**
  * Retrieve sources and provenance for one item.
  */
 export type GetSourcesRequest = {
@@ -2282,7 +2372,9 @@ export type ItemSummary = {
  * Durable work status; acknowledgement is not a claim of completion.
  *
  * `workspace_id` is present exactly for a workspace job kind and absent exactly for a tenant
- * job kind (`JobKind::is_tenant`); `check` enforces it.
+ * job kind (`JobKind::is_tenant`); `check` enforces it. The store writes the job's instants
+ * and `retryable` as its state changes; a job accepted before a field existed reads it as
+ * absent.
  */
 export type Job = {
     /**
@@ -2294,9 +2386,22 @@ export type Job = {
      */
     attempt: number;
     /**
-     * Last failure.
+     * What a completed workspace backup left out of its archive.
+     */
+    backup?: BackupReport | null;
+    /**
+     * When the job was accepted; absent on a job accepted before this field existed.
+     */
+    created_at?: Timestamp | null;
+    /**
+     * The refusal as the job's handler gave it; `field` is a JSON Pointer into the request
+     * that started the job.
      */
     error?: ApiError | null;
+    /**
+     * When the job reached a terminal state; cleared when a retry queues it again.
+     */
+    finished_at?: Timestamp | null;
     /**
      * Job identity.
      */
@@ -2318,9 +2423,18 @@ export type Job = {
      */
     restore?: RestoreReport | null;
     /**
+     * Present exactly when `state` is `failed`: whether `retry_job` will accept it.
+     */
+    retryable?: boolean | null;
+    /**
      * Committed result revision.
      */
     revision?: Revision | null;
+    /**
+     * When the current attempt was claimed; absent while the job waits, and cleared when a
+     * retry queues it again.
+     */
+    started_at?: Timestamp | null;
     /**
      * Current durable state.
      */
@@ -2823,58 +2937,110 @@ export type MutationResult = {
 };
 
 /**
+ * Which items a preview covers.
+ *
+ * Archived items are never renamed: whichever selection is made, they are counted in the
+ * plan's `archived_left_out`.
+ */
+export type NameSelection = {
+    /**
+     * Selected items.
+     */
+    item_ids: Array<ItemId>;
+    kind: 'items';
+} | {
+    /**
+     * The folder.
+     */
+    folder: WorkspacePath;
+    kind: 'folder';
+    /**
+     * Also the items of every folder under it.
+     */
+    recursive: boolean;
+} | {
+    kind: 'workspace';
+};
+
+/**
  * A typed rule scoped by glob and optional OKF type.
  */
 export type NamingRule = {
     /**
+     * Keep old paths as aliases
+     *
      * When true, preserve existing path aliases while renaming the primary path.
      */
     alias_preservation: boolean;
     /**
+     * Letter case
+     *
      * Case transformation.
      */
     case: LetterCase;
     /**
+     * When names collide
+     *
      * Collision behavior.
      */
     collision: CollisionPolicy;
     /**
+     * Date format
+     *
      * Explicit output format.
      */
     date_format: string;
     /**
+     * Date order
+     *
      * Declared incoming date convention.
      */
     date_order: DateOrder;
     /**
+     * Destination folder
+     *
      * Relative destination template.
      */
     destination?: string | null;
     /**
+     * File extension
+     *
      * How the filename extension is transformed on normalized notes.
      */
     extension_policy: ExtensionPolicy;
     /**
+     * Applies to paths
+     *
      * Match against the supplied relative path.
      */
     glob: string;
     /**
+     * Prefix
+     *
      * Optional literal prefix.
      */
     prefix: string;
     /**
+     * Word separator
+     *
      * Word separator.
      */
     separator: string;
     /**
+     * Remove version suffixes
+     *
      * Remove filename suffixes only from normalized notes, never originals.
      */
     strip_version_suffix: boolean;
     /**
+     * Suffix
+     *
      * Optional literal suffix applied to the normalized base name.
      */
     suffix?: string | null;
     /**
+     * Applies to type
+     *
      * Optional OKF type selector.
      */
     type_name?: string | null;
@@ -2885,10 +3051,14 @@ export type NamingRule = {
  */
 export type NamingRules = {
     /**
+     * Rules
+     *
      * Rules applied in explicit list order.
      */
     rules: Array<NamingRule>;
     /**
+     * Format version
+     *
      * Format version; this release emits 1.
      */
     schema_version: number;
@@ -3134,6 +3304,9 @@ export type PresentResponse = {
 
 /**
  * Calculate a rename plan with no persistent mutation.
+ *
+ * A plan too large for one request body is applied folder by folder: `apply_names` refuses an
+ * over-large body as every request does (`transport::MAX_REQUEST_BODY_BYTES`).
  */
 export type PreviewNamesRequest = {
     /**
@@ -3141,13 +3314,13 @@ export type PreviewNamesRequest = {
      */
     at: At;
     /**
-     * Selected items.
-     */
-    item_ids: Array<ItemId>;
-    /**
      * Candidate rules, not necessarily saved.
      */
     rules: NamingRules;
+    /**
+     * The items to preview.
+     */
+    selection: NameSelection;
     /**
      * Workspace whose permissions and storage scope apply.
      */
@@ -3239,6 +3412,10 @@ export type Proposal = {
      * Human-readable reason.
      */
     title: string;
+    /**
+     * Findings of the check that ran when the candidate was written.
+     */
+    warnings?: Array<Warning>;
     /**
      * Workspace whose permissions and storage scope apply.
      */
@@ -3664,24 +3841,38 @@ export type RenameEntry = {
 
 /**
  * A preview bound to source state and exact conventions.
+ *
+ * The counts are for the person reading the preview; `apply_names` does not check them.
  */
 export type RenamePlan = {
+    /**
+     * Archived items the selection holds; they are never renamed.
+     */
+    archived_left_out: number;
     /**
      * Workspace revision inspected.
      */
     base_revision: Revision;
     /**
+     * Items the selection holds that are not archived.
+     */
+    considered: number;
+    /**
      * Duplicate path observations recorded during preview.
      */
     duplicate_observations: Array<DuplicateObservation>;
     /**
-     * Proposed changes.
+     * Proposed changes: only the items whose path would change.
      */
     entries: Array<RenameEntry>;
     /**
      * Digest of the exact canonical rules.
      */
     rules_digest: Digest;
+    /**
+     * Considered items whose path would not change; they are not in `entries`.
+     */
+    unchanged: number;
     /**
      * Plan-level warnings.
      */
@@ -3753,6 +3944,10 @@ export type RestoreReport = {
      * Items restored.
      */
     items: number;
+    /**
+     * Rows the archive's own backup left out; they were not restored.
+     */
+    rows_left_out?: number | null;
 };
 
 /**
@@ -3792,7 +3987,9 @@ export type RestoreRequest = {
  * whose editor is a validated subject with `write` here back to that editor, and keeps the
  * others in the archive, unassigned and counted. An archive of this tenant whose workspace
  * still exists, or has a purge record, is refused: purged content never comes back through
- * an import. The upload is consumed when the restore completes.
+ * an import. The upload is consumed when the restore starts, before the archive is applied. A
+ * restore cancelled before that leaves the upload usable; one that fails after it leaves the
+ * upload consumed by its job, and only a retry of that job can use it.
  */
 export type RestoreWorkspaceRequest = {
     /**
@@ -4316,6 +4513,10 @@ export type SourceReference = {
 
 /**
  * Convert finalized uploads into source cards in the user-selected folder.
+ *
+ * `upload_ids` holds between one and `MAX_IMPORT_UPLOADS` uploads (`check_rules`): a longer
+ * list is `too_large` on `/upload_ids`, an empty one `invalid_input` on `/upload_ids`, and an
+ * upload listed twice `invalid_input` on `/upload_ids/<index of the second>`.
  */
 export type StartImportRequest = {
     /**
@@ -4323,7 +4524,9 @@ export type StartImportRequest = {
      */
     apply_naming_rules: boolean;
     /**
-     * Exact revision on which this change is based; stale writes conflict.
+     * The revision the import was prepared against; card names are chosen there. It must be
+     * a revision of the workspace. A head that moved since does not refuse the import. A card
+     * path taken since fails the job, which is not retried.
      */
     base_revision: Revision;
     /**
@@ -4340,7 +4543,7 @@ export type StartImportRequest = {
      */
     settings?: ConversionSettings | null;
     /**
-     * Completed upload slots.
+     * Completed upload slots, each listed once.
      */
     upload_ids: Array<UploadId>;
     /**
@@ -4452,6 +4655,21 @@ export type UnarchiveWorkspaceRequest = {
 export type UncitedReason = 'external' | 'scope' | 'not_found' | 'malformed';
 
 /**
+ * A stored rules file this build cannot read as rules.
+ */
+export type UnreadableRules = {
+    /**
+     * What was wrong; a `schema_version` this build does not know is one such problem.
+     */
+    problems: Array<Warning>;
+    /**
+     * The file's text as stored, at most `item::MAX_ITEM_TEXT_BYTES`; a longer file is
+     * `too_large`.
+     */
+    text: string;
+};
+
+/**
  * Why a location is not known; one variant per reason the producing rule states.
  */
 export type UnresolvedReason = {
@@ -4508,12 +4726,27 @@ export type UpdateWorkspaceRequest = {
 
 /**
  * An authenticated upload slot for a specific source occurrence.
+ *
+ * A slot stays until it is discarded, imported or its workspace is purged; nothing expires,
+ * and a completed upload is never removed by the service on its own.
  */
 export type Upload = {
     /**
      * Whether expected bytes and digest have been verified.
      */
     complete: boolean;
+    /**
+     * The job that took this upload.
+     */
+    consumed_by?: JobId | null;
+    /**
+     * When the slot was opened.
+     */
+    created_at?: Timestamp | null;
+    /**
+     * Original filename, as supplied.
+     */
+    filename?: string | null;
     /**
      * Upload identity.
      */
@@ -4522,6 +4755,14 @@ export type Upload = {
      * Durably retained byte count.
      */
     received_bytes: string;
+    /**
+     * Supplied folder context, as supplied.
+     */
+    relative_path?: string | null;
+    /**
+     * The announced byte count, as a decimal string.
+     */
+    size?: string | null;
     /**
      * Same-origin binary PUT target.
      */
@@ -4946,10 +5187,10 @@ export type GetRulesResponses = {
     /**
      * Successful operation result
      */
-    200: NamingRules;
+    200: GetRulesResponse;
 };
 
-export type GetRulesResponse = GetRulesResponses[keyof GetRulesResponses];
+export type GetRulesResponse2 = GetRulesResponses[keyof GetRulesResponses];
 
 export type PreviewNamesData = {
     body: PreviewNamesRequest;
@@ -9450,7 +9691,7 @@ export type StreamEventsData = {
 
 export type StreamEventsResponses = {
     /**
-     * Resume workspace notifications with Last-Event-ID; notifications are projections, not canonical content.
+     * Resume workspace notifications with Last-Event-ID; notifications are projections, not canonical content. A workspace's security events are returned only to a caller holding `admin` on it, checked on every call; a page may therefore hold fewer rows than asked, or none, and still carry a cursor.
      */
     200: string;
 };

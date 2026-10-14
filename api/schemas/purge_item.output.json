@@ -20,7 +20,7 @@
           "description": "Typed context for conflict, replay, and in-progress outcomes."
         },
         "field": {
-          "description": "Input field needing correction.",
+          "description": "Input field needing correction. A JSON Pointer into the request (`/base_revision`,\n`/changes/2/body`).",
           "type": [
             "string",
             "null"
@@ -273,6 +273,56 @@
           "required": [
             "kind",
             "purge_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An upload's received bytes do not match what was announced for it: their length, or\ntheir SHA-256. The code is `conflict`, and nothing was retained.",
+          "properties": {
+            "digest_matches": {
+              "description": "Whether the received bytes have the digest asked for; absent when the length\nalready differs, so the digest was not compared.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "expected_bytes": {
+              "description": "The byte count announced when the slot was opened, as a decimal string.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "upload_mismatch",
+              "type": "string"
+            },
+            "received_bytes": {
+              "description": "The byte count the slot holds, as a decimal string.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "expected_bytes",
+            "received_bytes"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The request's base revision (or expected head) is not the workspace's head; `field`\nnames that request field. The code is `conflict`.",
+          "properties": {
+            "head": {
+              "$ref": "#/$defs/Revision",
+              "description": "The head the request was compared with."
+            },
+            "kind": {
+              "const": "stale_base",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "head"
           ],
           "type": "object"
         }
@@ -853,7 +903,7 @@
         },
         {
           "const": "failed",
-          "description": "Stopped; repeating the request resumes it.",
+          "description": "Set, with `error`, when the purge's job failed and will not run again by itself;\nrepeating the request resumes it.",
           "type": "string"
         }
       ]

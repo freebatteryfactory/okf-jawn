@@ -182,7 +182,9 @@ pub struct BackupInstallationRequest {
 /// whose editor is a validated subject with `write` here back to that editor, and keeps the
 /// others in the archive, unassigned and counted. An archive of this tenant whose workspace
 /// still exists, or has a purge record, is refused: purged content never comes back through
-/// an import. The upload is consumed when the restore completes.
+/// an import. The upload is consumed when the restore starts, before the archive is applied. A
+/// restore cancelled before that leaves the upload usable; one that fails after it leaves the
+/// upload consumed by its job, and only a retry of that job can use it.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RestoreWorkspaceRequest {
@@ -206,6 +208,17 @@ pub struct RestoreReport {
     pub drafts_restored: u32,
     /// Drafts whose editor is not a validated identity here; kept in the archive.
     pub drafts_unassigned: u32,
+    /// Rows the archive's own backup left out; they were not restored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows_left_out: Option<u32>,
+}
+
+/// What a workspace backup did.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BackupReport {
+    /// Rows left out of the archive because they named a managed backup or a written history.
+    pub rows_left_out: u32,
 }
 
 /// An authorized export or backup artifact with integrity metadata.

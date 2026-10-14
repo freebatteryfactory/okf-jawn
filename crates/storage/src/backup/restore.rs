@@ -1182,6 +1182,7 @@ fn write_tables(
         items,
         drafts_restored: count(restored)?,
         drafts_unassigned: count(total.saturating_sub(restored))?,
+        rows_left_out: None,
     };
     if let Some(mutation) = mutation {
         let text = serde_json::to_string(&report).map_err(|error| crate::db::json(&error))?;

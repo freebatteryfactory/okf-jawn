@@ -32,7 +32,7 @@
     },
     "Event": {
       "additionalProperties": false,
-      "description": "A resumable change notification, not canonical content.\n\nA tenant-level event (a sign-in, a connector issued or revoked, a refusal outside a\nworkspace) has no `workspace_id`. Security events carry their `actor`.",
+      "description": "A resumable change notification, not canonical content.\n\nA tenant-level event (a sign-in or a refused one, a connector issued or revoked, a refusal\noutside a workspace) has no `workspace_id`. Security events (`EventKind::is_security`) carry\ntheir `actor`, except a `sign_in_refused` event before a subject was established.",
       "properties": {
         "actor": {
           "anyOf": [
@@ -59,6 +59,15 @@
             }
           ],
           "description": "Affected connector."
+        },
+        "count": {
+          "description": "How many occurrences this one event stands for; absent means one. A `sign_in_refused`\nevent past its source's allowance counts that source's refusals of the minute, and a\n`permission_denied` event may count the same way when the server bounds its flood.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "id": {
           "description": "Opaque monotonic event cursor.",
@@ -100,6 +109,17 @@
             }
           ],
           "description": "The refused operation of a `permission_denied` event."
+        },
+        "proposal_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Affected proposal."
         },
         "revision": {
           "anyOf": [
@@ -198,6 +218,11 @@
         {
           "const": "signed_in",
           "description": "A browser session began (tenant-level).",
+          "type": "string"
+        },
+        {
+          "const": "sign_in_refused",
+          "description": "A sign-in was refused (tenant-level). It carries `at`, and `actor` only when a subject\nwas established.\n\nEach refusal from one source is recorded as its own event up to an allowance a minute;\npast it, the refusals of that source in that minute are recorded as one event with their\n`count`, written at the end of that minute or when the server stops. So every refusal is\ncounted, and what one source can write is bounded. The source and the allowance are the\nserver's. A refusal before any tenant is known (a hosted callback that names no\norganization) belongs to no tenant's log: the server's ingress limit and its diagnostics\ncount it.",
           "type": "string"
         },
         {
@@ -606,6 +631,11 @@
           "type": "string"
         }
       ]
+    },
+    "ProposalId": {
+      "description": "Identity of a suggested change set, not a review.",
+      "format": "uuid",
+      "type": "string"
     },
     "Revision": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",

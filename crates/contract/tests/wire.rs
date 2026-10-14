@@ -9,8 +9,11 @@
 use check::{TestResult, err_of, some};
 use okf_jawn_contract::access::{CSRF_COOKIE, CSRF_HEADER};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::identity::{LOCAL_TENANT_ID, TenantId};
-use okf_jawn_contract::import::CorrectDigestRequest;
+use okf_jawn_contract::identity::{LOCAL_TENANT_ID, MAX_WORKSPACE_PATH_BYTES, TenantId};
+use okf_jawn_contract::import::{
+    CorrectDigestRequest, CreateUploadRequest, DEFAULT_MAX_UPLOAD_BYTES, MAX_IMPORT_UPLOADS,
+    MAX_UPLOAD_FILENAME_BYTES, MAX_UPLOAD_RELATIVE_PATH_BYTES, StartImportRequest,
+};
 use okf_jawn_contract::item::{CreateItemRequest, MAX_ITEM_TEXT_BYTES, SaveDraftRequest};
 use okf_jawn_contract::proposal::OpenProposalRequest;
 use okf_jawn_contract::scope::RequestScope;
@@ -228,6 +231,134 @@ fn every_bounded_field_publishes_the_bound_as_its_maximum_length() -> TestResult
     assert_eq!(
         bounded,
         ["create.body", "edit.body", "supply_extraction.markdown"]
+    );
+    Ok(())
+}
+
+fn create_upload(filename: &str, relative_path: &str) -> Value {
+    json!({
+        "workspace_id": WORKSPACE, "filename": filename, "relative_path": relative_path,
+        "size": "4", "idempotency_key": KEY
+    })
+}
+
+fn start_import(uploads: &[String]) -> Value {
+    json!({
+        "workspace_id": WORKSPACE, "base_revision": revision(), "upload_ids": uploads,
+        "destination": "", "idempotency_key": KEY, "apply_naming_rules": false
+    })
+}
+
+/// The `index`th distinct upload identity.
+fn upload_id(index: usize) -> String {
+    format!("00000000-0000-4000-8000-{index:012}")
+}
+
+/// `check_rules` of a decoded `T`.
+fn rules_of<T: DeserializeOwned + RequestScope>(
+    value: Value,
+) -> Result<Result<(), ApiError>, Box<dyn std::error::Error>> {
+    Ok(serde_json::from_value::<T>(value)?.check_rules())
+}
+
+#[test]
+fn the_upload_and_import_bounds_are_pinned() {
+    assert_eq!(DEFAULT_MAX_UPLOAD_BYTES, 536_870_912, "512 MiB");
+    assert_eq!(MAX_UPLOAD_FILENAME_BYTES, 1024);
+    assert_eq!(
+        MAX_UPLOAD_RELATIVE_PATH_BYTES, 4096,
+        "the bound of a workspace path"
+    );
+    assert_eq!(MAX_UPLOAD_RELATIVE_PATH_BYTES, MAX_WORKSPACE_PATH_BYTES);
+    assert_eq!(MAX_IMPORT_UPLOADS, 5000);
+}
+
+/// A name of exactly its bound passes; one byte more is `too_large` on its field, although it
+/// has no more characters than the bound.
+#[test]
+fn an_upload_name_passes_at_its_bound_and_is_too_large_one_byte_over() -> TestResult {
+    for (pointer, bound) in [
+        ("/filename", MAX_UPLOAD_FILENAME_BYTES),
+        ("/relative_path", MAX_UPLOAD_RELATIVE_PATH_BYTES),
+    ] {
+        let within = "a".repeat(bound);
+        let accepted =
+            checked::<CreateUploadRequest>(&create_upload("a.pdf", ""), pointer, &within)?;
+        assert!(accepted.is_ok(), "{pointer} at the bound: {accepted:?}");
+        let mut over = "a".repeat(bound.saturating_sub(1));
+        over.push('é');
+        assert_eq!(over.chars().count(), bound);
+        let refused = err_of(checked::<CreateUploadRequest>(
+            &create_upload("a.pdf", ""),
+            pointer,
+            &over,
+        )?)?;
+        assert_eq!(refused.code, ErrorCode::TooLarge, "{pointer}");
+        assert_eq!(refused.field.as_deref(), Some(pointer));
+    }
+    Ok(())
+}
+
+#[test]
+fn an_upload_name_that_gives_its_card_no_path_is_refused_on_filename() -> TestResult {
+    // The card of `CON.pdf` is `CON-pdf.md`, a fine path; the card of `CON` is `CON.md`, whose
+    // stem is a Windows device name. `a:b.pdf` holds a character Windows refuses.
+    for name in ["report.pdf", "CON.pdf", "Q3 Results.XLSX", "README"] {
+        let accepted = rules_of::<CreateUploadRequest>(create_upload(name, "2026/q3"))?;
+        assert!(accepted.is_ok(), "{name}: {accepted:?}");
+    }
+    for name in ["CON", "a:b.pdf", "notes?.txt", "tab\tname.pdf"] {
+        let refused = err_of(rules_of::<CreateUploadRequest>(create_upload(name, ""))?)?;
+        assert_eq!(refused.code, ErrorCode::InvalidInput, "{name}");
+        assert_eq!(refused.field.as_deref(), Some("/filename"), "{name}");
+    }
+    Ok(())
+}
+
+#[test]
+fn an_import_takes_one_to_the_bound_of_uploads_each_once() -> TestResult {
+    let at_bound: Vec<String> = (0..MAX_IMPORT_UPLOADS).map(upload_id).collect();
+    let accepted = rules_of::<StartImportRequest>(start_import(&at_bound))?;
+    assert!(accepted.is_ok(), "{accepted:?}");
+    let one = rules_of::<StartImportRequest>(start_import(&[upload_id(7)]))?;
+    assert!(one.is_ok(), "{one:?}");
+    let over: Vec<String> = (0..=MAX_IMPORT_UPLOADS).map(upload_id).collect();
+    let refused = err_of(rules_of::<StartImportRequest>(start_import(&over))?)?;
+    assert_eq!(refused.code, ErrorCode::TooLarge);
+    assert_eq!(refused.field.as_deref(), Some("/upload_ids"));
+    let none = err_of(rules_of::<StartImportRequest>(start_import(&[]))?)?;
+    assert_eq!(none.code, ErrorCode::InvalidInput);
+    assert_eq!(none.field.as_deref(), Some("/upload_ids"));
+    let twice = [upload_id(1), upload_id(2), upload_id(3), upload_id(2)];
+    let repeated = err_of(rules_of::<StartImportRequest>(start_import(&twice))?)?;
+    assert_eq!(repeated.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        repeated.field.as_deref(),
+        Some("/upload_ids/3"),
+        "the second place"
+    );
+    Ok(())
+}
+
+#[test]
+fn the_upload_and_import_bounds_are_published_in_the_schemas() -> TestResult {
+    let upload = schema_for::<CreateUploadRequest>()?;
+    assert_eq!(
+        upload.pointer("/properties/filename/maxLength"),
+        Some(&json!(MAX_UPLOAD_FILENAME_BYTES))
+    );
+    assert_eq!(
+        upload.pointer("/properties/relative_path/maxLength"),
+        Some(&json!(MAX_UPLOAD_RELATIVE_PATH_BYTES))
+    );
+    let import = schema_for::<StartImportRequest>()?;
+    assert_eq!(
+        import.pointer("/properties/upload_ids/minItems"),
+        Some(&json!(1))
+    );
+    assert_eq!(
+        import.pointer("/properties/upload_ids/maxItems"),
+        Some(&json!(MAX_IMPORT_UPLOADS))
     );
     Ok(())
 }

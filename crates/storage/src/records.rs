@@ -645,6 +645,11 @@ fn insert_job(
         item_ids: Vec::new(),
         artifact: None,
         restore: None,
+        backup: None,
+        created_at: None,
+        started_at: None,
+        finished_at: None,
+        retryable: None,
     };
     let (tenant, workspace) = job_scope_key(scope);
     transaction

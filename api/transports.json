@@ -51,7 +51,7 @@
   },
   {
     "auth": "principal",
-    "description": "Resume workspace notifications with Last-Event-ID; notifications are projections, not canonical content.",
+    "description": "Resume workspace notifications with Last-Event-ID; notifications are projections, not canonical content. A workspace's security events are returned only to a caller holding `admin` on it, checked on every call; a page may therefore hold fewer rows than asked, or none, and still carry a cursor.",
     "id": "stream_events",
     "method": "get",
     "path": "/api/workspaces/{workspace_id}/events",

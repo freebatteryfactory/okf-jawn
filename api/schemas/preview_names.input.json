@@ -44,16 +44,19 @@
         {
           "const": "reject",
           "description": "Require an explicit decision.",
+          "title": "Ask for a decision",
           "type": "string"
         },
         {
           "const": "suffix",
           "description": "Add a deterministic suffix.",
+          "title": "Add a number",
           "type": "string"
         },
         {
           "const": "keep_existing",
           "description": "Keep the original name and report the collision.",
+          "title": "Keep the existing name",
           "type": "string"
         }
       ]
@@ -64,21 +67,25 @@
         {
           "const": "ymd",
           "description": "Year, month, day.",
+          "title": "Year, month, day",
           "type": "string"
         },
         {
           "const": "mdy",
           "description": "Month, day, year.",
+          "title": "Month, day, year",
           "type": "string"
         },
         {
           "const": "dmy",
           "description": "Day, month, year.",
+          "title": "Day, month, year",
           "type": "string"
         },
         {
           "const": "reject_ambiguous",
           "description": "Require unambiguous dates or a human choice.",
+          "title": "Ask when unclear",
           "type": "string"
         }
       ]
@@ -89,16 +96,19 @@
         {
           "const": "preserve",
           "description": "Leave the extension unchanged.",
+          "title": "Keep",
           "type": "string"
         },
         {
           "const": "lowercase",
           "description": "Lower-case the extension.",
+          "title": "Lower case",
           "type": "string"
         },
         {
           "const": "strip",
           "description": "Drop the extension from the normalized note path (never from originals).",
+          "title": "Remove",
           "type": "string"
         }
       ]
@@ -114,32 +124,104 @@
         {
           "const": "preserve",
           "description": "Preserve case.",
+          "title": "Keep as written",
           "type": "string"
         },
         {
           "const": "lower",
           "description": "Lower case.",
+          "title": "Lower case",
           "type": "string"
         },
         {
           "const": "upper",
           "description": "Upper case.",
+          "title": "Upper case",
           "type": "string"
         },
         {
           "const": "title",
           "description": "Title case.",
+          "title": "Title case",
           "type": "string"
         },
         {
           "const": "snake",
           "description": "Snake case.",
+          "title": "Snake case",
           "type": "string"
         },
         {
           "const": "kebab",
           "description": "Kebab case.",
+          "title": "Kebab case",
           "type": "string"
+        }
+      ]
+    },
+    "NameSelection": {
+      "description": "Which items a preview covers.\n\nArchived items are never renamed: whichever selection is made, they are counted in the\nplan's `archived_left_out`.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The items named; at least one, or the request is `invalid_input` on\n`/selection/item_ids`.",
+          "properties": {
+            "item_ids": {
+              "description": "Selected items.",
+              "items": {
+                "$ref": "#/$defs/ItemId"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "kind": {
+              "const": "items",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "item_ids"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The items of one folder.",
+          "properties": {
+            "folder": {
+              "$ref": "#/$defs/WorkspacePath",
+              "description": "The folder."
+            },
+            "kind": {
+              "const": "folder",
+              "type": "string"
+            },
+            "recursive": {
+              "description": "Also the items of every folder under it.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "folder",
+            "recursive"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Every item of the workspace.",
+          "properties": {
+            "kind": {
+              "const": "workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -149,26 +231,32 @@
       "properties": {
         "alias_preservation": {
           "description": "When true, preserve existing path aliases while renaming the primary path.",
+          "title": "Keep old paths as aliases",
           "type": "boolean"
         },
         "case": {
           "$ref": "#/$defs/LetterCase",
-          "description": "Case transformation."
+          "description": "Case transformation.",
+          "title": "Letter case"
         },
         "collision": {
           "$ref": "#/$defs/CollisionPolicy",
-          "description": "Collision behavior."
+          "description": "Collision behavior.",
+          "title": "When names collide"
         },
         "date_format": {
           "description": "Explicit output format.",
+          "title": "Date format",
           "type": "string"
         },
         "date_order": {
           "$ref": "#/$defs/DateOrder",
-          "description": "Declared incoming date convention."
+          "description": "Declared incoming date convention.",
+          "title": "Date order"
         },
         "destination": {
           "description": "Relative destination template.",
+          "title": "Destination folder",
           "type": [
             "string",
             "null"
@@ -176,26 +264,32 @@
         },
         "extension_policy": {
           "$ref": "#/$defs/ExtensionPolicy",
-          "description": "How the filename extension is transformed on normalized notes."
+          "description": "How the filename extension is transformed on normalized notes.",
+          "title": "File extension"
         },
         "glob": {
           "description": "Match against the supplied relative path.",
+          "title": "Applies to paths",
           "type": "string"
         },
         "prefix": {
           "description": "Optional literal prefix.",
+          "title": "Prefix",
           "type": "string"
         },
         "separator": {
           "description": "Word separator.",
+          "title": "Word separator",
           "type": "string"
         },
         "strip_version_suffix": {
           "description": "Remove filename suffixes only from normalized notes, never originals.",
+          "title": "Remove version suffixes",
           "type": "boolean"
         },
         "suffix": {
           "description": "Optional literal suffix applied to the normalized base name.",
+          "title": "Suffix",
           "type": [
             "string",
             "null"
@@ -203,6 +297,7 @@
         },
         "type_name": {
           "description": "Optional OKF type selector.",
+          "title": "Applies to type",
           "type": [
             "string",
             "null"
@@ -232,12 +327,14 @@
           "items": {
             "$ref": "#/$defs/NamingRule"
           },
+          "title": "Rules",
           "type": "array"
         },
         "schema_version": {
           "description": "Format version; this release emits 1.",
           "format": "uint32",
           "minimum": 0,
+          "title": "Format version",
           "type": "integer"
         }
       },
@@ -255,26 +352,29 @@
       "description": "Stable application identity for one user-organized workspace.",
       "format": "uuid",
       "type": "string"
+    },
+    "WorkspacePath": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "pattern": "^[^/\\\\:<>\"|?*\\x00-\\x1f]+(/[^/\\\\:<>\"|?*\\x00-\\x1f]+)*$",
+      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Calculate a rename plan with no persistent mutation.",
+  "description": "Calculate a rename plan with no persistent mutation.\n\nA plan too large for one request body is applied folder by folder: `apply_names` refuses an\nover-large body as every request does (`transport::MAX_REQUEST_BODY_BYTES`).",
   "properties": {
     "at": {
       "$ref": "#/$defs/At",
       "description": "Requested revision selector; latest is resolved once before reading."
     },
-    "item_ids": {
-      "description": "Selected items.",
-      "items": {
-        "$ref": "#/$defs/ItemId"
-      },
-      "type": "array"
-    },
     "rules": {
       "$ref": "#/$defs/NamingRules",
       "description": "Candidate rules, not necessarily saved."
+    },
+    "selection": {
+      "$ref": "#/$defs/NameSelection",
+      "description": "The items to preview."
     },
     "workspace_id": {
       "$ref": "#/$defs/WorkspaceId",
@@ -284,7 +384,7 @@
   "required": [
     "workspace_id",
     "at",
-    "item_ids",
+    "selection",
     "rules"
   ],
   "title": "PreviewNamesRequest",

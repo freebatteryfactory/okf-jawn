@@ -79,7 +79,7 @@
   },
   {
     "alias": "",
-    "description": "Permanently remove a workspace's originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge.",
+    "description": "Permanently remove a workspace's originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request returns the purge: an unfinished one resumed, a completed one as it is.",
     "destructive": true,
     "id": "purge_workspace",
     "label": "Purge",
@@ -742,7 +742,7 @@
   },
   {
     "alias": "",
-    "description": "Read the same naming conventions used by the form, YAML editor, and import process.",
+    "description": "Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with set_rules.",
     "destructive": false,
     "id": "get_rules",
     "label": "Conventions",
@@ -898,7 +898,7 @@
   },
   {
     "alias": "",
-    "description": "Read resumable notifications without treating them as authoritative document content.",
+    "description": "Read resumable notifications without treating them as authoritative document content. A workspace's security events are returned only to a caller holding `admin` on it, checked on every call; a page may therefore hold fewer rows than asked, or none, and still carry a cursor.",
     "destructive": false,
     "id": "list_events",
     "label": "Activity",

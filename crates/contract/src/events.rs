@@ -33,6 +33,17 @@ pub enum EventKind {
     ConnectorRevoked,
     /// A browser session began (tenant-level).
     SignedIn,
+    /// A sign-in was refused (tenant-level). It carries `at`, and `actor` only when a subject
+    /// was established.
+    ///
+    /// Each refusal from one source is recorded as its own event up to an allowance a minute;
+    /// past it, the refusals of that source in that minute are recorded as one event with their
+    /// `count`, written at the end of that minute or when the server stops. So every refusal is
+    /// counted, and what one source can write is bounded. The source and the allowance are the
+    /// server's. A refusal before any tenant is known (a hosted callback that names no
+    /// organization) belongs to no tenant's log: the server's ingress limit and its diagnostics
+    /// count it.
+    SignInRefused,
     /// An authenticated request was refused for lack of a grant or by its route.
     PermissionDenied,
 }
@@ -90,8 +101,9 @@ pub struct GetReceiptRequest {
 
 /// A resumable change notification, not canonical content.
 ///
-/// A tenant-level event (a sign-in, a connector issued or revoked, a refusal outside a
-/// workspace) has no `workspace_id`. Security events carry their `actor`.
+/// A tenant-level event (a sign-in or a refused one, a connector issued or revoked, a refusal
+/// outside a workspace) has no `workspace_id`. Security events (`EventKind::is_security`) carry
+/// their `actor`, except a `sign_in_refused` event before a subject was established.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Event {
@@ -122,6 +134,14 @@ pub struct Event {
     /// The refused operation of a `permission_denied` event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<crate::metadata::OperationName>,
+    /// Affected proposal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<crate::identity::ProposalId>,
+    /// How many occurrences this one event stands for; absent means one. A `sign_in_refused`
+    /// event past its source's allowance counts that source's refusals of the minute, and a
+    /// `permission_denied` event may count the same way when the server bounds its flood.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
 }
 
 /// Read changes after an opaque cursor; SSE uses the same record shape.
@@ -157,4 +177,25 @@ pub struct ListEventsResponse {
     /// Continuation cursor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+}
+
+impl EventKind {
+    /// Whether this is a security event: who signed in or was refused a sign-in, a connector
+    /// issued or revoked, and a request refused (`permission_denied`).
+    ///
+    /// In a workspace's log only `permission_denied` occurs; the others are tenant-level and
+    /// live in the tenant's log, which `list_tenant_events` reads with the tenant's `admin`.
+    /// `list_events` and `stream_events` return a workspace's security events only to a caller
+    /// holding `admin` on it.
+    #[must_use]
+    pub const fn is_security(&self) -> bool {
+        matches!(
+            self,
+            Self::ConnectorIssued
+                | Self::ConnectorRevoked
+                | Self::SignedIn
+                | Self::SignInRefused
+                | Self::PermissionDenied
+        )
+    }
 }
