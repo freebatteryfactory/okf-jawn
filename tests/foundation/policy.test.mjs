@@ -65,6 +65,29 @@ test('core composes ports only and never depends on concrete adapter crates',asy
  const manifest=await readFile(join(root,'crates/core/Cargo.toml'),'utf8');
  for(const crate of ['okf-jawn-storage','okf-jawn-ingest','okf-jawn-server','okf-jawn-mcp','okf-jawn-cli'])assert.doesNotMatch(manifest,new RegExp(crate),crate);
 });
+/** A Rust source up to its unit-test module: `#[cfg(test)]` on the line before `mod tests`, which AGENTS.md puts last in the file. What follows is test code. */
+const beforeTests=source=>{const at=source.search(/^#\[cfg\(test\)\]\r?\nmod tests\b/m);return at<0?source:source.slice(0,at);};
+test('the code before a unit-test module is all of a file but its tests',()=>{
+ const file='use std::io;\nfn a() {}\n\n#[cfg(test)]\nmod tests {\n    use std::fs;\n}\n';
+ assert.equal(beforeTests(file),'use std::io;\nfn a() {}\n\n');
+ assert.equal(beforeTests('fn a() {}\n'),'fn a() {}\n');
+ // A `#[cfg(test)]` on anything but the test module does not end the scan.
+ assert.equal(beforeTests('#[cfg(test)]\nfn helper() {}\nfn b() { std::fs::write(); }\n').includes('std::fs'),true);
+});
+test('core writes no file: no source under crates/core/src names std::fs, tempfile or temp_dir',async()=>{
+ // crates/core/src/application/shared.rs: "This service runs no check of its own on a replay and writes no file." Ports do the IO.
+ // Unit tests may stage a directory to check a function against (`conformance.rs`), so a file is read up to its test module.
+ const sources=(await files(root)).filter(f=>f.startsWith('crates/core/src/')&&f.endsWith('.rs'));
+ assert.ok(sources.length>20,`the scan read only ${sources.length} core sources`);
+ // `std::fs` also as a grouped import (`use std::{fs, io}`), which never spells the two words together.
+ const named=[['std::fs',/\bstd::fs\b/],['std::fs',/\bstd::\{[^}]*\bfs\b/],['tempfile',/\btempfile\b/],['temp_dir',/\btemp_dir\b/]];
+ const found=[];
+ for(const file of sources){
+  const source=beforeTests(await readFile(join(root,file),'utf8'));
+  for(const [name,pattern] of named)if(pattern.test(source))found.push(`${file} names ${name}`);
+ }
+ assert.deepEqual(found,[],'the application service writes no file; file access belongs to a port\'s adapter');
+});
 test('test-support applications are included only by test targets',async()=>{
  for(const file of (await files(root)).filter(f=>f.endsWith('.rs'))){
   const normalized=file.replaceAll('\\','/');
