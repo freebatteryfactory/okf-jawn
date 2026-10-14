@@ -835,9 +835,6 @@ Findings that were judged not load-bearing at merge, each with its home. They ar
 - **R-I15.** The Timeline cursor carries the tip that the first page resolved. Today a Snapshot landing between pages of an `at: latest` Timeline can repeat a commit on the next page. The cursor is opaque, so the contract does not change.
 - **N1.** A Rewind whose only difference is in companion files (`.okf/sources/<id>.json`, `.okf/supplied/<id>.json`, `.okf/corrections/<id>/`) is refused today. The item comparison must count companions.
 - **R-I14.** A Rewind that restores a deleted item at an older path relinks its referrers from the item's last path before the delete.
-- **R-I10.** Storage keeps a commit's check warnings with the commit and answers them on replay. This replaces core's re-check of the committed tree (`shared::checked_again`, core's only filesystem write) and ingest's `checked_again`.
-- **R-I12.** The paths a move rewrites (`okf_core::move_concept` referrers) are reported to the `CandidateCheck` as touched, for `MoveItem` and Rewind alike.
-- **R-I13.** An atomic batch consume of uploads (`UploadStore`), so two imports that share uploads cannot strand them.
 - **Test gaps the reviewers left open:**
   - a Rewind with an item listed twice, and the occupied temporary path;
   - the temporary directory's cleanup;
@@ -859,7 +856,7 @@ Findings that were judged not load-bearing at merge, each with its home. They ar
 **With their features.**
 
 - **Asset retention (ingest M2, its main body).** Done in #21.
-- **An archive from a release build restores (the first release, or records schema V3, whichever comes first).** A restore compares the archive's stored schema statements with the live database's as text. Every database today is built by the same migrations under the same bundled SQLite, so they match. To catch a SQLite or migration change that would refuse older archives, commit a small workspace archive and installation archive written by a release build as crate test fixtures, with a test that restores them. This needs `.zip` in the foundation guard's declared binary types.
+- **Archives written before a schema change restore (a standing rule; the fixtures landed with records schema 3).** `crates/storage/tests/fixtures/archives/records-schema-2/` holds a workspace archive and an installation archive written by the build before the change, and `crates/storage/tests/archive_fixtures.rs` restores them on every build, by replacement and by import. Every later change to the records schema, the archive format or a stored shape first writes its own fixtures with the kept writer (`write_archive_fixtures`, run as its doc says, before the change) and keeps every earlier set restoring.
 - **Restored View bindings (core M1.6, with the View file layout).** An archive imported into a workspace with another id keeps the archive's tree. So once Views are stored in Git, the import's restore commit must rewrite each View's `bindings[].source.workspace_id` to the target and nothing else, or `require_own_workspace` rejects them. This ships in the same change that lands the View layout. Its test: a View restored into another id validates and opens with `get_view`.
 - **The purge job drains first (core M1.4, with the purge operation).** The `Purger` caller duty requires cancelling and draining the target workspace's jobs before the first call. The purge job's handler in ingest, which is the purger's caller, must therefore:
   - list the workspace's queued and running jobs;
@@ -880,6 +877,12 @@ Findings that were judged not load-bearing at merge, each with its home. They ar
 - **The CSRF cookie name in the UI (workspace-ui M2).** The generated client sends `x-okf-csrf`. workspace-ui reads the `okf-csrf` cookie name from generated output, or from one constant whose test checks it against the OpenAPI document.
 - **Screen readers on the tree (the Wave 3 accessibility check).** The tree's scrolling list is an unnamed `group` tab stop that forwards focus to the active row. Check how NVDA and VoiceOver announce it.
 - **R-I11 (core M1.4, with the cancel operation).** A point-of-no-return seal on `RecordStore`: `cancel_job` refuses with `Conflict` once a restore has called `restore_import`. Until M1.4, no production path cancels a running job.
+- **The purge removes by reachability (sweep 2a; owner decision 2026-10-14).** Today a purge reads the target's own history to learn which objects it named; a file of it that cannot be read leaves the objects only that file named, and the purge completes. That falls short of SPEC section 8, and SPEC is not changed to match. The rebuild: remove everything the target owns except what a surviving item still references, never reading the target; if a survivor's own records cannot be read, the purge does not complete (`PurgeState::Failed`, naming the survivor by identity) and resumes once that is repaired. Its builder first states how objects and their references are laid out, and its test is a target with an unreadable history file whose objects are all gone after the purge.
+- **Kept commit warnings (carry-over sweep part 2b, its reviews).**
+  - A landed commit's warnings are lost for good once a later attempt of the same mutation checks and fails to land (it then answers `replay_warnings_unavailable`). Within one process every writer holds the workspace's lock, so this needs a crash or a head moved outside the application.
+  - `commit_warnings` grows by one row per checked commit and is trimmed only by a workspace purge. An import keeps O(N) warnings for N cards.
+  - An import's commits and a redigest's are checked over the files they write, through the composition's real check; nothing composes ingest over real storage with the real check in one test.
+
 - **The mutation ledger after a purge (carry-over sweep, part 2).** A purge empties the ledger rows of its workspace (PR #20). Still open, each stated in the storage and core headers:
   - a live row completed before records schema 2 records no workspace and keeps its response until it expires;
   - a row whose `complete` lands after the purge's last pass over the rows keeps its response;
