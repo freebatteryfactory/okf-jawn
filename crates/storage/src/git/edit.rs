@@ -26,6 +26,17 @@
 //! the person sees one move in one commit. For that move only, the item's own file does not
 //! count as taking the destination (`Staged::occupied`); a move onto any other item's or file's
 //! key is refused as taken.
+//!
+//! For the same reason, every write that names a new path checks the folders it names against
+//! the staged tree's own spellings before that path is written there
+//! (`Staged::refuse_respelled_folder`): `notes/new.md` when the tree holds `Notes/` would land in
+//! `Notes/` on Windows and macOS and make a second folder on Linux, so it is refused on every
+//! system as `InvalidInput`, naming the tree's spelling and the request field. The writes are
+//! `CreateItem`, `MoveItem`, `CreateFolder` (whose own last segment counts too),
+//! `WriteSourceCard`, and the restores that write an earlier path: `RestoreItem` (each move back
+//! and each restored file) and `RestorePaths`, which also refuses a listed file the tree spells
+//! another way (`refuse_respelled_file`). A refusal leaves only the staged copy changed, and the
+//! staged copy is discarded, so nothing is committed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -142,6 +153,45 @@ impl Staged {
                     ErrorCode::Conflict,
                     format!("{path} collides with {other}"),
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuse `path` when a folder it names is in the staged tree already, spelled another way
+    /// (one collision key, other letters): `InvalidInput` on `field`, naming the spelling the
+    /// tree has (see the module header). `with_last` counts the last segment as a folder too,
+    /// for a folder being created; otherwise only the folders above it are checked. A folder
+    /// the tree does not hold yet, under any spelling, is new and passes.
+    fn refuse_respelled_folder(
+        &self,
+        path: &WorkspacePath,
+        with_last: bool,
+        field: &str,
+    ) -> Result<(), ApiError> {
+        let mut folders: Vec<&str> = path.as_str().split('/').collect();
+        if !with_last {
+            folders.pop();
+        }
+        let mut directory = self.root.clone();
+        let mut spelled = Vec::with_capacity(folders.len());
+        for folder in folders {
+            let Some(name) = spelled_in(&directory, folder, true)? else {
+                return Ok(());
+            };
+            directory.push(&name);
+            let same = name == folder;
+            spelled.push(name);
+            if !same {
+                return Err(ApiError::new(
+                    ErrorCode::InvalidInput,
+                    format!(
+                        "{}: the folder is spelled {}/",
+                        path.as_str(),
+                        spelled.join("/")
+                    ),
+                )
+                .with_field(field));
             }
         }
         Ok(())
@@ -314,6 +364,7 @@ fn create_item(
     mut properties: BTreeMap<String, serde_json::Value>,
 ) -> Result<(), ApiError> {
     check_item_path(path, "/path")?;
+    staged.refuse_respelled_folder(path, false, "/path")?;
     refuse_header_change(&BTreeMap::new(), &properties, "/properties")?;
     if staged.items.contains_key(&header.item_id) {
         return Err(conflict("an item with this identity already exists"));
@@ -342,6 +393,7 @@ fn create_folder(staged: &Staged, folder: &WorkspacePath) -> Result<(), ApiError
         )
         .with_field("/folder"));
     }
+    staged.refuse_respelled_folder(folder, true, "/folder")?;
     let target = staged.root.join(folder.as_str());
     if target.exists() || staged.occupied(folder, None)? {
         return Err(conflict(format!("{} is already taken", folder.as_str())));
@@ -414,7 +466,10 @@ fn restore_paths(
 ) -> Result<(), ApiError> {
     let commit = commit_of(repository, from)?;
     let tree = commit.tree().map_err(|error| super::repo::git(&error))?;
-    for path in paths {
+    for (index, path) in paths.iter().enumerate() {
+        let field = format!("/paths/{index}");
+        staged.refuse_respelled_folder(path, false, &field)?;
+        refuse_respelled_file(&staged.root, path, &field)?;
         let target = staged.root.join(path.as_str());
         match tree.get_path(Path::new(path.as_str())) {
             Ok(entry) => {
@@ -477,6 +532,7 @@ fn restore_items(
             remove(&staged.root.join(restored))?;
         }
         if let Some(earlier) = earlier {
+            staged.refuse_respelled_folder(earlier, false, "/target")?;
             if staged.occupied(earlier, None)? {
                 return Err(conflict(format!("{} is already taken", earlier.as_str())));
             }
@@ -541,6 +597,7 @@ fn move_back(
         remove(&staged.root.join(current))?;
     }
     for (private, destination) in parked {
+        staged.refuse_respelled_folder(destination, false, "/target")?;
         if staged.occupied(destination, None)? {
             return Err(conflict(format!(
                 "{} is already taken",
@@ -620,6 +677,7 @@ fn move_item(
     destination: &WorkspacePath,
 ) -> Result<(), ApiError> {
     check_item_path(destination, "/destination")?;
+    staged.refuse_respelled_folder(destination, false, "/destination")?;
     let source = staged.path_of(item)?;
     if source == destination.as_str() {
         return Ok(());
@@ -761,6 +819,7 @@ fn set_type(root: &Path, definition: TypeDefinition) -> Result<(), ApiError> {
 /// any correction recorded for the digest it now shows.
 fn write_card(staged: &mut Staged, card: &SourceCard) -> Result<(), ApiError> {
     check_item_path(&card.path, "/path")?;
+    staged.refuse_respelled_folder(&card.path, false, "/path")?;
     refuse_header_change(&BTreeMap::new(), &card.properties, "/properties")?;
     let existing = staged.items.get(&card.item_id).cloned();
     let archived = match &existing {
@@ -847,6 +906,60 @@ fn concept(path: &str) -> Result<ConceptId, ApiError> {
         ApiError::new(ErrorCode::InvalidInput, format!("{path}: {error}"))
             .with_field("/destination")
     })
+}
+
+/// Refuse a path whose last segment the staged tree under `root` holds spelled another way
+/// (one collision key, other letters), as a file or a folder: `Conflict` on `field`, naming
+/// both. Writing there would replace that file on a filesystem that holds both spellings as
+/// one, and add a second spelling on one that does not; removing it would remove that file on
+/// the first and nothing on the second.
+fn refuse_respelled_file(root: &Path, path: &WorkspacePath, field: &str) -> Result<(), ApiError> {
+    let (folder, name) = match path.as_str().rsplit_once('/') {
+        Some((folder, name)) => (Some(folder), name),
+        None => (None, path.as_str()),
+    };
+    let directory = folder.map_or_else(|| root.to_path_buf(), |folder| root.join(folder));
+    match spelled_in(&directory, name, false)? {
+        Some(spelled) if spelled != name => {
+            let other =
+                folder.map_or_else(|| spelled.clone(), |folder| format!("{folder}/{spelled}"));
+            Err(conflict(format!("{} collides with {other}", path.as_str())).with_field(field))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// How `directory` spells `segment`: the name of its entry named exactly `segment`, or else of
+/// one whose collision key is `segment`'s; `None` when it has neither, or does not exist.
+/// `folders` counts only its folders.
+fn spelled_in(directory: &Path, segment: &str, folders: bool) -> Result<Option<String>, ApiError> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error("read", directory, &error)),
+    };
+    let key = collision_key(segment);
+    let mut other = None;
+    for entry in entries {
+        let entry = entry.map_err(|error| io_error("read", directory, &error))?;
+        let kind = entry
+            .file_type()
+            .map_err(|error| io_error("inspect", &entry.path(), &error))?;
+        if folders && !kind.is_dir() {
+            continue;
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| internal("a staged file name is not UTF-8"))?;
+        if name == segment {
+            return Ok(Some(name));
+        }
+        if collision_key(&name) == key {
+            other = Some(name);
+        }
+    }
+    Ok(other)
 }
 
 /// `path` as a `/`-separated path relative to `root`; `None` when it is not under `root` or a

@@ -304,6 +304,23 @@ fn restore(item: u32, from: &Revision) -> Fallible<TreeEdit> {
     })
 }
 
+fn restore_paths(from: &Revision, paths: &[&str]) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::RestorePaths {
+        from: from.clone(),
+        paths: paths.iter().map(|at| path(at)).collect::<Fallible<_>>()?,
+    })
+}
+
+fn deleted(item: u32) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::DeleteItem {
+        item_id: uuid!(item)?,
+    })
+}
+
+fn folder(at: &str) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::CreateFolder { folder: path(at)? })
+}
+
 /// A source card at `at`.
 fn card(item: u32, at: &str) -> Fallible<TreeEdit> {
     Ok(TreeEdit::WriteSourceCard(Box::new(SourceCard {
@@ -333,6 +350,19 @@ fn card(item: u32, at: &str) -> Fallible<TreeEdit> {
             }
         }))?,
     })))
+}
+
+/// `error` is the folder-spelling refusal: `InvalidInput` on `field`, naming `spelling`.
+fn assert_spelled(error: &ApiError, spelling: &str, field: &str) {
+    assert_eq!(error.code, ErrorCode::InvalidInput, "{}", error.message);
+    assert_eq!(error.field.as_deref(), Some(field), "{}", error.message);
+    assert!(
+        error
+            .message
+            .contains(&format!("the folder is spelled {spelling}")),
+        "{}",
+        error.message
+    );
 }
 
 /// `error` is a `Conflict` that names every one of `names`.
@@ -652,6 +682,207 @@ async fn a_move_below_the_items_own_file_is_still_refused_as_taken() -> TestResu
         .refused(3, &seeded, vec![moved(10, "a.md/inner.md")?])
         .await?;
     assert_conflict_naming(&error, &["a.md/inner.md", "already taken"]);
+    Ok(())
+}
+
+// S2: a folder spelled two ways.
+
+/// `Notes/a.md` (item 10), `Notes/Sub/c.md` (item 13) and `b.md` (item 11).
+async fn notes_folder(space: &Workspace) -> Fallible<Revision> {
+    Ok(space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "Notes/a.md", "Ten.")?,
+                note(11, "b.md", "Eleven.")?,
+                note(13, "Notes/Sub/c.md", "Thirteen.")?,
+            ],
+        )
+        .await?)
+}
+
+/// No file of `files` is under a spelling of `Notes/` or `Notes/Sub/` other than those.
+fn one_spelling(files: &[String]) {
+    for file in files {
+        let folder = file.split('/').next().unwrap_or_default();
+        assert!(
+            !folder.eq_ignore_ascii_case("notes") || folder == "Notes",
+            "{files:?}"
+        );
+        let below = file.strip_prefix("Notes/").unwrap_or_default();
+        let sub = below.split('/').next().unwrap_or_default();
+        assert!(
+            !below.contains('/') || !sub.eq_ignore_ascii_case("sub") || sub == "Sub",
+            "{files:?}"
+        );
+    }
+}
+
+/// A note created, moved or written as a source card into a folder the tree spells another
+/// way is refused naming the tree's spelling and the field; the same writes in the tree's
+/// spelling land there.
+#[tokio::test]
+async fn a_note_written_into_a_folder_spelled_another_way_is_refused() -> TestResult {
+    let space = Workspace::new().await?;
+    let seeded = notes_folder(&space).await?;
+    let created = space
+        .refused(3, &seeded, vec![note(12, "notes/new.md", "Twelve.")?])
+        .await?;
+    assert_spelled(&created, "Notes/", "/path");
+    let nested = space
+        .refused(4, &seeded, vec![note(12, "Notes/sub/new.md", "Twelve.")?])
+        .await?;
+    assert_spelled(&nested, "Notes/Sub/", "/path");
+    let moving = space
+        .refused(5, &seeded, vec![moved(11, "NOTES/b.md")?])
+        .await?;
+    assert_spelled(&moving, "Notes/", "/destination");
+    let carded = space
+        .refused(6, &seeded, vec![card(14, "notes/scan-pdf.md")?])
+        .await?;
+    assert_spelled(&carded, "Notes/", "/path");
+    let landed = space
+        .commit(
+            7,
+            &seeded,
+            vec![
+                note(12, "Notes/new.md", "Twelve.")?,
+                note(15, "Notes/Sub/new.md", "Fifteen.")?,
+                moved(11, "Notes/b.md")?,
+                card(14, "Notes/scan-pdf.md")?,
+            ],
+        )
+        .await?;
+    let files = space.files(&landed)?;
+    for at in [
+        "Notes/new.md",
+        "Notes/Sub/new.md",
+        "Notes/b.md",
+        "Notes/scan-pdf.md",
+    ] {
+        assert!(files.iter().any(|file| file == at), "{at}: {files:?}");
+    }
+    one_spelling(&files);
+    Ok(())
+}
+
+/// A folder created inside, or as, a folder the tree spells another way is refused naming the
+/// tree's spelling; the exact spelling of an existing folder is taken, as before; new folders in
+/// the tree's spelling are created.
+#[tokio::test]
+async fn a_folder_created_in_or_as_a_folder_spelled_another_way_is_refused() -> TestResult {
+    let space = Workspace::new().await?;
+    let seeded = notes_folder(&space).await?;
+    for (mutation, at, spelling) in [
+        (3, "notes/archive", "Notes/"),
+        (4, "NOTES", "Notes/"),
+        (5, "Notes/SUB", "Notes/Sub/"),
+        (6, "Notes/sub/deep", "Notes/Sub/"),
+    ] {
+        let error = space.refused(mutation, &seeded, vec![folder(at)?]).await?;
+        assert_spelled(&error, spelling, "/folder");
+    }
+    let taken = space.refused(7, &seeded, vec![folder("Notes")?]).await?;
+    assert_conflict_naming(&taken, &["Notes", "already taken"]);
+    let landed = space
+        .commit(
+            8,
+            &seeded,
+            vec![folder("Notes/archive")?, folder("Notes/Sub/deep")?],
+        )
+        .await?;
+    let files = space.files(&landed)?;
+    for at in ["Notes/archive/index.md", "Notes/Sub/deep/index.md"] {
+        assert!(files.iter().any(|file| file == at), "{at}: {files:?}");
+    }
+    one_spelling(&files);
+    Ok(())
+}
+
+/// Item 20 at `docs/a.md` and item 21 at `docs/b.md` (`early`), then item 20 moved to `x.md`
+/// (`away`).
+async fn docs_moved_away(space: &Workspace) -> Fallible<(Revision, Revision)> {
+    let early = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(20, "docs/a.md", "Twenty.")?,
+                note(21, "docs/b.md", "21.")?,
+            ],
+        )
+        .await?;
+    let away = space.commit(3, &early, vec![moved(20, "x.md")?]).await?;
+    Ok((early, away))
+}
+
+/// The folder `docs/` of `away` renamed `Docs/` straight through Git (no edit renames a
+/// folder yet), committed on top of it.
+fn respell_docs(space: &Workspace, away: &Revision) -> Fallible<Revision> {
+    let mut written = Vec::new();
+    for name in ["b.md", "index.md"] {
+        let bytes = some(space.file(away, &format!("docs/{name}"))?, name)?;
+        written.push((format!("Docs/{name}"), bytes));
+    }
+    let written: Vec<(&str, Vec<u8>)> = written
+        .iter()
+        .map(|(at, bytes)| (at.as_str(), bytes.clone()))
+        .collect();
+    space.raw(900, &["docs/b.md", "docs/index.md"], &written)
+}
+
+/// A Rewind of an item to a path whose folder the tree now spells another way is refused
+/// naming that spelling, whether the item moves back from where it is or is written back after
+/// a delete; while the tree spells the folder as the earlier path does, the same Rewind lands.
+#[tokio::test]
+async fn a_rewind_into_a_folder_now_spelled_another_way_is_refused() -> TestResult {
+    let space = Workspace::new().await?;
+    let (early, away) = docs_moved_away(&space).await?;
+    let back = space.commit(4, &away, vec![restore(20, &early)?]).await?;
+    assert_eq!(space.item_at(&back, "docs/a.md").await?, Some(uuid!(20)?));
+    let space = Workspace::new().await?;
+    let (early, away) = docs_moved_away(&space).await?;
+    let respelled = respell_docs(&space, &away)?;
+    let moving_back = space
+        .refused(4, &respelled, vec![restore(20, &early)?])
+        .await?;
+    assert_spelled(&moving_back, "Docs/", "/target");
+    let gone = space.commit(5, &respelled, vec![deleted(20)?]).await?;
+    let written_back = space.refused(6, &gone, vec![restore(20, &early)?]).await?;
+    assert_spelled(&written_back, "Docs/", "/target");
+    Ok(())
+}
+
+/// `RestorePaths` refuses a listed path whose folder the tree spells another way, naming the
+/// listing's index, and a listed file the tree holds spelled another way (removing or writing
+/// it would reach that file only on a filesystem that holds both spellings as one); while the
+/// tree spells the folder as the listing does, the same restore lands.
+#[tokio::test]
+async fn restored_paths_spelled_another_way_are_refused() -> TestResult {
+    let space = Workspace::new().await?;
+    let (early, away) = docs_moved_away(&space).await?;
+    let request = ["x.md", "docs/a.md"];
+    let back = space
+        .commit(4, &away, vec![restore_paths(&early, &request)?])
+        .await?;
+    assert_eq!(space.item_at(&back, "docs/a.md").await?, Some(uuid!(20)?));
+    let space = Workspace::new().await?;
+    let (early, away) = docs_moved_away(&space).await?;
+    let respelled = respell_docs(&space, &away)?;
+    let into = space
+        .refused(4, &respelled, vec![restore_paths(&early, &request)?])
+        .await?;
+    assert_spelled(&into, "Docs/", "/paths/1");
+    let held = space
+        .commit(5, &respelled, vec![note(22, "Docs/A.md", "Twenty-two.")?])
+        .await?;
+    let removing = space
+        .refused(6, &held, vec![restore_paths(&early, &["Docs/a.md"])?])
+        .await?;
+    assert_conflict_naming(&removing, &["Docs/a.md", "Docs/A.md"]);
+    assert_eq!(removing.field.as_deref(), Some("/paths/0"));
+    assert_eq!(space.item_at(&held, "Docs/A.md").await?, Some(uuid!(22)?));
     Ok(())
 }
 

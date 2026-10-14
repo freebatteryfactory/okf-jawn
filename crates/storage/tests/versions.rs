@@ -530,6 +530,46 @@ async fn draft_per_editor_second_snapshot_conflicts_after_the_first() -> TestRes
     Ok(())
 }
 
+/// The case-folded refusals of `a_commit_is_staged_checked_and_refused_whole`, on a tree that
+/// holds `notes/Plan.md`. A file whose path folds onto it collides (`Conflict`). Under
+/// storage-paths ruling S2, a folder the tree spells another way (`Notes/plan.md`) is refused
+/// first, as `InvalidInput` naming the tree's spelling; before the ruling it was `Conflict`.
+async fn case_folded_paths_are_refused(
+    versions: &okf_jawn_storage::GitVersions,
+    scope: &StorageScope,
+    created: &Revision,
+) -> TestResult {
+    let respelled = err_of(
+        versions
+            .commit(
+                scope,
+                changes(22, created, vec![note(uuid!(11)?, "Notes/plan.md", "B")?])?,
+                Arc::new(Counting::default()),
+            )
+            .await,
+    )?;
+    assert_eq!(respelled.code, ErrorCode::InvalidInput, "{respelled}");
+    assert!(
+        respelled.message.contains("the folder is spelled notes/"),
+        "{respelled}"
+    );
+    let collision = err_of(
+        versions
+            .commit(
+                scope,
+                changes(22, created, vec![note(uuid!(11)?, "notes/plan.md", "B")?])?,
+                Arc::new(Counting::default()),
+            )
+            .await,
+    )?;
+    assert_eq!(
+        collision.code,
+        ErrorCode::Conflict,
+        "a case-folded path collides"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_commit_is_staged_checked_and_refused_whole() -> TestResult {
     let directory = tempfile::tempdir()?;
@@ -558,20 +598,7 @@ async fn a_commit_is_staged_checked_and_refused_whole() -> TestResult {
         )
         .await?
         .revision;
-    let collision = err_of(
-        versions
-            .commit(
-                &scope,
-                changes(22, &created, vec![note(uuid!(11)?, "Notes/plan.md", "B")?])?,
-                Arc::new(Counting::default()),
-            )
-            .await,
-    )?;
-    assert_eq!(
-        collision.code,
-        ErrorCode::Conflict,
-        "a case-folded path collides"
-    );
+    case_folded_paths_are_refused(&versions, &scope, &created).await?;
     let mut supplied = BTreeMap::new();
     supplied.insert("okf_jawn".to_owned(), json!({ "item_id": uuid_text(12) }));
     let header = err_of(
