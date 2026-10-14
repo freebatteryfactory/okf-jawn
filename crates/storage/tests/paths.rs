@@ -20,7 +20,8 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::history::FileChangeKind;
 use okf_jawn_contract::identity::{ItemId, Revision, TenantId, WorkspacePath};
 use okf_jawn_contract::item::{ItemKind, TypeDefinition};
-use okf_jawn_core::search::{GraphQuery, SearchIndex, SearchQuery};
+use okf_jawn_contract::search::LinkDirection;
+use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
     CandidateCheck, CommitChanges, Committed, DiffQuery, LogQuery, NewWorkspace, Page, Provenance,
     SourceCard, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
@@ -655,6 +656,51 @@ async fn an_item_whose_name_ends_in_md_md_moves_as_itself() -> TestResult {
         .item_at_path(&space.scope, &moved_on, &path("c.md.md")?)
         .await?;
     assert_eq!(some(untitled, "c.md.md")?.title, "c.md");
+    Ok(())
+}
+
+/// Search resolves the links of an item named `.md.md` or `x/.md.md` from the item's own folder:
+/// one `.md` comes off its name, as okf-core's concept, so `y.md` from `x/.md.md` is `x/y.md`
+/// and from `.md.md` is the root's `y.md`.
+#[tokio::test]
+async fn search_resolves_the_links_of_an_item_named_md_md_from_its_folder() -> TestResult {
+    let space = Workspace::new().await?;
+    let seeded = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(13, ".md.md", "Root. See [y](y.md).")?,
+                note(14, "x/.md.md", "Folder. See [y](y.md).")?,
+                note(15, "x/y.md", "Folder y.")?,
+                note(16, "y.md", "Root y.")?,
+            ],
+        )
+        .await?;
+    let search = space.storage.search();
+    search.index_revision(&space.scope, seeded.clone()).await?;
+    for (item, target) in [(13, 16), (14, 15)] {
+        let found = search
+            .links(
+                &space.scope,
+                LinkQuery {
+                    revision: seeded.clone(),
+                    item_id: uuid!(item)?,
+                    direction: LinkDirection::Outgoing,
+                    page: Page {
+                        cursor: None,
+                        limit: 20,
+                    },
+                },
+            )
+            .await?;
+        let resolved: Vec<(String, Option<ItemId>)> = found
+            .links
+            .iter()
+            .map(|link| (link.to_path.clone(), link.to))
+            .collect();
+        assert_eq!(resolved, [("y.md".to_owned(), Some(uuid!(target)?))]);
+    }
     Ok(())
 }
 
