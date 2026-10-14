@@ -93,6 +93,12 @@ pub enum ErrorDetail {
         /// The head the request was compared with.
         head: crate::identity::Revision,
     },
+    /// The workspace is archived, and this operation is not one an archived workspace allows
+    /// (`operations::ALLOWED_WHILE_ARCHIVED`). The code is `conflict`.
+    WorkspaceArchived {
+        /// When the workspace was archived.
+        archived_at: crate::identity::Timestamp,
+    },
 }
 
 /// One snapshotted item whose committed content moved after its draft's base.

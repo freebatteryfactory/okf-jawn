@@ -409,6 +409,25 @@
             "head"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The workspace is archived, and this operation is not one an archived workspace allows\n(`operations::ALLOWED_WHILE_ARCHIVED`). The code is `conflict`.",
+          "properties": {
+            "archived_at": {
+              "$ref": "#/$defs/Timestamp",
+              "description": "When the workspace was archived."
+            },
+            "kind": {
+              "const": "workspace_archived",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "archived_at"
+          ],
+          "type": "object"
         }
       ]
     },

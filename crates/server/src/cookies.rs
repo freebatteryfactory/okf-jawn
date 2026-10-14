@@ -14,11 +14,11 @@ use std::time::Duration;
 use axum::http::header::COOKIE;
 use axum::http::{HeaderMap, HeaderValue};
 use cookie::{Cookie, SameSite};
-use okf_jawn_contract::access::CSRF_COOKIE;
+use okf_jawn_contract::access::{CSRF_COOKIE, SESSION_COOKIE};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 
 use crate::hosted::{LOGIN_COOKIE, LOGIN_MAX_AGE};
-use crate::identity::{CookieReader, SESSION_COOKIE, csrf_token_of};
+use crate::identity::{CookieReader, csrf_token_of};
 
 /// Reads cookies with `cookie::Cookie::split_parse`.
 #[derive(Debug, Clone, Copy, Default)]

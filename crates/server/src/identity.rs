@@ -41,7 +41,7 @@ use axum::http::{HeaderMap, HeaderValue, Method};
 use axum::middleware::Next;
 use axum::response::Response;
 use okf_jawn_contract::access::{
-    AccessRoute, CSRF_HEADER, Connector, DelegationCeiling, Principal,
+    AccessRoute, CSRF_HEADER, Connector, DelegationCeiling, Principal, SESSION_COOKIE,
 };
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::TenantId;
@@ -173,9 +173,6 @@ struct Inner {
     origins: Vec<String>,
     clock: Arc<dyn WallClock>,
 }
-
-/// The browser session cookie (`api/openapi.json` `browserSession`).
-pub const SESSION_COOKIE: &str = "okf-session";
 
 /// The MCP endpoint path (`api/transports.json` `mcp_request`).
 pub const MCP_PATH: &str = "/mcp";

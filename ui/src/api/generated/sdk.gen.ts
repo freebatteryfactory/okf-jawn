@@ -31,11 +31,19 @@ export const getResourceMetadata = <ThrowOnError extends boolean = false>(option
  * Download a completed installation archive; only a tenant administrator in a human browser session.
  */
 export const downloadTenantArtifact = <ThrowOnError extends boolean = false>(options: Options<DownloadTenantArtifactData, ThrowOnError>): RequestResult<DownloadTenantArtifactResponses, unknown, ThrowOnError> => (options.client ?? client).get<DownloadTenantArtifactResponses, unknown, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
+    ],
     url: '/api/artifacts/{artifact_id}',
     ...options
 });
@@ -58,7 +66,12 @@ export const getAttention = <ThrowOnError extends boolean = false>(options: Opti
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/attention/get-attention',
     ...options,
@@ -86,7 +99,12 @@ export const rebuildIndex = <ThrowOnError extends boolean = false>(options: Opti
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/attention/rebuild-index',
     ...options,
@@ -114,7 +132,12 @@ export const applyNames = <ThrowOnError extends boolean = false>(options: Option
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/conventions/apply-names',
     ...options,
@@ -142,7 +165,12 @@ export const getRules = <ThrowOnError extends boolean = false>(options: Options<
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/conventions/get-rules',
     ...options,
@@ -170,7 +198,12 @@ export const previewNames = <ThrowOnError extends boolean = false>(options: Opti
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/conventions/preview-names',
     ...options,
@@ -198,7 +231,12 @@ export const setRules = <ThrowOnError extends boolean = false>(options: Options<
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/conventions/set-rules',
     ...options,
@@ -226,7 +264,12 @@ export const getReceipt = <ThrowOnError extends boolean = false>(options: Option
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/events/get-receipt',
     ...options,
@@ -254,7 +297,12 @@ export const listEvents = <ThrowOnError extends boolean = false>(options: Option
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/events/list-events',
     ...options,
@@ -282,7 +330,12 @@ export const listTenantEvents = <ThrowOnError extends boolean = false>(options: 
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/events/list-tenant-events',
     ...options,
@@ -310,7 +363,12 @@ export const getHealth = <ThrowOnError extends boolean = false>(options: Options
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/health/get-health',
     ...options,
@@ -338,7 +396,12 @@ export const getReadiness = <ThrowOnError extends boolean = false>(options: Opti
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/health/get-readiness',
     ...options,
@@ -366,7 +429,12 @@ export const blameItem = <ThrowOnError extends boolean = false>(options: Options
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/history/blame-item',
     ...options,
@@ -394,7 +462,12 @@ export const commitItems = <ThrowOnError extends boolean = false>(options: Optio
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/history/commit-items',
     ...options,
@@ -422,7 +495,12 @@ export const diffItems = <ThrowOnError extends boolean = false>(options: Options
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/history/diff-items',
     ...options,
@@ -450,7 +528,12 @@ export const logItems = <ThrowOnError extends boolean = false>(options: Options<
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/history/log-items',
     ...options,
@@ -478,7 +561,12 @@ export const restoreItems = <ThrowOnError extends boolean = false>(options: Opti
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/history/restore-items',
     ...options,
@@ -491,7 +579,7 @@ export const restoreItems = <ThrowOnError extends boolean = false>(options: Opti
 /**
  * Cancel
  *
- * Cancel work while retaining completed uploads and recorded state.
+ * Cancel work while retaining completed uploads and recorded state. Needs the permission of the operation that started the job, and a human session where that operation needs one.
  */
 export const cancelJob = <ThrowOnError extends boolean = false>(options: Options<CancelJobData, ThrowOnError>): RequestResult<CancelJobResponses, CancelJobErrors, ThrowOnError> => (options.client ?? client).post<CancelJobResponses, CancelJobErrors, ThrowOnError>({
     security: [
@@ -506,7 +594,12 @@ export const cancelJob = <ThrowOnError extends boolean = false>(options: Options
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/imports/cancel-job',
     ...options,
@@ -534,7 +627,12 @@ export const completeUpload = <ThrowOnError extends boolean = false>(options: Op
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/imports/complete-upload',
     ...options,
@@ -562,7 +660,12 @@ export const correctDigest = <ThrowOnError extends boolean = false>(options: Opt
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/imports/correct-digest',
     ...options,
@@ -590,7 +693,12 @@ export const createUpload = <ThrowOnError extends boolean = false>(options: Opti
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/imports/create-upload',
     ...options,
@@ -618,7 +726,12 @@ export const discardUpload = <ThrowOnError extends boolean = false>(options: Opt
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/imports/discard-upload',
     ...options,
@@ -646,7 +759,12 @@ export const getJob = <ThrowOnError extends boolean = false>(options: Options<Ge
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/imports/get-job',
     ...options,
@@ -674,7 +792,12 @@ export const getTenantJob = <ThrowOnError extends boolean = false>(options: Opti
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/imports/get-tenant-job',
     ...options,
@@ -702,7 +825,12 @@ export const getUpload = <ThrowOnError extends boolean = false>(options: Options
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/imports/get-upload',
     ...options,
@@ -730,7 +858,12 @@ export const listJobs = <ThrowOnError extends boolean = false>(options: Options<
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/imports/list-jobs',
     ...options,
@@ -758,7 +891,12 @@ export const listTenantJobs = <ThrowOnError extends boolean = false>(options: Op
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/imports/list-tenant-jobs',
     ...options,
@@ -786,7 +924,12 @@ export const listUploads = <ThrowOnError extends boolean = false>(options: Optio
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/imports/list-uploads',
     ...options,
@@ -814,7 +957,12 @@ export const redigestItem = <ThrowOnError extends boolean = false>(options: Opti
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/imports/redigest-item',
     ...options,
@@ -827,7 +975,7 @@ export const redigestItem = <ThrowOnError extends boolean = false>(options: Opti
 /**
  * Retry
  *
- * Retry the same durable work identity without duplicating completed effects.
+ * Retry the same durable work identity without duplicating completed effects. Needs the permission of the operation that started the job, and a human session where that operation needs one.
  */
 export const retryJob = <ThrowOnError extends boolean = false>(options: Options<RetryJobData, ThrowOnError>): RequestResult<RetryJobResponses, RetryJobErrors, ThrowOnError> => (options.client ?? client).post<RetryJobResponses, RetryJobErrors, ThrowOnError>({
     security: [
@@ -842,7 +990,12 @@ export const retryJob = <ThrowOnError extends boolean = false>(options: Options<
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/imports/retry-job',
     ...options,
@@ -870,7 +1023,12 @@ export const startImport = <ThrowOnError extends boolean = false>(options: Optio
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/imports/start-import',
     ...options,
@@ -898,7 +1056,12 @@ export const createFolder = <ThrowOnError extends boolean = false>(options: Opti
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/items/create-folder',
     ...options,
@@ -926,7 +1089,12 @@ export const createItem = <ThrowOnError extends boolean = false>(options: Option
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/items/create-item',
     ...options,
@@ -954,7 +1122,12 @@ export const deleteFolder = <ThrowOnError extends boolean = false>(options: Opti
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/items/delete-folder',
     ...options,
@@ -982,7 +1155,12 @@ export const deleteItem = <ThrowOnError extends boolean = false>(options: Option
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/items/delete-item',
     ...options,
@@ -1010,7 +1188,12 @@ export const discardDraft = <ThrowOnError extends boolean = false>(options: Opti
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/items/discard-draft',
     ...options,
@@ -1038,7 +1221,12 @@ export const getItem = <ThrowOnError extends boolean = false>(options: Options<G
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/items/get-item',
     ...options,
@@ -1066,7 +1254,12 @@ export const listDrafts = <ThrowOnError extends boolean = false>(options: Option
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/items/list-drafts',
     ...options,
@@ -1094,7 +1287,12 @@ export const listItems = <ThrowOnError extends boolean = false>(options: Options
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/items/list-items',
     ...options,
@@ -1122,7 +1320,12 @@ export const moveFolder = <ThrowOnError extends boolean = false>(options: Option
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/items/move-folder',
     ...options,
@@ -1150,7 +1353,12 @@ export const moveItem = <ThrowOnError extends boolean = false>(options: Options<
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/items/move-item',
     ...options,
@@ -1178,7 +1386,12 @@ export const purgeItem = <ThrowOnError extends boolean = false>(options: Options
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/items/purge-item',
     ...options,
@@ -1206,7 +1419,12 @@ export const saveDraft = <ThrowOnError extends boolean = false>(options: Options
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/items/save-draft',
     ...options,
@@ -1234,7 +1452,12 @@ export const setLifecycle = <ThrowOnError extends boolean = false>(options: Opti
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/items/set-lifecycle',
     ...options,
@@ -1262,7 +1485,12 @@ export const acceptProposal = <ThrowOnError extends boolean = false>(options: Op
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/proposals/accept-proposal',
     ...options,
@@ -1290,7 +1518,12 @@ export const addComment = <ThrowOnError extends boolean = false>(options: Option
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/proposals/add-comment',
     ...options,
@@ -1318,7 +1551,12 @@ export const declineProposal = <ThrowOnError extends boolean = false>(options: O
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/proposals/decline-proposal',
     ...options,
@@ -1346,7 +1584,12 @@ export const getProposal = <ThrowOnError extends boolean = false>(options: Optio
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/proposals/get-proposal',
     ...options,
@@ -1374,7 +1617,12 @@ export const listComments = <ThrowOnError extends boolean = false>(options: Opti
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/proposals/list-comments',
     ...options,
@@ -1402,7 +1650,12 @@ export const listProposals = <ThrowOnError extends boolean = false>(options: Opt
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/proposals/list-proposals',
     ...options,
@@ -1430,7 +1683,12 @@ export const openProposal = <ThrowOnError extends boolean = false>(options: Opti
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/proposals/open-proposal',
     ...options,
@@ -1458,7 +1716,12 @@ export const createSandboxCapability = <ThrowOnError extends boolean = false>(op
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/reads/create-sandbox-capability',
     ...options,
@@ -1486,7 +1749,12 @@ export const getObject = <ThrowOnError extends boolean = false>(options: Options
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/reads/get-object',
     ...options,
@@ -1514,7 +1782,12 @@ export const getSources = <ThrowOnError extends boolean = false>(options: Option
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/reads/get-sources',
     ...options,
@@ -1542,7 +1815,12 @@ export const readItem = <ThrowOnError extends boolean = false>(options: Options<
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/reads/read-item',
     ...options,
@@ -1570,7 +1848,12 @@ export const createConfirmation = <ThrowOnError extends boolean = false>(options
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/reviews/create-confirmation',
     ...options,
@@ -1598,7 +1881,12 @@ export const createReview = <ThrowOnError extends boolean = false>(options: Opti
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/reviews/create-review',
     ...options,
@@ -1626,7 +1914,12 @@ export const listReviews = <ThrowOnError extends boolean = false>(options: Optio
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/reviews/list-reviews',
     ...options,
@@ -1642,11 +1935,19 @@ export const listReviews = <ThrowOnError extends boolean = false>(options: Optio
  * Read a generated application schema by its allowed name.
  */
 export const getFormSchema = <ThrowOnError extends boolean = false>(options: Options<GetFormSchemaData, ThrowOnError>): RequestResult<GetFormSchemaResponses, unknown, ThrowOnError> => (options.client ?? client).get<GetFormSchemaResponses, unknown, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
+    ],
     url: '/api/schemas/{name}',
     ...options
 });
@@ -1669,7 +1970,12 @@ export const getGraph = <ThrowOnError extends boolean = false>(options: Options<
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/search/get-graph',
     ...options,
@@ -1697,7 +2003,12 @@ export const getLinks = <ThrowOnError extends boolean = false>(options: Options<
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/search/get-links',
     ...options,
@@ -1725,7 +2036,12 @@ export const searchItems = <ThrowOnError extends boolean = false>(options: Optio
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/search/search-items',
     ...options,
@@ -1753,7 +2069,12 @@ export const createConnector = <ThrowOnError extends boolean = false>(options: O
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/session/create-connector',
     ...options,
@@ -1781,7 +2102,12 @@ export const getSession = <ThrowOnError extends boolean = false>(options: Option
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/session/get-session',
     ...options,
@@ -1809,7 +2135,12 @@ export const listConnectors = <ThrowOnError extends boolean = false>(options: Op
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/session/list-connectors',
     ...options,
@@ -1837,7 +2168,12 @@ export const revokeConnector = <ThrowOnError extends boolean = false>(options: O
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/session/revoke-connector',
     ...options,
@@ -1865,7 +2201,12 @@ export const listTypes = <ThrowOnError extends boolean = false>(options: Options
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/types/list-types',
     ...options,
@@ -1893,7 +2234,12 @@ export const setType = <ThrowOnError extends boolean = false>(options: Options<S
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/types/set-type',
     ...options,
@@ -1921,7 +2267,12 @@ export const exportView = <ThrowOnError extends boolean = false>(options: Option
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/views/export-view',
     ...options,
@@ -1949,7 +2300,12 @@ export const getCatalog = <ThrowOnError extends boolean = false>(options: Option
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/views/get-catalog',
     ...options,
@@ -1977,7 +2333,12 @@ export const getView = <ThrowOnError extends boolean = false>(options: Options<G
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/views/get-view',
     ...options,
@@ -2005,7 +2366,12 @@ export const presentView = <ThrowOnError extends boolean = false>(options: Optio
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/views/present-view',
     ...options,
@@ -2033,7 +2399,12 @@ export const resolveView = <ThrowOnError extends boolean = false>(options: Optio
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/views/resolve-view',
     ...options,
@@ -2061,7 +2432,12 @@ export const archiveWorkspace = <ThrowOnError extends boolean = false>(options: 
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/workspaces/archive-workspace',
     ...options,
@@ -2089,7 +2465,12 @@ export const backupInstallation = <ThrowOnError extends boolean = false>(options
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/workspaces/backup-installation',
     ...options,
@@ -2117,7 +2498,12 @@ export const backupWorkspace = <ThrowOnError extends boolean = false>(options: O
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/workspaces/backup-workspace',
     ...options,
@@ -2145,7 +2531,12 @@ export const createWorkspace = <ThrowOnError extends boolean = false>(options: O
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/workspaces/create-workspace',
     ...options,
@@ -2173,7 +2564,12 @@ export const exportWorkspace = <ThrowOnError extends boolean = false>(options: O
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/workspaces/export-workspace',
     ...options,
@@ -2201,7 +2597,12 @@ export const getPurge = <ThrowOnError extends boolean = false>(options: Options<
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/workspaces/get-purge',
     ...options,
@@ -2229,7 +2630,12 @@ export const listWorkspaces = <ThrowOnError extends boolean = false>(options: Op
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/workspaces/list-workspaces',
     ...options,
@@ -2257,7 +2663,12 @@ export const openWorkspace = <ThrowOnError extends boolean = false>(options: Opt
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/workspaces/open-workspace',
     ...options,
@@ -2285,7 +2696,12 @@ export const purgeWorkspace = <ThrowOnError extends boolean = false>(options: Op
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/workspaces/purge-workspace',
     ...options,
@@ -2313,7 +2729,12 @@ export const restoreWorkspace = <ThrowOnError extends boolean = false>(options: 
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/workspaces/restore-workspace',
     ...options,
@@ -2341,7 +2762,12 @@ export const unarchiveWorkspace = <ThrowOnError extends boolean = false>(options
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/workspaces/unarchive-workspace',
     ...options,
@@ -2369,7 +2795,12 @@ export const updateWorkspace = <ThrowOnError extends boolean = false>(options: O
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/workspaces/update-workspace',
     ...options,
@@ -2385,11 +2816,19 @@ export const updateWorkspace = <ThrowOnError extends boolean = false>(options: O
  * Download a completed workspace export, View export or workspace archive. The artifact kind decides the permission and the routes (ArtifactKind::download_permission and download_routes); an archive is served only to a workspace administrator in a human browser session.
  */
 export const downloadArtifact = <ThrowOnError extends boolean = false>(options: Options<DownloadArtifactData, ThrowOnError>): RequestResult<DownloadArtifactResponses, unknown, ThrowOnError> => (options.client ?? client).get<DownloadArtifactResponses, unknown, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
+    ],
     url: '/api/workspaces/{workspace_id}/artifacts/{artifact_id}',
     ...options
 });
@@ -2400,11 +2839,19 @@ export const downloadArtifact = <ThrowOnError extends boolean = false>(options: 
  * Resume workspace notifications with Last-Event-ID; notifications are projections, not canonical content. A workspace's security events are returned only to a caller holding `admin` on it, checked on every call; a page may therefore hold fewer rows than asked, or none, and still carry a cursor.
  */
 export const streamEvents = <ThrowOnError extends boolean = false>(options: Options<StreamEventsData, ThrowOnError, StreamEventsResponse>): Promise<ServerSentEventsResult<StreamEventsResponses>> => (options.client ?? client).sse.get<StreamEventsResponses, unknown, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
+    ],
     url: '/api/workspaces/{workspace_id}/events',
     ...options
 });
@@ -2415,11 +2862,19 @@ export const streamEvents = <ThrowOnError extends boolean = false>(options: Opti
  * Read original or derived bytes authorized through an exact item revision. Support HTTP Range without accepting hash knowledge as permission. Never serves a backup artifact's object.
  */
 export const downloadObject = <ThrowOnError extends boolean = false>(options: Options<DownloadObjectData, ThrowOnError>): RequestResult<DownloadObjectResponses, unknown, ThrowOnError> => (options.client ?? client).get<DownloadObjectResponses, unknown, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
+    ],
     url: '/api/workspaces/{workspace_id}/items/{item_id}/revisions/{revision}/objects/{digest}',
     ...options
 });
@@ -2443,7 +2898,12 @@ export const uploadContent = <ThrowOnError extends boolean = false>(options: Opt
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/api/workspaces/{workspace_id}/uploads/{upload_id}/content',
     ...options,
@@ -2492,7 +2952,12 @@ export const endSession = <ThrowOnError extends boolean = false>(options?: Optio
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/auth/logout',
     ...options
@@ -2523,7 +2988,12 @@ export const mcpClose = <ThrowOnError extends boolean = false>(options?: Options
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/mcp',
     ...options
@@ -2535,11 +3005,19 @@ export const mcpClose = <ThrowOnError extends boolean = false>(options?: Options
  * Optional MCP server event stream managed by the SDK.
  */
 export const mcpEvents = <ThrowOnError extends boolean = false>(options?: Options<McpEventsData, ThrowOnError, McpEventsResponse>): Promise<ServerSentEventsResult<McpEventsResponses>> => (options?.client ?? client).sse.get<McpEventsResponses, unknown, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
+    ],
     url: '/mcp',
     ...options
 });
@@ -2562,7 +3040,12 @@ export const mcpRequest = <ThrowOnError extends boolean = false>(options: Option
             name: 'okf-csrf',
             type: 'apiKey'
         },
-        { name: 'x-okf-csrf', type: 'apiKey' }
+        { name: 'x-okf-csrf', type: 'apiKey' },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
     ],
     url: '/mcp',
     ...options,
@@ -2578,11 +3061,19 @@ export const mcpRequest = <ThrowOnError extends boolean = false>(options: Option
  * Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. The capability from create_sandbox_capability is the only credential: it binds workspace, item, revision and representation, is stored hashed, expires, and is never logged. No ambient session cookies, credentials, or privileged APIs; respond with no-store, no-referrer and a strict CSP (SPEC sections 7 and 11).
  */
 export const serveSandboxRepresentation = <ThrowOnError extends boolean = false>(options: Options<ServeSandboxRepresentationData, ThrowOnError>): RequestResult<ServeSandboxRepresentationResponses, unknown, ThrowOnError> => (options.client ?? client).get<ServeSandboxRepresentationResponses, unknown, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
             in: 'cookie',
             name: 'okf-session',
             type: 'apiKey'
-        }],
+        },
+        {
+            in: 'cookie',
+            name: '__Host-okf-session',
+            type: 'apiKey'
+        }
+    ],
     url: '/sandbox/{capability}',
     ...options
 });

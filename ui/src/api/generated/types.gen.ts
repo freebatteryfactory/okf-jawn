@@ -120,9 +120,13 @@ export type ApplyNamesRequest = {
 /**
  * Archive the workspace without deleting retained content.
  *
- * While a workspace is archived, an operation that would change its content or open work on
- * it (a commit, a draft, a proposal, an upload, an import or redigest) is refused as
- * `conflict`; reads, export, backup, `unarchive_workspace` and purge are allowed.
+ * While a workspace is archived, only the operations of `operations::ALLOWED_WHILE_ARCHIVED`
+ * run on it: every operation that is not a mutation, and a repeated archive, unarchive,
+ * export, backup, purge, cancelling a job and rebuilding the index. Any other is refused as
+ * `conflict` with `ErrorDetail::WorkspaceArchived`. The archive itself is refused with
+ * `conflict` while an import, redigest or restore job of the workspace is queued or running,
+ * and no such job is accepted for an archived workspace, so no content-changing job runs in
+ * one. A direct write admitted just before the archive lands completes.
  */
 export type ArchiveWorkspaceRequest = {
     /**
@@ -1600,6 +1604,12 @@ export type ErrorDetail = {
      */
     head: Revision;
     kind: 'stale_base';
+} | {
+    /**
+     * When the workspace was archived.
+     */
+    archived_at: Timestamp;
+    kind: 'workspace_archived';
 };
 
 /**

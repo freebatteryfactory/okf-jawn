@@ -134,9 +134,13 @@ components:
       description: |-
         Archive the workspace without deleting retained content.
 
-        While a workspace is archived, an operation that would change its content or open work on
-        it (a commit, a draft, a proposal, an upload, an import or redigest) is refused as
-        `conflict`; reads, export, backup, `unarchive_workspace` and purge are allowed.
+        While a workspace is archived, only the operations of `operations::ALLOWED_WHILE_ARCHIVED`
+        run on it: every operation that is not a mutation, and a repeated archive, unarchive,
+        export, backup, purge, cancelling a job and rebuilding the index. Any other is refused as
+        `conflict` with `ErrorDetail::WorkspaceArchived`. The archive itself is refused with
+        `conflict` while an import, redigest or restore job of the workspace is queued or running,
+        and no such job is accepted for an archived workspace, so no content-changing job runs in
+        one. A direct write admitted just before the archive lands completes.
       properties:
         base_revision:
           $ref: '#/components/schemas/Revision'
@@ -2063,6 +2067,21 @@ components:
         required:
         - kind
         - head
+        type: object
+      - additionalProperties: false
+        description: |-
+          The workspace is archived, and this operation is not one an archived workspace allows
+          (`operations::ALLOWED_WHILE_ARCHIVED`). The code is `conflict`.
+        properties:
+          archived_at:
+            $ref: '#/components/schemas/Timestamp'
+            description: When the workspace was archived.
+          kind:
+            const: workspace_archived
+            type: string
+        required:
+        - kind
+        - archived_at
         type: object
     Event:
       additionalProperties: false
@@ -6681,9 +6700,14 @@ components:
       scheme: bearer
       type: http
     browserSession:
-      description: Local-owner or WorkOS browser session. A cookie-authenticated request that is not a GET also carries the csrfCookie and csrfHeader pair.
+      description: Local-owner browser session of a service whose public origin is plain http on loopback. A cookie-authenticated request that is not a GET also carries the csrfCookie and csrfHeader pair. The server reads only the session cookie of its own scheme.
       in: cookie
       name: okf-session
+      type: apiKey
+    browserSessionHttps:
+      description: 'Browser session (local owner or WorkOS) of a service whose public origin is https: always Secure, Path=/ and no Domain, so a sibling host or another port cannot set it. A cookie-authenticated request that is not a GET also carries the csrfCookie and csrfHeader pair. The server reads only the session cookie of its own scheme.'
+      in: cookie
+      name: __Host-okf-session
       type: apiKey
     csrfCookie:
       description: 'Anti-CSRF token the server sets at sign-in beside the session cookie: not HttpOnly, SameSite=Strict, Secure under HTTPS. Double-submit rule: every cookie-authenticated mutation sends its value in the csrfHeader header, in addition to the server''s Origin and Sec-Fetch-Site check. Every canonical operation is a POST, so every route that is not a GET asks for the pair.'
@@ -6739,6 +6763,7 @@ paths:
       security:
       - bearerAuth: []
       - browserSession: []
+      - browserSessionHttps: []
       summary: download_tenant_artifact
       tags:
       - transport
@@ -6826,10 +6851,14 @@ paths:
       - attention
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: attention
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Attention
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -6919,10 +6948,14 @@ paths:
       - attention
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Rebuild search
       x-permission: admin
+      x-starts-job: rebuild_index
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -7012,10 +7045,14 @@ paths:
       - conventions
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Apply
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: true
         idempotentHint: false
@@ -7105,10 +7142,14 @@ paths:
       - conventions
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Conventions
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -7198,10 +7239,14 @@ paths:
       - conventions
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Preview
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -7291,10 +7336,14 @@ paths:
       - conventions
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Save conventions
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -7384,10 +7433,14 @@ paths:
       - events
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Tool results returned
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -7477,10 +7530,14 @@ paths:
       - events
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Activity
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -7570,10 +7627,14 @@ paths:
       - events
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Security activity
       x-permission: admin
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -7663,10 +7724,14 @@ paths:
       - health
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Health
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -7756,10 +7821,14 @@ paths:
       - health
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Readiness
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -7849,10 +7918,14 @@ paths:
       - history
       x-agent-alias: blame
       x-agent-tool: true
+      x-allowed-while-archived: true
       x-cli-alias: who
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: true
       x-operator-label: Who
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -7942,10 +8015,14 @@ paths:
       - history
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: snapshot
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Snapshot
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -8035,10 +8112,14 @@ paths:
       - history
       x-agent-alias: diff
       x-agent-tool: true
+      x-allowed-while-archived: true
       x-cli-alias: changes
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: true
       x-operator-label: Changes
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -8128,10 +8209,14 @@ paths:
       - history
       x-agent-alias: log
       x-agent-tool: true
+      x-allowed-while-archived: true
       x-cli-alias: timeline
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: true
       x-operator-label: Timeline
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -8221,10 +8306,14 @@ paths:
       - history
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: rewind
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Rewind
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: true
         idempotentHint: false
@@ -8234,7 +8323,7 @@ paths:
       x-ui-resource: null
   /api/imports/cancel-job:
     post:
-      description: Cancel work while retaining completed uploads and recorded state.
+      description: Cancel work while retaining completed uploads and recorded state. Needs the permission of the operation that started the job, and a human session where that operation needs one.
       operationId: cancel_job
       requestBody:
         content:
@@ -8314,10 +8403,14 @@ paths:
       - imports
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Cancel
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -8407,10 +8500,14 @@ paths:
       - imports
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Finish upload
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -8500,10 +8597,14 @@ paths:
       - imports
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Correct text
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -8593,10 +8694,14 @@ paths:
       - imports
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Add files
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -8686,10 +8791,14 @@ paths:
       - imports
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Discard upload
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: true
         idempotentHint: false
@@ -8779,10 +8888,14 @@ paths:
       - imports
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Progress
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -8872,10 +8985,14 @@ paths:
       - imports
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Progress
       x-permission: admin
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -8965,10 +9082,14 @@ paths:
       - imports
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Upload
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -9058,10 +9179,14 @@ paths:
       - imports
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Jobs
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -9151,10 +9276,14 @@ paths:
       - imports
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Installation jobs
       x-permission: admin
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -9244,10 +9373,14 @@ paths:
       - imports
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Uploads
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -9337,10 +9470,14 @@ paths:
       - imports
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Reconvert
       x-permission: write
+      x-starts-job: redigest
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -9350,7 +9487,7 @@ paths:
       x-ui-resource: null
   /api/imports/retry-job:
     post:
-      description: Retry the same durable work identity without duplicating completed effects.
+      description: Retry the same durable work identity without duplicating completed effects. Needs the permission of the operation that started the job, and a human session where that operation needs one.
       operationId: retry_job
       requestBody:
         content:
@@ -9430,10 +9567,14 @@ paths:
       - imports
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Retry
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -9523,10 +9664,14 @@ paths:
       - imports
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: import
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Import
       x-permission: write
+      x-starts-job: import
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -9616,10 +9761,14 @@ paths:
       - items
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: New folder
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -9709,10 +9858,14 @@ paths:
       - items
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: New note
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -9802,10 +9955,14 @@ paths:
       - items
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Delete folder
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: true
         idempotentHint: false
@@ -9895,10 +10052,14 @@ paths:
       - items
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Remove
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: true
         idempotentHint: false
@@ -9988,10 +10149,14 @@ paths:
       - items
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Discard draft
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: true
         idempotentHint: false
@@ -10081,10 +10246,14 @@ paths:
       - items
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Properties
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -10174,10 +10343,14 @@ paths:
       - items
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Drafts
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -10267,10 +10440,14 @@ paths:
       - items
       x-agent-alias: ls
       x-agent-tool: true
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: true
       x-operator-label: Browse
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -10360,10 +10537,14 @@ paths:
       - items
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Move folder
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -10453,10 +10634,14 @@ paths:
       - items
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Move
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -10546,10 +10731,14 @@ paths:
       - items
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: true
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Purge
       x-permission: admin
+      x-starts-job: purge_item
       x-tool-annotations:
         destructiveHint: true
         idempotentHint: false
@@ -10639,10 +10828,14 @@ paths:
       - items
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Save
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -10732,10 +10925,14 @@ paths:
       - items
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Archive
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -10825,10 +11022,14 @@ paths:
       - proposals
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: approve
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Approve
       x-permission: approve
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -10918,10 +11119,14 @@ paths:
       - proposals
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Comment
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -11011,10 +11216,14 @@ paths:
       - proposals
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: decline
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Decline
       x-permission: approve
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -11104,10 +11313,14 @@ paths:
       - proposals
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Open proposal
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -11197,10 +11410,14 @@ paths:
       - proposals
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Discussion
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -11290,10 +11507,14 @@ paths:
       - proposals
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Proposals
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -11383,10 +11604,14 @@ paths:
       - proposals
       x-agent-alias: propose
       x-agent-tool: true
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: true
       x-operator-label: Propose
       x-permission: propose
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -11476,10 +11701,14 @@ paths:
       - reads
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Open sandboxed
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -11569,10 +11798,14 @@ paths:
       - reads
       x-agent-alias: read_object
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: true
       x-operator-label: Original
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -11662,10 +11895,14 @@ paths:
       - reads
       x-agent-alias: sources
       x-agent-tool: true
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: true
       x-operator-label: Sources
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -11755,10 +11992,14 @@ paths:
       - reads
       x-agent-alias: show
       x-agent-tool: true
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: true
       x-operator-label: Read
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -11848,10 +12089,14 @@ paths:
       - reviews
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Confirm
       x-permission: review
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -11941,10 +12186,14 @@ paths:
       - reviews
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: verify
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Verify
       x-permission: review
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -12034,10 +12283,14 @@ paths:
       - reviews
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Reviews
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -12064,6 +12317,7 @@ paths:
       security:
       - bearerAuth: []
       - browserSession: []
+      - browserSessionHttps: []
       summary: get_form_schema
       tags:
       - transport
@@ -12151,10 +12405,14 @@ paths:
       - search
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Graph
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -12244,10 +12502,14 @@ paths:
       - search
       x-agent-alias: links
       x-agent-tool: true
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: true
       x-operator-label: Links
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -12337,10 +12599,14 @@ paths:
       - search
       x-agent-alias: grep
       x-agent-tool: true
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: true
       x-operator-label: Search
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -12430,10 +12696,14 @@ paths:
       - session
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: true
       x-mcp-tool: false
       x-operator-label: Connect an agent
       x-permission: admin
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -12523,10 +12793,14 @@ paths:
       - session
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Account
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -12616,10 +12890,14 @@ paths:
       - session
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: true
       x-mcp-tool: false
       x-operator-label: Connected agents
       x-permission: admin
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -12709,10 +12987,14 @@ paths:
       - session
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: true
       x-mcp-tool: false
       x-operator-label: Disconnect
       x-permission: admin
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: true
         idempotentHint: false
@@ -12802,10 +13084,14 @@ paths:
       - types
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Types
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -12895,10 +13181,14 @@ paths:
       - types
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Save type
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -12988,10 +13278,14 @@ paths:
       - views
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Export visual
       x-permission: write
+      x-starts-job: export_view
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -13081,10 +13375,14 @@ paths:
       - views
       x-agent-alias: catalog
       x-agent-tool: true
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: true
       x-operator-label: Components
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -13174,10 +13472,14 @@ paths:
       - views
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Open visual
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -13267,10 +13569,14 @@ paths:
       - views
       x-agent-alias: present
       x-agent-tool: true
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: true
       x-operator-label: Present
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -13360,10 +13666,14 @@ paths:
       - views
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Refresh
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -13453,10 +13763,14 @@ paths:
       - workspaces
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Archive
       x-permission: admin
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -13546,10 +13860,14 @@ paths:
       - workspaces
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: true
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Back up installation
       x-permission: admin
+      x-starts-job: backup_installation
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -13639,10 +13957,14 @@ paths:
       - workspaces
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: true
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Backup
       x-permission: admin
+      x-starts-job: backup_workspace
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -13732,10 +14054,14 @@ paths:
       - workspaces
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: New workspace
       x-permission: admin
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -13825,10 +14151,14 @@ paths:
       - workspaces
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: export
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Export
       x-permission: write
+      x-starts-job: export_workspace
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -13918,10 +14248,14 @@ paths:
       - workspaces
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Purge status
       x-permission: admin
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -14011,10 +14345,14 @@ paths:
       - workspaces
       x-agent-alias: workspaces
       x-agent-tool: true
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: true
       x-operator-label: Workspaces
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -14104,10 +14442,14 @@ paths:
       - workspaces
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Open
       x-permission: read
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: true
@@ -14197,10 +14539,14 @@ paths:
       - workspaces
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: true
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Purge
       x-permission: admin
+      x-starts-job: purge_workspace
       x-tool-annotations:
         destructiveHint: true
         idempotentHint: false
@@ -14290,10 +14636,14 @@ paths:
       - workspaces
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: true
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Restore
       x-permission: admin
+      x-starts-job: restore_workspace
       x-tool-annotations:
         destructiveHint: true
         idempotentHint: false
@@ -14383,10 +14733,14 @@ paths:
       - workspaces
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: true
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Unarchive
       x-permission: admin
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -14476,10 +14830,14 @@ paths:
       - workspaces
       x-agent-alias: ''
       x-agent-tool: false
+      x-allowed-while-archived: false
       x-cli-alias: null
+      x-human-session-only: false
+      x-local-owner-only: false
       x-mcp-tool: false
       x-operator-label: Properties
       x-permission: write
+      x-starts-job: null
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -14512,6 +14870,7 @@ paths:
       security:
       - bearerAuth: []
       - browserSession: []
+      - browserSessionHttps: []
       summary: download_artifact
       tags:
       - transport
@@ -14537,6 +14896,7 @@ paths:
       security:
       - bearerAuth: []
       - browserSession: []
+      - browserSessionHttps: []
       summary: stream_events
       tags:
       - transport
@@ -14577,6 +14937,7 @@ paths:
       security:
       - bearerAuth: []
       - browserSession: []
+      - browserSessionHttps: []
       summary: download_object
       tags:
       - transport
@@ -14734,6 +15095,7 @@ paths:
       security:
       - bearerAuth: []
       - browserSession: []
+      - browserSessionHttps: []
       summary: mcp_events
       tags:
       - transport
@@ -14779,6 +15141,7 @@ paths:
       security:
       - bearerAuth: []
       - browserSession: []
+      - browserSessionHttps: []
       summary: serve_sandbox_representation
       tags:
       - transport
@@ -14787,5 +15150,8 @@ paths:
 security:
 - bearerAuth: []
 - browserSession: []
+  csrfCookie: []
+  csrfHeader: []
+- browserSessionHttps: []
   csrfCookie: []
   csrfHeader: []

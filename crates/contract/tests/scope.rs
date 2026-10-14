@@ -11,6 +11,7 @@ use okf_jawn_contract::identity::ConnectorId;
 use okf_jawn_contract::import::{GetTenantJobRequest, ListTenantJobsRequest};
 use okf_jawn_contract::item::SetLifecycleRequest;
 use okf_jawn_contract::metadata::{OperationName, operations};
+use okf_jawn_contract::operations::ALLOWED_WHILE_ARCHIVED;
 use okf_jawn_contract::proposal::OpenProposalRequest;
 use okf_jawn_contract::purge::{GetPurgeRequest, PurgeItemRequest, PurgeWorkspaceRequest};
 use okf_jawn_contract::scope::{ReplayPolicy, RequestScope, Target};
@@ -120,6 +121,58 @@ const OTHER_WORKSPACE: &str = "33333333-3333-4333-8333-333333333333";
 /// The issued connector's ledger row keeps only its id (`ReplayPolicy::AlreadyIssued`), and a
 /// purge unlists the workspace from the connector record itself.
 const NAMES_WORKSPACES_IN_A_LIST: &[&str] = &["create_connector", "revoke_connector"];
+/// The mutations an archived workspace allows, by decision (ruling 25), in table order.
+const ALLOWED_MUTATIONS_WHILE_ARCHIVED: &[&str] = &[
+    "archive_workspace",
+    "unarchive_workspace",
+    "purge_workspace",
+    "export_workspace",
+    "backup_workspace",
+    "purge_item",
+    "cancel_job",
+    "rebuild_index",
+    "export_view",
+];
+
+/// The mutations an archived workspace refuses, in table order. The tenant-level ones
+/// (`create_workspace`, `backup_installation`, `create_connector`, `revoke_connector`) never
+/// name an archived workspace as their table target; they are listed so that every mutation
+/// has a decision.
+const REFUSED_MUTATIONS_WHILE_ARCHIVED: &[&str] = &[
+    "create_workspace",
+    "update_workspace",
+    "restore_workspace",
+    "backup_installation",
+    "create_item",
+    "save_draft",
+    "discard_draft",
+    "move_item",
+    "set_lifecycle",
+    "delete_item",
+    "create_folder",
+    "move_folder",
+    "delete_folder",
+    "set_type",
+    "commit_items",
+    "restore_items",
+    "open_proposal",
+    "accept_proposal",
+    "decline_proposal",
+    "add_comment",
+    "create_confirmation",
+    "create_review",
+    "create_upload",
+    "complete_upload",
+    "discard_upload",
+    "start_import",
+    "retry_job",
+    "redigest_item",
+    "correct_digest",
+    "set_rules",
+    "apply_names",
+    "create_connector",
+    "revoke_connector",
+];
 
 fn scoped<T: RequestScope>(id: &'static str, permission: Permission, request: &T) -> Scoped {
     Scoped {
@@ -953,5 +1006,43 @@ fn the_workspace_walk_sees_a_tuple_and_a_map_keyed_by_workspace() -> Result<(), 
         }
     });
     assert_eq!(workspace_fields_of(&plain)?, Vec::<(String, bool)>::new());
+    Ok(())
+}
+
+/// Every operation has a decision for an archived workspace: one that is not a mutation (it
+/// carries no idempotency key) is allowed by rule, and every mutation is named as allowed or as
+/// refused. A row added later without a decision fails here: a read that is not on the
+/// allow-list, or a mutation named in neither list.
+#[test]
+fn every_operation_has_a_decision_for_an_archived_workspace() -> Result<(), Box<dyn Error>> {
+    let allowed: Vec<&str> = ALLOWED_WHILE_ARCHIVED
+        .iter()
+        .map(|name| name.as_str())
+        .collect();
+    let positions: Vec<usize> = ALLOWED_WHILE_ARCHIVED
+        .iter()
+        .filter_map(|name| OperationName::ALL.iter().position(|each| each == name))
+        .collect();
+    assert!(positions.is_sorted(), "listed in table order");
+    let distinct: BTreeSet<usize> = positions.iter().copied().collect();
+    assert_eq!(distinct.len(), allowed.len(), "listed once each");
+    let mut mutations_allowed = Vec::new();
+    let mut mutations_refused = Vec::new();
+    for operation in sampled_operations()? {
+        let listed = allowed.contains(&operation.id);
+        if !operation.keyed {
+            assert!(
+                listed,
+                "{} is not a mutation and must be allowed",
+                operation.id
+            );
+        } else if listed {
+            mutations_allowed.push(operation.id);
+        } else {
+            mutations_refused.push(operation.id);
+        }
+    }
+    assert_eq!(mutations_allowed, ALLOWED_MUTATIONS_WHILE_ARCHIVED);
+    assert_eq!(mutations_refused, REFUSED_MUTATIONS_WHILE_ARCHIVED);
     Ok(())
 }

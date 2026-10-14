@@ -8,6 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::access::Permission;
+use crate::import::JobKind;
 
 macro_rules! collect_operations {
     ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
@@ -21,6 +22,7 @@ macro_rules! collect_operations {
                 operator_alias: $operator, visibility: $visibility,
                 permission: Permission::$permission, ui: $ui, success_status: $status,
                 destructive: $destructive, description: $description,
+                rules: rules_of(stringify!($id)),
             }),*]
         }
 
@@ -80,6 +82,25 @@ pub struct OperationInfo {
     pub destructive: bool,
     /// Shared operation documentation.
     pub description: &'static str,
+    /// What the contract's lists say of the operation; written beside the other fields.
+    #[serde(flatten)]
+    pub rules: OperationRules,
+}
+
+/// What the contract's lists say of one operation (`operations`), so generated metadata carries
+/// them: `api/operations.json` fields and OpenAPI `x-` fields of the same names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct OperationRules {
+    /// The kind of job the operation starts (`OperationName::starts_job`); `retry_job` and
+    /// `cancel_job` on such a job need this operation's permission and route.
+    pub starts_job: Option<JobKind>,
+    /// Refused on every route that is not a human browser session
+    /// (`operations::HUMAN_SESSION_ONLY`).
+    pub human_session_only: bool,
+    /// Refused on every route but the local owner's (`operations::LOCAL_OWNER_ONLY`).
+    pub local_owner_only: bool,
+    /// Allowed while its workspace is archived (`operations::ALLOWED_WHILE_ARCHIVED`).
+    pub allowed_while_archived: bool,
 }
 
 operation_names! {
@@ -169,3 +190,23 @@ operation_names! {
 }
 
 crate::for_each_operation!(collect_operations);
+
+/// The operation whose canonical id is `id`; every row of the table has one (a contract test
+/// holds the two in one order).
+fn named(id: &str) -> Option<OperationName> {
+    OperationName::ALL
+        .iter()
+        .copied()
+        .find(|name| name.as_str() == id)
+}
+
+/// What the lists say of the operation whose canonical id is `id`.
+fn rules_of(id: &str) -> OperationRules {
+    let name = named(id);
+    OperationRules {
+        starts_job: name.and_then(OperationName::starts_job),
+        human_session_only: name.is_some_and(OperationName::human_session_only),
+        local_owner_only: name.is_some_and(OperationName::local_owner_only),
+        allowed_while_archived: name.is_some_and(OperationName::allowed_while_archived),
+    }
+}

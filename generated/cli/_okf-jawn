@@ -1339,8 +1339,8 @@ _okf-jawn_commands() {
 'list_jobs:List conversion, export, and maintenance work.' \
 'get_tenant_job:Read an installation-level job\: an installation backup or a purge.' \
 'list_tenant_jobs:List installation-level jobs, newest first, with their artifacts.' \
-'retry_job:Retry the same durable work identity without duplicating completed effects.' \
-'cancel_job:Cancel work while retaining completed uploads and recorded state.' \
+'retry_job:Retry the same durable work identity without duplicating completed effects. Needs the permission of the operation that started the job, and a human session where that operation needs one.' \
+'cancel_job:Cancel work while retaining completed uploads and recorded state. Needs the permission of the operation that started the job, and a human session where that operation needs one.' \
 'redigest_item:Re-run extraction with declared settings; preserve prior digests and separate corrections.' \
 'correct_digest:Save a correction separately from generated extraction.' \
 'get_rules:Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with \`set_rules\`.' \
@@ -1658,8 +1658,8 @@ _okf-jawn__subcmd__help_commands() {
 'list_jobs:List conversion, export, and maintenance work.' \
 'get_tenant_job:Read an installation-level job\: an installation backup or a purge.' \
 'list_tenant_jobs:List installation-level jobs, newest first, with their artifacts.' \
-'retry_job:Retry the same durable work identity without duplicating completed effects.' \
-'cancel_job:Cancel work while retaining completed uploads and recorded state.' \
+'retry_job:Retry the same durable work identity without duplicating completed effects. Needs the permission of the operation that started the job, and a human session where that operation needs one.' \
+'cancel_job:Cancel work while retaining completed uploads and recorded state. Needs the permission of the operation that started the job, and a human session where that operation needs one.' \
 'redigest_item:Re-run extraction with declared settings; preserve prior digests and separate corrections.' \
 'correct_digest:Save a correction separately from generated extraction.' \
 'get_rules:Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with \`set_rules\`.' \

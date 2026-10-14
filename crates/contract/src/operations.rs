@@ -8,9 +8,11 @@
 //! `app` or empty), minimum permission, MCP App presentation key, HTTP success status,
 //! destructive hint, description. The `permission` column is the minimum capability;
 //! `create_confirmation` requires a stronger, action-specific one through its `targets()`.
-//! [`DRAFT_BEARING`], after the table, names the operations that carry or reveal a draft, and
-//! [`HUMAN_SESSION_ONLY`] the recovery and destruction operations; each is the one list the
-//! contract test and core dispatch both read.
+//! After the table, [`DRAFT_BEARING`] names the operations that carry or reveal a draft,
+//! [`HUMAN_SESSION_ONLY`] the recovery and destruction operations, [`LOCAL_OWNER_ONLY`] the
+//! connector operations and [`ALLOWED_WHILE_ARCHIVED`] what an archived workspace allows. Each
+//! is the one list the contract tests and the generated metadata (`OperationInfo`) read; core
+//! dispatch reads the first two today, and the last two once core M1.4 builds their checks.
 
 use crate::metadata::OperationName;
 
@@ -78,8 +80,8 @@ macro_rules! for_each_operation {
             (list_jobs, $crate::import::ListJobsRequest, $crate::import::ListJobsResponse, "/api/imports/list-jobs", "Jobs", "", "", "", Read, "", 200, false, "List conversion, export, and maintenance work."),
             (get_tenant_job, $crate::import::GetTenantJobRequest, $crate::import::Job, "/api/imports/get-tenant-job", "Progress", "", "", "", Admin, "", 200, false, "Read an installation-level job: an installation backup or a purge."),
             (list_tenant_jobs, $crate::import::ListTenantJobsRequest, $crate::import::ListJobsResponse, "/api/imports/list-tenant-jobs", "Installation jobs", "", "", "", Admin, "", 200, false, "List installation-level jobs, newest first, with their artifacts."),
-            (retry_job, $crate::import::RetryJobRequest, $crate::import::Job, "/api/imports/retry-job", "Retry", "", "", "", Write, "", 202, false, "Retry the same durable work identity without duplicating completed effects."),
-            (cancel_job, $crate::import::CancelJobRequest, $crate::import::Job, "/api/imports/cancel-job", "Cancel", "", "", "", Write, "", 200, false, "Cancel work while retaining completed uploads and recorded state."),
+            (retry_job, $crate::import::RetryJobRequest, $crate::import::Job, "/api/imports/retry-job", "Retry", "", "", "", Write, "", 202, false, "Retry the same durable work identity without duplicating completed effects. Needs the permission of the operation that started the job, and a human session where that operation needs one."),
+            (cancel_job, $crate::import::CancelJobRequest, $crate::import::Job, "/api/imports/cancel-job", "Cancel", "", "", "", Write, "", 200, false, "Cancel work while retaining completed uploads and recorded state. Needs the permission of the operation that started the job, and a human session where that operation needs one."),
             (redigest_item, $crate::import::RedigestRequest, $crate::import::Job, "/api/imports/redigest-item", "Reconvert", "", "", "", Write, "", 202, false, "Re-run extraction with declared settings; preserve prior digests and separate corrections."),
             (correct_digest, $crate::import::CorrectDigestRequest, $crate::common::MutationResult, "/api/imports/correct-digest", "Correct text", "", "", "", Write, "", 200, false, "Save a correction separately from generated extraction."),
             (get_rules, $crate::conventions::GetRulesRequest, $crate::conventions::GetRulesResponse, "/api/conventions/get-rules", "Conventions", "", "", "", Read, "", 200, false, "Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with `set_rules`."),
@@ -132,3 +134,107 @@ pub const HUMAN_SESSION_ONLY: &[OperationName] = &[
     OperationName::BackupInstallation,
     OperationName::PurgeItem,
 ];
+
+/// Connector operations, refused on every route but the local owner's, whatever the grants
+/// (SPEC section 11: local MCP clients use connector credentials the owner issues and revokes;
+/// hosted agents use WorkOS Connect). Core dispatch checks it from core M1.4 and records each
+/// refusal as a `permission_denied` event. In table order.
+pub const LOCAL_OWNER_ONLY: &[OperationName] = &[
+    OperationName::CreateConnector,
+    OperationName::ListConnectors,
+    OperationName::RevokeConnector,
+];
+
+/// Operations allowed while their workspace is archived, in table order: every operation that
+/// is not a mutation, and the mutations named here by decision (a repeated archive, unarchive,
+/// export, backup, purge, cancelling a job and rebuilding the index).
+///
+/// It is an allow-list: an operation added later is refused in an archived workspace until
+/// someone decides otherwise. A refused operation answers `conflict` with
+/// `ErrorDetail::WorkspaceArchived`. A direct write admitted just before the archive lands
+/// completes. Core dispatch checks it from core M1.4, with two guards in the store: an archive
+/// is refused while an import, redigest or restore job of the workspace is queued or running,
+/// and such a job is not inserted for an archived workspace.
+pub const ALLOWED_WHILE_ARCHIVED: &[OperationName] = &[
+    OperationName::ListWorkspaces,
+    OperationName::OpenWorkspace,
+    OperationName::ArchiveWorkspace,
+    OperationName::UnarchiveWorkspace,
+    OperationName::PurgeWorkspace,
+    OperationName::GetPurge,
+    OperationName::ExportWorkspace,
+    OperationName::BackupWorkspace,
+    OperationName::ListItems,
+    OperationName::GetItem,
+    OperationName::ListDrafts,
+    OperationName::PurgeItem,
+    OperationName::ListTypes,
+    OperationName::ReadItem,
+    OperationName::GetSources,
+    OperationName::GetObject,
+    OperationName::CreateSandboxCapability,
+    OperationName::SearchItems,
+    OperationName::GetLinks,
+    OperationName::GetGraph,
+    OperationName::LogItems,
+    OperationName::DiffItems,
+    OperationName::BlameItem,
+    OperationName::ListProposals,
+    OperationName::GetProposal,
+    OperationName::ListComments,
+    OperationName::ListReviews,
+    OperationName::GetUpload,
+    OperationName::ListUploads,
+    OperationName::GetJob,
+    OperationName::ListJobs,
+    OperationName::GetTenantJob,
+    OperationName::ListTenantJobs,
+    OperationName::CancelJob,
+    OperationName::GetRules,
+    OperationName::PreviewNames,
+    OperationName::GetAttention,
+    OperationName::RebuildIndex,
+    OperationName::GetView,
+    OperationName::PresentView,
+    OperationName::ResolveView,
+    OperationName::ExportView,
+    OperationName::GetCatalog,
+    OperationName::GetReceipt,
+    OperationName::ListEvents,
+    OperationName::ListTenantEvents,
+    OperationName::GetSession,
+    OperationName::ListConnectors,
+    OperationName::GetHealth,
+    OperationName::GetReadiness,
+];
+
+impl OperationName {
+    /// The kind of job this operation starts: the `JobKind` whose `JobKind::started_by` it is;
+    /// `None` for an operation that starts no job (`retry_job` queues a job again, it starts
+    /// none).
+    #[must_use]
+    pub fn starts_job(self) -> Option<crate::import::JobKind> {
+        crate::import::JobKind::ALL
+            .iter()
+            .copied()
+            .find(|kind| kind.started_by() == self)
+    }
+
+    /// Whether this operation is in [`HUMAN_SESSION_ONLY`].
+    #[must_use]
+    pub fn human_session_only(self) -> bool {
+        HUMAN_SESSION_ONLY.contains(&self)
+    }
+
+    /// Whether this operation is in [`LOCAL_OWNER_ONLY`].
+    #[must_use]
+    pub fn local_owner_only(self) -> bool {
+        LOCAL_OWNER_ONLY.contains(&self)
+    }
+
+    /// Whether this operation is in [`ALLOWED_WHILE_ARCHIVED`].
+    #[must_use]
+    pub fn allowed_while_archived(self) -> bool {
+        ALLOWED_WHILE_ARCHIVED.contains(&self)
+    }
+}

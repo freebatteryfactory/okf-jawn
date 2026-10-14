@@ -179,3 +179,21 @@ pub const CSRF_COOKIE: &str = "okf-csrf";
 /// The request header that echoes [`CSRF_COOKIE`]'s value on a cookie-authenticated mutation;
 /// a missing header, or one that differs from the cookie, is refused.
 pub const CSRF_HEADER: &str = "x-okf-csrf";
+
+/// The browser session cookie of a service whose public origin is plain `http` on loopback,
+/// the local default (SPEC section 2).
+///
+/// The server names the session cookie by its public origin's scheme and reads only the name
+/// of its own scheme; two cookies of the one name read as none. On loopback http a `__Host-`
+/// cookie cannot be set, and the only party that could plant a cookie there is a local
+/// process. It is `HttpOnly`, `SameSite=Strict` and `Path=/`.
+pub const SESSION_COOKIE: &str = "okf-session";
+
+/// The browser session cookie of a service whose public origin is `https`: hosted, and any
+/// remote endpoint, which SPEC section 2 requires to be https.
+///
+/// Its `__Host-` prefix makes a browser accept it only when it is `Secure`, with `Path=/` and
+/// no `Domain`, so a sibling subdomain or another port cannot set a second cookie of the name
+/// and sign the person out. The server always writes it so, besides `HttpOnly` and
+/// `SameSite=Strict`.
+pub const SESSION_COOKIE_HTTPS: &str = "__Host-okf-session";

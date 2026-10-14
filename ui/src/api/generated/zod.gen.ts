@@ -1050,55 +1050,6 @@ export const zDraftConflictItem = z.object({
 });
 
 /**
- * Typed failure context the UI and agents can act on without parsing messages.
- */
-export const zErrorDetail = z.union([
-    z.object({
-        connector_id: zConnectorId,
-        kind: z.literal('already_issued')
-    }),
-    z.object({
-        kind: z.literal('in_progress'),
-        mutation_id: zMutationId,
-        retry_after: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
-    }),
-    z.object({
-        items: z.array(zDraftConflictItem).min(1),
-        kind: z.literal('draft_conflict')
-    }),
-    z.object({
-        kind: z.literal('idempotency_conflict'),
-        operation: zOperationName
-    }),
-    z.object({
-        kind: z.literal('invalidated'),
-        purge_id: zPurgeId,
-        replacement: zRevision.nullish()
-    }),
-    z.object({
-        digest_matches: z.boolean().nullish(),
-        expected_bytes: z.string(),
-        kind: z.literal('upload_mismatch'),
-        received_bytes: z.string()
-    }),
-    z.object({
-        head: zRevision,
-        kind: z.literal('stale_base')
-    })
-]);
-
-/**
- * A safe error response, not an internal backtrace.
- */
-export const zApiError = z.object({
-    code: zErrorCode,
-    detail: zErrorDetail.nullish(),
-    field: z.string().nullish(),
-    message: z.string(),
-    request_id: z.string().nullish()
-});
-
-/**
  * Links and their resolution at one revision.
  */
 export const zGetLinksResponse = z.object({
@@ -1271,6 +1222,59 @@ export const zDraftContent = z.object({
     body: z.string(),
     draft: zDraft,
     properties: z.record(z.string(), z.unknown())
+});
+
+/**
+ * Typed failure context the UI and agents can act on without parsing messages.
+ */
+export const zErrorDetail = z.union([
+    z.object({
+        connector_id: zConnectorId,
+        kind: z.literal('already_issued')
+    }),
+    z.object({
+        kind: z.literal('in_progress'),
+        mutation_id: zMutationId,
+        retry_after: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
+    }),
+    z.object({
+        items: z.array(zDraftConflictItem).min(1),
+        kind: z.literal('draft_conflict')
+    }),
+    z.object({
+        kind: z.literal('idempotency_conflict'),
+        operation: zOperationName
+    }),
+    z.object({
+        kind: z.literal('invalidated'),
+        purge_id: zPurgeId,
+        replacement: zRevision.nullish()
+    }),
+    z.object({
+        digest_matches: z.boolean().nullish(),
+        expected_bytes: z.string(),
+        kind: z.literal('upload_mismatch'),
+        received_bytes: z.string()
+    }),
+    z.object({
+        head: zRevision,
+        kind: z.literal('stale_base')
+    }),
+    z.object({
+        archived_at: zTimestamp,
+        kind: z.literal('workspace_archived')
+    })
+]);
+
+/**
+ * A safe error response, not an internal backtrace.
+ */
+export const zApiError = z.object({
+    code: zErrorCode,
+    detail: zErrorDetail.nullish(),
+    field: z.string().nullish(),
+    message: z.string(),
+    request_id: z.string().nullish()
 });
 
 /**
@@ -1555,9 +1559,13 @@ export const zAcceptProposalRequest = z.object({
 /**
  * Archive the workspace without deleting retained content.
  *
- * While a workspace is archived, an operation that would change its content or open work on
- * it (a commit, a draft, a proposal, an upload, an import or redigest) is refused as
- * `conflict`; reads, export, backup, `unarchive_workspace` and purge are allowed.
+ * While a workspace is archived, only the operations of `operations::ALLOWED_WHILE_ARCHIVED`
+ * run on it: every operation that is not a mutation, and a repeated archive, unarchive,
+ * export, backup, purge, cancelling a job and rebuilding the index. Any other is refused as
+ * `conflict` with `ErrorDetail::WorkspaceArchived`. The archive itself is refused with
+ * `conflict` while an import, redigest or restore job of the workspace is queued or running,
+ * and no such job is accepted for an archived workspace, so no content-changing job runs in
+ * one. A direct write admitted just before the archive lands completes.
  */
 export const zArchiveWorkspaceRequest = z.object({
     base_revision: zRevision,

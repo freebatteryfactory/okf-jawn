@@ -4,8 +4,9 @@ use std::collections::BTreeSet;
 use std::error::Error;
 
 use okf_jawn_contract::access::Permission;
+use okf_jawn_contract::import::JobKind;
 use okf_jawn_contract::metadata::{OperationInfo, OperationName, operations};
-use okf_jawn_contract::operations::{DRAFT_BEARING, HUMAN_SESSION_ONLY};
+use okf_jawn_contract::operations::{DRAFT_BEARING, HUMAN_SESSION_ONLY, LOCAL_OWNER_ONLY};
 use schemars::{JsonSchema, generate::SchemaSettings};
 use serde_json::Value;
 
@@ -401,6 +402,74 @@ fn snapshot_states_the_per_item_precondition() -> Result<(), Box<dyn Error>> {
     let commit = declared("commit_items")?;
     assert!(commit.description.contains("since its draft's base"));
     assert!(!commit.description.contains("unchanged base"));
+    Ok(())
+}
+
+#[test]
+fn the_local_owner_only_list_is_exactly_the_connector_operations() -> Result<(), Box<dyn Error>> {
+    let listed: Vec<&str> = LOCAL_OWNER_ONLY.iter().map(|name| name.as_str()).collect();
+    assert_eq!(
+        listed,
+        ["create_connector", "list_connectors", "revoke_connector"]
+    );
+    for id in listed {
+        let operation = declared(id)?;
+        assert!(operation.alias.is_empty(), "{id} is not an MCP tool");
+        assert_eq!(operation.permission, Permission::Admin, "{id}");
+        assert!(operation.description.contains("Local owner only"), "{id}");
+    }
+    Ok(())
+}
+
+/// `OperationInfo` states, for every row, the job it starts and its membership of each list,
+/// as `OperationName` answers them, so the generated metadata is the lists.
+#[test]
+fn operation_info_states_the_job_it_starts_and_its_lists() -> Result<(), Box<dyn Error>> {
+    let table = operations();
+    assert_eq!(table.len(), OperationName::ALL.len());
+    for (info, name) in table.iter().zip(OperationName::ALL) {
+        assert_eq!(info.id, name.as_str());
+        assert_eq!(info.rules.starts_job, name.starts_job(), "{}", info.id);
+        assert_eq!(
+            info.rules.human_session_only,
+            name.human_session_only(),
+            "{}",
+            info.id
+        );
+        assert_eq!(
+            info.rules.local_owner_only,
+            name.local_owner_only(),
+            "{}",
+            info.id
+        );
+        assert_eq!(
+            info.rules.allowed_while_archived,
+            name.allowed_while_archived(),
+            "{}",
+            info.id
+        );
+    }
+    for kind in JobKind::ALL {
+        let starter = declared(kind.started_by().as_str())?;
+        assert_eq!(starter.rules.starts_job, Some(*kind), "{kind:?}");
+    }
+    let starters: Vec<&str> = table
+        .iter()
+        .filter(|info| info.rules.starts_job.is_some())
+        .map(|info| info.id)
+        .collect();
+    assert_eq!(starters.len(), JobKind::ALL.len(), "{starters:?}");
+    assert_eq!(
+        declared("retry_job")?.rules.starts_job,
+        None,
+        "a retry queues a job again"
+    );
+    let human: Vec<&str> = table
+        .iter()
+        .filter(|info| info.rules.human_session_only)
+        .map(|info| info.id)
+        .collect();
+    assert_eq!(human, EXPECTED_HUMAN_SESSION_ONLY);
     Ok(())
 }
 

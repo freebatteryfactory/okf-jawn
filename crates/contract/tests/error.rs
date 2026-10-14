@@ -225,3 +225,19 @@ fn a_stale_base_names_the_head_and_the_field_it_was_compared_with() -> Result<()
     assert_eq!(serde_json::to_value(&error)?, stale);
     Ok(())
 }
+
+#[test]
+fn an_archived_workspace_refusal_says_when_it_was_archived() -> Result<(), Box<dyn Error>> {
+    let archived = json!({
+        "code": "conflict",
+        "message": "the workspace is archived",
+        "detail": {"kind": "workspace_archived", "archived_at": "2026-10-08T14:03:07.250Z"}
+    });
+    let error: ApiError = serde_json::from_value(archived.clone())?;
+    let Some(ErrorDetail::WorkspaceArchived { archived_at }) = error.detail.as_deref() else {
+        return Err("expected a workspace_archived detail".into());
+    };
+    assert_eq!(archived_at.as_str(), "2026-10-08T14:03:07.250Z");
+    assert_eq!(serde_json::to_value(&error)?, archived);
+    Ok(())
+}

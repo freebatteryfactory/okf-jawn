@@ -457,7 +457,7 @@ export const restoreItemsMutation = (options?: Partial<Options<RestoreItemsData>
 /**
  * Cancel
  *
- * Cancel work while retaining completed uploads and recorded state.
+ * Cancel work while retaining completed uploads and recorded state. Needs the permission of the operation that started the job, and a human session where that operation needs one.
  */
 export const cancelJobMutation = (options?: Partial<Options<CancelJobData>>): UseMutationOptions<CancelJobResponse, CancelJobError, Options<CancelJobData>> => {
     const mutationOptions: UseMutationOptions<CancelJobResponse, CancelJobError, Options<CancelJobData>> = {
@@ -687,7 +687,7 @@ export const redigestItemMutation = (options?: Partial<Options<RedigestItemData>
 /**
  * Retry
  *
- * Retry the same durable work identity without duplicating completed effects.
+ * Retry the same durable work identity without duplicating completed effects. Needs the permission of the operation that started the job, and a human session where that operation needs one.
  */
 export const retryJobMutation = (options?: Partial<Options<RetryJobData>>): UseMutationOptions<RetryJobResponse, RetryJobError, Options<RetryJobData>> => {
     const mutationOptions: UseMutationOptions<RetryJobResponse, RetryJobError, Options<RetryJobData>> = {
