@@ -7,8 +7,11 @@
 //! `tools/list`, `tools/call`, `resources/list`, `resources/read`) passes one check, `admit`,
 //! before anything else is looked at: no `Principal` is `Unauthenticated`, and a route
 //! other than `AccessRoute::McpDelegation` is `Forbidden`. The browser session, `LocalOwner` and
-//! `Service` use the HTTP API; their refusal here is recorded as `permission_denied` in the
-//! tenant's log before anything is decoded.
+//! `Service` use the HTTP API; their refusal here is recorded as `permission_denied` before the
+//! request is validated or run. A refused tool call is recorded by core's rule for a refusal a
+//! binding makes itself (`core::dispatch::record_refusal`), so it lands in the log dispatch's
+//! own route refusal of the same request lands in; a refused request that is no operation is
+//! recorded in the tenant's log.
 //!
 //! Validation, authorization and the mutation ledger are dispatch's (`core::dispatch`). Nothing
 //! here reads a tool's visibility or annotations to decide access: an app-only tool is
@@ -21,8 +24,10 @@
 //!
 //! A read's selected images are fetched after the read succeeds, each through `read_object`
 //! (`get_object`) by dispatch as the read's own principal, so each fetch is authorized like any
-//! other call and a refusal is reported, never worked around. A fetch that fails, is refused or
-//! cannot be inlined never fails the read: that image is described in the text instead.
+//! other call and a refusal is reported, never worked around. An image is inlined only as a
+//! raster type, and only when its bytes begin with the signature of the type they were served
+//! as; the type is never guessed from the bytes. A fetch that fails, is refused or cannot be
+//! inlined never fails the read: that image is described in the text instead.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -35,7 +40,7 @@ use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::read::{MediaReference, ReadItemResponse, Selection};
 use okf_jawn_contract::source::{GetObjectRequest, GetObjectResponse, SourceReference};
 use okf_jawn_core::access::AccessControl;
-use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
+use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch, record_refusal};
 use okf_jawn_core::events::{EventLog, EventScope, NewEvent};
 use okf_jawn_core::mutations::MutationStore;
 use okf_jawn_core::ports::Application;
@@ -79,15 +84,41 @@ struct Shared {
     app_bundle: PathBuf,
 }
 
+/// Whether an object's leading bytes carry one raster format's signature.
+type Signature = fn(&[u8]) -> bool;
+
 /// What the agent sees in the host before it calls anything.
 const INSTRUCTIONS: &str = "okf-jawn document workspaces. Call `workspaces` first and pin later \
      reads to a workspace's head revision. Every result carries readable text and \
      structuredContent; a failed call is text with isError set.";
 
-/// The only media types a read's selected image is inlined as: raster formats, which carry no
-/// active content. SVG can carry script and the document is untrusted input, so it and every
-/// other type, `image/*` or not, are described in the text instead.
-const INLINE_IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+/// The only media types a read's selected image is inlined as, each with the check that an
+/// object's leading bytes carry that format's signature: raster formats, which carry no active
+/// content. SVG can carry script and the document is untrusted input, so it and every other
+/// type, `image/*` or not, are described in the text instead. A type is inlined only through
+/// its own check here, so a type without a signature check cannot be listed.
+const INLINE_IMAGE_TYPES: [(&str, Signature); 4] = [
+    ("image/png", is_png),
+    ("image/jpeg", is_jpeg),
+    ("image/gif", is_gif),
+    ("image/webp", is_webp),
+];
+
+/// The eight bytes a PNG file begins with.
+const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// The three bytes a JPEG file begins with.
+const JPEG_SIGNATURE: [u8; 3] = [0xFF, 0xD8, 0xFF];
+
+/// The leading bytes the longest signature spans: WebP's `RIFF`, four bytes of size, `WEBP`.
+const SIGNATURE_SPAN: usize = 12;
+
+/// The base64 characters that encode the first `SIGNATURE_SPAN` bytes: four for every three.
+const SIGNATURE_CHARACTERS: usize = 16;
+
+/// The standard base64 alphabet (RFC 4648 section 4); a character's place is its six bits.
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 impl McpServer {
     /// A server over `ports` that serves the App bundle at `app_bundle`.
@@ -122,9 +153,10 @@ impl McpServer {
     /// Call the tool named `tool` as `principal`, the way `tools/call` does.
     ///
     /// Identity is checked before the name is looked up, so an unidentified caller learns
-    /// nothing about tool names and a refused route is recorded whatever it asked for. A name
-    /// that is no operation's alias is then refused as `NotFound`, also when it is a canonical
-    /// operation id: only aliased operations are tools.
+    /// nothing about tool names and a refused route is recorded whatever it asked for: with
+    /// the operation and its arguments when the name is a tool, as a request that is no
+    /// operation otherwise. A name that is no operation's alias is then refused as `NotFound`,
+    /// also when it is a canonical operation id: only aliased operations are tools.
     ///
     /// # Errors
     /// Returns an rmcp error only when an `ApiError` cannot be serialized into its result.
@@ -135,7 +167,9 @@ impl McpServer {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ErrorData> {
         let named = operation_of_tool(tool);
-        if let Err(refusal) = self.admit(principal, named).await {
+        let input = Value::Object(arguments.unwrap_or_default());
+        let asked = named.map(|operation| (operation, &input));
+        if let Err(refusal) = self.admit(principal, asked).await {
             return failure(&refusal);
         }
         let Some(operation) = named else {
@@ -144,7 +178,6 @@ impl McpServer {
                 format!("No tool is named `{tool}`"),
             ));
         };
-        let input = Value::Object(arguments.unwrap_or_default());
         self.call_operation(principal, operation, input).await
     }
 
@@ -158,7 +191,7 @@ impl McpServer {
         operation: OperationName,
         input: Value,
     ) -> Result<CallToolResult, ErrorData> {
-        let principal = match self.admit(principal, Some(operation)).await {
+        let principal = match self.admit(principal, Some((operation, &input))).await {
             Ok(principal) => principal,
             Err(refusal) => return failure(&refusal),
         };
@@ -238,8 +271,11 @@ impl McpServer {
     /// `max_images`, so every entry of `media` is one the caller asked for.
     ///
     /// An image is inlined when its media type, as declared and as served, is an inline raster
-    /// type (`INLINE_IMAGE_TYPES`), its fetch is complete (`has_more` false) and it fits what
-    /// is left of the image budget. The image budget is the
+    /// type (`INLINE_IMAGE_TYPES`), its fetch is complete (`has_more` false), it fits what
+    /// is left of the image budget and its bytes begin with the signature of the type they
+    /// were served as. The block names its type by the canonical essence of the served type,
+    /// never by the served string. Bytes that are another type are described, not shown under
+    /// the type they claim and not sniffed to the type they might be. The image budget is the
     /// read's own `budget` (its `max_bytes`, capped at `MAX_TEXT_BYTES`), counted again and
     /// separately from the text's: the text and the images may each use all of it. It counts
     /// image bytes, the decoded size of each inlined image, so the base64 on the wire is about
@@ -275,9 +311,14 @@ impl McpServer {
     /// A media type the read declares as no inline image type is not fetched, nor is any image
     /// once the budget is spent.
     ///
+    /// The checks run in this order, and the first that fails is the reason given: the
+    /// declared type, the budget, the fetch, the served type, the size, the signature. So an
+    /// object that is too large is reported as too large whatever its bytes are.
+    ///
     /// # Errors
     /// Returns why the image is not inlined: not an inline image type (declared or served),
-    /// too large, or the fetch refused with its `ApiError` code.
+    /// too large, the fetch refused with its `ApiError` code, or bytes that do not begin with
+    /// the signature of the type they were served as.
     async fn fetch_image(
         &self,
         principal: &Principal,
@@ -297,11 +338,11 @@ impl McpServer {
             .fetch_object(principal, read, media, left)
             .await
             .map_err(|refusal| NotInlined::Refused { code: refusal.code })?;
-        if !is_inline_image_type(&block.media_type) {
+        let Some((media_type, signature)) = inline_type(&block.media_type) else {
             return Err(NotInlined::NotInlineType {
                 media_type: block.media_type,
             });
-        }
+        };
         let size = decoded_size(&block.data_base64);
         if block.has_more || size > left {
             return Err(NotInlined::TooLarge {
@@ -309,10 +350,15 @@ impl McpServer {
                 left,
             });
         }
+        if !signature(&leading_bytes(&block.data_base64)) {
+            return Err(NotInlined::NotItsType {
+                media_type: block.media_type,
+            });
+        }
         Ok((
             ReadImage::Inline {
                 data_base64: block.data_base64,
-                mime_type: block.media_type,
+                mime_type: media_type.to_owned(),
             },
             size,
         ))
@@ -396,8 +442,10 @@ impl McpServer {
 
     /// The check every MCP request passes: an authenticated principal on the agent route.
     ///
-    /// `operation` is the operation a tool call names; `None` for the requests that are no
-    /// operation (`initialize`, the two listings and the App read).
+    /// `asked` is the operation a tool call names, with its arguments as they arrived; `None`
+    /// for the requests that are no operation (`initialize`, `server/discover`, the two
+    /// listings, the App read, and a tool call whose name is no tool). The arguments are read
+    /// only to find the log a refusal is recorded in (`refuse_route`).
     ///
     /// # Errors
     /// Returns `Unauthenticated` without a principal, and `Forbidden` for any route other than
@@ -405,7 +453,7 @@ impl McpServer {
     async fn admit<'caller>(
         &self,
         principal: Option<&'caller Principal>,
-        operation: Option<OperationName>,
+        asked: Option<(OperationName, &Value)>,
     ) -> Result<&'caller Principal, ApiError> {
         let Some(principal) = principal else {
             return Err(ApiError::new(
@@ -414,34 +462,38 @@ impl McpServer {
             ));
         };
         if principal.route != AccessRoute::McpDelegation {
-            return Err(self.refuse_route(principal, operation).await);
+            return Err(self.refuse_route(principal, asked).await);
         }
         Ok(principal)
     }
 
     /// Record a non-agent route's request as `permission_denied` and return its refusal.
     ///
-    /// The refusal comes before any request is decoded, so it is recorded in the tenant's log.
-    /// Core's `denial_scope`, which records a refusal of a request about exactly one workspace
-    /// in that workspace's log, is private to `core::dispatch`; this crate cannot apply it
-    /// without changing core, so a refusal here always goes to the tenant log, which
-    /// `list_tenant_events` reads. A failed append does not change the answer.
+    /// A refused tool call is recorded by `core::dispatch::record_refusal`, which applies
+    /// dispatch's own rule for a refusal made before any target is evaluated to the request
+    /// the arguments decode to. Which log that is, that only a `Forbidden` is recorded and
+    /// that a failed append does not change the answer are that function's rules, not this
+    /// one's. A request that is no operation has nothing to decode and names no workspace, so
+    /// its refusal goes to the tenant's log, which `list_tenant_events` reads, naming no
+    /// operation; a failed append does not change that answer either.
     async fn refuse_route(
         &self,
         principal: &Principal,
-        operation: Option<OperationName>,
+        asked: Option<(OperationName, &Value)>,
     ) -> ApiError {
-        let scope = EventScope::Tenant(principal.tenant_id.clone());
-        let _recorded = self
-            .shared
-            .ports
-            .events
-            .append(&scope, None, refusal_event(principal, operation))
-            .await;
-        ApiError::new(
+        let events = self.shared.ports.events.as_ref();
+        let refusal = ApiError::new(
             ErrorCode::Forbidden,
             "Only an MCP delegation reaches this server; this route uses the HTTP API",
-        )
+        );
+        if let Some((operation, input)) = asked {
+            return record_refusal(events, principal, operation, input, refusal).await;
+        }
+        let scope = EventScope::Tenant(principal.tenant_id.clone());
+        let _recorded = events
+            .append(&scope, None, unnamed_refusal_event(principal))
+            .await;
+        refusal
     }
 }
 
@@ -556,13 +608,76 @@ fn read_budget(input: &Value) -> Option<usize> {
 
 /// Whether `media_type` is one of `INLINE_IMAGE_TYPES`, ignoring case and any parameters.
 fn is_inline_image_type(media_type: &str) -> bool {
+    inline_type(media_type).is_some()
+}
+
+/// The inline image type `media_type` names, ignoring case, surrounding spaces and any
+/// parameters: its canonical essence (one of `INLINE_IMAGE_TYPES`, lower case, as listed) and
+/// its signature check; `None` when it names no listed type.
+///
+/// The one place both are chosen, so the type an image block carries and the check its bytes
+/// passed are of the same type by construction.
+fn inline_type(media_type: &str) -> Option<(&'static str, Signature)> {
     let essence = media_type
         .split_once(';')
         .map_or(media_type, |(essence, _)| essence)
         .trim();
     INLINE_IMAGE_TYPES
         .iter()
-        .any(|inline| essence.eq_ignore_ascii_case(inline))
+        .find(|(inline, _)| essence.eq_ignore_ascii_case(inline))
+        .map(|(inline, signature)| (*inline, *signature))
+}
+
+/// Whether `bytes` begin as a PNG file does.
+fn is_png(bytes: &[u8]) -> bool {
+    bytes.starts_with(&PNG_SIGNATURE)
+}
+
+/// Whether `bytes` begin as a JPEG file does.
+fn is_jpeg(bytes: &[u8]) -> bool {
+    bytes.starts_with(&JPEG_SIGNATURE)
+}
+
+/// Whether `bytes` begin as a GIF file of either version does.
+fn is_gif(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")
+}
+
+/// Whether `bytes` begin as a WebP file does: a RIFF container (`RIFF`, then four bytes of
+/// size, which are not compared) whose form type is `WEBP`.
+fn is_webp(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"RIFF") && bytes.get(8..SIGNATURE_SPAN) == Some(b"WEBP".as_slice())
+}
+
+/// The first bytes padded base64 text decodes to, at most `SIGNATURE_SPAN` of them.
+///
+/// Only the leading `SIGNATURE_CHARACTERS` are read, by the standard alphabet. Decoding ends at
+/// the padding and at any other character outside the alphabet, so malformed text yields the
+/// bytes before the fault and no others. Text past those characters is not looked at here.
+fn leading_bytes(base64: &str) -> Vec<u8> {
+    let sextets: Vec<u32> = base64
+        .bytes()
+        .take(SIGNATURE_CHARACTERS)
+        .map_while(|character| {
+            BASE64_ALPHABET
+                .iter()
+                .position(|letter| *letter == character)
+                .and_then(|place| u32::try_from(place).ok())
+        })
+        .collect();
+    sextets
+        .chunks(4)
+        .flat_map(|quad| {
+            // Four sextets are three bytes; three are two, two are one, and one is none.
+            let word = (0..4).fold(0_u32, |word, at| {
+                (word << 6) | quad.get(at).copied().unwrap_or(0)
+            });
+            let [_, first, second, third] = word.to_be_bytes();
+            [first, second, third]
+                .into_iter()
+                .take(quad.len().saturating_sub(1))
+        })
+        .collect()
 }
 
 /// The number of bytes padded base64 text decodes to: three per four characters, less the
@@ -596,24 +711,22 @@ fn request_error(error: &ApiError) -> ErrorData {
     }
 }
 
-/// The `permission_denied` event of a route refusal, naming the operation when there is one.
-fn refusal_event(principal: &Principal, operation: Option<OperationName>) -> NewEvent {
-    operation.map_or_else(
-        || NewEvent {
-            kind: EventKind::PermissionDenied,
-            revision: None,
-            item_id: None,
-            job_id: None,
-            connector_id: None,
-            actor: Some(EventActor {
-                subject: principal.subject.clone(),
-                route: principal.route.clone(),
-                client_id: principal.client_id.clone(),
-            }),
-            operation: None,
-        },
-        |operation| NewEvent::permission_denied(principal, operation),
-    )
+/// The `permission_denied` event of a route refusal of a request that is no operation: it
+/// names the caller and no operation.
+fn unnamed_refusal_event(principal: &Principal) -> NewEvent {
+    NewEvent {
+        kind: EventKind::PermissionDenied,
+        revision: None,
+        item_id: None,
+        job_id: None,
+        connector_id: None,
+        actor: Some(EventActor {
+            subject: principal.subject.clone(),
+            route: principal.route.clone(),
+            client_id: principal.client_id.clone(),
+        }),
+        operation: None,
+    }
 }
 
 /// The App bundle's HTML, read off the async runtime.
@@ -694,6 +807,9 @@ mod tests {
 
     /// Dispatch's refusal of a draft-bearing operation on a route that is no human session.
     const DRAFT_REFUSAL: &str = "Drafts are visible only in a human browser session";
+
+    /// The workspace `list_drafts` names.
+    const WORKSPACE: &str = "11111111-1111-4111-8111-111111111111";
 
     okf_jawn_contract::for_each_operation!(refusing_operations);
 
@@ -822,7 +938,15 @@ mod tests {
     }
 
     fn list_drafts() -> Value {
-        json!({"workspace_id": "11111111-1111-4111-8111-111111111111", "page": {"limit": 10}})
+        json!({"workspace_id": WORKSPACE, "page": {"limit": 10}})
+    }
+
+    /// The log of the workspace `list_drafts` names, in the test principal's tenant.
+    fn workspace_log() -> Result<EventScope, Box<dyn Error>> {
+        Ok(EventScope::Workspace(StorageScope {
+            tenant_id: TenantId::try_from("tenant-test".to_owned()).map_err(|error| error.0)?,
+            workspace_id: serde_json::from_value(json!(WORKSPACE))?,
+        }))
     }
 
     /// The `ApiError` of a failed tool result shaped as `error_result` shapes it.
@@ -869,11 +993,108 @@ mod tests {
             assert_eq!(refused.code, ErrorCode::Forbidden, "{route:?}");
             assert_eq!(refused.message, ROUTE_REFUSAL, "{route:?}");
         }
+        // The request names one workspace, so each refusal is recorded in that workspace's log.
         let appended = events.appended()?;
         assert_eq!(appended.len(), 3);
         for (scope, event) in &appended {
-            assert!(matches!(scope, EventScope::Tenant(_)), "{scope:?}");
+            assert_eq!(scope, &workspace_log()?);
             assert_eq!(event.operation, Some(OperationName::ListDrafts));
+        }
+        Ok(())
+    }
+
+    /// Dispatch refuses an agent a draft-bearing operation by route, before any target; this
+    /// server refuses a browser session the same request by route, before dispatch. Both are
+    /// recorded in the same log, each naming its own caller.
+    #[tokio::test]
+    async fn a_route_refusal_lands_where_dispatchs_own_route_refusal_lands() -> Checked {
+        let events = Arc::new(Recording::default());
+        let server = server(events.clone())?;
+        let callers = [
+            (AccessRoute::McpDelegation, DRAFT_REFUSAL),
+            (AccessRoute::BrowserSession, ROUTE_REFUSAL),
+        ];
+        for (route, message) in callers {
+            let caller = principal(route.clone())?;
+            let result = server
+                .call_operation(Some(&caller), OperationName::ListDrafts, list_drafts())
+                .await?;
+            assert_eq!(refusal(&result)?.message, message, "{route:?}");
+        }
+        let appended = events.appended()?;
+        let [(dispatched, by_dispatch), (refused, by_server)] = appended.as_slice() else {
+            return Err(format!("expected two recorded refusals, got {appended:?}").into());
+        };
+        assert_eq!(dispatched, &workspace_log()?);
+        assert_eq!(refused, dispatched);
+        assert_eq!(by_dispatch.operation, by_server.operation);
+        let routes: Vec<_> = [by_dispatch, by_server]
+            .iter()
+            .filter_map(|event| event.actor.as_ref())
+            .map(|actor| actor.route.clone())
+            .collect();
+        assert_eq!(
+            routes,
+            vec![AccessRoute::McpDelegation, AccessRoute::BrowserSession]
+        );
+        Ok(())
+    }
+
+    /// The decoder of an image's leading bytes agrees with RFC 4648's vectors, never yields
+    /// more than the longest signature spans, and stops at whatever is not standard base64.
+    #[test]
+    fn leading_bytes_are_the_first_decoded_bytes_and_end_at_what_is_not_base64() {
+        let cases: [(&str, &[u8]); 14] = [
+            ("", b""),
+            ("Zg==", b"f"),
+            ("Zm8=", b"fo"),
+            ("Zm9v", b"foo"),
+            ("Zm9vYg==", b"foob"),
+            ("Zm9vYmE=", b"fooba"),
+            ("Zm9vYmFy", b"foobar"),
+            ("+/+/", &[0xFB, 0xFF, 0xBF]),
+            // Exactly the span, and more than the span: never more than twelve bytes.
+            ("Zm9vYmFyZm9vYmFy", b"foobarfoobar"),
+            ("Zm9vYmFyZm9vYmFyZm9vYmFy", b"foobarfoobar"),
+            // A sextet with no partner carries no byte.
+            ("Zm9vY", b"foo"),
+            // A character outside the standard alphabet ends the decode where it stands.
+            ("Zm9v*mFy", b"foo"),
+            ("Zm9v-_-_", b"foo"),
+            ("Zm9vYg==YmFy", b"foob"),
+        ];
+        for (base64, bytes) in cases {
+            assert_eq!(super::leading_bytes(base64), bytes, "{base64}");
+        }
+    }
+
+    /// A request that is no operation is refused by route whether or not its refusal can be
+    /// recorded: the log here fails every append, and the answer is still the route refusal.
+    #[tokio::test]
+    async fn a_refused_request_that_is_no_operation_is_answered_though_the_log_fails() -> Checked {
+        let events = Arc::new(Recording::default());
+        let server = server(events.clone())?;
+        let browser = principal(AccessRoute::BrowserSession)?;
+        let Err(read) = server.read_resource_as(Some(&browser), "ui://none").await else {
+            return Err("a browser session read a resource".into());
+        };
+        assert_eq!(
+            (read.code, read.message.as_str()),
+            (ErrorCode::Forbidden, ROUTE_REFUSAL)
+        );
+        let result = server
+            .call_tool_as(Some(&browser), "no_such_tool", None)
+            .await?;
+        let called = refusal(&result)?;
+        assert_eq!(
+            (called.code, called.message.as_str()),
+            (ErrorCode::Forbidden, ROUTE_REFUSAL)
+        );
+        let appended = events.appended()?;
+        assert_eq!(appended.len(), 2);
+        for (scope, event) in &appended {
+            assert_eq!(scope, &EventScope::Tenant(browser.tenant_id.clone()));
+            assert_eq!(event.operation, None);
         }
         Ok(())
     }

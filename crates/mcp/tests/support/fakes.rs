@@ -2,7 +2,7 @@
 //!
 //! `FakeApplication` answers each operation from a configured response, and `get_object` from
 //! a configured outcome per object digest first, and records who called what with which
-//! request. `FakeAccess` grants each known subject a fixed permission set on every workspace
+//! request, and the whole principal of each call's context. `FakeAccess` grants each known subject a fixed permission set on every workspace
 //! but the ones it refuses, and on the tenant, so dispatch's own route and permission rules
 //! decide. `FakeLedger` always begins a new mutation. `FakeEvents` records every append.
 
@@ -52,6 +52,7 @@ pub struct FakeApplication {
     objects: Mutex<BTreeMap<String, Result<Value, ApiError>>>,
     calls: Mutex<Vec<Call>>,
     requests: Mutex<Vec<(&'static str, Value)>>,
+    callers: Mutex<Vec<(&'static str, Value)>>,
 }
 
 /// Grants by subject; an unknown subject holds nothing, and nobody holds a refused workspace.
@@ -140,6 +141,22 @@ impl FakeApplication {
             .collect())
     }
 
+    /// The whole principal, serialized, of the context of every call to `operation`, in order:
+    /// its subject, tenant, route, client and delegation ceiling as dispatch handed them over.
+    ///
+    /// # Errors
+    /// Returns an error when the caller record is poisoned.
+    pub fn callers(&self, operation: &str) -> Result<Vec<Value>, ApiError> {
+        Ok(self
+            .callers
+            .lock()
+            .map_err(|_| poisoned())?
+            .iter()
+            .filter(|(called, _)| *called == operation)
+            .map(|(_, principal)| principal.clone())
+            .collect())
+    }
+
     fn answer<T: rmcp::serde::de::DeserializeOwned, R: rmcp::serde::Serialize>(
         &self,
         operation: &'static str,
@@ -148,6 +165,12 @@ impl FakeApplication {
     ) -> Result<T, ApiError> {
         let request = serde_json::to_value(request)
             .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+        let caller = serde_json::to_value(&context.principal)
+            .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+        self.callers
+            .lock()
+            .map_err(|_| poisoned())?
+            .push((operation, caller));
         self.calls.lock().map_err(|_| poisoned())?.push(Call {
             operation,
             subject: context.principal.subject.clone(),
