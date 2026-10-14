@@ -41,7 +41,8 @@
 //! `CreateItem`, `MoveItem`, `CreateFolder` (whose own last segment counts too),
 //! `WriteSourceCard`, and the restores that write an earlier path: `RestoreItem` (each move back
 //! and each restored file) and `RestorePaths`, which also refuses a listed file the tree spells
-//! another way (`refuse_respelled_file`). A refusal leaves only the staged copy changed, and the
+//! another way (`refuse_respelled_file`) and a listed path below a file
+//! (`refuse_file_as_folder`). A refusal leaves only the staged copy changed, and the
 //! staged copy is discarded, so nothing is committed.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -484,6 +485,7 @@ fn restore_paths(
     for (index, path) in paths.iter().enumerate() {
         let field = format!("/paths/{index}");
         staged.refuse_respelled_folder(path, false, &field)?;
+        refuse_file_as_folder(&staged.root, path, &field)?;
         refuse_respelled_file(&staged.root, path, &field)?;
         let target = staged.root.join(path.as_str());
         match tree.get_path(Path::new(path.as_str())) {
@@ -1021,6 +1023,33 @@ fn refuse_respelled_file(root: &Path, path: &WorkspacePath, field: &str) -> Resu
         }
         _ => Ok(()),
     }
+}
+
+/// Refuse a path one of whose folders the staged tree under `root` holds as a file, in any
+/// spelling: `Conflict` on `field`, naming the path and the file. Writing or removing below a
+/// file fails differently by system (Windows reads `notes/a.md` through a file `NOTES` and
+/// fails, Linux finds nothing there), so it is refused alike, before anything below it is read.
+fn refuse_file_as_folder(root: &Path, path: &WorkspacePath, field: &str) -> Result<(), ApiError> {
+    let mut folders: Vec<&str> = path.as_str().split('/').collect();
+    folders.pop();
+    let mut directory = root.to_path_buf();
+    let mut walked = Vec::with_capacity(folders.len());
+    for folder in folders {
+        let Some(name) = spelled_in(&directory, folder, false)? else {
+            return Ok(());
+        };
+        directory.push(&name);
+        walked.push(name);
+        if !directory.is_dir() {
+            return Err(conflict(format!(
+                "{}: {} is a file, not a folder",
+                path.as_str(),
+                walked.join("/")
+            ))
+            .with_field(field));
+        }
+    }
+    Ok(())
 }
 
 /// How `directory` spells `segment`: the name of its entry named exactly `segment`, or else of

@@ -1436,6 +1436,36 @@ async fn restored_paths_spelled_another_way_are_refused() -> TestResult {
     Ok(())
 }
 
+/// `RestorePaths` of a path below a folder the tree now holds as a file, in another spelling
+/// or the same, is refused alike on every system, before anything below the file is read:
+/// `Conflict` on the listing's field, naming the path and the file.
+#[tokio::test]
+async fn restored_paths_below_a_file_are_refused_naming_it() -> TestResult {
+    for file in ["NOTES", "notes"] {
+        let space = Workspace::new().await?;
+        let early = space
+            .commit(2, &space.initial, vec![note(10, "notes/a.md", "Ten.")?])
+            .await?;
+        space.raw(900, &["notes/a.md", "notes/index.md"], &[])?;
+        let filed = space.raw(901, &[], &[(file, b"plain".to_vec())])?;
+        let error = space
+            .refused(3, &filed, vec![restore_paths(&early, &["notes/a.md"])?])
+            .await?;
+        assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+        assert_eq!(
+            error.field.as_deref(),
+            Some("/paths/0"),
+            "{}",
+            error.message
+        );
+        assert_eq!(
+            error.message,
+            format!("notes/a.md: {file} is a file, not a folder")
+        );
+    }
+    Ok(())
+}
+
 // The backstop: a tree that holds two spellings of one path.
 
 /// `seeded` holds `Notes/a.md` (item 10) and `b.md` (item 11); the answer moves `b.md` to
