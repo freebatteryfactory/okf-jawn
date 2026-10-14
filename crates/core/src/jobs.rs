@@ -270,6 +270,13 @@ pub struct DerivedObject {
 }
 
 /// SQLite-backed non-rebuildable application records.
+///
+/// The store writes a job's instants and retry flag as its state changes:
+/// `created_at` when the job is created; `started_at` when a claim starts an attempt;
+/// `finished_at` when the job succeeds, fails or is cancelled; `retryable` exactly while it is
+/// failed. A retry, and a released lease (`expire_leases`), queue the job again and clear
+/// `started_at` (and a retry `finished_at` and `retryable`), so a waiting job has no
+/// `started_at`.
 pub trait RecordStore: Send + Sync {
     /// Register a queued job and allocate its identity.
     ///
@@ -302,8 +309,11 @@ pub trait RecordStore: Send + Sync {
     /// When `completion.artifact` is set, the returned and stored job shows
     /// `ArtifactRecord::download` of that record as its artifact.
     fn complete_job(&self, completion: JobCompletion) -> PortFuture<'_, Job>;
-    /// Keep the failure and retry eligibility for the current claim.
-    fn fail_job(&self, lease: JobLease, message: String, retryable: bool) -> PortFuture<'_, Job>;
+    /// Record the failure of the current claim: `error` is stored as `Job.error` as given (its
+    /// code, message, `field` and `detail`), and `retryable` as `Job.retryable`, which says
+    /// whether `retry_job` queues the job again; the code never says it. `field` is a JSON
+    /// Pointer into the request that started the job.
+    fn fail_job(&self, lease: JobLease, error: ApiError, retryable: bool) -> PortFuture<'_, Job>;
     /// Cancel pending or running work while retaining recorded state.
     ///
     /// Unique on `mutation_id`: a repeated id makes no second transition and returns the job

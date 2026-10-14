@@ -7,7 +7,7 @@
 //! state, scope and lease in columns; the specification and initiator are kept exactly as
 //! written and handed back unchanged on every claim. The job lease is `JOB_LEASE_SECONDS`.
 
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::events::Receipt;
 use okf_jawn_contract::identity::{
     ArtifactId, Digest, ItemId, JobId, MutationId, PurgeId, ReceiptId, Revision, TenantId,
@@ -194,7 +194,7 @@ impl RecordStore for SqliteRecords {
         )
     }
 
-    fn fail_job(&self, lease: JobLease, message: String, retryable: bool) -> PortFuture<'_, Job> {
+    fn fail_job(&self, lease: JobLease, error: ApiError, retryable: bool) -> PortFuture<'_, Job> {
         Box::pin(self.db.transaction(move |transaction| {
             let row = leased_row(transaction, lease.job_id)?;
             if row.token.as_deref() != Some(lease.token.as_str())
@@ -205,12 +205,9 @@ impl RecordStore for SqliteRecords {
             }
             let mut job = decode_job(&row.record)?;
             job.state = JobState::Failed;
-            let code = if retryable {
-                ErrorCode::Unavailable
-            } else {
-                ErrorCode::Internal
-            };
-            job.error = Some(ApiError::new(code, message));
+            job.error = Some(error);
+            job.retryable = Some(retryable);
+            job.finished_at = Some(seam::now()?);
             write_job(
                 transaction,
                 &job,
@@ -343,7 +340,8 @@ impl RecordStore for SqliteRecords {
             let released = transaction
                 .execute(
                     "UPDATE jobs SET state = 'queued', lease_token = NULL, lease_expires_ms = NULL,
-                         lease_expires_at = NULL, record = json_set(record, '$.state', 'queued')
+                         lease_expires_at = NULL,
+                         record = json_remove(json_set(record, '$.state', 'queued'), '$.started_at')
                      WHERE state = 'running' AND lease_expires_ms <= ?1",
                     [seam::now_ms()?],
                 )
@@ -646,7 +644,7 @@ fn insert_job(
         artifact: None,
         restore: None,
         backup: None,
-        created_at: None,
+        created_at: Some(seam::now()?),
         started_at: None,
         finished_at: None,
         retryable: None,
@@ -714,6 +712,9 @@ fn claim(transaction: &Transaction<'_>, job_id: JobId) -> Result<Option<ClaimedJ
         return Ok(None);
     }
     job.state = JobState::Running;
+    job.started_at = Some(seam::now()?);
+    job.finished_at = None;
+    job.retryable = None;
     job.attempt = job
         .attempt
         .checked_add(1)
@@ -769,6 +770,8 @@ fn complete(transaction: &Transaction<'_>, completion: &JobCompletion) -> Result
         })
         .transpose()?;
     job.state = JobState::Succeeded;
+    job.finished_at = Some(seam::now()?);
+    job.retryable = None;
     job.progress = 100;
     job.revision.clone_from(&completion.revision);
     job.item_ids.clone_from(&completion.item_ids);
@@ -832,6 +835,7 @@ fn control(
     match (action, &job.state) {
         ("cancel", JobState::Queued | JobState::Running) => {
             job.state = JobState::Cancelled;
+            job.finished_at = Some(seam::now()?);
             write_job(transaction, &job, params![], "lease_expires_ms = NULL")?;
             Ok(job)
         }
@@ -848,6 +852,9 @@ fn control(
             }
             job.state = JobState::Queued;
             job.error = None;
+            job.started_at = None;
+            job.finished_at = None;
+            job.retryable = None;
             write_job(
                 transaction,
                 &job,

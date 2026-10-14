@@ -362,7 +362,7 @@ impl RecordStore for FakeRecords {
     fn fail_job(
         &self,
         _lease: JobLease,
-        _message: String,
+        _error: ApiError,
         _retryable: bool,
     ) -> PortFuture<'_, Job> {
         unused()

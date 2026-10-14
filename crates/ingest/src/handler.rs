@@ -168,7 +168,7 @@ impl IngestHandler {
             let _job = self
                 .ports
                 .records
-                .fail_job(claimed.lease.clone(), refusal.message, false)
+                .fail_job(claimed.lease.clone(), refusal, false)
                 .await?;
             return announce_job(self.ports.events.as_ref(), claimed).await;
         }

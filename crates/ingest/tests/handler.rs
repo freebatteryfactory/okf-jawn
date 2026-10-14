@@ -1790,12 +1790,15 @@ mod job_handler {
             workspace_scope()?,
             import_spec(vec![valid, escaping], false)?,
         )?;
-        // A job's failure is recorded as a message only (`RecordStore::fail_job`), so the field
-        // is read where it exists: in the handler's own refusal, before the runtime records it.
-        let claimed = some(world.records.claim_job(id).await?, "the claim")?;
-        let refused = err_of(world.handler.handle(&claimed).await)?;
+        // The refusal names the one upload, the second of the request, and the job's failure
+        // keeps it as given (`RecordStore::fail_job`).
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        assert_eq!(entry.job.retryable, Some(false));
+        let refused = some(entry.job.error, "the failure")?;
         assert_eq!(refused.code, ErrorCode::InvalidInput);
-        assert_eq!(refused.field.as_deref(), Some("/upload_ids"));
+        assert_eq!(refused.field.as_deref(), Some("/upload_ids/1"));
         assert!(
             refused.message.contains("gives no workspace path"),
             "{}",

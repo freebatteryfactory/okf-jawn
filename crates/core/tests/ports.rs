@@ -434,7 +434,11 @@ async fn record_store_calls(
             })
             .await?;
         records
-            .fail_job(claimed.lease, "converter stopped".to_owned(), true)
+            .fail_job(
+                claimed.lease,
+                ApiError::new(ErrorCode::Unavailable, "converter stopped"),
+                true,
+            )
             .await?;
     }
     records.cancel_job(&job_scope, mutation_id, job.id).await?;

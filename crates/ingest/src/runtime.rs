@@ -194,7 +194,7 @@ pub async fn run_one(
                 | ErrorCode::NotImplemented
         );
         let _failed = records
-            .fail_job(claimed.lease.clone(), error.message, retryable)
+            .fail_job(claimed.lease.clone(), error, retryable)
             .await?;
         announce_job(events, &claimed).await?;
     }

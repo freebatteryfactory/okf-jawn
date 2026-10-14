@@ -418,12 +418,12 @@ fn refused_as(error: ApiError) -> Done {
 /// Every upload of the request is read and checked, and every card path derived, before any
 /// upload is consumed. An incomplete upload refuses the batch (`InvalidInput`), so does one
 /// another job consumed (`Conflict`), and so does a file name that gives no workspace path
-/// (`InvalidInput` on `/upload_ids`); then no upload of the batch is consumed, so another job
-/// may still take the good ones. Only then are they consumed by this job, all in one call
-/// (`UploadStore::consume_batch`, one transaction: all of them or none). Another job that
-/// consumed one of them between this check and that call is a concurrent import of the same
-/// upload: the store refuses the whole batch with `Conflict` and marks none, so two imports
-/// that share uploads never hold some of them each (R-I13).
+/// (`InvalidInput`); each refusal names its upload as `/upload_ids/<index>`. Then no upload of
+/// the batch is consumed, so another job may still take the good ones. Only then are they
+/// consumed by this job, all in one call (`UploadStore::consume_batch`, one transaction: all of
+/// them or none). Another job that consumed one of them between this check and that call is a
+/// concurrent import of the same upload: the store refuses the whole batch with `Conflict` and
+/// marks none, so two imports that share uploads never hold some of them each (R-I13).
 async fn pending_cards(
     ports: &HandlerPorts,
     claimed: &ClaimedJob,
@@ -432,28 +432,37 @@ async fn pending_cards(
 ) -> Result<Vec<(SourceCard, LocalSource)>, ApiError> {
     let job = claimed.lease.job_id;
     let mut sources = Vec::new();
-    for upload_id in request.upload_ids {
+    for (index, upload_id) in request.upload_ids.iter().enumerate() {
+        let field = format!("/upload_ids/{index}");
         let upload = ports.uploads.get(scope, *upload_id).await?;
         let object = upload.object.clone().ok_or_else(|| {
             ApiError::new(
                 ErrorCode::InvalidInput,
                 "an upload to import is not complete",
             )
-            .with_field("/upload_ids")
+            .with_field(field.clone())
         })?;
         if upload.consumed_by.is_some_and(|consumer| consumer != job) {
             return Err(ApiError::new(
                 ErrorCode::Conflict,
                 "an upload to import was already taken by another job",
             )
-            .with_field("/upload_ids"));
+            .with_field(field));
         }
         sources.push((upload, object));
     }
     let mut taken = taken_keys(ports, scope, request.base_revision, request.destination).await?;
     let paths = sources
         .iter()
-        .map(|(upload, _object)| free_path(request.destination, &upload.filename, &mut taken))
+        .enumerate()
+        .map(|(index, (upload, _object))| {
+            free_path(
+                request.destination,
+                &upload.filename,
+                &format!("/upload_ids/{index}"),
+                &mut taken,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let batch: Vec<UploadId> = sources.iter().map(|(upload, _object)| upload.id).collect();
     let _consumed = ports.uploads.consume_batch(scope, &batch, job).await?;
@@ -1107,6 +1116,7 @@ async fn taken_keys(
 fn free_path(
     destination: Option<&WorkspacePath>,
     file_name: &str,
+    field: &str,
     taken: &mut BTreeSet<String>,
 ) -> Result<WorkspacePath, ApiError> {
     let name = source_card_name(file_name);
@@ -1126,7 +1136,7 @@ fn free_path(
                 ErrorCode::InvalidInput,
                 format!("the file name {file_name:?} gives no workspace path: {error}"),
             )
-            .with_field("/upload_ids")
+            .with_field(field)
         })?;
         if taken.insert(path.collision_key()) {
             return Ok(path);

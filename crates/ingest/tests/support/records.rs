@@ -440,12 +440,13 @@ impl RecordStore for FakeRecords {
         Box::pin(async move { done })
     }
 
-    fn fail_job(&self, lease: JobLease, message: String, retryable: bool) -> PortFuture<'_, Job> {
+    fn fail_job(&self, lease: JobLease, error: ApiError, retryable: bool) -> PortFuture<'_, Job> {
         let failed = self.running_with_lease(&lease, |entry| {
             entry.job.state = JobState::Failed;
-            entry.job.error = Some(ApiError::new(ErrorCode::Internal, message.clone()));
+            entry.failures.push((error.message.clone(), retryable));
+            entry.job.error = Some(error.clone());
+            entry.job.retryable = Some(retryable);
             entry.lease = None;
-            entry.failures.push((message, retryable));
             entry.job.clone()
         });
         Box::pin(async move { failed })

@@ -2838,7 +2838,11 @@ async fn purge_refuses_a_retry_of_a_failed_job_of_the_workspace_it_names() -> Te
     let records = storage.records();
     let claimed = some(records.claim_job(job.id).await?, "the claim")?;
     records
-        .fail_job(claimed.lease, "disk full".to_owned(), true)
+        .fail_job(
+            claimed.lease,
+            ApiError::new(ErrorCode::Unavailable, "disk full"),
+            true,
+        )
         .await?;
     record_purge_under(&storage, &target, 60, 50).await?;
     refused(
@@ -2876,9 +2880,7 @@ async fn purge_refuses_every_retry_once_recorded_while_retries_race_it() -> Test
         let job = queued_job(&storage, &scope, 30 + lane).await?;
         let records = storage.records();
         let claimed = some(records.claim_job(job.id).await?, "the first claim")?;
-        records
-            .fail_job(claimed.lease, "busy".to_owned(), true)
-            .await?;
+        records.fail_job(claimed.lease, busy(), true).await?;
         let scope = scope.clone();
         let queued_so_far = std::sync::Arc::clone(&queued_so_far);
         tasks.push(tokio::spawn(async move {
@@ -2906,7 +2908,7 @@ async fn purge_refuses_every_retry_once_recorded_while_retries_race_it() -> Test
                 match records.claim_job(job.id).await {
                     Ok(Some(claimed)) => {
                         records
-                            .fail_job(claimed.lease, "busy".to_owned(), true)
+                            .fail_job(claimed.lease, busy(), true)
                             .await
                             .map_err(|error| error.to_string())?;
                     }
@@ -3484,6 +3486,11 @@ async fn a_workspace_archive_and_a_written_history_land_their_pending_puts() -> 
     assert_eq!(pending_puts(directory.path(), &target)?, 0, "a history");
     assert_eq!(stored_objects(directory.path())?.len(), 2);
     Ok(())
+}
+
+/// The failure a retried purge job is given while the store is busy.
+fn busy() -> ApiError {
+    ApiError::new(ErrorCode::Unavailable, "busy")
 }
 
 #[path = "../../../tests/support/check.rs"]
