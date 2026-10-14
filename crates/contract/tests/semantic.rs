@@ -1102,7 +1102,8 @@ fn workspace_paths_refuse_a_segment_windows_cannot_store() -> Result<(), Box<dyn
     assert!(path(format!("{}/{}", "a".repeat(255), "b".repeat(255))).is_ok());
     // A supplied name is measured after NFC: 255 decomposed `e\u{301}` are 255 units once
     // composed, and one more is refused, never shortened.
-    assert!(WorkspacePath::from_supplied(&"e\u{301}".repeat(255)).is_ok());
+    let composed = WorkspacePath::from_supplied(&"e\u{301}".repeat(255))?;
+    assert_eq!(composed.as_str().encode_utf16().count(), 255);
     assert!(WorkspacePath::from_supplied(&"e\u{301}".repeat(256)).is_err());
     Ok(())
 }
