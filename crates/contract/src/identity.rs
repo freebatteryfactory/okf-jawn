@@ -110,9 +110,10 @@ pub struct Digest(String);
 /// Every `/`-separated segment is non-empty, is not `.`, `..` or `.git` (any case), holds no
 /// control character and none of `\ : < > " | ? *`, does not end in `.` or a space, and has a
 /// stem (the segment up to its first `.`) that is not a Windows reserved device name such as
-/// `CON`, `NUL`, `COM1` or `CONIN$`, compared ASCII case-insensitively. The whole value is in
-/// Unicode NFC and at most 4096 bytes. A non-NFC value is refused, never changed on parse;
-/// `from_supplied` normalizes a supplied filename first.
+/// `CON`, `NUL`, `COM1` or `CONIN$`, compared ASCII case-insensitively, and is at most 255 UTF-16
+/// code units long (`MAX_PATH_SEGMENT_UTF16_UNITS`, what NTFS stores in one name). The whole
+/// value is in Unicode NFC and at most 4096 bytes. A non-NFC value is refused, never changed on
+/// parse; `from_supplied` normalizes a supplied filename first.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct WorkspacePath(String);
@@ -157,6 +158,10 @@ pub const LOCAL_TENANT_ID: &str = "local";
 
 /// The most UTF-8 bytes of a `WorkspacePath`: 4096.
 pub const MAX_WORKSPACE_PATH_BYTES: usize = 4096;
+
+/// The most UTF-16 code units of one segment of a `WorkspacePath`: 255, the longest name NTFS
+/// stores (SPEC section 2: a path segment that Windows cannot store is refused).
+pub const MAX_PATH_SEGMENT_UTF16_UNITS: usize = 255;
 
 /// The part of the workspace-path rule a regular expression can state: `/`-separated
 /// segments, none empty, none containing `\`, `:`, `<`, `>`, `"`, `|`, `?`, `*` or a C0
@@ -324,7 +329,10 @@ impl WorkspacePath {
     }
 
     /// Build a path from a supplied filename or folder: convert it to NFC, then apply every
-    /// rule of `TryFrom<String>`. The supplied spelling itself is kept elsewhere unchanged.
+    /// rule of `TryFrom<String>`. The supplied spelling itself is kept elsewhere unchanged. A
+    /// supplied name whose NFC form has a segment over `MAX_PATH_SEGMENT_UTF16_UNITS` is refused,
+    /// never shortened: an upload whose `filename` gives its source card such a segment is
+    /// refused when its slot is opened (`import::CreateUploadRequest::check_names`).
     ///
     /// # Errors
     /// Returns the rule the normalized value breaks.
@@ -514,6 +522,11 @@ fn segment_error(segment: &str) -> Option<IdentityError> {
     if segment.ends_with('.') || segment.ends_with(' ') {
         return Some(IdentityError(
             "path segment must not end with a dot or a space",
+        ));
+    }
+    if segment.encode_utf16().count() > MAX_PATH_SEGMENT_UTF16_UNITS {
+        return Some(IdentityError(
+            "path segment is longer than the 255 UTF-16 code units Windows can store",
         ));
     }
     let stem = segment.split('.').next().unwrap_or(segment);

@@ -254,6 +254,13 @@ fn upload_id(index: usize) -> String {
     format!("00000000-0000-4000-8000-{index:012}")
 }
 
+/// A name of `bytes` ASCII bytes in segments of at most 200, so every segment is a storable name.
+fn segmented(bytes: usize) -> String {
+    (0..bytes)
+        .map(|position| if position % 201 == 200 { '/' } else { 'a' })
+        .collect()
+}
+
 /// `check_rules` of a decoded `T`.
 fn rules_of<T: DeserializeOwned + RequestScope>(
     value: Value,
@@ -277,16 +284,20 @@ fn the_upload_and_import_bounds_are_pinned() {
 /// has no more characters than the bound.
 #[test]
 fn an_upload_name_passes_at_its_bound_and_is_too_large_one_byte_over() -> TestResult {
+    // The name at the bound is in folders of 200 bytes, so its source card has a path: a single
+    // segment that long is refused on another rule (`WorkspacePath`'s 255 UTF-16 units).
     for (pointer, bound) in [
         ("/filename", MAX_UPLOAD_FILENAME_BYTES),
         ("/relative_path", MAX_UPLOAD_RELATIVE_PATH_BYTES),
     ] {
-        let within = "a".repeat(bound);
+        let within = segmented(bound);
+        assert_eq!(within.len(), bound);
         let accepted =
             checked::<CreateUploadRequest>(&create_upload("a.pdf", ""), pointer, &within)?;
         assert!(accepted.is_ok(), "{pointer} at the bound: {accepted:?}");
-        let mut over = "a".repeat(bound.saturating_sub(1));
+        let mut over = segmented(bound.saturating_sub(1));
         over.push('é');
+        assert_eq!(over.len(), bound.saturating_add(1));
         assert_eq!(over.chars().count(), bound);
         let refused = err_of(checked::<CreateUploadRequest>(
             &create_upload("a.pdf", ""),
