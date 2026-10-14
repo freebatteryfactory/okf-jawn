@@ -2,8 +2,9 @@
 //!
 //! Every write follows one path under the workspace's lock: scan for the mutation's trailer
 //! after the expected head (a replay returns that commit), refuse a moved head, materialize the
-//! base tree in `<data>/staging/<tenant>/<workspace>/<mutation>`, apply the edits there, check
-//! path collisions, maintain the folder indexes and the change log, run the caller's
+//! base tree in `<data>/staging/<tenant>/<workspace>/<mutation>` (refusing a tree that holds two
+//! spellings of one path, unless the first edit replaces the whole tree), apply the edits
+//! there, check path collisions, maintain the folder indexes and the change log, run the caller's
 //! `CandidateCheck` on that directory, write the tree and the commit, and only then move the
 //! reference with a compare-and-set. The staging directory is removed when the call returns.
 //! The check's warnings are kept in the records database just before the reference moves, and a
@@ -527,9 +528,15 @@ fn stage_and_commit(
         .find_commit(write.base)
         .map_err(|error| git(&error))?;
     let staged_root = staging.path.clone();
+    // A first edit that replaces the whole tree reads nothing of the base, so the base is not
+    // staged: a base that cannot be staged (two paths sharing a collision key, `materialize`)
+    // can still be replaced by an earlier revision that can.
+    let replaced = matches!(write.edits.first(), Some(TreeEdit::RestoreWorkspace { .. }));
     let candidate = || -> Result<(Oid, Vec<Warning>), ApiError> {
         let tree = base.tree().map_err(|error| git(&error))?;
-        materialize(repository, &tree, &staged_root)?;
+        if !replaced {
+            materialize(repository, &tree, &staged_root)?;
+        }
         let mut staged = Staged::scan(&staged_root)?;
         apply(repository, &mut staged, write.edits)?;
         staged.refuse_collisions()?;

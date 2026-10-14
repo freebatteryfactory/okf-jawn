@@ -321,6 +321,14 @@ fn folder(at: &str) -> Fallible<TreeEdit> {
     Ok(TreeEdit::CreateFolder { folder: path(at)? })
 }
 
+fn edited(item: u32, body: &str) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::EditItem {
+        item_id: uuid!(item)?,
+        body: body.to_owned(),
+        properties: BTreeMap::from([("type".to_owned(), json!("Note"))]),
+    })
+}
+
 /// A source card at `at`.
 fn card(item: u32, at: &str) -> Fallible<TreeEdit> {
     Ok(TreeEdit::WriteSourceCard(Box::new(SourceCard {
@@ -883,6 +891,95 @@ async fn restored_paths_spelled_another_way_are_refused() -> TestResult {
     assert_conflict_naming(&removing, &["Docs/a.md", "Docs/A.md"]);
     assert_eq!(removing.field.as_deref(), Some("/paths/0"));
     assert_eq!(space.item_at(&held, "Docs/A.md").await?, Some(uuid!(22)?));
+    Ok(())
+}
+
+// The backstop: a tree that holds two spellings of one path.
+
+/// `seeded` holds `Notes/a.md` (item 10) and `b.md` (item 11); the answer moves `b.md` to
+/// `respelled` straight through Git, so the tree holds two spellings of one path.
+fn two_spellings(space: &Workspace, seeded: &Revision, respelled: &str) -> Fallible<Revision> {
+    let bytes = some(space.file(seeded, "b.md")?, "b.md")?;
+    space.raw(900, &["b.md"], &[(respelled, bytes)])
+}
+
+/// A tree built in Git with two spellings of one folder (`Notes/` and `notes/`, as a
+/// case-sensitive filesystem could leave it) refuses every commit, naming both, before a
+/// case-insensitive filesystem could merge them; a whole-tree Rewind to a revision without
+/// them is not refused, and repairs it.
+#[tokio::test]
+async fn a_tree_with_two_spellings_of_a_folder_refuses_every_commit_but_a_whole_rewind()
+-> TestResult {
+    let space = Workspace::new().await?;
+    let seeded = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "Notes/a.md", "Ten.")?,
+                note(11, "b.md", "Eleven.")?,
+            ],
+        )
+        .await?;
+    let spelled = two_spellings(&space, &seeded, "notes/b.md")?;
+    for (mutation, edit) in [
+        (3, edited(10, "Changed.")?),
+        (4, note(12, "c.md", "Twelve.")?),
+        (5, edited(11, "Changed.")?),
+    ] {
+        let error = space.refused(mutation, &spelled, vec![edit]).await?;
+        assert_conflict_naming(&error, &["notes", "Notes", "collides"]);
+    }
+    let repaired = space
+        .commit(
+            6,
+            &spelled,
+            vec![TreeEdit::RestoreWorkspace {
+                from: seeded.clone(),
+            }],
+        )
+        .await?;
+    let files = space.files(&repaired)?;
+    assert!(files.iter().any(|file| file == "b.md"), "{files:?}");
+    one_spelling(&files);
+    assert_eq!(
+        space.file(&repaired, "Notes/a.md")?,
+        space.file(&seeded, "Notes/a.md")?
+    );
+    Ok(())
+}
+
+/// A tree built in Git with two spellings of one file (`a.md` and `A.md`, two items) refuses
+/// every commit naming both, rather than letting a case-insensitive filesystem keep one of
+/// them; a whole-tree Rewind repairs it.
+#[tokio::test]
+async fn a_tree_with_two_spellings_of_a_file_refuses_every_commit_but_a_whole_rewind() -> TestResult
+{
+    let space = Workspace::new().await?;
+    let seeded = space
+        .commit(
+            2,
+            &space.initial,
+            vec![note(10, "a.md", "Ten.")?, note(11, "b.md", "Eleven.")?],
+        )
+        .await?;
+    let spelled = two_spellings(&space, &seeded, "A.md")?;
+    for (mutation, edit) in [(3, edited(10, "Changed.")?), (4, edited(11, "Changed.")?)] {
+        let error = space.refused(mutation, &spelled, vec![edit]).await?;
+        assert_conflict_naming(&error, &["a.md", "A.md", "collides"]);
+    }
+    let repaired = space
+        .commit(
+            5,
+            &spelled,
+            vec![TreeEdit::RestoreWorkspace {
+                from: seeded.clone(),
+            }],
+        )
+        .await?;
+    assert_eq!(space.file(&repaired, "A.md")?, None);
+    assert_eq!(space.body(&repaired, 10).await?, "Ten.");
+    assert_eq!(space.body(&repaired, 11).await?, "Eleven.");
     Ok(())
 }
 

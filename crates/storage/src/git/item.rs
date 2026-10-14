@@ -16,7 +16,7 @@
 //! `ConceptId::to_path` writes `.md`. A file `X.MD` is a plain file, kept as it is; a write
 //! that names one for an item is refused with the lower-case name (`check_item_path`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use okf_core::yaml::{Mapping, Value as Yaml};
 use okf_core::{Document, Frontmatter};
@@ -197,6 +197,32 @@ pub(crate) fn is_reserved(path: &str) -> bool {
                 .iter()
                 .any(|reserved| collision_key(reserved) == segment)
     })
+}
+
+/// Refuse two of `files` (every file of one tree, as `/`-separated paths), or two of the
+/// folders above them, that share a collision key but are spelled differently: `Conflict`
+/// naming both. Files and folders count alike, so `notes/a.md` and `Notes/b.md` collide on
+/// their folders, and `a.md` and `A.md/x.md` collide too. A case-insensitive filesystem would
+/// merge each such pair into one.
+pub(crate) fn refuse_shared_keys<'a>(
+    files: impl IntoIterator<Item = &'a str>,
+) -> Result<(), ApiError> {
+    let mut paths = BTreeSet::new();
+    for file in files {
+        paths.insert(file);
+        paths.extend(file.match_indices('/').filter_map(|(at, _)| file.get(..at)));
+    }
+    // Every spelling once, so two paths with one key are two spellings of it.
+    let mut keys = BTreeMap::new();
+    for path in paths {
+        if let Some(other) = keys.insert(collision_key(path), path) {
+            return Err(ApiError::new(
+                ErrorCode::Conflict,
+                format!("{path} collides with {other}"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The key two paths collide on (`WorkspacePath::collision_key`); a path that is not a valid

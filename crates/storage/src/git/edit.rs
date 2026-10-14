@@ -10,8 +10,10 @@
 //! point at the item (`okf_core::move_concept`), and so does a `RestoreItem` that puts an item
 //! back at another path than the one it holds now. An item, a move or a folder may not land on a
 //! reserved name (`.okf/`, `index.md`, `log.md`) in any letter case: it is refused naming the
-//! path before anything is written. After the edits, no two files may share a path collision
-//! key, the folder indexes are regenerated and the change is appended to `log.md`. The files a
+//! path before anything is written. After the edits, no two paths, files or folders, may share
+//! a collision key (`Staged::refuse_collisions`; a tree that already holds such a pair is
+//! refused when it is staged, `repo::materialize`), the folder indexes are regenerated and the
+//! change is appended to `log.md`. The files a
 //! move rewrote besides the moved item's own (the referrers) are remembered, and the candidate
 //! check is told them (`Staged::rewritten`, `CandidateCheck::check`).
 //! Conformance is the `CandidateCheck`'s decision, not this module's.
@@ -52,7 +54,7 @@ use okf_jawn_core::storage::{SourceCard, TreeEdit};
 
 use super::item::{
     APP_DIR, ItemFile, LOG_FILE, RULES_FILE, TYPES_FILE, bare_header, check_item_path,
-    collision_key, is_item_path, is_reserved, new_item,
+    collision_key, is_item_path, is_reserved, new_item, refuse_shared_keys,
 };
 use super::repo::{commit_of, internal, materialize};
 use crate::data::io_error;
@@ -138,24 +140,20 @@ impl Staged {
             .collect()
     }
 
-    /// Refuse two files of the staged tree whose paths share a collision key (Stage 1b design
-    /// section 7), so a tree never holds two files a case-insensitive filesystem would merge.
+    /// Refuse two paths of the staged tree that share a collision key (Stage 1b design section
+    /// 7), files and the folders above them alike (`refuse_shared_keys`), so a tree never holds
+    /// two files, or two spellings of one folder, that a case-insensitive filesystem would
+    /// merge, whatever the edits did. On such a filesystem the staged copy cannot hold such a
+    /// pair; the tree it was staged from is checked for one when it is staged
+    /// (`repo::materialize`).
     pub(crate) fn refuse_collisions(&self) -> Result<(), ApiError> {
         for path in self.items.values() {
             WorkspacePath::try_from(path.clone()).map_err(|error| {
                 ApiError::new(ErrorCode::InvalidInput, format!("{path}: {error}"))
             })?;
         }
-        let mut keys = BTreeMap::new();
-        for path in files_under(&self.root, "")? {
-            if let Some(other) = keys.insert(collision_key(&path), path.clone()) {
-                return Err(ApiError::new(
-                    ErrorCode::Conflict,
-                    format!("{path} collides with {other}"),
-                ));
-            }
-        }
-        Ok(())
+        let files = files_under(&self.root, "")?;
+        refuse_shared_keys(files.iter().map(String::as_str))
     }
 
     /// Refuse `path` when a folder it names is in the staged tree already, spelled another way

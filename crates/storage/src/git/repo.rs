@@ -375,11 +375,24 @@ pub(crate) fn signature(who: &Provenance) -> Result<Signature<'static>, ApiError
 }
 
 /// Write the files of `tree` under `root`.
+///
+/// A tree that holds two paths sharing a collision key (two spellings of one file or folder,
+/// `item::refuse_shared_keys`) is refused as `Conflict` before anything is written: on a
+/// case-insensitive filesystem the staged copy would merge the two, so a commit made from it
+/// would silently respell or drop a file. Git, and a case-sensitive filesystem, can hold such a
+/// tree (a commit of an earlier build, an archive); it is refused the same way on every system.
 pub(crate) fn materialize(
     repository: &Repository,
     tree: &Tree<'_>,
     root: &Path,
 ) -> Result<(), ApiError> {
+    let paths = files(repository, tree)?;
+    super::item::refuse_shared_keys(paths.iter().map(|(path, _)| path.as_str()))?;
+    write_files(repository, tree, root)
+}
+
+/// Write the files of `tree` under `root`, as `materialize` does once the tree is checked.
+fn write_files(repository: &Repository, tree: &Tree<'_>, root: &Path) -> Result<(), ApiError> {
     for entry in tree {
         let name = entry
             .name()
@@ -393,7 +406,7 @@ pub(crate) fn materialize(
                 let child = repository
                     .find_tree(entry.id())
                     .map_err(|error| git(&error))?;
-                materialize(repository, &child, &target)?;
+                write_files(repository, &child, &target)?;
             }
             Some(ObjectType::Blob) => {
                 let blob = repository
