@@ -47,7 +47,7 @@ use okf_jawn_contract::identity::{
 };
 use okf_jawn_contract::import::{Job, JobState};
 use okf_jawn_contract::purge::{Purge, PurgeReport, PurgeState};
-use okf_jawn_contract::workspace::RestoreReport;
+use okf_jawn_contract::workspace::{BackupReport, RestoreReport};
 use okf_jawn_core::conversion::Converter;
 use okf_jawn_core::events::{EventLog, EventScope, NewEvent};
 use okf_jawn_core::jobs::{
@@ -113,6 +113,8 @@ pub(crate) struct Done {
     pub(crate) artifact: Option<ArtifactId>,
     /// What a restore did.
     pub(crate) restore: Option<RestoreReport>,
+    /// What a workspace backup left out of its archive.
+    pub(crate) backup: Option<BackupReport>,
     /// Findings of the checks the commits ran.
     pub(crate) warnings: Vec<Warning>,
     /// The job was found cancelled: no completion is written.
@@ -181,6 +183,7 @@ impl IngestHandler {
                 item_ids: done.item_ids,
                 artifact: done.artifact,
                 restore: done.restore,
+                backup: done.backup,
                 outputs: done.outputs,
                 warnings: done.warnings,
             })
@@ -236,11 +239,7 @@ impl IngestHandler {
                 self.rebuild(attempt, scope).await
             }
             (JobSpec::BackupWorkspace, JobScope::Workspace(scope)) => {
-                let written = ports
-                    .backups
-                    .write_workspace_archive(scope, claimed.mutation_id);
-                self.backup(attempt, ArtifactKind::WorkspaceBackup, written)
-                    .await
+                self.workspace_backup(attempt, scope).await
             }
             (
                 JobSpec::RestoreWorkspace {
@@ -254,11 +253,7 @@ impl IngestHandler {
                     .await
             }
             (JobSpec::BackupInstallation, JobScope::Tenant(tenant)) => {
-                let written = ports
-                    .backups
-                    .write_installation_archive(tenant, claimed.mutation_id);
-                self.backup(attempt, ArtifactKind::InstallationBackup, written)
-                    .await
+                self.installation_backup(attempt, tenant).await
             }
             (
                 JobSpec::PurgeWorkspace { .. } | JobSpec::PurgeItem { .. },
@@ -290,17 +285,63 @@ impl IngestHandler {
         }
     }
 
-    /// Write an archive under the heartbeat and record it as the job's artifact; a job found
-    /// cancelled while it was written records none.
+    /// Back up the job's workspace: its archive, recorded as the artifact, and what the archive
+    /// left out, carried to the job (`Job::backup`).
+    async fn workspace_backup(
+        &self,
+        attempt: &Attempt<'_>,
+        scope: &StorageScope,
+    ) -> Result<Done, ApiError> {
+        let written = async {
+            let written = self
+                .ports
+                .backups
+                .write_workspace_archive(scope, attempt.claimed.mutation_id)
+                .await?;
+            let report = BackupReport {
+                rows_left_out: written.rows_left_out,
+            };
+            Ok((written.object, Some(report)))
+        };
+        self.backup(attempt, ArtifactKind::WorkspaceBackup, written)
+            .await
+    }
+
+    /// Back up the installation of the job's tenant, recorded as the artifact.
+    async fn installation_backup(
+        &self,
+        attempt: &Attempt<'_>,
+        tenant: &TenantId,
+    ) -> Result<Done, ApiError> {
+        let written = async {
+            let object = self
+                .ports
+                .backups
+                .write_installation_archive(tenant, attempt.claimed.mutation_id)
+                .await?;
+            Ok((object, None))
+        };
+        self.backup(attempt, ArtifactKind::InstallationBackup, written)
+            .await
+    }
+
+    /// Write an archive under the heartbeat and record it as the job's artifact, with what a
+    /// workspace archive left out; a job found cancelled while it was written records none.
     async fn backup(
         &self,
         attempt: &Attempt<'_>,
         kind: ArtifactKind,
-        write: impl Future<Output = Result<ObjectInfo, ApiError>>,
+        write: impl Future<Output = Result<(ObjectInfo, Option<BackupReport>), ApiError>>,
     ) -> Result<Done, ApiError> {
         match renewing(&self.ports, attempt, write).await? {
-            Renewed::Done(object) => self.artifact(attempt.claimed, kind, object).await,
-            Renewed::Cancelled(_object) => Ok(Done::stopped()),
+            Renewed::Done((object, report)) => {
+                let done = self.artifact(attempt.claimed, kind, object).await?;
+                Ok(Done {
+                    backup: report,
+                    ..done
+                })
+            }
+            Renewed::Cancelled(_written) => Ok(Done::stopped()),
         }
     }
 

@@ -34,7 +34,9 @@ use okf_jawn_contract::workspace::RestoreReport;
 use okf_jawn_core::credentials::secret_hash;
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::search::SearchIndex as _;
-use okf_jawn_core::storage::{Backups, ObjectInfo, ObjectRead, StorageScope, VersionStore as _};
+use okf_jawn_core::storage::{
+    Backups, ObjectInfo, ObjectRead, StorageScope, VersionStore as _, WrittenArchive,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use tokio::runtime::Handle;
 
@@ -210,9 +212,12 @@ impl StorageBackups {
         &self,
         scope: &StorageScope,
         mutation: MutationId,
-    ) -> Result<ObjectInfo, ApiError> {
+    ) -> Result<WrittenArchive, ApiError> {
         if let Some(object) = self.recorded(mutation).await? {
-            return Ok(object);
+            let (blobs, tenant) = (self.storage.blobs.clone(), scope.tenant_id.clone());
+            return tokio::task::spawn_blocking(move || written_archive(&blobs, &tenant, object))
+                .await
+                .map_err(|error| internal(format!("a backup task stopped: {error}")))?;
         }
         crate::purge::guard::refuse_scope(&self.storage.records, scope).await?;
         #[cfg(test)]
@@ -233,7 +238,7 @@ impl StorageBackups {
                 if let Some(object) =
                     runtime.block_on(recorded_archive(&storage.records, mutation))?
                 {
-                    return Ok(object);
+                    return written_archive(&storage.blobs, &scope.tenant_id, object);
                 }
                 let staging = storage.repositories.stage(scope, mutation)?;
                 let zip = staging.path.join("archive.zip");
@@ -243,7 +248,7 @@ impl StorageBackups {
                         .records
                         .call(move |connection| snapshot::copy_live(connection, &directory)),
                 )?;
-                workspace_zip(
+                let rows_left_out = workspace_zip(
                     &storage.repositories,
                     &storage.blobs,
                     scope,
@@ -274,7 +279,10 @@ impl StorageBackups {
                 pinned.end()?;
                 #[cfg(test)]
                 runtime.block_on(crate::pause::point(&recorded_point(&storage, mutation)))?;
-                recorded
+                recorded.map(|object| WrittenArchive {
+                    object,
+                    rows_left_out,
+                })
             })
         })
         .await
@@ -424,7 +432,7 @@ impl Backups for StorageBackups {
         &'a self,
         scope: &'a StorageScope,
         mutation_id: MutationId,
-    ) -> PortFuture<'a, ObjectInfo> {
+    ) -> PortFuture<'a, WrittenArchive> {
         Box::pin(self.workspace_archive(scope, mutation_id))
     }
 
@@ -643,7 +651,8 @@ fn write_set(
     Ok(written)
 }
 
-/// Filter a full copy to the workspace and write its archive to `target`. Blocking.
+/// Filter a full copy to the workspace and write its archive to `target`; answers the rows it
+/// left out. Blocking.
 fn workspace_zip(
     repositories: &Repositories,
     blobs: &LocalBlobs,
@@ -651,7 +660,7 @@ fn workspace_zip(
     full: &snapshot::FullCopy,
     directory: &Path,
     target: &Path,
-) -> Result<(), ApiError> {
+) -> Result<u32, ApiError> {
     let (tenant, workspace) = crate::db::scope_key(scope);
     let excluded = snapshot::archive_objects(full, &tenant)?;
     let (records, rows_left_out) =
@@ -665,7 +674,23 @@ fn workspace_zip(
         &scope.tenant_id,
         &excluded,
     )?;
-    Ok(())
+    Ok(rows_left_out)
+}
+
+/// The workspace archive `object` of `tenant` with the count of rows its manifest says it left
+/// out: the answer to a repeat of the mutation that wrote it. Blocking: it reads the archive,
+/// which `archive::Opened::open` checks whole.
+fn written_archive(
+    blobs: &LocalBlobs,
+    tenant: &TenantId,
+    object: ObjectInfo,
+) -> Result<WrittenArchive, ApiError> {
+    let path = blobs.local_path(tenant, &object.digest)?;
+    let rows_left_out = archive::Opened::open(&path)?.workspace()?.rows_left_out;
+    Ok(WrittenArchive {
+        object,
+        rows_left_out,
+    })
 }
 
 /// Restore the installation records of a replacement restore.

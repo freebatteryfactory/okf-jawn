@@ -776,6 +776,7 @@ fn complete(transaction: &Transaction<'_>, completion: &JobCompletion) -> Result
     job.revision.clone_from(&completion.revision);
     job.item_ids.clone_from(&completion.item_ids);
     job.restore.clone_from(&completion.restore);
+    job.backup.clone_from(&completion.backup);
     job.warnings.clone_from(&completion.warnings);
     job.error = None;
     write_job(transaction, &job, params![], "lease_expires_ms = NULL")?;

@@ -78,6 +78,7 @@ fn completion(lease: okf_jawn_core::jobs::JobLease) -> JobCompletion {
         item_ids: Vec::new(),
         artifact: None,
         restore: None,
+        backup: None,
         outputs: Vec::new(),
         warnings: Vec::new(),
     }

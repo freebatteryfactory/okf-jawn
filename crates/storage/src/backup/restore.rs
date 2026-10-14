@@ -80,6 +80,8 @@ struct Target {
     followed: BTreeMap<Digest, BTreeSet<Digest>>,
     /// For a replacement restore, the SHA-256 of the archive file, recorded with the rows.
     replaced_from: Option<Digest>,
+    /// Rows the archive's own backup left out (its manifest's `rows_left_out`); not restored.
+    rows_left_out: u32,
     /// This build's schema and table order, which the rows are copied with.
     live: Live,
 }
@@ -530,6 +532,7 @@ fn put_back(
             workspace: scope.workspace_id.0.to_string(),
             original: manifest.workspace_id.0.to_string(),
             objects: manifest.objects.clone(),
+            rows_left_out: manifest.rows_left_out,
             history: named.history,
             followed: named.followed,
             replaced_from: match mode {
@@ -1182,7 +1185,7 @@ fn write_tables(
         items,
         drafts_restored: count(restored)?,
         drafts_unassigned: count(total.saturating_sub(restored))?,
-        rows_left_out: None,
+        rows_left_out: Some(target.rows_left_out),
     };
     if let Some(mutation) = mutation {
         let text = serde_json::to_string(&report).map_err(|error| crate::db::json(&error))?;
@@ -1451,6 +1454,7 @@ mod tests {
             history: BTreeSet::new(),
             followed: BTreeMap::new(),
             replaced_from: None,
+            rows_left_out: 0,
             live: Live {
                 schema: schema_of(&live)?,
                 order: parents_first(&live, WORKSPACE_TABLES)?,

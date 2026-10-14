@@ -376,7 +376,8 @@ async fn an_import_of_another_workspace_inside_the_object_step_keeps_its_objects
     let archive = storage
         .backups()
         .write_workspace_archive(&source, mutation(72))
-        .await?;
+        .await?
+        .object;
     let bytes = std::fs::read(
         storage
             .blobs
@@ -457,6 +458,7 @@ async fn a_job_output_completed_inside_the_objects_step_keeps_its_object() -> Re
             item_ids: Vec::new(),
             artifact: None,
             restore: None,
+            backup: None,
             outputs: vec![stored],
             warnings: Vec::new(),
         })
@@ -686,7 +688,8 @@ async fn a_failed_import_leaves_pending_puts_a_purge_deletes() -> Result<(), Api
     let archive = storage
         .backups()
         .write_workspace_archive(&source, mutation(72))
-        .await?;
+        .await?
+        .object;
     let bytes = std::fs::read(
         storage
             .blobs
@@ -776,7 +779,8 @@ async fn archive_into(
     let archive = storage
         .backups()
         .write_workspace_archive(source, mutation(72))
-        .await?;
+        .await?
+        .object;
     let bytes = std::fs::read(
         storage
             .blobs

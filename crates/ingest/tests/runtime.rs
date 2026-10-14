@@ -80,6 +80,7 @@ mod job_runtime {
                                 item_ids: Vec::new(),
                                 artifact: None,
                                 restore: None,
+                                backup: None,
                                 outputs: Vec::new(),
                                 warnings: Vec::new(),
                             })

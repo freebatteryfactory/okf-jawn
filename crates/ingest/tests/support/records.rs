@@ -433,6 +433,7 @@ impl RecordStore for FakeRecords {
             entry.job.revision.clone_from(&completion.revision);
             entry.job.item_ids.clone_from(&completion.item_ids);
             entry.job.restore.clone_from(&completion.restore);
+            entry.job.backup.clone_from(&completion.backup);
             entry.lease = None;
             entry.completions.push(completion);
             entry.job.clone()

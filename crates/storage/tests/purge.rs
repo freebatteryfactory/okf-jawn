@@ -944,7 +944,8 @@ async fn purge_reaches_a_workspace_archive_no_artifact_records() -> TestResult {
         .storage
         .backups()
         .write_workspace_archive(&fixture.target, uuid!(70)?)
-        .await?;
+        .await?
+        .object;
     assert!(held(&fixture.storage, &fixture.survivor, &archive.digest).await?);
     let report = purge_target(&fixture).await?;
     assert!(
@@ -1030,13 +1031,15 @@ async fn purge_rewrites_another_workspaces_archive_that_cites_it() -> TestResult
     let backups = fixture.storage.backups();
     let before = backups
         .write_workspace_archive(&fixture.survivor, uuid!(71)?)
-        .await?;
+        .await?
+        .object;
     let report = purge_target(&fixture).await?;
     assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
     assert_eq!(report.backups_rewritten, 1, "the survivor's archive");
     let after = backups
         .write_workspace_archive(&fixture.survivor, uuid!(71)?)
-        .await?;
+        .await?
+        .object;
     assert_ne!(after.digest, before.digest, "the record names the rewrite");
     assert!(!held(&fixture.storage, &fixture.survivor, &before.digest).await?);
     let records = directory.path().join("rewritten.sqlite");
@@ -1438,6 +1441,7 @@ async fn refuse_records(
                 item_ids: Vec::new(),
                 artifact: None,
                 restore: None,
+                backup: None,
                 outputs: vec![object.digest.clone()],
                 warnings: Vec::new(),
             })
@@ -1923,6 +1927,7 @@ async fn every_row_kind(fixture: &Fixture) -> Fallible<Vec<Digest>> {
                     item_ids: Vec::new(),
                     artifact: None,
                     restore: None,
+                    backup: None,
                     outputs: vec![output.clone()],
                     warnings: Vec::new(),
                 })
@@ -3008,6 +3013,7 @@ async fn every_record_that_references_a_put_object_lands_its_pending_put() -> Te
             item_ids: Vec::new(),
             artifact: None,
             restore: None,
+            backup: None,
             outputs: vec![output.digest],
             warnings: Vec::new(),
         })
@@ -3278,6 +3284,7 @@ async fn a_repeated_job_completion_lands_no_pending_put() -> TestResult {
         item_ids: Vec::new(),
         artifact: None,
         restore: None,
+        backup: None,
         outputs,
         warnings: Vec::new(),
     };

@@ -562,6 +562,7 @@ async fn seed_job(seeded: &Seeded) -> TestResult {
             item_ids: Vec::new(),
             artifact: Some(artifact.id),
             restore: None,
+            backup: None,
             outputs: vec![export.digest],
             warnings: Vec::new(),
         })
@@ -719,7 +720,8 @@ async fn take_archives(seeded: &Seeded, target: &Path) -> Fallible<(PathBuf, Pat
     std::fs::create_dir_all(target)?;
     let archive = backups
         .write_workspace_archive(&seeded.workspace, uuid!(70)?)
-        .await?;
+        .await?
+        .object;
     let stored = storage
         .data()
         .objects_path()

@@ -34,7 +34,7 @@ use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
     Backups, BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges,
     Committed, DiffQuery, FolderListing, LocalSource, LogQuery, ObjectInfo, ObjectRead, Page,
-    Promotion, Purger, SourceCard, StorageScope, TreeEdit, VersionStore,
+    Promotion, Purger, SourceCard, StorageScope, TreeEdit, VersionStore, WrittenArchive,
     replay_warnings_unavailable,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
@@ -224,6 +224,9 @@ pub struct FakePurger {
     /// Awaited as either purge starts (a long purge).
     pub hold: Mutex<Option<Hold>>,
 }
+
+/// The rows `FakeBackups` says each workspace archive it writes left out.
+pub const ARCHIVE_ROWS_LEFT_OUT: u32 = 2;
 
 impl Drop for DropCount {
     fn drop(&mut self) {
@@ -1009,13 +1012,16 @@ impl Backups for FakeBackups {
         &'a self,
         _scope: &'a StorageScope,
         _mutation_id: MutationId,
-    ) -> PortFuture<'a, ObjectInfo> {
+    ) -> PortFuture<'a, WrittenArchive> {
         let _previous = self.writes.fetch_add(1, Ordering::SeqCst);
         let archive = self.archive.clone();
         let hold = hold_of(&self.write_hold);
         Box::pin(async move {
             held(hold).await?;
-            Ok(archive)
+            Ok(WrittenArchive {
+                object: archive,
+                rows_left_out: ARCHIVE_ROWS_LEFT_OUT,
+            })
         })
     }
     fn write_installation_archive<'a>(

@@ -30,7 +30,7 @@ mod job_handler {
     };
     use okf_jawn_contract::import::JobState;
     use okf_jawn_contract::purge::{Purge, PurgeReport, PurgeState};
-    use okf_jawn_contract::workspace::ArtifactKind;
+    use okf_jawn_contract::workspace::{ArtifactKind, BackupReport};
     use okf_jawn_core::conversion::{ConversionRecord, ConverterLimits, PixelSize, RetainedAsset};
     use okf_jawn_core::events::EventScope;
     use okf_jawn_core::jobs::{JobHandler, JobScope, JobSpec, NewJob, RecordStore};
@@ -48,8 +48,8 @@ mod job_handler {
 
     use crate::check::{TestResult, err_of, some};
     use crate::ports::{
-        AcceptAll, FakeBackups, FakeBlobs, FakeConverter, FakePurger, FakeSearch, FakeUploads,
-        FakeVersions, Hold, RefuseAll,
+        ARCHIVE_ROWS_LEFT_OUT, AcceptAll, FakeBackups, FakeBlobs, FakeConverter, FakePurger,
+        FakeSearch, FakeUploads, FakeVersions, Hold, RefuseAll,
     };
     use crate::records::{Appended, FakeEvents, FakeRecords, job_id};
 
@@ -811,6 +811,13 @@ mod job_handler {
             completion.outputs,
             std::slice::from_ref(&artifact.object.digest)
         );
+        // The job carries what the archive left out.
+        assert_eq!(
+            completion.backup,
+            Some(BackupReport {
+                rows_left_out: ARCHIVE_ROWS_LEFT_OUT
+            })
+        );
 
         // The attempt is repeated (its completion was lost): the same artifact, no second one.
         world
@@ -836,6 +843,12 @@ mod job_handler {
             JobSpec::BackupInstallation,
         )?;
         assert!(run(&world, tenant_job).await?);
+        let tenant_completion = world.records.entry(tenant_job)?;
+        assert_eq!(
+            some(tenant_completion.completions.first(), "the completion")?.backup,
+            None,
+            "an installation archive has no rows of a workspace to leave out"
+        );
         assert!(
             world
                 .records

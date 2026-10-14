@@ -499,10 +499,12 @@ async fn backup_a_workspace_archive_holds_its_history_drafts_and_objects_only() 
     let backups = fixture.storage.backups();
     let object = backups
         .write_workspace_archive(&fixture.workspace, uuid!(40)?)
-        .await?;
+        .await?
+        .object;
     let repeated = backups
         .write_workspace_archive(&fixture.workspace, uuid!(40)?)
-        .await?;
+        .await?
+        .object;
     assert_eq!(repeated, object, "a repeated mutation writes nothing new");
     let path = fixture
         .storage
@@ -670,7 +672,8 @@ async fn backup_an_installation_archive_holds_no_workspace_content() -> TestResu
     );
     let workspace_archive = backups
         .write_workspace_archive(&fixture.workspace, uuid!(52)?)
-        .await?;
+        .await?
+        .object;
     let error = err_of(
         backups
             .open_installation_archive(&tenant, &workspace_archive.digest, 0, 1)
@@ -824,6 +827,7 @@ async fn backup_a_workspace_archive_holds_every_object_its_records_name() -> Tes
             item_ids: Vec::new(),
             artifact: None,
             restore: None,
+            backup: None,
             outputs: vec![output.clone(), history.clone()],
             warnings: Vec::new(),
         })
@@ -831,7 +835,8 @@ async fn backup_a_workspace_archive_holds_every_object_its_records_name() -> Tes
     let archive = storage
         .backups()
         .write_workspace_archive(workspace, uuid!(40)?)
-        .await?;
+        .await?
+        .object;
     let names = entries(
         &storage
             .data()
@@ -922,7 +927,8 @@ async fn backup_an_import_refuses_an_archive_of_a_live_or_purged_workspace() -> 
     let backups = storage.backups();
     let archive = backups
         .write_workspace_archive(&fixture.workspace, uuid!(40)?)
-        .await?;
+        .await?
+        .object;
     let downloaded = std::fs::read(
         storage
             .data()
@@ -1019,7 +1025,8 @@ async fn backup_an_import_fills_a_blank_workspace_and_keeps_unknown_editors_draf
     let backups = storage.backups();
     let archive = backups
         .write_workspace_archive(&fixture.workspace, uuid!(40)?)
-        .await?;
+        .await?
+        .object;
     let (target, _) = create(storage, "elsewhere", 80, "Copy").await?;
     let bytes = std::fs::read(
         storage
@@ -1123,7 +1130,8 @@ async fn backup_an_import_stopped_before_its_record_leaves_nothing_and_completes
     let backups = storage.backups();
     let archive = backups
         .write_workspace_archive(&fixture.workspace, uuid!(40)?)
-        .await?;
+        .await?
+        .object;
     let (target, _) = create(storage, "elsewhere", 80, "Copy").await?;
     let bytes = std::fs::read(
         storage
@@ -1272,7 +1280,8 @@ async fn backup_an_import_rewrites_only_structured_workspace_identity_fields() -
     let archive = storage
         .backups()
         .write_workspace_archive(&fixture.workspace, uuid!(40)?)
-        .await?;
+        .await?
+        .object;
     let bytes = std::fs::read(
         storage
             .data()
@@ -1591,7 +1600,8 @@ async fn backup_a_workspace_archive_keeps_no_workspace_backup_record() -> TestRe
     let archive = storage
         .backups()
         .write_workspace_archive(&fixture.workspace, uuid!(40)?)
-        .await?;
+        .await?
+        .object;
     let path = storage
         .data()
         .objects_path()
@@ -2176,7 +2186,8 @@ async fn archive_into(
     let archive = storage
         .backups()
         .write_workspace_archive(source, uuid!(40)?)
-        .await?;
+        .await?
+        .object;
     let bytes = std::fs::read(
         storage
             .data()
@@ -3275,7 +3286,8 @@ async fn backup_a_restored_backup_job_advertises_no_download_it_lost() -> TestRe
         let archive = storage
             .backups()
             .write_workspace_archive(&workspace, uuid!(31)?)
-            .await?;
+            .await?
+            .object;
         let artifact = records
             .record_artifact(
                 &scope,
@@ -3295,6 +3307,7 @@ async fn backup_a_restored_backup_job_advertises_no_download_it_lost() -> TestRe
                 item_ids: Vec::new(),
                 artifact: Some(artifact.id),
                 restore: None,
+                backup: None,
                 outputs: Vec::new(),
                 warnings: Vec::new(),
             })
@@ -3437,7 +3450,8 @@ async fn archive_bytes(storage: &Storage, source: &StorageScope) -> Fallible<Vec
     let archive = storage
         .backups()
         .write_workspace_archive(source, uuid!(40)?)
-        .await?;
+        .await?
+        .object;
     Ok(std::fs::read(object_file(
         storage.data().root(),
         &archive.digest,
@@ -3945,6 +3959,7 @@ async fn rr4_missing_objects_of_every_named_kind_fail_the_archive() -> TestResul
             item_ids: Vec::new(),
             artifact: None,
             restore: None,
+            backup: None,
             outputs: vec![output.clone()],
             warnings: Vec::new(),
         })
@@ -4023,7 +4038,7 @@ async fn rr4_a_large_conversion_record_keeps_what_it_names() -> TestResult {
             return Err(format!("the archive was refused: {error}").into());
         }
         Ok(archive) => {
-            let names = entries(&object_file(directory.path(), &archive.digest)?)?;
+            let names = entries(&object_file(directory.path(), &archive.object.digest)?)?;
             assert!(
                 names.contains(&format!("objects/{}", record.as_str())),
                 "the record itself is held"
@@ -4592,6 +4607,7 @@ async fn rr4_job_round_trip(control: bool, output: bool) -> TestResult {
                     item_ids: Vec::new(),
                     artifact: None,
                     restore: None,
+                    backup: None,
                     outputs,
                     warnings: Vec::new(),
                 })
@@ -4654,7 +4670,8 @@ async fn rr4_rt_a_workspace_the_app_backed_up_once_restores_by_replacement() -> 
         let archive = storage
             .backups()
             .write_workspace_archive(&workspace, claimed.mutation_id)
-            .await?;
+            .await?
+            .object;
         let artifact = records
             .record_artifact(
                 &scope,
@@ -4674,6 +4691,7 @@ async fn rr4_rt_a_workspace_the_app_backed_up_once_restores_by_replacement() -> 
                 item_ids: Vec::new(),
                 artifact: Some(artifact.id),
                 restore: None,
+                backup: None,
                 outputs: vec![archive.digest],
                 warnings: Vec::new(),
             })
@@ -5799,7 +5817,8 @@ async fn backup_a_small_upload_naming_another_workspaces_object_keeps_and_copies
     let archive = storage
         .backups()
         .write_workspace_archive(&uploader, uuid!(40)?)
-        .await?;
+        .await?
+        .object;
     let names = entries(&object_file(directory.path(), &archive.digest)?)?;
     assert!(
         !names.contains(&format!("objects/{}", hidden.as_str())),
@@ -5952,6 +5971,7 @@ async fn backup_a_conversion_before_its_completion_restores_with_its_exports_and
             item_ids: Vec::new(),
             artifact: None,
             restore: None,
+            backup: None,
             outputs: vec![export.clone(), asset.clone(), record.clone()],
             warnings: Vec::new(),
         })
@@ -6755,7 +6775,8 @@ async fn rr7_copied_and_kept(
     let archive = storage
         .backups()
         .write_workspace_archive(a, uuid!(40)?)
-        .await?;
+        .await?
+        .object;
     let copied = entries(&object_file(directory, &archive.digest)?)?
         .contains(&format!("objects/{}", hidden.as_str()));
     rr5_purge(storage, b).await?;
@@ -7165,6 +7186,7 @@ async fn rr8_converted(
             item_ids: vec![item],
             artifact: None,
             restore: None,
+            backup: None,
             outputs: vec![
                 export.clone(),
                 render.clone(),
@@ -7280,7 +7302,8 @@ async fn backup_every_object_a_rich_workspace_uses_is_structural_and_survives_an
     let archive = storage
         .backups()
         .write_workspace_archive(&rich, uuid!(40)?)
-        .await?;
+        .await?
+        .object;
     let archived = rr9_archived(directory.path(), "elsewhere", &archive.digest)?;
     let mut stored = rr8_stored(directory.path(), "elsewhere")?;
     stored.remove(archive.digest.as_str());
@@ -7437,7 +7460,8 @@ async fn rr7_an_import_whose_card_names_an_object_it_does_not_hold_is_refused() 
     let written = storage
         .backups()
         .write_workspace_archive(&source, uuid!(40)?)
-        .await?;
+        .await?
+        .object;
     let bytes = std::fs::read(
         directory
             .path()
@@ -7480,7 +7504,8 @@ async fn rr7_an_import_whose_card_names_an_object_it_does_not_hold_is_refused() 
             let archive = storage
                 .backups()
                 .write_workspace_archive(&target, uuid!(85)?)
-                .await?;
+                .await?
+                .object;
             let copied = entries(&object_file(directory.path(), &archive.digest)?)?
                 .contains(&format!("objects/{}", hidden.as_str()));
             rr5_purge(&storage, &victim).await?;
@@ -7625,7 +7650,8 @@ async fn backup_a_card_whose_original_is_a_backup_fails_the_backup_and_writes_no
     let backup = storage
         .backups()
         .write_workspace_archive(&workspace, uuid!(40)?)
-        .await?;
+        .await?
+        .object;
     commit(
         &storage,
         &workspace,
@@ -8188,7 +8214,8 @@ async fn rr9_a_card_of_a_later_contract_is_read_by_purge_backup_and_restore() ->
     let archive = storage
         .backups()
         .write_workspace_archive(&survivor, uuid!(40)?)
-        .await?;
+        .await?
+        .object;
     let archived = rr8_archived(directory.path(), &archive.digest)?;
     let expected: std::collections::BTreeSet<String> = four
         .iter()
@@ -8507,7 +8534,8 @@ async fn rr9_workspace_holding_its_own_backup(
     let archive = storage
         .backups()
         .write_workspace_archive(&workspace, claimed.mutation_id)
-        .await?;
+        .await?
+        .object;
     let artifact = records
         .record_artifact(
             &scope,
@@ -8527,6 +8555,7 @@ async fn rr9_workspace_holding_its_own_backup(
             item_ids: Vec::new(),
             artifact: Some(artifact.id),
             restore: None,
+            backup: None,
             outputs: vec![archive.digest.clone()],
             warnings: Vec::new(),
         })
@@ -8812,6 +8841,61 @@ async fn rr10_a_pack_lacking_the_sources_tree_is_refused_naming_it() -> TestResu
     rr10_a_pack_lacking_a_tree_is_refused(".okf/sources", "the folder .okf/sources (").await
 }
 
+/// Ruling 14: a workspace archive answers the rows it left out, the count its manifest holds,
+/// on its first write and on a repeat of its mutation (read back from the stored archive), and
+/// a restore of it reports the same count, also when the restore is repeated.
+#[tokio::test]
+async fn an_archive_answers_and_its_restore_reports_the_rows_it_left_out() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let (workspace, _first) =
+        rr9_workspace_holding_its_own_backup(directory.path(), output.path()).await?;
+    let storage = Storage::open(directory.path())?;
+    let backups = storage.backups();
+    let written = backups
+        .write_workspace_archive(&workspace, uuid!(95)?)
+        .await?;
+    assert_eq!(
+        written.rows_left_out, 3,
+        "the artifact, the output and the upload"
+    );
+    let bytes = std::fs::read(object_file(directory.path(), &written.object.digest)?)?;
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&entry_bytes_of(&bytes, "manifest.json")?)?;
+    assert_eq!(
+        manifest
+            .get("rows_left_out")
+            .and_then(serde_json::Value::as_u64),
+        Some(3)
+    );
+    let repeated = backups
+        .write_workspace_archive(&workspace, uuid!(95)?)
+        .await?;
+    assert_eq!(
+        repeated, written,
+        "a repeat answers the archive and its count"
+    );
+    let (target, _) = create(&storage, "elsewhere", 96, "Copy").await?;
+    let uploaded = storage
+        .blobs()
+        .put(
+            &target,
+            Box::pin(std::io::Cursor::new(bytes)),
+            1 << 30,
+            None,
+        )
+        .await?;
+    let report = backups
+        .restore_import(&target, uploaded.digest.clone(), uuid!(97)?, Vec::new())
+        .await?;
+    assert_eq!(report.rows_left_out, Some(3));
+    let again = backups
+        .restore_import(&target, uploaded.digest, uuid!(97)?, Vec::new())
+        .await?;
+    assert_eq!(again, report);
+    Ok(())
+}
+
 /// N-21: `rows_left_out` is the workspace's own count. A second workspace of the tenant holding
 /// its own backup artifact and job output adds nothing to the first's count (3), and its own
 /// archive counts its two rows.
@@ -8838,7 +8922,8 @@ async fn rr10_rows_left_out_counts_only_the_workspaces_own_rows() -> TestResult 
         let archive = storage
             .backups()
             .write_workspace_archive(&second, claimed.mutation_id)
-            .await?;
+            .await?
+            .object;
         let artifact = records
             .record_artifact(
                 &scope,
@@ -8858,6 +8943,7 @@ async fn rr10_rows_left_out_counts_only_the_workspaces_own_rows() -> TestResult 
                 item_ids: Vec::new(),
                 artifact: Some(artifact.id),
                 restore: None,
+                backup: None,
                 outputs: vec![archive.digest.clone()],
                 warnings: Vec::new(),
             })

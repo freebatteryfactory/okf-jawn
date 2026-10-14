@@ -23,7 +23,7 @@ use okf_jawn_contract::{
     import::{Job, JobKind, ListJobsResponse},
     purge::{Purge, PurgeTarget},
     review::Review,
-    workspace::{ArtifactScope, DownloadArtifact, RestoreReport},
+    workspace::{ArtifactScope, BackupReport, DownloadArtifact, RestoreReport},
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -189,6 +189,9 @@ pub struct JobCompletion {
     pub artifact: Option<ArtifactId>,
     /// What a restore did; present exactly for a `RestoreWorkspace` job.
     pub restore: Option<RestoreReport>,
+    /// What a workspace backup left out of its archive; present exactly for a
+    /// `BackupWorkspace` job (`Backups::write_workspace_archive`).
+    pub backup: Option<BackupReport>,
     /// Retained output objects, kept as garbage-collection roots.
     pub outputs: Vec<Digest>,
     /// Non-fatal issues recorded during the work.

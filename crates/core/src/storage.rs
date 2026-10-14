@@ -858,18 +858,31 @@ pub trait Purger: Send + Sync {
     ) -> PortFuture<'a, PurgeReport>;
 }
 
+/// A workspace archive written into the blob store, and what it left out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrittenArchive {
+    /// Identity and size of the archive's bytes.
+    pub object: ObjectInfo,
+    /// Rows of the workspace's records left out of the archive because they named a managed
+    /// backup or a written history; the archive's manifest holds the same count, and a restore
+    /// of the archive reports it (`RestoreReport::rows_left_out`).
+    pub rows_left_out: u32,
+}
+
 /// Independently recoverable backups (Stage 1b design section 8); storage implements them.
 ///
 /// The offline backup, the pre-migration backup and the replacement restore are storage
 /// functions the server command and startup call, not ports.
 pub trait Backups: Send + Sync {
-    /// Write a workspace archive into the blob store; the backup handler records it as a
-    /// `WorkspaceBackup` artifact. Idempotent on the mutation id.
+    /// Write a workspace archive into the blob store and answer it with the rows it left out;
+    /// the backup handler records it as a `WorkspaceBackup` artifact and its job carries the
+    /// count (`Job::backup`). Idempotent on the mutation id: a repeat answers the archive
+    /// already written, with the count its manifest holds.
     fn write_workspace_archive<'a>(
         &'a self,
         scope: &'a StorageScope,
         mutation_id: MutationId,
-    ) -> PortFuture<'a, ObjectInfo>;
+    ) -> PortFuture<'a, WrittenArchive>;
     /// Write an installation archive (identities, grants, connector records without secrets,
     /// purge records, tenant events; no workspace content) into the tenant's store; the
     /// handler records it as an `InstallationBackup` artifact. Idempotent on the mutation id.

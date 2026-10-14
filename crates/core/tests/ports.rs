@@ -312,7 +312,7 @@ async fn purge_and_backup_calls(
     backups
         .restore_import(
             scope,
-            archive.digest,
+            archive.object.digest,
             mutation_id,
             vec!["user_1".to_owned()],
         )
@@ -429,6 +429,7 @@ async fn record_store_calls(
                 item_ids: Vec::new(),
                 artifact: None,
                 restore: None,
+                backup: None,
                 outputs: Vec::new(),
                 warnings: Vec::new(),
             })
@@ -814,6 +815,7 @@ async fn artifact_calls(
             item_ids: Vec::new(),
             artifact: Some(record.id),
             restore: None,
+            backup: None,
             outputs: vec![record.object.digest.clone()],
             warnings: Vec::new(),
         })
