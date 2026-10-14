@@ -357,7 +357,7 @@ describe('when the properties YAML is read', () => {
   it('saves nothing of a text with a directive behind a byte order mark', async () => {
     const api = service();
     const box = await openYaml();
-    replaceText(box, `﻿%YAML 1.1\n---\n${storedYaml}started: 2026-10-12\nratio: 1:30\n`);
+    replaceText(box, `\uFEFF%YAML 1.1\n---\n${storedYaml}started: 2026-10-12\nratio: 1:30\n`);
     await pass(YAML_PAUSE_MS + AUTOSAVE_DELAY_MS * 2);
     expect(api.callsTo(SAVE)).toEqual([]);
     expect(screen.getByRole('alert').textContent).toContain(
