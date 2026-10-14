@@ -439,7 +439,8 @@ async fn seed_history(directory: &Path) -> Fallible<Seeded> {
             },
             Arc::new(Accept),
         )
-        .await?;
+        .await?
+        .revision;
     let marked = "Content of the second workspace.";
     let elsewhere = vec![note(15, "notes/elsewhere.md", marked)?];
     commit(&storage, &second, 7, &second_head, "Seed", elsewhere).await?;

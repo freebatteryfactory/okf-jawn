@@ -904,7 +904,7 @@ impl VersionStore for FakeVersions {
         _proposal_id: okf_jawn_contract::identity::ProposalId,
         _changes: CandidateChanges,
         _check: Arc<dyn CandidateCheck>,
-    ) -> PortFuture<'a, Revision> {
+    ) -> PortFuture<'a, Committed> {
         unused("create_candidate")
     }
     fn promote_candidate<'a>(

@@ -601,14 +601,17 @@ pub trait VersionStore: Send + Sync {
     /// Idempotent on `changes.mutation_id`: when the reference already points at a commit
     /// carrying this mutation's trailer, that revision is returned and nothing is written.
     /// `check` runs on the staged candidate tree exactly as it does for `commit`, and the
-    /// path-collision and application-header refusals of `commit` apply.
+    /// path-collision and application-header refusals of `commit` apply. The candidate is
+    /// answered with the check's findings (`Committed::warnings`), which the store keeps with
+    /// it as it keeps a commit's, so a repeat answers the same findings, `replayed` set (or
+    /// the one warning `replay_warnings_unavailable` when it kept none for that candidate).
     fn create_candidate<'a>(
         &'a self,
         scope: &'a StorageScope,
         proposal_id: ProposalId,
         changes: CandidateChanges,
         check: Arc<dyn CandidateCheck>,
-    ) -> PortFuture<'a, Revision>;
+    ) -> PortFuture<'a, Committed>;
     /// Accept a candidate: commit the candidate's exact tree on top of `expected_head`.
     ///
     /// Fails with `Conflict`, writing nothing, when the head is not `expected_head`, when the

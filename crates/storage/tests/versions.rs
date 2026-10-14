@@ -1026,6 +1026,54 @@ async fn items_are_shown_listed_moved_with_their_links_and_archived() -> TestRes
     history_follows_the_move(&storage.versions(), &scope, &first, &moved).await
 }
 
+/// Ruling 19: a candidate is answered with its check's findings, kept with it, so a repeat of
+/// the mutation answers the same findings (`replayed`) and runs no check.
+#[tokio::test]
+async fn a_candidate_answers_its_checks_findings_and_a_repeat_the_same() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let finding = Warning {
+        code: "missing_description".to_owned(),
+        message: "proposed.md has no description".to_owned(),
+        location: Some("proposed.md".to_owned()),
+    };
+    let check = Arc::new(Warns {
+        warnings: vec![finding.clone()],
+        runs: AtomicUsize::new(0),
+    });
+    let changes = CandidateChanges {
+        mutation_id: uuid!(53)?,
+        base: initial,
+        author: person("agent"),
+        message: "Propose a note".to_owned(),
+        edits: vec![note(uuid!(12)?, "proposed.md", "Proposed.")?],
+    };
+    let first = versions
+        .create_candidate(&scope, uuid!(54)?, changes.clone(), check.clone())
+        .await?;
+    assert!(!first.replayed);
+    assert_eq!(
+        serde_json::to_value(&first.warnings)?,
+        serde_json::to_value([&finding])?
+    );
+    let again = versions
+        .create_candidate(&scope, uuid!(54)?, changes, check.clone())
+        .await?;
+    assert!(again.replayed);
+    assert_eq!(again.revision, first.revision);
+    assert_eq!(
+        serde_json::to_value(&again.warnings)?,
+        serde_json::to_value([&finding])?
+    );
+    assert_eq!(
+        check.runs.load(Ordering::SeqCst),
+        1,
+        "a repeat runs no check"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_candidate_is_retained_off_the_head_and_promoted_exactly() -> TestResult {
     let directory = tempfile::tempdir()?;
@@ -1046,7 +1094,8 @@ async fn a_candidate_is_retained_off_the_head_and_promoted_exactly() -> TestResu
             candidate_changes.clone(),
             Arc::new(Counting::default()),
         )
-        .await?;
+        .await?
+        .revision;
     assert_eq!(
         versions.head(&scope).await?,
         initial,
@@ -1059,7 +1108,8 @@ async fn a_candidate_is_retained_off_the_head_and_promoted_exactly() -> TestResu
             candidate_changes,
             Arc::new(Counting::default()),
         )
-        .await?;
+        .await?
+        .revision;
     assert_eq!(again, candidate);
     let promotion = Promotion {
         mutation_id: uuid!(52)?,
@@ -1319,7 +1369,8 @@ async fn history_is_a_bundle_of_the_accepted_line_that_stock_git_clones() -> Tes
             },
             Arc::new(Counting::default()),
         )
-        .await?;
+        .await?
+        .revision;
     let off_line = err_of(versions.write_history(&scope, &candidate, uuid!(60)?).await)?;
     assert_eq!(
         off_line.code,
@@ -1657,7 +1708,8 @@ async fn find_commit_with_no_base_never_reads_a_proposal_candidate() -> TestResu
             },
             Arc::new(Counting::default()),
         )
-        .await?;
+        .await?
+        .revision;
     assert_eq!(
         found(versions.find_commit(&scope, uuid!(51)?, None).await?),
         None,
@@ -1755,7 +1807,8 @@ async fn find_commit_with_no_base_never_follows_a_merge_into_a_candidate() -> Te
             },
             Arc::new(Counting::default()),
         )
-        .await?;
+        .await?
+        .revision;
     let head = versions
         .commit(
             &scope,
@@ -2692,7 +2745,8 @@ async fn a_promotion_whose_answer_cannot_be_kept_does_not_land() -> TestResult {
             },
             Arc::new(Counting::default()),
         )
-        .await?;
+        .await?
+        .revision;
     rusqlite::Connection::open(storage.data().records_path())?
         .execute_batch("DROP TABLE commit_warnings;")?;
     let refused = err_of(

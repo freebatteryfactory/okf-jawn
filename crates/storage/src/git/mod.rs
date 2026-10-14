@@ -364,7 +364,7 @@ impl VersionStore for GitVersions {
         proposal_id: ProposalId,
         changes: CandidateChanges,
         check: Arc<dyn CandidateCheck>,
-    ) -> PortFuture<'a, Revision> {
+    ) -> PortFuture<'a, Committed> {
         let named = card_objects(&changes.edits);
         let records = self.records.clone();
         let candidate = self.blocking(scope, move |repositories, scope| {
@@ -379,32 +379,40 @@ impl VersionStore for GitVersions {
                     if find_trailer(&repository, retained, base, changes.mutation_id)?
                         == Some(retained)
                     {
-                        return Ok((
-                            revision_of(retained)?,
-                            named_by(&repository, retained, named)?,
-                        ));
+                        let replay =
+                            warnings::replayed(&records, scope, changes.mutation_id, retained)?;
+                        return Ok((replay, named_by(&repository, retained, named)?));
                     }
                     return Err(ApiError::new(
                         ErrorCode::Conflict,
                         "this proposal already has a candidate from another write",
                     ));
                 }
+                let mutation_id = changes.mutation_id;
                 let write = Write {
-                    mutation_id: changes.mutation_id,
+                    mutation_id,
                     base,
                     author: changes.author.clone(),
                     committer: changes.author,
                     message: changes.message,
                     edits: changes.edits,
                 };
-                let (commit, _) =
+                let (commit, given) =
                     stage_and_commit(repositories, scope, &repository, write, &*check)?;
+                // Kept before the reference names the candidate, as a commit's are, so a
+                // repeat answers them.
+                warnings::keep(&records, scope, mutation_id, commit, &given)?;
                 move_reference(&repository, &name, commit, None)?;
                 sync_directories(
                     &repository,
                     &["refs", "refs/okf-jawn", "refs/okf-jawn/proposals"],
                 )?;
-                Ok((revision_of(commit)?, named))
+                let committed = Committed {
+                    revision: revision_of(commit)?,
+                    replayed: false,
+                    warnings: given,
+                };
+                Ok((committed, named))
             })
         });
         Box::pin(self.guarded(scope, candidate))

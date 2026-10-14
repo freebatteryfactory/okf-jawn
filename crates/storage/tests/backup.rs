@@ -302,7 +302,8 @@ async fn fixture(directory: &Path) -> Fallible<Fixture> {
             },
             Arc::new(Accept),
         )
-        .await?;
+        .await?
+        .revision;
     commit(
         &storage,
         &other,

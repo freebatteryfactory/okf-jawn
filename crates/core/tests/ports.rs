@@ -211,7 +211,8 @@ async fn version_writes(
             },
             check,
         )
-        .await?;
+        .await?
+        .revision;
     versions
         .promote_candidate(
             scope,

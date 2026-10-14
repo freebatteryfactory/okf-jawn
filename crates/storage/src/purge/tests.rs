@@ -1055,6 +1055,7 @@ async fn candidate(
             Arc::new(Accept),
         )
         .await
+        .map(|committed| committed.revision)
 }
 
 /// Assert that a Git write waiting for the workspace's lock while the purge is recorded is

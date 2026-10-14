@@ -388,7 +388,8 @@ async fn seed_git(
             },
             Arc::new(Accept),
         )
-        .await?;
+        .await?
+        .revision;
     let shared_card = card(uuid!(14)?, "sources/common.md", &shared.digest, None)?;
     commit(storage, survivor, 5, &survivor_head, vec![shared_card]).await?;
     Ok(Seeded {
@@ -3204,7 +3205,8 @@ async fn purge_deletes_the_bytes_of_a_retry_a_replayed_candidate_does_not_name()
             candidate(&first.digest)?,
             Arc::new(Accept),
         )
-        .await?;
+        .await?
+        .revision;
     let second = put(&storage, &target, b"zanzibar proposed attempt two").await?;
     let answered = storage
         .versions()
@@ -3214,7 +3216,8 @@ async fn purge_deletes_the_bytes_of_a_retry_a_replayed_candidate_does_not_name()
             candidate(&second.digest)?,
             Arc::new(Accept),
         )
-        .await?;
+        .await?
+        .revision;
     assert_eq!(answered, retained, "the retained candidate answers");
     assert_eq!(
         pending_puts(directory.path(), &target)?,

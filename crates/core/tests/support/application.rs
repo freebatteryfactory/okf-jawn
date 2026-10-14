@@ -1371,7 +1371,7 @@ impl VersionStore for FakeVersions {
         _proposal_id: ProposalId,
         _changes: CandidateChanges,
         _check: Arc<dyn CandidateCheck>,
-    ) -> PortFuture<'a, Revision> {
+    ) -> PortFuture<'a, Committed> {
         unused()
     }
     fn promote_candidate<'a>(
