@@ -10,7 +10,7 @@ import { readResolvedRevision,reviewCoversRevision } from '../support/assertions
 export async function runJourney(call){
  const key=randomUUID();const workspace=await call('workspaces','create_workspace',{name:`Acceptance ${key}`,description:'Disposable independent test',idempotency_key:key});
  const workspace_id=workspace.id;const properties={our_extension:{kept:true}};
- const item=await call('items','create_item',{workspace_id,base_revision:workspace.head,path:'case.md',title:'Case',type_name:'Note',kind:'note',body:'Proposal is not approved.\n',properties,idempotency_key:randomUUID()});
+ const {item}=await call('items','create_item',{workspace_id,base_revision:workspace.head,path:'case.md',title:'Case',type_name:'Note',kind:'note',body:'Proposal is not approved.\n',properties,idempotency_key:randomUUID()});
  const item_id=item.summary.id;const revision=item.summary.revision;
  const read=await call('reads','read_item',{workspace_id,item_id,at:{kind:'revision',revision},view:'text',selection:{kind:'all'},max_bytes:65536,max_images:0},true);
  readResolvedRevision(read,revision);assert.match(read.markdown,/not approved/);

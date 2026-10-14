@@ -22,17 +22,18 @@ import {
 import { z } from 'zod';
 import { listDraftsQueryKey } from '../../api/generated/@tanstack/react-query.gen';
 import { listDrafts } from '../../api/generated/sdk.gen';
-import type {
-  Draft,
-  DraftContent,
-  ItemDocument,
-  ListDraftsResponse,
-} from '../../api/generated/types.gen';
+import type { Draft, DraftContent, ItemDocument } from '../../api/generated/types.gen';
 
 /** Drafts requested per page: the most the operation allows. */
 export const DRAFTS_PAGE = 200;
 
-type DraftPages = InfiniteData<ListDraftsResponse, string | null>;
+/**
+ * One page of the list as this module keeps it: the drafts alone. `list_drafts` answers each draft
+ * with its item's summary beside it (`DraftRow`); the panel still reads each item itself.
+ */
+export type DraftsPage = { items: Draft[]; next_cursor?: string | null };
+
+type DraftPages = InfiniteData<DraftsPage, string | null>;
 
 export function draftsQueryKey(workspaceId: string) {
   const body = { workspace_id: workspaceId, page: { limit: DRAFTS_PAGE } };
@@ -48,7 +49,9 @@ export function draftsOptions(workspaceId: string) {
         signal,
         throwOnError: true,
       });
-      return data;
+      const page: DraftsPage = { items: data.items.map((row) => row.draft) };
+      if (data.next_cursor !== undefined) page.next_cursor = data.next_cursor;
+      return page;
     },
     initialPageParam: null as string | null,
     getNextPageParam: (last) => last.next_cursor ?? undefined,
@@ -61,7 +64,7 @@ export function useDrafts(workspaceId: string) {
 }
 
 /** The listed drafts, by item. */
-export function draftsByItem(pages: readonly ListDraftsResponse[] | undefined): Map<string, Draft> {
+export function draftsByItem(pages: readonly DraftsPage[] | undefined): Map<string, Draft> {
   const drafts = new Map<string, Draft>();
   for (const page of pages ?? []) for (const draft of page.items) drafts.set(draft.item_id, draft);
   return drafts;

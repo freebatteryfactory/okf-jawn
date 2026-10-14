@@ -22,7 +22,7 @@ import {
 } from '../../src/features/drafts/saving';
 import { sessionKey, useDraftSessions } from '../../src/features/drafts/sessions';
 import { takeSnapshot, UnsavedSelection } from '../../src/features/drafts/snapshot';
-import { fail, type Handler, type Json, mockApi, ok, type Reply } from './support/api';
+import { draftsPage, fail, type Handler, type Json, mockApi, ok, type Reply } from './support/api';
 import { findTextBox, replaceText, textBox, textIn, typeInto } from './support/editor';
 import {
   draftOf,
@@ -1010,7 +1010,7 @@ describe('autosave', () => {
     let savedAt = NOW;
     const api = writable({
       [SAVE]: (body) => ok(draftOf(String(body.item_id), HEAD, savedAt)),
-      [DRAFTS]: () => ok({ items: [draftOf(NOTE, HEAD, NOW)], next_cursor: null }),
+      [DRAFTS]: () => ok(draftsPage([draftOf(NOTE, HEAD, NOW)])),
     });
     const { box, queryClient } = await startEditing();
     const listed = () =>
@@ -1561,7 +1561,7 @@ describe('reopening an item that has a draft', () => {
   it('shows the draft, marked as a draft and not as the committed text', async () => {
     const api = writable({
       [ITEM]: (body) => (body.item_id === NOTE ? ok(withDraft()) : ok(itemDocument(otherSummary))),
-      [DRAFTS]: () => ok({ items: [draftOf(NOTE, HEAD, LATER)], next_cursor: null }),
+      [DRAFTS]: () => ok(draftsPage([draftOf(NOTE, HEAD, LATER)])),
     });
     renderAt(`/w/${WS}/i/${NOTE}`);
     const box = await findTextBox('Text of Meeting notes');
@@ -1828,8 +1828,8 @@ describe('the drafts of a workspace', () => {
     const cursor =
       page !== null && typeof page === 'object' && 'cursor' in page ? page.cursor : null;
     return cursor === 'next'
-      ? ok({ items: [draftOf(OTHER, HEAD, NOW)], next_cursor: null })
-      : ok({ items: [draftOf(NOTE, HEAD, LATER)], next_cursor: 'next' });
+      ? ok(draftsPage([draftOf(OTHER, HEAD, NOW)]))
+      : ok(draftsPage([draftOf(NOTE, HEAD, LATER)], 'next'));
   };
 
   it('lists every draft, page after page, and opens the item of a row', async () => {
@@ -1858,7 +1858,7 @@ describe('the drafts of a workspace', () => {
 
   it('marks drafted items in the tree', async () => {
     writable({
-      [DRAFTS]: () => ok({ items: [draftOf(NOTE, HEAD, LATER)], next_cursor: null }),
+      [DRAFTS]: () => ok(draftsPage([draftOf(NOTE, HEAD, LATER)])),
     });
     renderAt(`/w/${WS}/i/${OTHER}`);
     const tree = await screen.findByRole('tree', { name: 'Folders' });
@@ -1943,12 +1943,12 @@ describe('the drafts of a workspace', () => {
             page !== null && typeof page === 'object' && 'cursor' in page ? page.cursor : null;
           if (cursor !== 'next') {
             return first === 'ok'
-              ? ok({ items: [draftOf(NOTE, HEAD, LATER)], next_cursor: 'next' })
+              ? ok(draftsPage([draftOf(NOTE, HEAD, LATER)], 'next'))
               : fail(500, 'internal', 'the store is unwell again');
           }
           if (further === 'fail') return fail(500, 'internal', 'the store is unwell');
           return new Promise<Reply>((resolve) =>
-            held.push(() => resolve(ok({ items: [draftOf(OTHER, HEAD, NOW)], next_cursor: null }))),
+            held.push(() => resolve(ok(draftsPage([draftOf(OTHER, HEAD, NOW)])))),
           );
         },
       });
@@ -2020,7 +2020,7 @@ describe('discarding a draft', () => {
         body.item_id === NOTE && held
           ? ok(withDraft())
           : ok(itemDocument(body.item_id === NOTE ? noteSummary : otherSummary)),
-      [DRAFTS]: () => ok({ items: held ? [draftOf(NOTE, HEAD, LATER)] : [], next_cursor: null }),
+      [DRAFTS]: () => ok(draftsPage(held ? [draftOf(NOTE, HEAD, LATER)] : [])),
       [DISCARD]: (body) => {
         held = false;
         return ok(draftOf(String(body.item_id), HEAD, LATER));
@@ -2111,7 +2111,7 @@ describe('discarding a draft', () => {
           read.answer = () => resolve(reply);
         });
       },
-      [DRAFTS]: () => ok({ items: held ? [draftOf(NOTE, HEAD, LATER)] : [], next_cursor: null }),
+      [DRAFTS]: () => ok(draftsPage(held ? [draftOf(NOTE, HEAD, LATER)] : [])),
       [DISCARD]: (body) => {
         held = false;
         return ok(draftOf(String(body.item_id), HEAD, LATER));
@@ -2317,7 +2317,7 @@ describe('discarding a draft', () => {
         },
         [DRAFTS]: () => {
           const draft = held();
-          return ok({ items: draft === null ? [] : [draft], next_cursor: null });
+          return ok(draftsPage(draft === null ? [] : [draft]));
         },
         [SAVE]: (body) => {
           if (first === 'refuses and holds nothing') return fail(503, 'unavailable', 'busy');

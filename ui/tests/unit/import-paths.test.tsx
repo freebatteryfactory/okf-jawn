@@ -140,10 +140,20 @@ describe('a path the page can see is wrong', () => {
     );
   });
 
-  it('finds no path too long today: the generated request schema states no length', () => {
-    // The day `CreateUploadRequest` states one, this expectation changes and the page follows it.
+  it('finds a name or a folder longer than the generated request schema allows', () => {
+    // `CreateUploadRequest` states the contract's bounds; the page follows them.
+    expect(pathProblem({ folder: 'x'.repeat(5000), filename: `${'y'.repeat(5000)}.txt` })).toEqual({
+      kind: 'too-long',
+      part: 'name',
+      max: 1024,
+    });
+    expect(pathProblem({ folder: 'x'.repeat(5000), filename: 'y.txt' })).toEqual({
+      kind: 'too-long',
+      part: 'folder',
+      max: 4096,
+    });
     expect(
-      pathProblem({ folder: 'x'.repeat(5000), filename: `${'y'.repeat(5000)}.txt` }),
+      pathProblem({ folder: 'x'.repeat(4096), filename: `${'y'.repeat(1020)}.txt` }),
     ).toBeNull();
   });
 

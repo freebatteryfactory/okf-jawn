@@ -152,7 +152,9 @@ export async function createNote(
     },
     throwOnError: true,
   });
-  const item = data.summary;
+  // The answer is the item as committed, with the receipt and the check's findings, which this
+  // page does not show yet.
+  const item = data.item.summary;
   client.setQueryData(
     getItemOptions({
       body: {
@@ -161,7 +163,7 @@ export async function createNote(
         at: { kind: 'revision', revision: item.revision },
       },
     }).queryKey,
-    data,
+    data.item,
   );
   return { ...changed(client, workspaceId, attempt.base, item.revision, [item.id]), item };
 }

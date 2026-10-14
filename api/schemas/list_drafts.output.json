@@ -38,29 +38,251 @@
       ],
       "type": "object"
     },
+    "DraftRow": {
+      "additionalProperties": false,
+      "description": "One draft and its item.",
+      "properties": {
+        "draft": {
+          "$ref": "#/$defs/Draft",
+          "description": "Draft metadata."
+        },
+        "item": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ItemSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The item as it is at `revision`; absent when the item does not exist there."
+        }
+      },
+      "required": [
+        "draft"
+      ],
+      "type": "object"
+    },
+    "ExtractionStatus": {
+      "description": "The converter's verdict on one source, as a listing and a filter use it.",
+      "oneOf": [
+        {
+          "const": "pending",
+          "description": "Accepted; no conversion has finished.",
+          "type": "string"
+        },
+        {
+          "const": "completed",
+          "description": "Every page, or the whole non-paginated document, was converted.",
+          "type": "string"
+        },
+        {
+          "const": "partial",
+          "description": "A document was produced but part of the source is missing from it.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The converter produced no document; the bytes are retained.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported",
+          "description": "No converter exists for this format; the bytes are retained.",
+          "type": "string"
+        }
+      ]
+    },
+    "ExtractionSummary": {
+      "additionalProperties": false,
+      "description": "What a listing shows about one source.",
+      "properties": {
+        "corrected": {
+          "description": "A human correction is shown over that text.",
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/ExtractionStatus",
+          "description": "The converter's verdict."
+        },
+        "text_origin": {
+          "$ref": "#/$defs/TextOrigin",
+          "description": "Whose text is shown."
+        }
+      },
+      "required": [
+        "status",
+        "text_origin",
+        "corrected"
+      ],
+      "type": "object"
+    },
     "ItemId": {
       "description": "Stable item identity independent of its current relative path.",
       "format": "uuid",
       "type": "string"
     },
+    "ItemKind": {
+      "description": "Built-in presentation roles; user-defined OKF type names remain unrestricted.",
+      "oneOf": [
+        {
+          "const": "note",
+          "description": "Human or agent-authored Markdown knowledge.",
+          "type": "string"
+        },
+        {
+          "const": "source",
+          "description": "An appearance of immutable source bytes.",
+          "type": "string"
+        },
+        {
+          "const": "view",
+          "description": "A source-bound declarative visual artifact.",
+          "type": "string"
+        }
+      ]
+    },
+    "ItemStatus": {
+      "description": "OKF's `status` word of an item, distinct from business approval and from archiving.\n\nAn absent OKF `status` reads `stable`. `other` is a producer's value outside the three,\nkept exactly as written in the file's `status` property; it cannot be set through\n`set_lifecycle`.",
+      "oneOf": [
+        {
+          "const": "draft",
+          "description": "Work in progress.",
+          "type": "string"
+        },
+        {
+          "const": "stable",
+          "description": "Current and usable content.",
+          "type": "string"
+        },
+        {
+          "const": "deprecated",
+          "description": "Retained, superseded content; still searchable.",
+          "type": "string"
+        },
+        {
+          "const": "other",
+          "description": "A status word outside the three, preserved in the file.",
+          "type": "string"
+        }
+      ]
+    },
+    "ItemSummary": {
+      "additionalProperties": false,
+      "description": "A navigable item description bound to a resolved workspace revision.",
+      "properties": {
+        "archived": {
+          "description": "Hidden from ordinary current listings; reversible and keeps history.",
+          "type": "boolean"
+        },
+        "description": {
+          "description": "One-line navigation summary.",
+          "type": "string"
+        },
+        "extraction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExtractionSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The converter's verdict and whose text is shown; present exactly when `kind` is `source`."
+        },
+        "id": {
+          "$ref": "#/$defs/ItemId",
+          "description": "Stable identity."
+        },
+        "kind": {
+          "$ref": "#/$defs/ItemKind",
+          "description": "Built-in rendering role."
+        },
+        "media_type": {
+          "description": "Original MIME type if there is a source object.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "$ref": "#/$defs/WorkspacePath",
+          "description": "Current relative OKF path."
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Resolved revision for this summary."
+        },
+        "status": {
+          "$ref": "#/$defs/ItemStatus",
+          "description": "OKF status word."
+        },
+        "title": {
+          "description": "Human-readable title.",
+          "type": "string"
+        },
+        "type_name": {
+          "description": "User-selected OKF type; not a closed enum.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "path",
+        "title",
+        "description",
+        "type_name",
+        "kind",
+        "revision",
+        "status",
+        "archived"
+      ],
+      "type": "object"
+    },
     "Revision": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
       "type": "string"
+    },
+    "TextOrigin": {
+      "description": "Whose text a source card shows and search indexes.",
+      "oneOf": [
+        {
+          "const": "converter",
+          "description": "The converter's extraction.",
+          "type": "string"
+        },
+        {
+          "const": "supplied_by_agent",
+          "description": "Text an agent proposed and a person accepted.",
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "No text: pending, failed or unsupported, with nothing supplied.",
+          "type": "string"
+        }
+      ]
     },
     "Timestamp": {
       "format": "date-time",
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$",
       "type": "string"
+    },
+    "WorkspacePath": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "pattern": "^[^/\\\\:<>\"|?*\\x00-\\x1f]+(/[^/\\\\:<>\"|?*\\x00-\\x1f]+)*$",
+      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "The caller's drafts, without other editors' drafts.",
+  "description": "The caller's drafts, without other editors' drafts, each with its item's summary.",
   "properties": {
     "items": {
-      "description": "Draft metadata.",
+      "description": "The drafts, most recently saved first.",
       "items": {
-        "$ref": "#/$defs/Draft"
+        "$ref": "#/$defs/DraftRow"
       },
       "type": "array"
     },
@@ -70,9 +292,14 @@
         "string",
         "null"
       ]
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision",
+      "description": "The head at which the items were read."
     }
   },
   "required": [
+    "revision",
     "items"
   ],
   "title": "ListDraftsResponse",

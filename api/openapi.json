@@ -1939,6 +1939,33 @@
         ],
         "type": "object"
       },
+      "CreatedItem": {
+        "additionalProperties": false,
+        "description": "A created item, with the receipt of its commit and the findings of the commit's check.",
+        "properties": {
+          "item": {
+            "$ref": "#/components/schemas/ItemDocument",
+            "description": "The item as committed."
+          },
+          "receipt_id": {
+            "$ref": "#/components/schemas/ReceiptId",
+            "description": "Durable application operation receipt."
+          },
+          "warnings": {
+            "description": "Non-fatal issues recorded during the operation.",
+            "items": {
+              "$ref": "#/components/schemas/Warning"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "item",
+          "receipt_id",
+          "warnings"
+        ],
+        "type": "object"
+      },
       "Dataset": {
         "additionalProperties": false,
         "description": "A typed table resolved from cited application data; its canonical JSON bytes are the blob\n`ViewBinding::materialized` names.",
@@ -2520,6 +2547,31 @@
           "draft",
           "body",
           "properties"
+        ],
+        "type": "object"
+      },
+      "DraftRow": {
+        "additionalProperties": false,
+        "description": "One draft and its item.",
+        "properties": {
+          "draft": {
+            "$ref": "#/components/schemas/Draft",
+            "description": "Draft metadata."
+          },
+          "item": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ItemSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The item as it is at `revision`; absent when the item does not exist there."
+          }
+        },
+        "required": [
+          "draft"
         ],
         "type": "object"
       },
@@ -4588,6 +4640,34 @@
           }
         ]
       },
+      "Limits": {
+        "additionalProperties": false,
+        "description": "The limits a deployment applies to what a client sends.",
+        "properties": {
+          "item_text_bytes": {
+            "description": "The most UTF-8 bytes of one item's text in a write (`item::MAX_ITEM_TEXT_BYTES`).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "request_body_bytes": {
+            "description": "The most bytes of one JSON request body (`transport::MAX_REQUEST_BODY_BYTES`).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "upload_bytes": {
+            "description": "The most bytes of one upload, as a decimal string (a 64-bit value); `create_upload`\nrefuses a larger `size` as `too_large` on `/size` when the slot is opened.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "upload_bytes",
+          "request_body_bytes",
+          "item_text_bytes"
+        ],
+        "type": "object"
+      },
       "Link": {
         "additionalProperties": false,
         "description": "A source-level relationship between items.",
@@ -4750,12 +4830,12 @@
       },
       "ListDraftsResponse": {
         "additionalProperties": false,
-        "description": "The caller's drafts, without other editors' drafts.",
+        "description": "The caller's drafts, without other editors' drafts, each with its item's summary.",
         "properties": {
           "items": {
-            "description": "Draft metadata.",
+            "description": "The drafts, most recently saved first.",
             "items": {
-              "$ref": "#/components/schemas/Draft"
+              "$ref": "#/components/schemas/DraftRow"
             },
             "type": "array"
           },
@@ -4765,9 +4845,14 @@
               "string",
               "null"
             ]
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision",
+            "description": "The head at which the items were read."
           }
         },
         "required": [
+          "revision",
           "items"
         ],
         "type": "object"
@@ -8020,6 +8105,10 @@
             "description": "Browser writes require a same-origin anti-CSRF token: the double-submit pair published\nas the `csrfCookie` and `csrfHeader` security schemes.",
             "type": "boolean"
           },
+          "limits": {
+            "$ref": "#/components/schemas/Limits",
+            "description": "The limits this deployment applies, so a client can check before it sends."
+          },
           "principal": {
             "$ref": "#/components/schemas/Principal",
             "description": "Authenticated caller."
@@ -8027,7 +8116,8 @@
         },
         "required": [
           "principal",
-          "csrf_required"
+          "csrf_required",
+          "limits"
         ],
         "type": "object"
       },
@@ -13936,7 +14026,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ItemDocument"
+                  "$ref": "#/components/schemas/CreatedItem"
                 }
               }
             },

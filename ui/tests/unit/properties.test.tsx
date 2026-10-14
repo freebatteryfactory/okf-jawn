@@ -12,7 +12,7 @@ import {
   withoutHeaderField,
 } from '../../src/features/documents/PropertiesForm';
 import { AUTOSAVE_DELAY_MS, resetDraftSessions } from '../../src/features/drafts/saving';
-import { fail, type Handler, mockApi, ok } from './support/api';
+import { draftsPage, fail, type Handler, mockApi, ok } from './support/api';
 import { textBox, typeInto } from './support/editor';
 import {
   draftOf,
@@ -1371,7 +1371,7 @@ describe('input the form holds back', () => {
               ? { ...itemDocument(noteSummary), body: draft.body, properties: stored }
               : { ...itemDocument(noteSummary), properties: stored, draft },
         ),
-      [DRAFTS]: () => ok({ items: taken ? [] : [draft.draft], next_cursor: null }),
+      [DRAFTS]: () => ok(draftsPage(taken ? [] : [draft.draft])),
       '/api/workspaces/open-workspace': () =>
         ok({ ...writableWorkspace, head: taken ? MADE : HEAD }),
       [COMMIT]: () => {

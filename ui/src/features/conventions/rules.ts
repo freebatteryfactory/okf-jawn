@@ -25,13 +25,14 @@
  * version, and says so.
  * Saving the rules is a commit too, and is told to the cache the same way.
  */
-import type { QueryClient } from '@tanstack/react-query';
+import { type QueryClient, queryOptions } from '@tanstack/react-query';
 import {
   getFormSchemaOptions,
   getRulesOptions,
 } from '../../api/generated/@tanstack/react-query.gen';
 import { applyNames, previewNames, setRules } from '../../api/generated/sdk.gen';
 import type {
+  GetRulesResponse,
   ListItemsResponse,
   NamingRules,
   RenamePlan,
@@ -47,10 +48,17 @@ import type { Attempt } from '../tree/changes';
 /** The name of the naming rules' schema among the service's form schemas. */
 export const RULES_SCHEMA = 'naming-rules';
 
-/** The saved rules at the revision the workspace shows. */
+/**
+ * The saved rules at the revision the workspace shows. `get_rules` answers them inside its
+ * answer, beside the revision read and a stored file that cannot be read as rules; this page
+ * reads the rules alone, and has none when the answer holds none.
+ */
 export function rulesOptions(workspaceId: string, head: Revision) {
-  return getRulesOptions({
-    body: { workspace_id: workspaceId, at: { kind: 'revision', revision: head } },
+  return queryOptions({
+    ...getRulesOptions({
+      body: { workspace_id: workspaceId, at: { kind: 'revision', revision: head } },
+    }),
+    select: (answer: GetRulesResponse): NamingRules | undefined => answer.rules ?? undefined,
   });
 }
 
@@ -183,7 +191,7 @@ export async function previewRenames(
     body: {
       workspace_id: workspaceId,
       at: { kind: 'revision', revision },
-      item_ids: itemIds,
+      selection: { kind: 'items', item_ids: itemIds },
       rules,
     },
     throwOnError: true,

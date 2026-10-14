@@ -529,6 +529,15 @@ export const zLetterCase = z.union([
 ]);
 
 /**
+ * The limits a deployment applies to what a client sends.
+ */
+export const zLimits = z.object({
+    item_text_bytes: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+    request_body_bytes: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+    upload_bytes: z.string()
+});
+
+/**
  * A source-level relationship between items.
  */
 export const zLink = z.object({
@@ -1275,14 +1284,6 @@ export const zApiError = z.object({
     field: z.string().nullish(),
     message: z.string(),
     request_id: z.string().nullish()
-});
-
-/**
- * The caller's drafts, without other editors' drafts.
- */
-export const zListDraftsResponse = z.object({
-    items: z.array(zDraft),
-    next_cursor: z.string().nullish()
 });
 
 /**
@@ -2244,6 +2245,7 @@ export const zSearchRequest = z.object({
  */
 export const zSessionResponse = z.object({
     csrf_required: z.boolean(),
+    limits: zLimits,
     principal: zPrincipal
 });
 
@@ -2483,6 +2485,14 @@ export const zAttentionItem = z.object({
 });
 
 /**
+ * One draft and its item.
+ */
+export const zDraftRow = z.object({
+    draft: zDraft,
+    item: zItemSummary.nullish()
+});
+
+/**
  * Bounded diagnostics; an empty list does not establish safety.
  */
 export const zGetAttentionResponse = z.object({
@@ -2511,6 +2521,24 @@ export const zItemDocument = z.object({
     properties: z.record(z.string(), z.unknown()),
     source: zSourceAppearance.nullish(),
     summary: zItemSummary
+});
+
+/**
+ * A created item, with the receipt of its commit and the findings of the commit's check.
+ */
+export const zCreatedItem = z.object({
+    item: zItemDocument,
+    receipt_id: zReceiptId,
+    warnings: z.array(zWarning)
+});
+
+/**
+ * The caller's drafts, without other editors' drafts, each with its item's summary.
+ */
+export const zListDraftsResponse = z.object({
+    items: z.array(zDraftRow),
+    next_cursor: z.string().nullish(),
+    revision: zRevision
 });
 
 /**
@@ -3136,7 +3164,7 @@ export const zCreateItemBody = zCreateItemRequest;
 /**
  * Successful operation result
  */
-export const zCreateItemResponse = zItemDocument;
+export const zCreateItemResponse = zCreatedItem;
 
 export const zDeleteFolderBody = zDeleteFolderRequest;
 

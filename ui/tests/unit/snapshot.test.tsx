@@ -15,7 +15,7 @@ import {
   resetDraftSessions,
 } from '../../src/features/drafts/saving';
 import { sessionKey, useDraftSessions } from '../../src/features/drafts/sessions';
-import { fail, type Handler, type Json, mockApi, ok, type Reply } from './support/api';
+import { draftsPage, fail, type Handler, type Json, mockApi, ok, type Reply } from './support/api';
 import { findTextBox, replaceText, textBox, textIn, typeInto } from './support/editor';
 import {
   draftOf,
@@ -131,8 +131,7 @@ function service(overrides: Record<string, Handler> = {}, drafts: string[] = [NO
           state.drafts.has(itemId) ? { ...document, draft: draftContent(itemId) } : document,
         );
       },
-      [DRAFTS]: () =>
-        ok({ items: [...state.drafts].map((id) => draftOf(id, HEAD, LATER)), next_cursor: null }),
+      [DRAFTS]: () => ok(draftsPage([...state.drafts].map((id) => draftOf(id, HEAD, LATER)))),
       [SAVE]: (body) => {
         state.drafts.add(String(body.item_id));
         return ok(draftOf(String(body.item_id), String(body.base_revision), LATER));
@@ -276,7 +275,7 @@ describe('taking a Snapshot', () => {
   it('is not offered to a person who may only read', async () => {
     mockApi(
       explorerHandlers({
-        [DRAFTS]: () => ok({ items: [draftOf(NOTE, HEAD, LATER)], next_cursor: null }),
+        [DRAFTS]: () => ok(draftsPage([draftOf(NOTE, HEAD, LATER)])),
       }),
     );
     renderAt(`/w/${WS}`);
@@ -730,7 +729,7 @@ describe('taking a Snapshot', () => {
                 : { ...document, draft: { body: held.draft, properties, draft: draftNow() } },
             );
           },
-          [DRAFTS]: () => ok({ items: held.draft === null ? [] : [draftNow()], next_cursor: null }),
+          [DRAFTS]: () => ok(draftsPage(held.draft === null ? [] : [draftNow()])),
           [SAVE]: (body) => {
             const apply = () => {
               const base = String(body.base_revision);
@@ -1090,7 +1089,7 @@ describe('taking a Snapshot', () => {
   it('reads "not available in this build" where Snapshot is not built, and adopts nothing', async () => {
     const { [COMMIT]: _unbuilt, ...handlers } = explorerHandlers({
       [OPEN]: () => ok(writableWorkspace),
-      [DRAFTS]: () => ok({ items: [draftOf(NOTE, HEAD, LATER)], next_cursor: null }),
+      [DRAFTS]: () => ok(draftsPage([draftOf(NOTE, HEAD, LATER)])),
     });
     mockApi(handlers);
     renderAt(`/w/${WS}`);

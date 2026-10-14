@@ -1126,6 +1126,24 @@ export type CreateWorkspaceRequest = {
 };
 
 /**
+ * A created item, with the receipt of its commit and the findings of the commit's check.
+ */
+export type CreatedItem = {
+    /**
+     * The item as committed.
+     */
+    item: ItemDocument;
+    /**
+     * Durable application operation receipt.
+     */
+    receipt_id: ReceiptId;
+    /**
+     * Non-fatal issues recorded during the operation.
+     */
+    warnings: Array<Warning>;
+};
+
+/**
  * A typed table resolved from cited application data; its canonical JSON bytes are the blob
  * `ViewBinding::materialized` names.
  */
@@ -1508,6 +1526,20 @@ export type DraftContent = {
     properties: {
         [key: string]: unknown;
     };
+};
+
+/**
+ * One draft and its item.
+ */
+export type DraftRow = {
+    /**
+     * Draft metadata.
+     */
+    draft: Draft;
+    /**
+     * The item as it is at `revision`; absent when the item does not exist there.
+     */
+    item?: ItemSummary | null;
 };
 
 /**
@@ -2566,6 +2598,25 @@ export type JobState = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelle
 export type LetterCase = 'preserve' | 'lower' | 'upper' | 'title' | 'snake' | 'kebab';
 
 /**
+ * The limits a deployment applies to what a client sends.
+ */
+export type Limits = {
+    /**
+     * The most UTF-8 bytes of one item's text in a write (`item::MAX_ITEM_TEXT_BYTES`).
+     */
+    item_text_bytes: number;
+    /**
+     * The most bytes of one JSON request body (`transport::MAX_REQUEST_BODY_BYTES`).
+     */
+    request_body_bytes: number;
+    /**
+     * The most bytes of one upload, as a decimal string (a 64-bit value); `create_upload`
+     * refuses a larger `size` as `too_large` on `/size` when the slot is opened.
+     */
+    upload_bytes: string;
+};
+
+/**
  * A source-level relationship between items.
  */
 export type Link = {
@@ -2666,17 +2717,21 @@ export type ListDraftsRequest = {
 };
 
 /**
- * The caller's drafts, without other editors' drafts.
+ * The caller's drafts, without other editors' drafts, each with its item's summary.
  */
 export type ListDraftsResponse = {
     /**
-     * Draft metadata.
+     * The drafts, most recently saved first.
      */
-    items: Array<Draft>;
+    items: Array<DraftRow>;
     /**
      * Continuation cursor.
      */
     next_cursor?: string | null;
+    /**
+     * The head at which the items were read.
+     */
+    revision: Revision;
 };
 
 /**
@@ -4472,6 +4527,10 @@ export type SessionResponse = {
      * as the `csrfCookie` and `csrfHeader` security schemes.
      */
     csrf_required: boolean;
+    /**
+     * The limits this deployment applies, so a client can check before it sends.
+     */
+    limits: Limits;
     /**
      * Authenticated caller.
      */
@@ -7094,7 +7153,7 @@ export type CreateItemResponses = {
     /**
      * Successful operation result
      */
-    200: ItemDocument;
+    200: CreatedItem;
 };
 
 export type CreateItemResponse = CreateItemResponses[keyof CreateItemResponses];
