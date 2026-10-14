@@ -213,22 +213,22 @@ impl Staged {
         Ok(())
     }
 
-    /// Whether a file or folder of the staged tree, or an item, already holds `path`'s
-    /// collision key (or a folder above it holds a file's).
+    /// Whether a file or folder of the staged tree (an empty folder an earlier edit left
+    /// included), or an item, already holds `path`'s collision key, or a path below it, or
+    /// whether a file holds the key of a folder above it. The staged directory is listed and
+    /// compared by key (`entries_under`), so a folder spelled another way counts on a
+    /// filesystem that holds `report.md/` and `Report.md` apart as on one that holds them as
+    /// one.
     ///
     /// `own` is the moved item's own file, for a move. Only when it holds `path`'s own key (a
     /// rename that changes only letter case, see the module header) is it not counted; then,
     /// on a filesystem that holds both spellings as one file, `path` exists because of it, so
-    /// only a folder at `path` counts there. Every other file, folder and item counts.
+    /// only the listing is asked. Otherwise the filesystem is asked too whether anything is at
+    /// `path`. Every other file, folder and item counts.
     fn occupied(&self, path: &WorkspacePath, own: Option<&str>) -> Result<bool, ApiError> {
         let key = path.collision_key();
         let own = own.filter(|own| collision_key(own) == key);
-        let target = self.root.join(path.as_str());
-        let there = match own {
-            Some(_) => target.is_dir(),
-            None => target.exists(),
-        };
-        if there {
+        if own.is_none() && self.root.join(path.as_str()).exists() {
             return Ok(true);
         }
         let folder_prefix = format!("{key}/");
@@ -237,14 +237,14 @@ impl Staged {
             .match_indices('/')
             .filter_map(|(at, _)| key.get(..at))
             .collect();
-        Ok(files_under(&self.root, "")?.iter().any(|existing| {
+        Ok(entries_under(&self.root)?.iter().any(|(existing, folder)| {
             if own == Some(existing.as_str()) {
                 return false;
             }
             let existing = collision_key(existing);
             existing == key
                 || existing.starts_with(&folder_prefix)
-                || folders.contains(&existing.as_str())
+                || (!folder && folders.contains(&existing.as_str()))
         }) || self
             .items
             .values()
@@ -1103,6 +1103,25 @@ fn relative(root: &Path, path: &Path) -> Option<String> {
 /// Every file under `root`, as `/`-separated paths relative to it.
 pub(crate) fn files_under(root: &Path, prefix: &str) -> Result<Vec<String>, ApiError> {
     let mut found = Vec::new();
+    walk(root, prefix, false, &mut found)?;
+    Ok(found.into_iter().map(|(path, _)| path).collect())
+}
+
+/// Every file and every folder under `root`, empty folders included, as `/`-separated paths
+/// relative to it, each with whether it is a folder.
+fn entries_under(root: &Path) -> Result<Vec<(String, bool)>, ApiError> {
+    let mut found = Vec::new();
+    walk(root, "", true, &mut found)?;
+    Ok(found)
+}
+
+/// Add every file under `prefix` of `root` to `found`, and with `folders` every folder too.
+fn walk(
+    root: &Path,
+    prefix: &str,
+    folders: bool,
+    found: &mut Vec<(String, bool)>,
+) -> Result<(), ApiError> {
     let directory = if prefix.is_empty() {
         root.to_path_buf()
     } else {
@@ -1125,12 +1144,15 @@ pub(crate) fn files_under(root: &Path, prefix: &str) -> Result<Vec<String>, ApiE
             .file_type()
             .map_err(|error| io_error("inspect", &entry.path(), &error))?;
         if kind.is_dir() {
-            found.extend(files_under(root, &relative)?);
+            walk(root, &relative, folders, found)?;
+            if folders {
+                found.push((relative, true));
+            }
         } else if kind.is_file() {
-            found.push(relative);
+            found.push((relative, false));
         }
     }
-    Ok(found)
+    Ok(())
 }
 
 fn read_text(path: &Path) -> Result<String, ApiError> {

@@ -1020,6 +1020,39 @@ async fn a_referrer_renamed_by_case_after_a_move_is_told_only_as_the_tree_spells
     Ok(())
 }
 
+/// A folder an earlier edit of the same commit emptied still takes its key: a note created at
+/// `Report.md` after the only note of `report.md/` is deleted is refused as taken on every
+/// system, so no later rename by letter case can meet a folder at its destination.
+#[tokio::test]
+async fn an_emptied_folder_in_another_spelling_still_takes_its_name() -> TestResult {
+    let space = Workspace::new().await?;
+    space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(20, "report.md/x.md", "Twenty.")?,
+                note(11, "b.md", "Eleven.")?,
+            ],
+        )
+        .await?;
+    let seeded = space.raw(900, &["report.md/index.md"], &[])?;
+    let error = space
+        .refused(
+            3,
+            &seeded,
+            vec![
+                deleted(20)?,
+                note(10, "Report.md", "Ten.")?,
+                moved(10, "report.md")?,
+            ],
+        )
+        .await?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    assert_eq!(error.message, "Report.md is already taken");
+    Ok(())
+}
+
 // B1: the private name an item is parked under is a free name.
 
 /// Item 10 at `Notes/Report.md` with a referrer, and `taken` held by a person's note (item 11)
