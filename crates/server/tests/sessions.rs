@@ -190,6 +190,12 @@ async fn the_launch_token_opens_a_strict_http_only_session_and_records_the_sign_
         "the session cookie",
     )?;
     assert!(session.starts_with(&format!("okf-session={SESSION_SECRET};")));
+    // On loopback http the session cookie is `okf-session` (ruling 17): no `__Host-` cookie, which
+    // a browser would refuse without `Secure`.
+    assert!(
+        !cookies.iter().any(|c| c.starts_with("__Host-okf-session=")),
+        "{cookies:?}"
+    );
     assert!(session.contains("HttpOnly"));
     assert!(session.contains("SameSite=Strict"));
     assert!(session.contains("Path=/"));

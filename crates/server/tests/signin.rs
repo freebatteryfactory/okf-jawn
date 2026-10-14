@@ -12,7 +12,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::response::Response;
-use okf_jawn_contract::access::AccessRoute;
+use okf_jawn_contract::access::{AccessRoute, SESSION_COOKIE, SESSION_COOKIE_HTTPS};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::EventKind;
 use okf_jawn_contract::identity::TenantId;
@@ -226,7 +226,10 @@ async fn assert_no_sign_in(hosted: &Hosted, response: &Response) -> TestResult {
             .and_then(|v| v.to_str().ok()),
         Some("no-referrer")
     );
-    assert_eq!(set_cookies(response, "okf-session"), Vec::<String>::new());
+    assert_eq!(
+        set_cookies(response, SESSION_COOKIE_HTTPS),
+        Vec::<String>::new()
+    );
     assert!(!hosted.signed_in().await?);
     Ok(())
 }
@@ -263,7 +266,10 @@ async fn beginning_a_sign_in_hands_the_browser_its_cookie_with_each_attribute() 
         ]
     );
     // Beginning a sign-in opens no session and exchanges nothing.
-    assert_eq!(set_cookies(&begun, "okf-session"), Vec::<String>::new());
+    assert_eq!(
+        set_cookies(&begun, SESSION_COOKIE_HTTPS),
+        Vec::<String>::new()
+    );
     assert_eq!(hosted.exchanges(), 0);
     Ok(())
 }
@@ -276,7 +282,10 @@ async fn the_browser_that_began_a_sign_in_completes_it_and_its_cookie_is_cleared
         .await?;
     assert_eq!(response.status(), StatusCode::FOUND);
     assert_login_cookie_cleared(&response)?;
-    let session = set_cookies(&response, "okf-session");
+    // Over https the session cookie is `__Host-okf-session` (ruling 17), and no `okf-session`
+    // is set beside it.
+    assert_eq!(set_cookies(&response, SESSION_COOKIE), Vec::<String>::new());
+    let session = set_cookies(&response, SESSION_COOKIE_HTTPS);
     let session = some(session.first(), "the session cookie")?;
     assert_eq!(
         attributes(session),
@@ -456,7 +465,10 @@ async fn the_same_callback_sent_twice_signs_in_once() -> TestResult {
     let replay = hosted.callback(STATE, CODE, Some(&cookie)).await?;
     assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
     assert_login_cookie_cleared(&replay)?;
-    assert_eq!(set_cookies(&replay, "okf-session"), Vec::<String>::new());
+    assert_eq!(
+        set_cookies(&replay, SESSION_COOKIE_HTTPS),
+        Vec::<String>::new()
+    );
     assert_eq!(hosted.exchanges(), 2);
     Ok(())
 }
@@ -493,7 +505,10 @@ async fn a_matching_callback_clears_the_cookie_when_the_provider_or_the_store_fa
     let response = hosted.callback(STATE, CODE, Some(&cookie)).await?;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_login_cookie_cleared(&response)?;
-    assert_eq!(set_cookies(&response, "okf-session"), Vec::<String>::new());
+    assert_eq!(
+        set_cookies(&response, SESSION_COOKIE_HTTPS),
+        Vec::<String>::new()
+    );
     assert_eq!(hosted.exchanges(), 1);
     // The provider answers, and the store cannot take the session.
     let hosted = Hosted::new()?;
@@ -501,7 +516,10 @@ async fn a_matching_callback_clears_the_cookie_when_the_provider_or_the_store_fa
     let response = hosted.callback(STATE, CODE, Some(&cookie)).await?;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_login_cookie_cleared(&response)?;
-    assert_eq!(set_cookies(&response, "okf-session"), Vec::<String>::new());
+    assert_eq!(
+        set_cookies(&response, SESSION_COOKIE_HTTPS),
+        Vec::<String>::new()
+    );
     assert_eq!(hosted.exchanges(), 1);
     hosted.base.credentials.set_down(false);
     assert!(!hosted.signed_in().await?);

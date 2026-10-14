@@ -1,9 +1,12 @@
 //! The browser session cookies, read and written through the `cookie` crate; nothing here parses
 //! or formats a cookie by hand.
 //!
-//! The session cookie (`okf-session`) is `HttpOnly`, `SameSite=Strict`, `Path=/`, and `Secure`
-//! when the service's public origin is `https`; its value is an opaque random secret whose
-//! SHA-256 is the stored session id. The anti-CSRF cookie (`okf-csrf`) carries the session's
+//! The session cookie is named by the service's public origin (`session_cookie_name`):
+//! `__Host-okf-session` over `https`, always `Secure`, `Path=/` and with no `Domain`, so a sibling
+//! host or another port cannot set one; `okf-session` on plain `http` (loopback), where a `__Host-`
+//! cookie cannot be set. It is `HttpOnly` and `SameSite=Strict`, and the server reads only the
+//! name of its own scheme. Its value is an opaque random secret whose SHA-256 is the stored
+//! session id. The anti-CSRF cookie (`okf-csrf`) carries the session's
 //! derived token with the same attributes except `HttpOnly`, so the page can read it and send it
 //! back in the `x-okf-csrf` header. A request that carries two cookies of one name is read as
 //! carrying none: a sibling site can set a cookie on the same host, and the server never guesses
@@ -14,7 +17,7 @@ use std::time::Duration;
 use axum::http::header::COOKIE;
 use axum::http::{HeaderMap, HeaderValue};
 use cookie::{Cookie, SameSite};
-use okf_jawn_contract::access::{CSRF_COOKIE, SESSION_COOKIE};
+use okf_jawn_contract::access::{CSRF_COOKIE, SESSION_COOKIE, SESSION_COOKIE_HTTPS};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 
 use crate::hosted::{LOGIN_COOKIE, LOGIN_MAX_AGE};
@@ -53,6 +56,17 @@ impl CookieReader for CrateCookies {
     }
 }
 
+/// The session cookie's name for a public origin that is `https` (`secure`) or plain `http`:
+/// `SESSION_COOKIE_HTTPS` or `SESSION_COOKIE`.
+#[must_use]
+pub const fn session_cookie_name(secure: bool) -> &'static str {
+    if secure {
+        SESSION_COOKIE_HTTPS
+    } else {
+        SESSION_COOKIE
+    }
+}
+
 /// The two `Set-Cookie` values that open a session whose cookie secret is `secret`.
 ///
 /// # Errors
@@ -60,7 +74,7 @@ impl CookieReader for CrateCookies {
 pub fn session_cookies(secret: &str, policy: CookiePolicy) -> Result<[HeaderValue; 2], ApiError> {
     let max_age = time::Duration::try_from(policy.lifetime)
         .map_err(|_| ApiError::new(ErrorCode::Internal, "The session lifetime is too long"))?;
-    let session = Cookie::build((SESSION_COOKIE, secret.to_owned()))
+    let session = Cookie::build((session_cookie_name(policy.secure), secret.to_owned()))
         .http_only(true)
         .same_site(SameSite::Strict)
         .secure(policy.secure)
@@ -82,7 +96,7 @@ pub fn session_cookies(secret: &str, policy: CookiePolicy) -> Result<[HeaderValu
 /// # Errors
 /// Returns `Internal` when a value cannot be carried in a header.
 pub fn cleared_cookies(secure: bool) -> Result<[HeaderValue; 2], ApiError> {
-    let session = Cookie::build((SESSION_COOKIE, ""))
+    let session = Cookie::build((session_cookie_name(secure), ""))
         .http_only(true)
         .same_site(SameSite::Strict)
         .secure(secure)

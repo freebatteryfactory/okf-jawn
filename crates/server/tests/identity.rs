@@ -10,7 +10,9 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use axum::response::Response;
 use axum::{Extension, Router};
-use okf_jawn_contract::access::{AccessRoute, CSRF_HEADER, Permission, Principal};
+use okf_jawn_contract::access::{
+    AccessRoute, CSRF_HEADER, Permission, Principal, SESSION_COOKIE, SESSION_COOKIE_HTTPS,
+};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{TenantId, Timestamp};
 use okf_jawn_core::credentials::{CredentialStore, SessionRecord, secret_hash};
@@ -515,6 +517,48 @@ fn cookie_request(secret: &str) -> Result<Request<Body>, axum::http::Error> {
         .header("cookie", format!("okf-session={secret}"))
         .header(CSRF_HEADER, csrf_token_of(secret))
         .body(Body::from(list_drafts_body().to_string()))
+}
+
+/// A draft listing sent with the owner's session secret under the cookie `name`.
+fn named_cookie_request(name: &str, secret: &str) -> Result<Request<Body>, axum::http::Error> {
+    Request::post(LIST_DRAFTS)
+        .header("host", HOST)
+        .header("content-type", "application/json")
+        .header("cookie", format!("{name}={secret}"))
+        .header(CSRF_HEADER, csrf_token_of(secret))
+        .body(Body::from(list_drafts_body().to_string()))
+}
+
+/// Ruling 17: the server reads only the session cookie of its public origin's scheme. Over
+/// https that is `__Host-okf-session`, and an `okf-session` cookie a sibling host could set is
+/// not read; on plain http it is `okf-session`, and a `__Host-okf-session` cookie is not read.
+#[tokio::test]
+async fn only_the_session_cookie_of_the_origins_scheme_is_read() -> TestResult {
+    let harness = Harness::new()?;
+    harness.owner_session("session-secret", FAR_FUTURE)?;
+    let https = harness.serve(
+        Identity::new(
+            BearerAuth::Local,
+            harness.ports(),
+            vec![format!("https://{HOST}")],
+        ),
+        Router::new(),
+    )?;
+    let http = harness.service(BearerAuth::Local)?;
+    for (app, name, status) in [
+        (&https, SESSION_COOKIE_HTTPS, StatusCode::OK),
+        (&https, SESSION_COOKIE, StatusCode::UNAUTHORIZED),
+        (&http, SESSION_COOKIE, StatusCode::OK),
+        (&http, SESSION_COOKIE_HTTPS, StatusCode::UNAUTHORIZED),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(named_cookie_request(name, "session-secret")?)
+            .await?;
+        assert_eq!(response.status(), status, "{name}");
+    }
+    assert_eq!(harness.counting.call_count("list_drafts")?, 2);
+    Ok(())
 }
 
 #[tokio::test]

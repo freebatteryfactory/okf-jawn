@@ -13,7 +13,8 @@
 //!   cookie. A hosted token the verifier cannot judge yet (`Unverified::retry_after`) is 503
 //!   `Unavailable` with `Retry-After`, never a 401 that would send a good client back to sign
 //!   in. The CLI, a connector and every other non-browser client arrive this way.
-//! - **Browser session cookie** (`okf-session`): resolved through `CredentialStore::get_session`
+//! - **Browser session cookie** (`__Host-okf-session` when the public origin is `https`,
+//!   `okf-session` on plain `http`; only the name of the service's own scheme is read): resolved through `CredentialStore::get_session`
 //!   by the SHA-256 of its secret. Only this path may carry `BrowserSession` or `LocalOwner`
 //!   (core lets those two routes reach drafts and decides by route alone, SPEC section 8), and a
 //!   stored session with any other route, or of the other mode's route, is refused. A cookie
@@ -41,7 +42,7 @@ use axum::http::{HeaderMap, HeaderValue, Method};
 use axum::middleware::Next;
 use axum::response::Response;
 use okf_jawn_contract::access::{
-    AccessRoute, CSRF_HEADER, Connector, DelegationCeiling, Principal, SESSION_COOKIE,
+    AccessRoute, CSRF_HEADER, Connector, DelegationCeiling, Principal,
 };
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::TenantId;
@@ -50,6 +51,7 @@ use okf_jawn_core::credentials::{CredentialStore, secret_hash};
 use okf_jawn_core::events::{EventLog, EventScope, NewEvent};
 
 use crate::SessionId;
+use crate::cookies::session_cookie_name;
 use crate::errors::{error_response, retry_response};
 
 /// Verifies a WorkOS Connect access token: JWKS signature, issuer, audience and expiry.
@@ -171,6 +173,8 @@ struct Inner {
     ports: IdentityPorts,
     /// Origins a cookie request may come from: the service's own public origin.
     origins: Vec<String>,
+    /// The one session cookie name read: the `https` name when every origin is `https`.
+    session_cookie: &'static str,
     clock: Arc<dyn WallClock>,
 }
 
@@ -206,8 +210,10 @@ impl WallClock for SystemWallClock {
 
 impl Identity {
     /// The middleware state: bearer tokens resolved by `bearer`, sessions and connectors read
-    /// through `ports`, and cookie requests accepted only from `origins`. Session expiry is
-    /// compared with the operating system's clock.
+    /// through `ports`, and cookie requests accepted only from `origins`. The session cookie read
+    /// is `__Host-okf-session` when every origin is `https`, and `okf-session` otherwise
+    /// (`cookies::session_cookie_name`). Session expiry is compared with the operating system's
+    /// clock.
     #[must_use]
     pub fn new(bearer: BearerAuth, ports: IdentityPorts, origins: Vec<String>) -> Self {
         Self::with_clock(bearer, ports, origins, Arc::new(SystemWallClock))
@@ -221,11 +227,14 @@ impl Identity {
         origins: Vec<String>,
         clock: Arc<dyn WallClock>,
     ) -> Self {
+        let secure =
+            !origins.is_empty() && origins.iter().all(|origin| origin.starts_with("https://"));
         Self {
             inner: Arc::new(Inner {
                 bearer,
                 ports,
                 origins,
+                session_cookie: session_cookie_name(secure),
                 clock,
             }),
         }
@@ -447,7 +456,12 @@ pub async fn identify(
             "The MCP endpoint needs a bearer token",
         ));
     }
-    let Some(secret) = identity.inner.ports.cookies.read(headers, SESSION_COOKIE) else {
+    let Some(secret) = identity
+        .inner
+        .ports
+        .cookies
+        .read(headers, identity.inner.session_cookie)
+    else {
         return next.run(request).await;
     };
     let session = match identity.session(&secret).await {
