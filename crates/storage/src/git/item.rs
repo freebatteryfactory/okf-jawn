@@ -10,6 +10,11 @@
 //! An item's rendering role is recorded in its header (`ApplicationHeader::kind`) when it is
 //! created and read back from there, never inferred from the body: a Note that shows a fenced
 //! vega-lite example stays a Note.
+//!
+//! An item's file ends in `.md`, in lower case (`is_item_path`), because the OKF format reads
+//! only that: okf-core's bundle collects a file whose extension is exactly `md`, and
+//! `ConceptId::to_path` writes `.md`. A file `X.MD` is a plain file, kept as it is; a write
+//! that names one for an item is refused with the lower-case name (`check_item_path`).
 
 use std::collections::BTreeMap;
 
@@ -37,6 +42,8 @@ pub(crate) const RULES_FILE: &str = ".okf/rules.yaml";
 pub(crate) const TYPES_FILE: &str = ".okf/types.json";
 /// The maintained change log at the root.
 pub(crate) const LOG_FILE: &str = "log.md";
+/// The extension of an item's file, exactly: the only one okf-core reads as a concept.
+const ITEM_EXTENSION: &str = "md";
 /// The request field of the server-owned header.
 const HEADER_FIELD: &str = "/properties/okf_jawn";
 
@@ -158,12 +165,24 @@ pub(crate) fn status_of(status: &okf_core::Status) -> ItemStatus {
     }
 }
 
-/// Whether a tree path is an item file: Markdown and not reserved (`is_reserved`).
+/// Whether a tree path is an item file: its extension is exactly `md`, in lower case (a file
+/// `X.MD` is a plain file, see the module header), and it is not reserved (`is_reserved`).
 pub(crate) fn is_item_path(path: &str) -> bool {
     std::path::Path::new(path)
         .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+        .is_some_and(|extension| extension == ITEM_EXTENSION)
         && !is_reserved(path)
+}
+
+/// `path` with its extension written `md`, when that extension is `md` in another letter case.
+fn in_lower_case(path: &str) -> Option<String> {
+    let extension = std::path::Path::new(path).extension()?;
+    if extension == ITEM_EXTENSION || !extension.eq_ignore_ascii_case(ITEM_EXTENSION) {
+        return None;
+    }
+    // The extension is the last two bytes, both ASCII, so the cut is a character boundary.
+    let stem = path.get(..path.len().checked_sub(ITEM_EXTENSION.len())?)?;
+    Some(format!("{stem}{ITEM_EXTENSION}"))
 }
 
 /// Whether a tree path is one the server keeps for itself or one that would collide with such
@@ -292,8 +311,9 @@ pub(crate) fn yaml_to_json(value: &Yaml) -> Json {
     }
 }
 
-/// Refuse, naming it, a path that cannot hold an item: not Markdown, or reserved in any letter
-/// case (`is_reserved`). `field` is the request field that named the path.
+/// Refuse, naming it, a path that cannot hold an item: reserved in any letter case
+/// (`is_reserved`), ending in `.md` in another letter case (refused naming the lower-case
+/// name), or not Markdown. `field` is the request field that named the path.
 pub(crate) fn check_item_path(path: &WorkspacePath, field: &str) -> Result<(), ApiError> {
     if is_reserved(path.as_str()) {
         return Err(ApiError::new(
@@ -307,17 +327,16 @@ pub(crate) fn check_item_path(path: &WorkspacePath, field: &str) -> Result<(), A
         .with_field(field));
     }
     if is_item_path(path.as_str()) {
-        Ok(())
-    } else {
-        Err(ApiError::new(
-            ErrorCode::InvalidInput,
-            format!(
-                "{} is not a Markdown file, so it cannot hold an item",
-                path.as_str()
-            ),
-        )
-        .with_field(field))
+        return Ok(());
     }
+    let message = match in_lower_case(path.as_str()) {
+        Some(named) => format!("a note's file ends in `.md` in lower case: name it {named}"),
+        None => format!(
+            "{} is not a Markdown file, so it cannot hold an item",
+            path.as_str()
+        ),
+    };
+    Err(ApiError::new(ErrorCode::InvalidInput, message).with_field(field))
 }
 
 /// The header a created item is written with: its identity and the rendering role its
