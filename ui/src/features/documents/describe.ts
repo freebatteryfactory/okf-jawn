@@ -20,6 +20,7 @@ import type {
   zUncitedReason,
   zUnresolvedReason,
 } from '../../api/generated/zod.gen';
+import { wordsFor } from '../../lib/words';
 
 type CellRange = z.infer<typeof zCellRange>;
 type ConversionOutcome = z.infer<typeof zConversionOutcome>;
@@ -127,6 +128,42 @@ export const EXTRACTION_STATUS: Record<ExtractionStatus, string> = {
   unsupported: 'Bytes kept; text extraction is not supported for this format.',
 };
 
+/**
+ * The mark a source carries wherever it is named (a row of the tree, a tab, a job's list of
+ * items): how its conversion stands, when it is anything but converted. A converted source, and
+ * an item that is not a source, carries none. "format not supported" is its own word: such a
+ * source is never marked, or left unmarked, as converted.
+ */
+export const CONVERSION_MARK: Record<Exclude<ExtractionStatus, 'completed'>, string> = {
+  pending: 'conversion pending',
+  partial: 'partly converted',
+  failed: 'conversion failed',
+  unsupported: 'format not supported',
+};
+
+/**
+ * A state this build does not know (a newer service) is marked as unknown, with the service's own
+ * word. It is never left unmarked: no mark is how a converted source looks.
+ */
+export function conversionWord(
+  extraction: { status: ExtractionStatus } | null | undefined,
+): string | null {
+  if (extraction === null || extraction === undefined) return null;
+  if (extraction.status === 'completed') return null;
+  return (
+    wordsFor(CONVERSION_MARK, extraction.status) ??
+    `conversion state not known: “${extraction.status}”`
+  );
+}
+
+/** How a conversion stands, as a sentence; a state this build does not know is said to be unknown. */
+export function extractionSentence(status: string): string {
+  return (
+    wordsFor(EXTRACTION_STATUS, status) ??
+    `The conversion is in a state this page does not know (“${status}”). It is not known to be converted.`
+  );
+}
+
 export const TEXT_ORIGIN: Record<TextOrigin, string> = {
   converter: 'The text shown is the converter’s.',
   supplied_by_agent:
@@ -145,6 +182,18 @@ export function extractionLabels(extraction: ExtractionSummary | null | undefine
   if (extraction === null || extraction === undefined) return [];
   const labels: string[] = [];
   if (extraction.status !== 'completed') labels.push(EXTRACTION_STATUS[extraction.status]);
+  if (extraction.text_origin !== 'converter') labels.push(TEXT_ORIGIN[extraction.text_origin]);
+  if (extraction.corrected) labels.push(CORRECTED);
+  return labels;
+}
+
+/**
+ * The labels of a source's text that say whose text it is: not the converter's, or corrected by a
+ * person. How the conversion itself stands is said apart (`ConversionState`).
+ */
+export function textLabels(extraction: ExtractionSummary | null | undefined): string[] {
+  if (extraction === null || extraction === undefined) return [];
+  const labels: string[] = [];
   if (extraction.text_origin !== 'converter') labels.push(TEXT_ORIGIN[extraction.text_origin]);
   if (extraction.corrected) labels.push(CORRECTED);
   return labels;
@@ -174,7 +223,7 @@ export function describeOutcome(outcome: ConversionOutcome): string {
     case 'failed':
       return `Conversion failed because ${describeFailure(outcome.reason)}; the original bytes are kept.`;
     default:
-      return EXTRACTION_STATUS[outcome.status];
+      return extractionSentence(outcome.status);
   }
 }
 

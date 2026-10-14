@@ -15,28 +15,33 @@ function Value({ value }: { value: unknown }) {
   return <pre>{JSON.stringify(value, null, 2)}</pre>;
 }
 
-export function Properties({ properties }: PropertiesProps) {
+/** The properties as a list of names and values; nothing when there are none. */
+export function PropertyList({ properties }: PropertiesProps) {
   const entries = Object.entries(properties);
+  if (entries.length === 0) return null;
+  return (
+    <dl>
+      {entries.map(([key, value]) => (
+        <div key={key} className="property">
+          <dt>
+            {key}
+            {key === APP_HEADER_KEY ? ' (kept by okf-jawn; not editable)' : ''}
+          </dt>
+          <dd>
+            <Value value={value} />
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+export function Properties({ properties }: PropertiesProps) {
+  const count = Object.keys(properties).length;
   return (
     <details className="properties" open>
-      <summary>Properties ({entries.length})</summary>
-      {entries.length === 0 ? (
-        <p>This item has no properties.</p>
-      ) : (
-        <dl>
-          {entries.map(([key, value]) => (
-            <div key={key} className="property">
-              <dt>
-                {key}
-                {key === APP_HEADER_KEY ? ' (kept by okf-jawn; not editable)' : ''}
-              </dt>
-              <dd>
-                <Value value={value} />
-              </dd>
-            </div>
-          ))}
-        </dl>
-      )}
+      <summary>Properties ({count})</summary>
+      {count === 0 ? <p>This item has no properties.</p> : <PropertyList properties={properties} />}
     </details>
   );
 }
