@@ -15,8 +15,9 @@ use tokio::task::JoinSet;
 use crate::check::{TestResult, some};
 use crate::support::fakes::{Call, FakeAccess, World};
 use crate::support::fixtures::{
-    HOST, agent, bundle, call, call_result, http_service, initialize, object_response, post,
-    principal, read_object_input, refusal_of, result_of, rpc, rpc_refusal,
+    HOST, WORKSPACE, agent, bundle, call, call_result, http_service, initialize, object_response,
+    post, principal, read_input, read_object_input, refusal_of, result_of, rpc, rpc_refusal,
+    workspace_log, workspaces_input,
 };
 
 /// No extra request headers.
@@ -86,15 +87,96 @@ async fn every_route_but_mcp_delegation_is_forbidden_and_recorded() -> TestResul
             "{route:?}"
         );
         assert_eq!(world.application.calls()?, Vec::new(), "{route:?}");
+        // The request names one workspace, so the refusal is recorded in that workspace's log.
         let appended = world.events.appended()?;
         assert_eq!(appended.len(), 1, "{route:?}");
         let (scope, event) = some(appended.first(), "the recorded refusal")?;
-        assert_eq!(scope, &EventScope::Tenant(caller.tenant_id.clone()));
+        assert_eq!(scope, &workspace_log(&caller, WORKSPACE)?, "{route:?}");
         assert_eq!(event.kind, EventKind::PermissionDenied);
         assert_eq!(event.operation, Some(OperationName::GetObject));
         let actor = some(event.actor.as_ref(), "the refused actor")?;
         assert_eq!(actor.route, route);
     }
+    Ok(())
+}
+
+/// A refused route is recorded where dispatch would record its own route refusal of the same
+/// request: in the log of the one workspace a tool call's arguments name, and otherwise in the
+/// tenant's (a tenant-level operation, arguments that are no request of the operation, and a
+/// request that is no operation). The caller's answer does not depend on the log.
+#[tokio::test]
+async fn a_refused_route_is_recorded_in_the_log_its_request_names() -> TestResult {
+    let browser = principal("owner", AccessRoute::BrowserSession)?;
+    let tenant = EventScope::Tenant(browser.tenant_id.clone());
+    let workspace = workspace_log(&browser, WORKSPACE)?;
+    let cases = [
+        (
+            "a read of one workspace's object",
+            call(1, "read_object", &read_object_input()),
+            &workspace,
+            Some(OperationName::GetObject),
+        ),
+        (
+            "a read of one workspace's item",
+            call(1, "show", &read_input(1024)),
+            &workspace,
+            Some(OperationName::ReadItem),
+        ),
+        (
+            "a tenant-level operation",
+            call(1, "workspaces", &workspaces_input()),
+            &tenant,
+            Some(OperationName::ListWorkspaces),
+        ),
+        (
+            "arguments that name a workspace and are no request of the operation",
+            call(1, "show", &json!({"workspace_id": WORKSPACE})),
+            &tenant,
+            Some(OperationName::ReadItem),
+        ),
+        (
+            "a tool name that is no operation, with a workspace in its arguments",
+            call(1, "no_such_tool", &read_object_input()),
+            &tenant,
+            None,
+        ),
+        (
+            "a request that is no operation",
+            rpc(1, "tools/list", &json!({})),
+            &tenant,
+            None,
+        ),
+    ];
+    let mut answers = Vec::new();
+    for (case, request, log, operation) in &cases {
+        let world = World::new(FakeAccess::default().granting("owner", EVERY_PERMISSION));
+        let service = http_service(&world, bundle("identity-refusal-log.html", "<p>app</p>")?)?;
+        let reply = post(&service, Some(browser.clone()), HOST, &[], request).await?;
+        // A tool call answers with an error result, any other request with a JSON-RPC error.
+        let refused = match reply.body.pointer("/error") {
+            Some(_) => rpc_refusal(&reply)?,
+            None => refusal_of(&call_result(&reply)?)?,
+        };
+        answers.push(serde_json::to_value(refused)?);
+        let appended = world.events.appended()?;
+        assert_eq!(appended.len(), 1, "{case}");
+        let (scope, event) = some(appended.first(), "the recorded refusal")?;
+        assert_eq!(&scope, log, "{case}");
+        assert_eq!(event.kind, EventKind::PermissionDenied, "{case}");
+        assert_eq!(&event.operation, operation, "{case}");
+        let actor = some(event.actor.as_ref(), "the refused actor")?;
+        assert_eq!(
+            (actor.subject.as_str(), &actor.route),
+            ("owner", &AccessRoute::BrowserSession),
+            "{case}"
+        );
+        assert_eq!(world.application.calls()?, Vec::new(), "{case}");
+    }
+    let refusal = json!({
+        "code": "forbidden",
+        "message": "Only an MCP delegation reaches this server; this route uses the HTTP API"
+    });
+    assert_eq!(answers, vec![refusal; cases.len()]);
     Ok(())
 }
 
