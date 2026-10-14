@@ -44,7 +44,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use git2::Repository;
-use okf_core::{Bundle, ConceptId, MoveOptions, RefactorError};
+use okf_core::{
+    Bundle, ConceptId, Link, LinkRewriteAction, MoveOptions, RefactorError, rewrite_markdown_links,
+};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::TextOrigin;
 use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath};
@@ -697,12 +699,17 @@ fn move_item(
     relink(staged, &from, destination.as_str(), Some("/destination"))
 }
 
-/// Move the item file at `current` to a private path beside it, `okf-jawn-<purpose>-<item
-/// id>.md` in the same folder, with every link that points at it (`relink`), and answer that
-/// path; a private path that is taken is `Conflict`. The caller moves the item on from there
-/// within the same commit, so the private path reaches no commit's tree. Being in the same
-/// folder, the item's own relative links resolve from the private path as they did from
-/// `current`. `field` is passed to `relink`.
+/// Move the item file at `current` to a private path beside it, with every link that points at
+/// it (`move_in`), and answer that path. The caller moves the item on from there within the
+/// same commit, so the private path reaches no commit's tree. `field` is passed to `move_in`.
+///
+/// The private path is the first free one of `okf-jawn-<purpose>-<item id>.md`, then
+/// `okf-jawn-<purpose>-<item id>-1.md`, `-2` and so on, in `current`'s folder. Free means that
+/// no file, folder or item holds its collision key in any spelling (`Staged::occupied`), and
+/// that no link or `sources` entry of the staged tree resolves to it (`linked`): the next hop
+/// rewrites every reference that resolves to the private path, so it must find only the ones
+/// this hop wrote. Each entry of the folder takes at most one of these names (the one with its
+/// key), and so does each linked concept, so one of the first `entries + linked + 1` is free.
 fn park(
     staged: &mut Staged,
     item: ItemId,
@@ -710,32 +717,93 @@ fn park(
     purpose: &str,
     field: Option<&str>,
 ) -> Result<WorkspacePath, ApiError> {
-    let name = format!("okf-jawn-{purpose}-{}.md", item.0);
-    let private = match current.rsplit_once('/') {
-        Some((folder, _)) => format!("{folder}/{name}"),
-        None => name,
-    };
-    let private = WorkspacePath::try_from(private)
-        .map_err(|error| internal(format!("a private path is invalid: {error}")))?;
-    if staged.occupied(&private, None)? {
-        return Err(conflict(format!("{} is already taken", private.as_str())));
+    let bundle = load(&staged.root)?;
+    let linked = linked(&bundle);
+    let folder = current.rsplit_once('/').map(|(folder, _)| folder);
+    let directory = folder.map_or_else(|| staged.root.clone(), |folder| staged.root.join(folder));
+    let entries = std::fs::read_dir(&directory)
+        .map_err(|error| io_error("read", &directory, &error))?
+        .count();
+    for attempt in 0..=entries.saturating_add(linked.len()) {
+        let name = match attempt {
+            0 => format!("okf-jawn-{purpose}-{}.md", item.0),
+            _ => format!("okf-jawn-{purpose}-{}-{attempt}.md", item.0),
+        };
+        let private = folder.map_or_else(|| name.clone(), |folder| format!("{folder}/{name}"));
+        let private = WorkspacePath::try_from(private)
+            .map_err(|error| internal(format!("a private path is invalid: {error}")))?;
+        if linked.contains(&concept(private.as_str())?) || staged.occupied(&private, None)? {
+            continue;
+        }
+        move_in(staged, &bundle, current, private.as_str(), field)?;
+        return Ok(private);
     }
-    relink(staged, current, private.as_str(), field)?;
-    Ok(private)
+    Err(internal(format!(
+        "no private path beside {current} was free"
+    )))
+}
+
+/// Every concept a reference of `bundle` resolves to, found as `okf_core::move_concept` finds
+/// the references it rewrites: each Markdown link of a body (`rewrite_markdown_links`, then
+/// `Link::resolve` from the document's own concept) and each `sources[].resource` of a
+/// frontmatter. A reference to a concept that does not exist counts: a move to that concept
+/// would rewrite it.
+fn linked(bundle: &Bundle) -> BTreeSet<ConceptId> {
+    let mut found = BTreeSet::new();
+    for concept in bundle.concepts() {
+        rewrite_markdown_links(&concept.document.body, |link, _| {
+            found.extend(link.resolve(&concept.id));
+            LinkRewriteAction::Keep
+        });
+        let Some(okf_core::Value::Sequence(sources)) = concept.document.frontmatter.get("sources")
+        else {
+            continue;
+        };
+        for source in sources {
+            if let okf_core::Value::Mapping(entry) = source
+                && let Some(okf_core::Value::String(resource)) = entry.get("resource")
+            {
+                let link = Link {
+                    text: String::new(),
+                    kind: Link::classify(resource),
+                    target: resource.clone(),
+                };
+                found.extend(link.resolve(&concept.id));
+            }
+        }
+    }
+    found
+}
+
+/// The staged tree as okf-core reads it.
+fn load(root: &Path) -> Result<Bundle, ApiError> {
+    Bundle::load(root)
+        .map_err(|error| internal(format!("the staged tree did not load as a bundle: {error}")))
 }
 
 /// Move the item file at `source` to `destination` with `okf_core::move_concept`, which rewrites
-/// every link that points at it, and index the staged tree again. The caller has checked
-/// `destination` free. A refusal other than an existing target is `InvalidInput` on `field`
-/// for a caller's move, and `Internal` for the server's own (`field` is `None`).
+/// every link that points at it, and index the staged tree again (`move_in`). The caller has
+/// checked `destination` free.
 fn relink(
     staged: &mut Staged,
     source: &str,
     destination: &str,
     field: Option<&str>,
 ) -> Result<(), ApiError> {
-    let bundle = Bundle::load(&staged.root)
-        .map_err(|error| internal(format!("the staged tree did not load as a bundle: {error}")))?;
+    let bundle = load(&staged.root)?;
+    move_in(staged, &bundle, source, destination, field)
+}
+
+/// `relink` on `bundle`, the staged tree as it is now. A refusal other than an existing target
+/// is `InvalidInput` on `field` for a caller's move, and `Internal` for the server's own
+/// (`field` is `None`).
+fn move_in(
+    staged: &mut Staged,
+    bundle: &Bundle,
+    source: &str,
+    destination: &str,
+    field: Option<&str>,
+) -> Result<(), ApiError> {
     let from = concept(source)?;
     let to = concept(destination)?;
     let options = MoveOptions {
@@ -744,7 +812,7 @@ fn relink(
         ..MoveOptions::default()
     };
     let moved =
-        okf_core::move_concept(&bundle, &from, &to, &options).map_err(|error| match error {
+        okf_core::move_concept(bundle, &from, &to, &options).map_err(|error| match error {
             RefactorError::ConceptAlreadyExists(_) => conflict(error.to_string()),
             other => match field {
                 Some(field) => {

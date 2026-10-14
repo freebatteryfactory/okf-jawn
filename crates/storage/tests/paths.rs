@@ -290,6 +290,29 @@ fn note(item: u32, at: &str, body: &str) -> Fallible<TreeEdit> {
     })
 }
 
+/// A note with `properties` besides its type and title.
+fn note_with(
+    item: u32,
+    at: &str,
+    body: &str,
+    properties: BTreeMap<String, serde_json::Value>,
+) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::CreateItem {
+        item_id: uuid!(item)?,
+        path: path(at)?,
+        title: Some(format!("Note {item}")),
+        type_name: "Note".to_owned(),
+        kind: ItemKind::Note,
+        body: body.to_owned(),
+        properties,
+    })
+}
+
+/// The first private name item `item` is parked under for `purpose` (`recase`, `rewind`).
+fn parked_name(purpose: &str, item: u32) -> String {
+    format!("okf-jawn-{purpose}-{}.md", uuid_text(item))
+}
+
 fn moved(item: u32, to: &str) -> Fallible<TreeEdit> {
     Ok(TreeEdit::MoveItem {
         item_id: uuid!(item)?,
@@ -735,6 +758,206 @@ async fn a_move_below_the_items_own_file_is_still_refused_as_taken() -> TestResu
         .await?;
     assert_conflict_naming(&error, &["a.md/inner.md", "already taken"]);
     Ok(())
+}
+
+// B1: the private name an item is parked under is a free name.
+
+/// Item 10 at `Notes/Report.md` with a referrer, and `taken` held by a person's note (item 11)
+/// or, with `plain`, by a plain file committed straight through Git; item 10 is renamed to
+/// `Notes/report.md`. The rename lands as one move past the taken name: `taken` keeps its
+/// bytes, the referrer follows and is the one file the check is told, and no other private
+/// name is left in the tree.
+async fn renamed_past(taken: &str, plain: bool) -> TestResult {
+    let space = Workspace::new().await?;
+    let mut edits = vec![
+        note(10, "Notes/Report.md", "The report.")?,
+        note(12, "ref.md", "Read [it](Notes/Report.md).")?,
+    ];
+    if !plain {
+        edits.push(note(11, taken, "A person's note named so.")?);
+    }
+    let mut seeded = space.commit(2, &space.initial, edits).await?;
+    if plain {
+        seeded = space.raw(900, &[], &[(taken, b"plain".to_vec())])?;
+    }
+    let held = some(space.file(&seeded, taken)?, "the taken name")?;
+    let recording = Arc::new(Recording::default());
+    let renamed = space
+        .commit_with(
+            3,
+            &seeded,
+            vec![moved(10, "Notes/report.md")?],
+            recording.clone(),
+        )
+        .await?
+        .revision;
+    assert_eq!(
+        space.item_at(&renamed, "Notes/report.md").await?,
+        Some(uuid!(10)?)
+    );
+    assert_eq!(space.file(&renamed, taken)?, Some(held), "{taken}");
+    let files = space.files(&renamed)?;
+    assert!(
+        !files
+            .iter()
+            .any(|file| file.contains(PARKED) && file != taken),
+        "{files:?}"
+    );
+    assert!(
+        !files.iter().any(|file| file == "Notes/Report.md"),
+        "{files:?}"
+    );
+    assert_eq!(recording.seen()?, [vec!["ref.md".to_owned()]]);
+    let referrer = space.body(&renamed, 12).await?;
+    assert_eq!(referrer, "Read [it](Notes/report.md).");
+    Ok(())
+}
+
+/// The first private name taken by a person's note, by a plain file, or by a note in another
+/// spelling of it does not stop a rename that changes only letter case, and is left as it was.
+#[tokio::test]
+async fn a_case_only_rename_parks_past_a_taken_private_name() -> TestResult {
+    let first = format!("Notes/{}", parked_name("recase", 10));
+    renamed_past(&first, false).await?;
+    renamed_past(&first, true).await?;
+    let upper = format!(
+        "Notes/{}.md",
+        parked_name("recase", 10)
+            .trim_end_matches(".md")
+            .to_uppercase()
+    );
+    renamed_past(&upper, false).await
+}
+
+/// An item whose own name is its first private name, in either spelling, can be renamed by
+/// letter case to the other spelling.
+#[tokio::test]
+async fn an_item_named_like_its_private_name_is_renamed_by_case() -> TestResult {
+    let lower = parked_name("recase", 10);
+    let upper = format!("{}.md", lower.trim_end_matches(".md").to_uppercase());
+    for (from, to) in [(&lower, &upper), (&upper, &lower)] {
+        let space = Workspace::new().await?;
+        let seeded = space
+            .commit(
+                2,
+                &space.initial,
+                vec![
+                    note(10, from, "Named like its private path.")?,
+                    note(12, "ref.md", &format!("Read [it]({from})."))?,
+                ],
+            )
+            .await?;
+        let renamed = space.commit(3, &seeded, vec![moved(10, to)?]).await?;
+        let files = space.files(&renamed)?;
+        assert!(files.iter().any(|file| file == to), "{files:?}");
+        assert!(!files.iter().any(|file| file == from), "{files:?}");
+        assert!(
+            !files.iter().any(|file| file.contains("-1.md")),
+            "{files:?}"
+        );
+        assert_eq!(space.file(&renamed, to)?, space.file(&seeded, from)?);
+        assert_eq!(space.body(&renamed, 12).await?, format!("Read [it]({to})."));
+    }
+    Ok(())
+}
+
+/// A link, or a `sources` entry, that points at the first private name while nothing holds it
+/// is a broken reference that a rename by letter case leaves alone: the rename parks the item
+/// elsewhere, so only the links to the item follow it, and the check is told only the file
+/// that held one.
+#[tokio::test]
+async fn a_link_to_the_private_name_is_not_rewritten_by_a_case_only_rename() -> TestResult {
+    let space = Workspace::new().await?;
+    let ghost = parked_name("recase", 10);
+    let sources = BTreeMap::from([("sources".to_owned(), json!([{ "resource": ghost }]))]);
+    let seeded = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "Notes/Report.md", "The report.")?,
+                note(
+                    12,
+                    "Notes/other.md",
+                    &format!("[ghost]({ghost}) and [real](Report.md)."),
+                )?,
+                note(13, "Notes/bystander.md", &format!("Only [ghost]({ghost})."))?,
+                note_with(14, "Notes/cited.md", "Cites it.", sources)?,
+            ],
+        )
+        .await?;
+    let recording = Arc::new(Recording::default());
+    let renamed = space
+        .commit_with(
+            3,
+            &seeded,
+            vec![moved(10, "Notes/report.md")?],
+            recording.clone(),
+        )
+        .await?
+        .revision;
+    assert_eq!(
+        space.body(&renamed, 12).await?,
+        format!("[ghost]({ghost}) and [real](report.md).")
+    );
+    for at in ["Notes/bystander.md", "Notes/cited.md"] {
+        assert_eq!(space.file(&renamed, at)?, space.file(&seeded, at)?, "{at}");
+    }
+    assert_eq!(recording.seen()?, [vec!["Notes/other.md".to_owned()]]);
+    Ok(())
+}
+
+/// Item 20 moved from `a/x.md` to `b/c/x.md`, then rewound. With `plain`, a plain file holds
+/// its first private name `b/c/okf-jawn-rewind-<id>.md`; without, a note beside it links to
+/// that name while nothing holds it. The Rewind parks the item at a free name: it lands, the
+/// plain file or the link stays as it was, and a referrer of the item follows it back.
+async fn rewound_past(plain: bool) -> TestResult {
+    let space = Workspace::new().await?;
+    let ghost = parked_name("rewind", 20);
+    let first = format!("b/c/{ghost}");
+    let early = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(20, "a/x.md", "Twenty.")?,
+                note(21, "top.md", "Top [x](a/x.md).")?,
+                note(22, "b/c/ghost.md", &format!("Only [ghost]({ghost})."))?,
+            ],
+        )
+        .await?;
+    let mut away = space
+        .commit(3, &early, vec![moved(20, "b/c/x.md")?])
+        .await?;
+    if plain {
+        away = space.raw(
+            900,
+            &["b/c/ghost.md"],
+            &[(first.as_str(), b"plain".to_vec())],
+        )?;
+    }
+    let back = space.commit(4, &away, vec![restore(20, &early)?]).await?;
+    assert_eq!(space.item_at(&back, "a/x.md").await?, Some(uuid!(20)?));
+    assert_eq!(space.body(&back, 21).await?, "Top [x](a/x.md).");
+    for at in [first.as_str(), "b/c/ghost.md"] {
+        assert_eq!(space.file(&back, at)?, space.file(&away, at)?, "{at}");
+    }
+    let files = space.files(&back)?;
+    assert!(
+        !files
+            .iter()
+            .any(|file| file.contains("okf-jawn-rewind-") && *file != first),
+        "{files:?}"
+    );
+    Ok(())
+}
+
+/// A Rewind that moves an item back parks it beside its current path at a free name too, past
+/// a plain file that holds the first private name and past a link that points at it.
+#[tokio::test]
+async fn a_rewind_parks_past_a_taken_private_name_and_leaves_links_to_it() -> TestResult {
+    rewound_past(true).await?;
+    rewound_past(false).await
 }
 
 // S2: a folder spelled two ways.
