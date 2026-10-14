@@ -1588,6 +1588,44 @@ async fn a_revision_spelling_a_server_name_another_way_is_refused_naming_the_rep
     Ok(())
 }
 
+/// A Rewind of an item to a revision whose corrections of it spell a digest's name another way
+/// is refused like a revision that holds it, naming the corrections' workspace path, the
+/// server's spelling and the repair: the corrections folder is checked by its workspace paths
+/// before it is written.
+#[tokio::test]
+async fn a_rewind_to_respelled_corrections_is_refused_naming_the_repair() -> TestResult {
+    let space = Workspace::new().await?;
+    space
+        .commit(2, &space.initial, vec![card_of(LETTERED, "one.md")?])
+        .await?;
+    let digest = "c".repeat(64);
+    let upper = digest.to_uppercase();
+    let respelled = format!(".okf/corrections/{LETTERED}/{upper}.json");
+    let early = space.raw(900, &[], &[(respelled.as_str(), b"{}".to_vec())])?;
+    let clean = space.raw(901, &[respelled.as_str()], &[])?;
+    let error = space
+        .refused(
+            3,
+            &clean,
+            vec![TreeEdit::RestoreItem {
+                item_id: serde_json::from_value(json!(LETTERED))?,
+                from: early,
+            }],
+        )
+        .await?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    assert_eq!(
+        error.message,
+        format!(
+            "{respelled} collides with the server's .okf/corrections/{LETTERED}/{digest}.json: \
+             the revision spells a path the server writes another way, which Windows and macOS \
+             would merge with it; the workspace can be restored to a revision from before \
+             {respelled} appeared"
+        )
+    );
+    Ok(())
+}
+
 /// A restore of paths that writes a name the server writes in another spelling, into a tree
 /// that holds neither spelling, is refused naming both spellings: the staged copy is checked
 /// for it after the edits, so no commit can hold it.
