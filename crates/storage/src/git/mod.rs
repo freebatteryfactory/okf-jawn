@@ -17,7 +17,7 @@ use std::sync::Arc;
 use git2::{Oid, Repository};
 use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::conventions::NamingRules;
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::history::{BlameResponse, DiffResponse, LogResponse};
 use okf_jawn_contract::identity::{
     Digest, ItemId, MutationId, ProposalId, Revision, WorkspacePath,
@@ -297,7 +297,7 @@ impl VersionStore for GitVersions {
                     return Ok((replay, named_by(&repository, found, named)?));
                 }
                 if current != expected {
-                    return Err(moved_head());
+                    return Err(moved_head(&repository));
                 }
                 let mutation_id = changes.mutation_id;
                 let write = Write {
@@ -589,7 +589,7 @@ fn promote(
         return warnings::replayed(records, scope, promotion.mutation_id, found);
     }
     if current != expected {
-        return Err(moved_head());
+        return Err(moved_head(repository));
     }
     let retained = reference_target(repository, &proposal_reference(promotion.proposal_id))?;
     let candidate = oid(&promotion.candidate)?;
@@ -651,18 +651,25 @@ fn move_reference(
             error.code(),
             git2::ErrorCode::Modified | git2::ErrorCode::Exists
         ) {
-            moved_head()
+            moved_head(repository)
         } else {
             git(&error)
         }
     })
 }
 
-fn moved_head() -> ApiError {
-    ApiError::new(
-        ErrorCode::Conflict,
-        "the workspace head moved since the change was prepared",
-    )
+/// The refusal of a write whose expected head is not the head: `Conflict` with
+/// `ErrorDetail::StaleBase` naming the head it was compared with; the caller, which knows the
+/// request, names its field. A head that cannot be read is answered as that read's error.
+fn moved_head(repository: &Repository) -> ApiError {
+    match head(repository).and_then(revision_of) {
+        Ok(head) => ApiError::new(
+            ErrorCode::Conflict,
+            "the workspace head moved since the change was prepared",
+        )
+        .with_detail(ErrorDetail::StaleBase { head }),
+        Err(error) => error,
+    }
 }
 
 /// The commit an `expected_head` names. One the repository does not hold (stale after a
@@ -672,7 +679,7 @@ fn held_head(repository: &Repository, expected: &Revision) -> Result<Oid, ApiErr
     let id = oid(expected)?;
     match repository.find_commit(id) {
         Ok(_) => Ok(id),
-        Err(error) if error.code() == git2::ErrorCode::NotFound => Err(moved_head()),
+        Err(error) if error.code() == git2::ErrorCode::NotFound => Err(moved_head(repository)),
         Err(error) => Err(git(&error)),
     }
 }

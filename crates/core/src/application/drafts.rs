@@ -23,7 +23,7 @@
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{ItemId, Revision};
 use okf_jawn_contract::item::{
-    DiscardDraftRequest, Draft, DraftContent, ItemDocument, ItemKind, ListDraftsRequest,
+    DiscardDraftRequest, Draft, DraftContent, DraftRow, ItemDocument, ItemKind, ListDraftsRequest,
     ListDraftsResponse, SaveDraftRequest,
 };
 
@@ -217,10 +217,14 @@ async fn require_item_at(
     }
 }
 
-/// One page of the caller's drafts in the workspace, most recently saved first.
+/// One page of the caller's drafts in the workspace, most recently saved first, each with its
+/// item's summary at the head, which the answer names (`ListDraftsResponse::revision`).
 ///
 /// The store lists every draft of the editor; the page is cut here, and its cursor is the
-/// decimal position of the next draft in that order.
+/// decimal position of the next draft in that order. Each row's item is read at the head with
+/// `VersionStore::show` (one read a row, up to the page's 200); an item the head does not hold
+/// (deleted since its draft was saved) has no summary, and any other refusal of the read fails
+/// the request.
 ///
 /// # Errors
 /// Returns `InvalidInput` on `/page/cursor` for a cursor this operation did not issue, or any
@@ -245,8 +249,24 @@ pub(super) async fn list_drafts(
         .await?;
     let after = offset.saturating_add(limit);
     let next_cursor = (after < drafts.len()).then(|| after.to_string());
+    let revision = service.ports().versions.head(&scope).await?;
+    let mut items = Vec::with_capacity(limit.min(drafts.len()));
+    for draft in drafts.into_iter().skip(offset).take(limit) {
+        let item = match service
+            .ports()
+            .versions
+            .show(&scope, &revision, draft.item_id)
+            .await
+        {
+            Ok(document) => Some(document.summary),
+            Err(error) if error.code == ErrorCode::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        items.push(DraftRow { draft, item });
+    }
     Ok(ListDraftsResponse {
-        items: drafts.into_iter().skip(offset).take(limit).collect(),
+        revision,
+        items,
         next_cursor,
     })
 }

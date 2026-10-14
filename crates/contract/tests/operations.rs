@@ -44,7 +44,7 @@ const EXPECTED_HUMAN_SESSION_ONLY: &[&str] = &[
     "purge_item",
 ];
 /// Contract types that hold a draft or its content.
-const DRAFT_TYPES: &[&str] = &["Draft", "DraftContent"];
+const DRAFT_TYPES: &[&str] = &["Draft", "DraftContent", "DraftRow"];
 /// Contract types named `Draft…` that hold no draft content, each with why. A new `Draft…` type
 /// must be added here or to `DRAFT_TYPES`.
 const DRAFT_NAMED_NOT_DRAFT: &[(&str, &str)] = &[(
@@ -54,7 +54,7 @@ const DRAFT_NAMED_NOT_DRAFT: &[(&str, &str)] = &[(
 /// Operations whose schemas name a draft type but which never carry a draft, each with why.
 const DRAFT_SCHEMA_EXEMPT: &[(&str, &str)] = &[(
     "create_item",
-    "Its response is an ItemDocument, whose optional `draft` field is how get_item returns the      caller's draft. A created item is an immediate commit with a fresh identity, so no draft      of it can exist: the create_item handler must return `draft: None` on every route.",
+    "Its response holds an ItemDocument (CreatedItem.item), whose optional `draft` field is how get_item returns the      caller's draft. A created item is an immediate commit with a fresh identity, so no draft      of it can exist: the create_item handler must return `draft: None` on every route.",
 )];
 
 /// Operations that destroy or overwrite user state, in table order.

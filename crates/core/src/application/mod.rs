@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{TenantId, WorkspaceId};
+use okf_jawn_contract::import::DEFAULT_MAX_UPLOAD_BYTES;
 use time::OffsetDateTime;
 
 use crate::access::AccessControl;
@@ -206,6 +207,10 @@ pub struct ApplicationConfig {
     pub sandbox_origin: String,
     /// How long a minted sandbox capability resolves; above zero.
     pub sandbox_ttl: Duration,
+    /// The most bytes of one upload; above zero. `ApplicationConfig::new` sets the contract's
+    /// `import::DEFAULT_MAX_UPLOAD_BYTES`, and a deployment may set another. `get_session`
+    /// reports it (`Limits::upload_bytes`).
+    pub max_upload_bytes: u64,
 }
 
 /// Where the service reads the current instant: the system clock unless a test fixes it
@@ -227,13 +232,24 @@ pub struct ApplicationService {
 type IndexBuilds = Mutex<BTreeMap<(TenantId, WorkspaceId), Arc<tokio::sync::Mutex<()>>>>;
 
 impl ApplicationConfig {
+    /// The settings of a deployment with the default upload limit
+    /// (`import::DEFAULT_MAX_UPLOAD_BYTES`).
+    #[must_use]
+    pub const fn new(sandbox_origin: String, sandbox_ttl: Duration) -> Self {
+        Self {
+            sandbox_origin,
+            sandbox_ttl,
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
+        }
+    }
+
     /// Refuse settings no deployment may run with.
     ///
     /// # Errors
     /// Returns `InvalidInput` naming `sandbox_origin` when it is not an absolute `http` or
     /// `https` origin of a host and an optional port in `1..=65535`, without a path, query,
-    /// fragment or user information, and naming
-    /// `sandbox_ttl` when it is zero.
+    /// fragment or user information, naming `sandbox_ttl` when it is zero, and naming
+    /// `max_upload_bytes` when it is zero.
     pub fn check(&self) -> Result<(), ApiError> {
         if !is_origin(&self.sandbox_origin) {
             return Err(ApiError::new(
@@ -248,6 +264,13 @@ impl ApplicationConfig {
                 "a sandbox capability must resolve for some time",
             )
             .with_field("sandbox_ttl"));
+        }
+        if self.max_upload_bytes == 0 {
+            return Err(ApiError::new(
+                ErrorCode::InvalidInput,
+                "an upload must be allowed some bytes",
+            )
+            .with_field("max_upload_bytes"));
         }
         Ok(())
     }

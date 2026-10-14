@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::common::Warning;
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::{ItemId, MutationId, Revision, TenantId, WorkspacePath};
 use okf_jawn_contract::item::{ItemKind, ItemStatus};
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
@@ -446,6 +446,13 @@ async fn mutation_crash_reconcile_commit_carries_the_trailer_and_a_moved_head_co
             .await,
     )?;
     assert_eq!(error.code, ErrorCode::Conflict);
+    // Ruling 5: the refusal names the head the expected one was compared with.
+    assert_eq!(
+        error.detail.as_deref(),
+        Some(&ErrorDetail::StaleBase {
+            head: versions.head(&scope).await?
+        })
+    );
     assert!(
         staging_is_empty(&storage)?,
         "staging is removed after every call"

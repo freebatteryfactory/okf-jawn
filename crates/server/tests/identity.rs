@@ -80,7 +80,10 @@ impl Harness {
             .insert(workspace(WORKSPACE)?, fixtures::all_permissions());
         let counting = Arc::new(CountingApplication::new());
         counting.set_response("list_items", listing())?;
-        counting.set_response("list_drafts", json!({ "items": [] }))?;
+        counting.set_response(
+            "list_drafts",
+            json!({ "revision": "a".repeat(40), "items": [] }),
+        )?;
         Ok(Self {
             counting,
             credentials: Arc::new(FakeCredentials::default()),

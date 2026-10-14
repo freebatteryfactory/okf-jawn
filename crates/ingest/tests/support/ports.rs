@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use okf_jawn_contract::common::{PageRange, Warning};
 use okf_jawn_contract::conventions::NamingRules;
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::extraction::{ConverterIdentity, FailureReason};
 use okf_jawn_contract::history::{BlameResponse, Commit, DiffResponse, LogResponse};
 use okf_jawn_contract::identity::{
@@ -587,7 +587,9 @@ impl FakeVersions {
             .last()
             .map_or_else(|| self.head.clone(), |(_, revision)| revision.clone());
         if changes.expected_head != head {
-            return Err(ApiError::new(ErrorCode::Conflict, "the head moved"));
+            // As storage refuses it: `StaleBase` naming the head.
+            return Err(ApiError::new(ErrorCode::Conflict, "the head moved")
+                .with_detail(ErrorDetail::StaleBase { head }));
         }
         let mut holders: Vec<(String, ItemId)> = self.taken.lock().map_err(|_| poisoned())?.clone();
         holders.extend(commits.iter().flat_map(|(earlier, _)| {

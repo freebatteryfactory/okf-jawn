@@ -2,7 +2,7 @@
 #![cfg(feature = "runtime")]
 
 use okf_jawn_contract::access::{AccessRoute, Permission};
-use okf_jawn_contract::error::ErrorCode;
+use okf_jawn_contract::error::{ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::{Digest, JobId, TenantId, UploadId};
 use okf_jawn_core::credentials::{ConnectorIssue, CredentialStore, NewConnector, secret_hash};
 use okf_jawn_core::storage::{BlobStore, ByteReader, Provenance, StorageScope};
@@ -121,6 +121,16 @@ async fn a_blob_past_its_limit_or_with_another_digest_is_not_retained() -> TestR
         assert_eq!(error.code, ErrorCode::NotFound, "nothing was retained");
     }
     Ok(())
+}
+
+/// The detail of a completion refused for a mismatch: `expected` and `received` bytes, and
+/// whether the digest matched.
+fn mismatch(expected: &str, received: &str, digest_matches: Option<bool>) -> ErrorDetail {
+    ErrorDetail::UploadMismatch {
+        expected_bytes: expected.to_owned(),
+        received_bytes: received.to_owned(),
+        digest_matches,
+    }
 }
 
 fn announced(size: u64) -> NewUpload {
@@ -398,6 +408,8 @@ async fn an_upload_is_received_verified_retained_and_consumed_once() -> TestResu
         ErrorCode::Conflict,
         "five of ten bytes received"
     );
+    // Ruling 5: the lengths are named, and the digest was not compared.
+    assert_eq!(error.detail.as_deref(), Some(&mismatch("10", "5", None)));
     let error = err_of(uploads.consume(&local, slot.id, uuid!(7)?).await)?;
     assert_eq!(error.code, ErrorCode::InvalidInput);
     uploads
@@ -405,6 +417,11 @@ async fn an_upload_is_received_verified_retained_and_consumed_once() -> TestResu
         .await?;
     let error = err_of(uploads.complete(&local, slot.id, sha256(b"wrong")?).await)?;
     assert_eq!(error.code, ErrorCode::Conflict);
+    assert_eq!(
+        error.detail.as_deref(),
+        Some(&mismatch("10", "10", Some(false))),
+        "every byte received, the digest differs"
+    );
     let complete = uploads
         .complete(&local, slot.id, sha256(b"0123456789")?)
         .await?;
@@ -414,6 +431,13 @@ async fn an_upload_is_received_verified_retained_and_consumed_once() -> TestResu
         .complete(&local, slot.id, sha256(b"0123456789")?)
         .await?;
     assert_eq!(again, complete);
+    let other = err_of(uploads.complete(&local, slot.id, sha256(b"other")?).await)?;
+    assert_eq!(other.code, ErrorCode::Conflict);
+    assert_eq!(
+        other.detail.as_deref(),
+        Some(&mismatch("10", "10", Some(false))),
+        "completed with another digest"
+    );
     let read = storage.blobs().open(&local, &object.digest, 0, 10).await?;
     assert_eq!(read_all(read.body).await?, b"0123456789");
     let consumed = uploads.consume(&local, slot.id, uuid!(7)?).await?;

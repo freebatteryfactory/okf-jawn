@@ -190,6 +190,18 @@ pub struct CreateItemRequest {
     pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
+/// A created item, with the receipt of its commit and the findings of the commit's check.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreatedItem {
+    /// The item as committed.
+    pub item: ItemDocument,
+    /// Durable application operation receipt.
+    pub receipt_id: crate::identity::ReceiptId,
+    /// Non-fatal issues recorded during the operation.
+    pub warnings: Vec<crate::common::Warning>,
+}
+
 /// Save the caller's draft; always succeeds even when the head has moved.
 ///
 /// The first save records `base_revision`, the revision the editor saw, as the draft's base;
@@ -223,15 +235,28 @@ pub struct ListDraftsRequest {
     pub page: crate::common::PageRequest,
 }
 
-/// The caller's drafts, without other editors' drafts.
+/// The caller's drafts, without other editors' drafts, each with its item's summary.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListDraftsResponse {
-    /// Draft metadata.
-    pub items: Vec<Draft>,
+    /// The head at which the items were read.
+    pub revision: crate::identity::Revision,
+    /// The drafts, most recently saved first.
+    pub items: Vec<DraftRow>,
     /// Continuation cursor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+}
+
+/// One draft and its item.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DraftRow {
+    /// Draft metadata.
+    pub draft: Draft,
+    /// The item as it is at `revision`; absent when the item does not exist there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<ItemSummary>,
 }
 
 /// Remove the caller's own draft of one item.

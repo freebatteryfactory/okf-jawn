@@ -76,8 +76,10 @@ pub trait UploadStore: Send + Sync {
     ) -> PortFuture<'a, UploadRecord>;
     /// Verify the received bytes against the announced length and `sha256`, and retain them.
     ///
-    /// Fails with `Conflict` on a length or hash mismatch and retains nothing. Completing a
-    /// complete slot with the same `sha256` changes nothing and returns the same record.
+    /// Fails with `Conflict` and `ErrorDetail::UploadMismatch` on a length or hash mismatch, and
+    /// retains nothing; completing a complete slot with another `sha256` is such a mismatch.
+    /// Completing a complete slot with the same `sha256` changes nothing and returns the same
+    /// record.
     fn complete<'a>(
         &'a self,
         scope: &'a StorageScope,

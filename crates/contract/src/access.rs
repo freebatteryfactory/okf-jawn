@@ -81,6 +81,21 @@ pub struct SessionResponse {
     /// Browser writes require a same-origin anti-CSRF token: the double-submit pair published
     /// as the `csrfCookie` and `csrfHeader` security schemes.
     pub csrf_required: bool,
+    /// The limits this deployment applies, so a client can check before it sends.
+    pub limits: Limits,
+}
+
+/// The limits a deployment applies to what a client sends.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Limits {
+    /// The most bytes of one upload, as a decimal string (a 64-bit value); `create_upload`
+    /// refuses a larger `size` as `too_large` on `/size` when the slot is opened.
+    pub upload_bytes: String,
+    /// The most bytes of one JSON request body (`transport::MAX_REQUEST_BODY_BYTES`).
+    pub request_body_bytes: u32,
+    /// The most UTF-8 bytes of one item's text in a write (`item::MAX_ITEM_TEXT_BYTES`).
+    pub item_text_bytes: u32,
 }
 
 /// Issue a scoped credential for a local MCP client; read-only unless propose is enabled.

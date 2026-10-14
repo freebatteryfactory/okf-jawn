@@ -93,8 +93,10 @@ impl Local {
     /// The service whose sign-ins are recorded in `events` (the fixture log when `None`).
     fn with_events(events: Option<Arc<dyn EventLog>>) -> Result<Self, Box<dyn std::error::Error>> {
         let base = LocalApp::new()?;
-        base.counting
-            .set_response("list_drafts", json!({ "items": [] }))?;
+        base.counting.set_response(
+            "list_drafts",
+            json!({ "revision": "a".repeat(40), "items": [] }),
+        )?;
         let tokens = Arc::new(LaunchTokens::new());
         // One secret more than one sign-in needs, so a second sign-in would show.
         let secrets = Arc::new(Sequence(Mutex::new(vec![

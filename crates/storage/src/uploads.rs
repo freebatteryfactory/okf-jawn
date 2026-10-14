@@ -19,7 +19,7 @@ use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::{Digest, JobId, MutationId, UploadId};
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{ByteReader, ObjectInfo, StorageScope};
@@ -269,22 +269,25 @@ impl SqliteUploads {
             if object.digest == sha256 {
                 return Ok(record);
             }
-            return Err(conflict("this upload was completed with another digest"));
+            return Err(conflict("this upload was completed with another digest")
+                .with_detail(mismatch(&record, Some(false))));
         }
         if record.received_bytes != record.expected_size {
             return Err(conflict(format!(
                 "received {} bytes of the {} announced",
                 record.received_bytes, record.expected_size
-            )));
+            ))
+            .with_detail(mismatch(&record, None)));
         }
         if record
             .expected_sha256
             .as_ref()
             .is_some_and(|announced| *announced != sha256)
         {
-            return Err(conflict(
-                "the digest differs from the one announced for this upload",
-            ));
+            return Err(
+                conflict("the digest differs from the one announced for this upload")
+                    .with_detail(mismatch(&record, Some(false))),
+            );
         }
         let part = self.part(upload);
         let body = if record.expected_size == 0 {
@@ -295,10 +298,19 @@ impl SqliteUploads {
         // Pinned until this write ends, and recorded as a pending put until the upload's record
         // names the object; a failed record write leaves the pending put, so a purge of the
         // workspace deletes the bytes.
+        // The store refuses bytes whose digest is not `sha256` with `Conflict`, retaining nothing:
+        // every byte was received, and the digest does not match.
         let (object, pinned) = self
             .blobs
             .put_pinned(scope, body, record.expected_size, Some(sha256))
-            .await?;
+            .await
+            .map_err(|error| {
+                if error.code == ErrorCode::Conflict && error.detail.is_none() {
+                    error.with_detail(mismatch(&record, Some(false)))
+                } else {
+                    error
+                }
+            })?;
         let (tenant, workspace) = scope_key(scope);
         let stored = self
             .db
@@ -596,4 +608,15 @@ fn append_file(from: &std::path::Path, to: &std::path::Path) -> Result<(), ApiEr
     target
         .sync_all()
         .map_err(|error| io_error("sync", to, &error))
+}
+
+/// The typed detail of a completion refused because the upload's bytes do not match what was
+/// announced: both lengths, and whether the digest matched (`None` when the length already
+/// differs, so the digest was not compared).
+fn mismatch(record: &UploadRecord, digest_matches: Option<bool>) -> ErrorDetail {
+    ErrorDetail::UploadMismatch {
+        expected_bytes: record.expected_size.to_string(),
+        received_bytes: record.received_bytes.to_string(),
+        digest_matches,
+    }
 }

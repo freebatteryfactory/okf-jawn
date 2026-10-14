@@ -69,7 +69,7 @@ use std::time::Duration;
 use okf_jawn_contract::access::{AccessRoute, Connector, IssuedConnector, Principal};
 use okf_jawn_contract::common::{PageRange, TextRange, Warning};
 use okf_jawn_contract::conventions::NamingRules;
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::events::{Event, ListEventsResponse, Receipt};
 use okf_jawn_contract::extraction::{
     ConversionOutcome, ConversionSettings, ConverterIdentity, Extraction, TextOrigin,
@@ -80,7 +80,7 @@ use okf_jawn_contract::identity::{
     ArtifactId, ConnectorId, Digest, ItemId, JobId, MutationId, ProposalId, PurgeId, ReceiptId,
     Revision, TenantId, Timestamp, UploadId, WorkspaceId, WorkspacePath,
 };
-use okf_jawn_contract::import::{Job, ListJobsResponse};
+use okf_jawn_contract::import::{DEFAULT_MAX_UPLOAD_BYTES, Job, ListJobsResponse};
 use okf_jawn_contract::item::{
     Draft, DraftContent, ItemDocument, ItemKind, ItemStatus, ItemSummary, TypeDefinition,
 };
@@ -296,6 +296,14 @@ impl World {
     /// # Errors
     /// Returns when the staged directory cannot be written or a fixture value does not parse.
     pub fn new() -> Built<Self> {
+        Self::with_config(config())
+    }
+
+    /// The same world, its service built with `config`.
+    ///
+    /// # Errors
+    /// As `World::new`, or the refusal of `config`.
+    pub fn with_config(config: ApplicationConfig) -> Built<Self> {
         let versions = Arc::new(FakeVersions::new()?);
         let blobs = Arc::new(FakeBlobs::default());
         let records = Arc::new(FakeRecords::default());
@@ -324,7 +332,7 @@ impl World {
             sandbox: sandbox.clone(),
             readiness: readiness.clone(),
         };
-        let service = ApplicationService::new(ports, config())?;
+        let service = ApplicationService::new(ports, config)?;
         Ok(Self {
             service,
             versions,
@@ -409,6 +417,19 @@ impl FakeVersions {
     pub fn forget_warnings(&self) -> Built<()> {
         lock(&self.state)?.warnings.clear();
         Ok(())
+    }
+
+    /// The warnings the check gave the commit of `mutation`, as the store kept them.
+    ///
+    /// # Errors
+    /// Returns an error when the state lock is poisoned or no warnings were kept for it.
+    pub fn kept_warnings(&self, mutation: MutationId) -> Built<Vec<Warning>> {
+        lock(&self.state)?
+            .warnings
+            .iter()
+            .find(|(kept, _)| *kept == mutation)
+            .map(|(_, warnings)| warnings.clone())
+            .ok_or_else(|| "no warnings were kept for that commit".into())
     }
 
     /// The staged tree every commit's check runs on.
@@ -1299,7 +1320,12 @@ impl VersionStore for FakeVersions {
                 return Ok(state.replay_of(changes.mutation_id, revision));
             }
             if state.head.as_ref() != Some(&changes.expected_head) {
-                return Err(ApiError::new(ErrorCode::Conflict, "the head moved"));
+                // As storage refuses it: `StaleBase` naming the head (`moved_head`).
+                let moved = ApiError::new(ErrorCode::Conflict, "the head moved");
+                return Err(match state.head.clone() {
+                    Some(head) => moved.with_detail(ErrorDetail::StaleBase { head }),
+                    None => moved,
+                });
             }
             let (written, moved) = state.applied(&changes)?;
             // "`rewritten` names the files of the candidate that the store rewrote on its own
@@ -2340,6 +2366,7 @@ pub fn config() -> ApplicationConfig {
     ApplicationConfig {
         sandbox_origin: SANDBOX_ORIGIN.to_owned(),
         sandbox_ttl: Duration::from_secs(300),
+        max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
     }
 }
 

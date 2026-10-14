@@ -842,6 +842,7 @@ async fn draft_visibility_list_drafts_pages_through_only_the_callers_own() -> Te
             .put_draft(draft_of(item, ALICE, &at, "mine")?)?;
     }
     world.drafts.put_draft(draft_of(4, "bob", &at, "his")?)?;
+    world.versions.set_head(at.clone())?;
     let request = |cursor: Option<&str>| -> Built<ListDraftsRequest> {
         Ok(ListDraftsRequest {
             workspace_id: scope()?.workspace_id,
@@ -866,8 +867,9 @@ async fn draft_visibility_list_drafts_pages_through_only_the_callers_own() -> Te
             .items
             .iter()
             .chain(&second.items)
-            .all(|draft| draft.editor == ALICE)
+            .all(|row| row.draft.editor == ALICE)
     );
+    assert_eq!(first.revision, at, "read at the head");
     let refused = err_of(
         world
             .service
@@ -974,5 +976,58 @@ async fn a_later_save_that_names_another_revision_keeps_the_drafts_base() -> Tes
         .collect();
     assert_eq!(listed, vec![(&revision('a')?, &revision('c')?)]);
     assert!(world.versions.commits()?.is_empty(), "nothing overwritten");
+    Ok(())
+}
+
+/// Ruling 1: each row of `list_drafts` carries its item's summary at the head the answer names;
+/// a draft of an item the head no longer holds has none; any other refusal of the read fails
+/// the request rather than leaving a row's item out.
+#[tokio::test]
+async fn list_drafts_answers_each_drafts_item_at_the_head() -> TestResult {
+    let world = World::new()?;
+    let base = revision('a')?;
+    let head = revision('b')?;
+    world.versions.set_head(head.clone())?;
+    world.versions.put_document(
+        &head,
+        note(
+            NOTE,
+            &head,
+            "notes/plan.md",
+            "# Plan\n",
+            json!({ "type": "Note", APP_HEADER_KEY: header() }),
+        )?,
+    )?;
+    // The note's draft, and a draft of an item deleted since its base.
+    world
+        .drafts
+        .put_draft(draft_of(NOTE, ALICE, &base, "mine")?)?;
+    world
+        .drafts
+        .put_draft(draft_of(99, ALICE, &base, "gone")?)?;
+    let request = ListDraftsRequest {
+        workspace_id: scope()?.workspace_id,
+        page: PageRequest {
+            cursor: None,
+            limit: 10,
+        },
+    };
+    let caller = alice(OperationName::ListDrafts, None)?;
+    let listed = world.service.list_drafts(&caller, request.clone()).await?;
+    assert_eq!(listed.revision, head);
+    assert_eq!(listed.items.len(), 2);
+    for row in &listed.items {
+        match row.draft.item_id {
+            id if id == ItemId(Uuid::from_u128(NOTE)) => {
+                let item = some(row.item.as_ref(), "the note's summary")?;
+                assert_eq!(item.path.as_str(), "notes/plan.md");
+                assert_eq!(item.revision, head, "the item as it is at the head");
+            }
+            _ => assert!(row.item.is_none(), "the deleted item has no summary"),
+        }
+    }
+    world.versions.fail_show_number(1, ErrorCode::Unavailable)?;
+    let failed = err_of(world.service.list_drafts(&caller, request).await)?;
+    assert_eq!(failed.code, ErrorCode::Unavailable);
     Ok(())
 }
