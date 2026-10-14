@@ -8,7 +8,9 @@
 //!    refused batch consumes none. An upload another job took refuses the job for good.
 //! 2. Each card is named `conventions::source_card_name` of its file name, with the
 //!    numbered-suffix rule (`report-pdf-2.md`) against the destination folder at the base
-//!    revision and against the other cards of the job.
+//!    revision and against the other cards of the job. Both fit one path segment
+//!    (`conventions::fit_segment`): a long name is shortened, never refused for its
+//!    length.
 //! 3. All cards are committed first with outcome `pending`, through `portable::ImportCheck`
 //!    (the injected `CandidateCheck`, then OKF lint of the imported files) over every card's
 //!    path. A commit's check reports what that commit wrote: each card's own commit (step 4)
@@ -86,7 +88,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use okf_jawn_contract::common::{PageRange, Warning};
-use okf_jawn_contract::conventions::source_card_name;
+use okf_jawn_contract::conventions::{fit_segment, source_card_name};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::EventKind;
 use okf_jawn_contract::extraction::{
@@ -1100,7 +1102,8 @@ async fn taken_keys(
 }
 
 /// The card path for `file_name` in `destination`, with the numbered-suffix rule against the
-/// keys already taken; the chosen key is taken too.
+/// keys already taken; the chosen key is taken too. A numbered name is built with
+/// `conventions::fit_segment`, so `-<n>.md` is never cut and the name fits one path segment.
 fn free_path(
     destination: Option<&WorkspacePath>,
     file_name: &str,
@@ -1112,7 +1115,7 @@ fn free_path(
         let candidate = if number == 1 {
             name.clone()
         } else {
-            format!("{stem}-{number}.md")
+            fit_segment(&stem, &format!("-{number}.md"))
         };
         let full = match destination {
             Some(folder) => format!("{}/{candidate}", folder.as_str()),

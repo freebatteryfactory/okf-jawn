@@ -5,6 +5,9 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use unicode_normalization::UnicodeNormalization;
+
+use crate::identity::MAX_PATH_SEGMENT_UTF16_UNITS;
 
 /// Supported case transformations.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -325,12 +328,63 @@ impl NameSelection {
 /// `report-pdf.md`, `v1.2.notes.txt` gives `v1.2.notes-txt.md`). A name with no `.`, or whose
 /// only `.` is its first character, gets `.md` alone (`README` gives `README.md`, `.env` gives
 /// `.env.md`). Case is kept. A collision then takes the numbered-suffix rule
-/// (`report-pdf-2.md`) and the naming rules apply; the original name is kept exactly as
-/// supplied in the card's application header.
+/// (`report-pdf-2.md`, built with `fit_segment`) and the naming rules apply; the original name
+/// is kept exactly as supplied in the card's application header.
+///
+/// The card's name always fits one path segment (`fit_segment`): a long stem is shortened and
+/// `-<extension>.md` is kept whole. When that tail cannot fit beside a stem of at least one
+/// character, the whole name is the stem and the tail is `.md`. So an import never fails because
+/// an original's name is long.
 #[must_use]
 pub fn source_card_name(original: &str) -> String {
-    match original.rsplit_once('.') {
-        Some((stem, extension)) if !stem.is_empty() => format!("{stem}-{extension}.md"),
-        _ => format!("{original}.md"),
+    if let Some((stem, extension)) = original.rsplit_once('.')
+        && let Some(first) = stem.chars().next()
+    {
+        let tail = format!("-{extension}.md");
+        let first: String = std::iter::once(first).nfc().collect();
+        if units(&first).saturating_add(units_nfc(&tail)) <= MAX_PATH_SEGMENT_UTF16_UNITS {
+            return fit_segment(stem, &tail);
+        }
     }
+    fit_segment(original, ".md")
+}
+
+/// `stem` and `tail` as one path segment of at most `identity::MAX_PATH_SEGMENT_UTF16_UNITS`
+/// UTF-16 code units, measured on their NFC forms.
+///
+/// `tail` is kept whole (a card's `-pdf.md`, a numbered `-2.md`); `stem` is shortened at a
+/// character boundary, so a surrogate pair is never split, and the trailing dots and spaces a cut
+/// leaves are trimmed, since a segment may not end in either. A stem that fits is kept as it is.
+/// The result is in NFC. A tail longer than the bound is the caller's to avoid
+/// (`source_card_name` does).
+#[must_use]
+pub fn fit_segment(stem: &str, tail: &str) -> String {
+    let stem: String = stem.nfc().collect();
+    let tail: String = tail.nfc().collect();
+    let room = MAX_PATH_SEGMENT_UTF16_UNITS.saturating_sub(units(&tail));
+    if units(&stem) <= room {
+        return format!("{stem}{tail}");
+    }
+    let mut kept = String::new();
+    let mut used = 0_usize;
+    for character in stem.chars() {
+        let width = character.len_utf16();
+        if used.saturating_add(width) > room {
+            break;
+        }
+        used = used.saturating_add(width);
+        kept.push(character);
+    }
+    let kept = kept.trim_end_matches(['.', ' ']);
+    format!("{kept}{tail}")
+}
+
+/// The UTF-16 code units of `text`.
+fn units(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+/// The UTF-16 code units of `text`'s NFC form.
+fn units_nfc(text: &str) -> usize {
+    text.nfc().map(char::len_utf16).sum()
 }

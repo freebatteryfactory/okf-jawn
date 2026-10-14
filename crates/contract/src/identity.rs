@@ -331,8 +331,10 @@ impl WorkspacePath {
     /// Build a path from a supplied filename or folder: convert it to NFC, then apply every
     /// rule of `TryFrom<String>`. The supplied spelling itself is kept elsewhere unchanged. A
     /// supplied name whose NFC form has a segment over `MAX_PATH_SEGMENT_UTF16_UNITS` is refused,
-    /// never shortened: an upload whose `filename` gives its source card such a segment is
-    /// refused when its slot is opened (`import::CreateUploadRequest::check_names`).
+    /// never shortened here. A source card's name is fitted to one segment before it gets here
+    /// (`conventions::source_card_name`, `conventions::fit_segment`), so an import is never refused
+    /// because a file's name is long (an upload's `filename` is bounded by
+    /// `import::MAX_UPLOAD_FILENAME_BYTES`).
     ///
     /// # Errors
     /// Returns the rule the normalized value breaks.

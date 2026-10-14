@@ -1715,6 +1715,70 @@ mod job_handler {
         Ok(())
     }
 
+    /// The last segment of each card path the import wrote.
+    fn card_names(world: &World) -> Built<Vec<String>> {
+        Ok(cards(world)?
+            .iter()
+            .filter_map(|card| card.path.as_str().rsplit('/').next().map(str::to_owned))
+            .collect())
+    }
+
+    #[tokio::test]
+    async fn an_import_of_a_file_with_a_long_name_succeeds_with_a_card_name_of_one_segment()
+    -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let long = format!("{}.pdf", "q".repeat(296));
+        assert_eq!(long.chars().count(), 300);
+        let only = upload(&world, 157, &long, b"%PDF long")?;
+        let id = job(
+            &world,
+            155,
+            workspace_scope()?,
+            import_spec(vec![only], false)?,
+        )?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let names = card_names(&world)?;
+        assert_ne!(names, Vec::<String>::new(), "the import wrote its card");
+        for name in &names {
+            assert!(name.encode_utf16().count() <= 255, "{name}");
+            assert!(name.ends_with("-pdf.md"), "{name}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_second_file_of_the_same_long_name_is_numbered_within_one_segment() -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let long = format!("{}.pdf", "q".repeat(296));
+        let first = upload(&world, 158, &long, b"%PDF first")?;
+        let second = upload(&world, 159, &long, b"%PDF second")?;
+        let id = job(
+            &world,
+            156,
+            workspace_scope()?,
+            import_spec(vec![first, second], false)?,
+        )?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let names = card_names(&world)?;
+        let pending: Vec<&String> = names.iter().take(2).collect();
+        assert_eq!(
+            pending,
+            [
+                &format!("{}-pdf.md", "q".repeat(248)),
+                // The numbered name keeps `-2.md` whole and cuts the card's own stem to fit.
+                &format!("{}-p-2.md", "q".repeat(248))
+            ]
+        );
+        for name in &names {
+            assert!(name.encode_utf16().count() <= 255, "{name}");
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn an_import_refused_for_a_file_name_names_the_upload_ids_field() -> TestResult {
         let world = world_with(Some(3), Vec::new())?;
