@@ -825,6 +825,21 @@ from the lanes or the composed server.
   - In Wave 0 the integration owner amends the receipts of `cli-mcp-stdio-relay` and of
     `application-operations` (its CLI part) to name both commands. `records.test.mjs` pins neither
     today.
+- **I6. Uploads use no upload library.** Decided at workspace-ui M2: the four `@uppy/*` packages
+  the foundation listed are removed from `ui/package.json`. Read in the installed sources, they
+  do not fit the rules the workspace runs under:
+  - `@uppy/xhr-upload` makes its own requests, with its own retries and timer, outside the one
+    request transport every call of the UI goes through (credentials, CSRF, refusals, retry keys).
+    It sends one request a file; an upload here is three operations with a digest and a length
+    check.
+  - `@uppy/dashboard` ships a visual system of its own, and the `Uppy` instance is a third state
+    store beside the two the UI has.
+  - `getDroppedFiles`, the one function that was used for a while, gives up the whole walk of a
+    dropped folder at the first file it cannot read and then lists the folder as a file.
+
+  The walk of a drop is `ui/src/features/imports/files.ts`, on the browsers' entry API, with
+  stated bounds. Resumable uploads across a browser restart were never promised by the XHR
+  plugin either. Putting the library back is a manifest change and a vendor note.
 
 ### Carried items (from the Wave 1 review loops)
 

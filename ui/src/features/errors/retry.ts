@@ -54,12 +54,16 @@
  * away by a component in between, on its own state, would be followed only at the next render.
  * The retry button exists only through this hook, and only where the caller gives it `run`.
  *
- * Limits. The retry is over when `run` settles. A refetch that replaces a request still in flight
- * for content already on screen (an invalidation; nothing does that yet) settles `run` early,
- * while the replacement is still in flight; the outcome followed is then the state at that moment.
- * A notice that leaves because the component calling the hook is itself unmounted is not followed
- * by the hook, which goes with it. When a navigation does that, the router's rule moves the focus
- * that fell to the page body to the new page's level-one heading (`app/router.tsx`).
+ * A retry replaced in flight. The retry is over when `run` settles. An invalidation of a query
+ * with data on screen (the drafts list after a save, a discard or a Snapshot) cancels its request
+ * in flight and asks again; TanStack Query then settles the cancelled request's promise with the
+ * replacement's, so `run` settles when the replacement has answered, not before. The outcome
+ * followed is the operation's state then: for a further page whose list is listed again from its
+ * first page, that listing's (the further page is a new request after it, with its own outcome).
+ *
+ * Limit. A notice that leaves because the component calling the hook is itself unmounted is not
+ * followed by the hook, which goes with it. When a navigation does that, the router's rule moves
+ * the focus that fell to the page body to the new page's level-one heading (`app/router.tsx`).
  */
 import { type RefCallback, useLayoutEffect, useRef, useState } from 'react';
 import { pageHeading, takeHeld, useWatchedPart } from '../../lib/focus';
