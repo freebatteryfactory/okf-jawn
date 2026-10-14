@@ -3,7 +3,7 @@
 
 use okf_jawn_contract::access::{AccessRoute, Permission};
 use okf_jawn_contract::error::ErrorCode;
-use okf_jawn_contract::identity::{Digest, TenantId};
+use okf_jawn_contract::identity::{Digest, JobId, TenantId, UploadId};
 use okf_jawn_core::credentials::{ConnectorIssue, CredentialStore, NewConnector, secret_hash};
 use okf_jawn_core::storage::{BlobStore, ByteReader, Provenance, StorageScope};
 use okf_jawn_core::uploads::{NewUpload, UploadStore};
@@ -23,9 +23,18 @@ macro_rules! uuid {
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 
+/// How many rounds the batch race runs.
+const RACE_ROUNDS: u32 = 300;
+
 /// A fixed UUID spelling numbered `n`.
 fn uuid_text(n: u32) -> String {
     format!("00000000-0000-4000-8000-{n:012}")
+}
+
+/// A number of round `round` of the batch race: `first` for round 0, then every second number,
+/// so `numbered(n, round)` and `numbered(n + 1, round)` never meet across rounds.
+fn numbered(first: u32, round: u32) -> u32 {
+    first.saturating_add(round.saturating_mul(2))
 }
 
 fn scope(tenant: &str, workspace: u32) -> Fallible<StorageScope> {
@@ -414,6 +423,318 @@ async fn an_upload_is_received_verified_retained_and_consumed_once() -> TestResu
     assert_eq!(error.code, ErrorCode::Conflict);
     let error = err_of(uploads.get(&scope("local", 2)?, slot.id).await)?;
     assert_eq!(error.code, ErrorCode::NotFound);
+    Ok(())
+}
+
+/// A complete upload of `bytes` in `scope`, opened under mutation `mutation`.
+async fn complete_slot(
+    uploads: &dyn UploadStore,
+    scope: &StorageScope,
+    mutation: u32,
+    bytes: &[u8],
+) -> Fallible<UploadId> {
+    let slot = uploads
+        .create(
+            scope,
+            uuid!(mutation)?,
+            announced(u64::try_from(bytes.len())?),
+        )
+        .await?;
+    uploads
+        .put_content(scope, slot.id, body(bytes), 1024)
+        .await?;
+    uploads.complete(scope, slot.id, sha256(bytes)?).await?;
+    Ok(slot.id)
+}
+
+/// The job that consumed each of `slots`, as the store holds it now.
+async fn consumers(
+    uploads: &dyn UploadStore,
+    scope: &StorageScope,
+    slots: &[UploadId],
+) -> Fallible<Vec<Option<JobId>>> {
+    let mut found = Vec::with_capacity(slots.len());
+    for slot in slots {
+        found.push(uploads.get(scope, *slot).await?.consumed_by);
+    }
+    Ok(found)
+}
+
+/// R-I13: a batch is checked whole before any upload is marked. Each refusal is tried with the
+/// upload that causes it listed last and listed first, so a batch that marks as it reads, or
+/// that checks only its first upload, is caught either way.
+#[tokio::test]
+async fn a_refused_batch_of_uploads_marks_none_of_them() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let uploads = storage.uploads();
+    let local = scope("local", 1)?;
+    let (importer, other): (JobId, JobId) = (uuid!(7)?, uuid!(8)?);
+    let free = complete_slot(&uploads, &local, 20, b"free").await?;
+    let taken = complete_slot(&uploads, &local, 21, b"taken").await?;
+    uploads.consume(&local, taken, other).await?;
+    let open = uploads.create(&local, uuid!(22)?, announced(4)).await?.id;
+    let elsewhere = complete_slot(&uploads, &scope("local", 2)?, 23, b"elsewhere").await?;
+    let unknown: UploadId = uuid!(99)?;
+    for (cause, code) in [
+        (open, ErrorCode::InvalidInput),
+        (taken, ErrorCode::Conflict),
+        (unknown, ErrorCode::NotFound),
+        (elsewhere, ErrorCode::NotFound),
+    ] {
+        for batch in [[free, cause], [cause, free]] {
+            let error = err_of(uploads.consume_batch(&local, &batch, importer).await)?;
+            assert_eq!(error.code, code, "{batch:?}: {}", error.message);
+            assert_eq!(
+                consumers(&uploads, &local, &[free, taken]).await?,
+                [None, Some(other)],
+                "{batch:?}: the refused batch marked nothing"
+            );
+        }
+    }
+    // The first upload that cannot be taken decides the refusal.
+    let error = err_of(
+        uploads
+            .consume_batch(&local, &[open, taken], importer)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::InvalidInput, "{}", error.message);
+    let error = err_of(
+        uploads
+            .consume_batch(&local, &[taken, open], importer)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    // The other workspace's upload was not marked from here either.
+    assert_eq!(
+        consumers(&uploads, &scope("local", 2)?, &[elsewhere]).await?,
+        [None]
+    );
+    Ok(())
+}
+
+/// R-I13: a batch marks every upload it lists for its job, and a repeat by the same job changes
+/// nothing and answers the same records.
+#[tokio::test]
+async fn a_batch_of_uploads_is_consumed_whole_and_a_repeat_changes_nothing() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let uploads = storage.uploads();
+    let local = scope("local", 1)?;
+    let (importer, other): (JobId, JobId) = (uuid!(7)?, uuid!(8)?);
+    let first = complete_slot(&uploads, &local, 20, b"first").await?;
+    let second = complete_slot(&uploads, &local, 21, b"second").await?;
+    let third = complete_slot(&uploads, &local, 22, b"third").await?;
+    assert_eq!(
+        uploads.consume_batch(&local, &[], importer).await?,
+        Vec::new(),
+        "an empty batch"
+    );
+    let taken = uploads
+        .consume_batch(&local, &[first, second], importer)
+        .await?;
+    assert_eq!(
+        taken
+            .iter()
+            .map(|record| (record.id, record.consumed_by))
+            .collect::<Vec<_>>(),
+        [(first, Some(importer)), (second, Some(importer))],
+        "the records, in the order given, as they now stand"
+    );
+    assert_eq!(
+        consumers(&uploads, &local, &[first, second, third]).await?,
+        [Some(importer), Some(importer), None]
+    );
+    assert_eq!(
+        uploads
+            .consume_batch(&local, &[first, second], importer)
+            .await?,
+        taken,
+        "a repeat by the same job answers the same records"
+    );
+    // In the other order, and with an upload the job had not taken yet, listed twice.
+    let more = uploads
+        .consume_batch(&local, &[second, third, first, third], importer)
+        .await?;
+    assert_eq!(
+        more.iter()
+            .map(|record| (record.id, record.consumed_by))
+            .collect::<Vec<_>>(),
+        [second, third, first, third].map(|slot| (slot, Some(importer)))
+    );
+    assert_eq!(
+        consumers(&uploads, &local, &[first, second, third]).await?,
+        [Some(importer); 3]
+    );
+    // Another job is refused the whole of it, and a single consume still agrees.
+    let error = err_of(uploads.consume_batch(&local, &[third], other).await)?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    let error = err_of(uploads.consume(&local, third, other).await)?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    assert_eq!(
+        uploads.consume(&local, third, importer).await?.consumed_by,
+        Some(importer)
+    );
+    Ok(())
+}
+
+/// R-I13, the ruling's race: two jobs consume the same two uploads at once, one listing them
+/// [A, B] and the other [B, A]. In every round one job ends owning both and the other is
+/// refused with `Conflict` owning neither; never one upload each. Both calls are released
+/// together by a barrier, and exactly one refusal in a round shows both ran against the pair.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_batches_that_share_uploads_never_take_one_each() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let uploads = storage.uploads();
+    let local = scope("local", 1)?;
+    for round in 0..RACE_ROUNDS {
+        let a = complete_slot(&uploads, &local, numbered(1000, round), b"a").await?;
+        let b = complete_slot(&uploads, &local, numbered(1001, round), b"b").await?;
+        let jobs: [JobId; 2] = [uuid!(numbered(5000, round))?, uuid!(numbered(5001, round))?];
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let mut racing = Vec::new();
+        for (job, batch) in jobs.into_iter().zip([[a, b], [b, a]]) {
+            let (uploads, local, barrier) = (storage.uploads(), local.clone(), barrier.clone());
+            racing.push(tokio::spawn(async move {
+                barrier.wait().await;
+                uploads.consume_batch(&local, &batch, job).await
+            }));
+        }
+        let mut winners = Vec::new();
+        for (job, call) in jobs.into_iter().zip(racing) {
+            match call.await? {
+                Ok(records) => {
+                    assert_eq!(records.len(), 2, "round {round}");
+                    winners.push(job);
+                }
+                Err(error) => {
+                    assert_eq!(error.code, ErrorCode::Conflict, "round {round}: {error}");
+                }
+            }
+        }
+        let [winner] = winners.as_slice() else {
+            return Err(format!("round {round}: {} batches were taken", winners.len()).into());
+        };
+        assert_eq!(
+            consumers(&uploads, &local, &[a, b]).await?,
+            [Some(*winner); 2],
+            "round {round}: one job owns both uploads"
+        );
+    }
+    Ok(())
+}
+
+/// R-I13: a repeat by the same job with a different set. A superset that lists another job's
+/// upload is refused whole, and the new upload it also listed stays free; a superset of free
+/// uploads takes the new one and leaves the others; a subset changes nothing and releases
+/// nothing. (Reviewer probe PO1, adopted.)
+#[tokio::test]
+async fn a_repeated_batch_with_a_different_set_takes_the_new_and_releases_none() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let uploads = storage.uploads();
+    let local = scope("local", 1)?;
+    let (importer, other): (JobId, JobId) = (uuid!(7)?, uuid!(8)?);
+    let first = complete_slot(&uploads, &local, 20, b"a").await?;
+    let second = complete_slot(&uploads, &local, 21, b"b").await?;
+    let third = complete_slot(&uploads, &local, 22, b"c").await?;
+    let theirs = complete_slot(&uploads, &local, 23, b"d").await?;
+    let free = complete_slot(&uploads, &local, 24, b"e").await?;
+    uploads.consume(&local, theirs, other).await?;
+    uploads
+        .consume_batch(&local, &[first, second], importer)
+        .await?;
+    // A superset holding another job's upload: refused whole, and the fifth stays free.
+    let error = err_of(
+        uploads
+            .consume_batch(&local, &[first, second, free, theirs], importer)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    assert_eq!(
+        consumers(&uploads, &local, &[first, second, third, theirs, free]).await?,
+        [Some(importer), Some(importer), None, Some(other), None]
+    );
+    // A superset of free uploads: the new one is taken too.
+    let more = uploads
+        .consume_batch(&local, &[first, second, third], importer)
+        .await?;
+    assert_eq!(more.len(), 3);
+    assert_eq!(
+        consumers(&uploads, &local, &[first, second, third, theirs, free]).await?,
+        [
+            Some(importer),
+            Some(importer),
+            Some(importer),
+            Some(other),
+            None
+        ]
+    );
+    // A subset: nothing changes, and nothing is released.
+    let fewer = uploads.consume_batch(&local, &[first], importer).await?;
+    assert_eq!(fewer.len(), 1);
+    assert_eq!(
+        consumers(&uploads, &local, &[first, second, third, theirs, free]).await?,
+        [
+            Some(importer),
+            Some(importer),
+            Some(importer),
+            Some(other),
+            None
+        ]
+    );
+    Ok(())
+}
+
+/// R-I13: each refusal cause in the middle of a batch marks nothing before it or after it,
+/// and one fresh upload listed twice gives two records and one mark. (Reviewer probe PO2,
+/// adopted.)
+#[tokio::test]
+async fn a_cause_in_the_middle_of_a_batch_marks_none_and_an_upload_listed_twice_is_marked_once()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let uploads = storage.uploads();
+    let local = scope("local", 1)?;
+    let (importer, other): (JobId, JobId) = (uuid!(7)?, uuid!(8)?);
+    let first = complete_slot(&uploads, &local, 20, b"first").await?;
+    let last = complete_slot(&uploads, &local, 21, b"last").await?;
+    let taken = complete_slot(&uploads, &local, 22, b"taken").await?;
+    uploads.consume(&local, taken, other).await?;
+    let open = uploads.create(&local, uuid!(23)?, announced(4)).await?.id;
+    let unknown: UploadId = uuid!(99)?;
+    for (cause, code) in [
+        (open, ErrorCode::InvalidInput),
+        (taken, ErrorCode::Conflict),
+        (unknown, ErrorCode::NotFound),
+    ] {
+        let error = err_of(
+            uploads
+                .consume_batch(&local, &[first, cause, last], importer)
+                .await,
+        )?;
+        assert_eq!(error.code, code, "{}", error.message);
+        assert_eq!(
+            consumers(&uploads, &local, &[first, last, taken]).await?,
+            [None, None, Some(other)],
+            "the refused batch marked nothing"
+        );
+    }
+    let twice = uploads
+        .consume_batch(&local, &[first, first], importer)
+        .await?;
+    assert_eq!(
+        twice
+            .iter()
+            .map(|record| (record.id, record.consumed_by))
+            .collect::<Vec<_>>(),
+        [(first, Some(importer)), (first, Some(importer))]
+    );
+    assert_eq!(
+        consumers(&uploads, &local, &[first, last]).await?,
+        [Some(importer), None]
+    );
     Ok(())
 }
 

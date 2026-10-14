@@ -3,13 +3,19 @@
 //!
 //! Import:
 //! 1. Each upload must be complete and taken by no other job, and its file name must give a
-//!    card path; only once every upload of the request passes is each consumed by this job,
-//!    so a refused batch consumes none. An upload another job took refuses the job for good.
+//!    card path; only once every upload of the request passes are they consumed by this job, as
+//!    one batch the store takes whole or not at all (`UploadStore::consume_batch`), so a
+//!    refused batch consumes none. An upload another job took refuses the job for good.
 //! 2. Each card is named `conventions::source_card_name` of its file name, with the
 //!    numbered-suffix rule (`report-pdf-2.md`) against the destination folder at the base
 //!    revision and against the other cards of the job.
 //! 3. All cards are committed first with outcome `pending`, through `portable::ImportCheck`
-//!    (the injected `CandidateCheck`, then OKF lint of the imported files).
+//!    (the injected `CandidateCheck`, then OKF lint of the imported files) over every card's
+//!    path. A commit's check reports what that commit wrote: each card's own commit (step 4)
+//!    is checked over that card's path only, so an import of N cards completes with each
+//!    commit's findings once (at most N from the pending commit and one card's from each card
+//!    commit, for one finding a card), and no commit's kept warnings hold more than the
+//!    pending commit's.
 //! 4. Each source is converted window by window (`windows_of(page_count, window_pages)`); each
 //!    window's export and assets are retained, the windows are assembled
 //!    (`record::assemble`), the record is retained, and the card is replaced with the
@@ -21,8 +27,9 @@
 //! it writes, an import commit asks `VersionStore::find_commit` whether an earlier attempt
 //! already wrote it after the job's base revision; if so it is replayed and nothing is written
 //! again, whatever order the store searches in. A replayed commit keeps the warnings its check
-//! returned: storage gives none back on a replay, so the same check runs again over the
-//! replayed commit's tree, and the completion does not depend on where an attempt died.
+//! returned: the store kept them when the commit was written and gives them back with the
+//! commit it finds (R-I10), so the completion does not depend on where an attempt died, and a
+//! replay runs no check.
 //!
 //! An import does not conflict with unrelated edits (SPEC: "Create, move, delete, import ...
 //! remain immediate commits"; integration-owner ruling R-I8). Each commit is written on the
@@ -48,7 +55,9 @@
 //! A redigest writes one commit, under ordinal 0, by the same rule against its base revision
 //! (R-I8 extended): replayed when an earlier attempt wrote it, refused (not retried) only when
 //! the item was deleted or its original changed since the base, and otherwise written onto the
-//! head's version of the card, keeping its path, title, properties and supplied text.
+//! head's version of the card, keeping its path, title, properties and supplied text. Its check
+//! is a card commit's (`card_check`): it reports the card it writes, at the head's path, not
+//! the whole workspace.
 //!
 //! Every commit the job lands, written now or replayed (the pending commit, each card's commit,
 //! the redigest's commit), is indexed and announced as `changed` under its own derived
@@ -145,11 +154,12 @@ enum Landed {
     Kept(String),
 }
 
-/// What one commit writes, given the head it is written on.
+/// What one commit writes, given the head it is written on, and so what its check reports.
 enum Writes<'a> {
-    /// These edits, whatever the head holds.
-    Edits(Vec<TreeEdit>),
-    /// This card, onto the head's version of its item, by `rule` against the item at `since`.
+    /// These edits, whatever the head holds, checked by this check.
+    Edits(Vec<TreeEdit>, Arc<dyn CandidateCheck>),
+    /// This card, onto the head's version of its item, by `rule` against the item at `since`;
+    /// checked over the card as written there (`card_check`).
     Card {
         /// The card as the job would write it.
         card: &'a SourceCard,
@@ -183,12 +193,6 @@ pub const CARD_NOT_WRITTEN: &str = "import_card_not_written";
 /// How many entries one folder listing asks for.
 const LIST_PAGE: u16 = 500;
 
-/// The file name of a folder's maintained index, a Markdown file of the bundle.
-const MAINTAINED_INDEX: &str = "index.md";
-
-/// The workspace's change log at the root, a Markdown file of the bundle.
-const CHANGE_LOG: &str = "log.md";
-
 /// How many times one import commit reads the head again after it moved under the write,
 /// before the attempt gives up as retryable.
 const HEAD_RACES: u32 = 8;
@@ -206,13 +210,17 @@ pub(crate) async fn import(
             "naming rules at import wait for core's rule function (request R-I4); import without them",
         ));
     }
-    // Conflict from the batch check (an upload another job took, or took meanwhile) refuses
-    // the job for good, like a collision: retrying it meets the same refusal.
+    // Conflict from the batch check (an upload another job took, or took meanwhile, or a purge
+    // that names the workspace) refuses the job for good, like a collision: retrying it meets
+    // the same refusal.
     let cards = match pending_cards(ports, attempt.claimed, scope, &request).await {
         Ok(cards) => cards,
         Err(error) if error.code == ErrorCode::Conflict => return Ok(refused_as(error)),
         Err(error) => return Err(error),
     };
+    // A commit's check reports what that commit wrote (review N2): the pending commit writes
+    // every card, so its check is over every card's path; each card's own commit is checked
+    // over that card's path only (`card_check`).
     let check: Arc<dyn CandidateCheck> = Arc::new(ImportCheck::new(
         Arc::clone(&ports.check),
         cards.iter().map(|(card, _)| card.path.clone()).collect(),
@@ -229,8 +237,8 @@ pub(crate) async fn import(
                 .iter()
                 .map(|(card, _)| TreeEdit::WriteSourceCard(Box::new(card.clone())))
                 .collect(),
+            check,
         ),
-        Arc::clone(&check),
     )
     .await?
     {
@@ -250,7 +258,7 @@ pub(crate) async fn import(
         // A card an earlier attempt already committed is not converted again: the completion
         // takes its commit and the outputs its committed extraction references.
         let item = Some(card.item_id);
-        let replay = replayed(ports, attempt, scope, (base, ordinal), item, &check);
+        let replay = replayed(ports, attempt, scope, (base, ordinal), item);
         if let Some(committed) = replay.await? {
             let resumed = (card.item_id, committed, Vec::new());
             take_committed(ports, attempt, scope, resumed, &mut done).await?;
@@ -270,17 +278,7 @@ pub(crate) async fn import(
                 since: &pending_revision,
                 rule: Blocked::AnyChange,
             };
-            match commit(
-                ports,
-                attempt,
-                scope,
-                (base, ordinal),
-                message,
-                writes,
-                Arc::clone(&check),
-            )
-            .await?
-            {
+            match commit(ports, attempt, scope, (base, ordinal), message, writes).await? {
                 Landed::Committed(committed) => {
                     let landed = (card.item_id, committed, converted.outputs);
                     take_committed(ports, attempt, scope, landed, &mut done).await?;
@@ -303,6 +301,24 @@ pub(crate) async fn import(
     }
     announce_imported(ports, attempt.claimed, scope, &done).await?;
     Ok(done)
+}
+
+/// The check of a commit that writes `card` alone, an import's converted card or a redigest's:
+/// the injected conformance check and OKF lint, reported for that card's file only
+/// (`portable::ImportCheck`). `card` is the card as written onto the head, so its path is the
+/// one the commit writes: an import's card at the path its pending commit gave it (a card a
+/// person moved meanwhile is not written at all, `Blocked::AnyChange`), a redigest's at the
+/// head's path of the item. Such a commit also writes the card's appearance record under
+/// `.okf/`, the regenerated folder indexes and the log, none of them a concept, so the card is
+/// all it is told. The workspace's other files are files of the candidate too, but this commit
+/// does not write them: an import of N cards completes with each commit's findings once, not
+/// with all N cards' on each of its N + 1 commits, and a redigest with the findings of its card,
+/// not of the whole workspace.
+fn card_check(ports: &HandlerPorts, card: &SourceCard) -> Arc<dyn CandidateCheck> {
+    Arc::new(ImportCheck::new(
+        Arc::clone(&ports.check),
+        vec![card.path.clone()],
+    ))
 }
 
 /// Append `imported` once, under the job's own mutation, with the last revision, when the
@@ -401,9 +417,11 @@ fn refused_as(error: ApiError) -> Done {
 /// upload is consumed. An incomplete upload refuses the batch (`InvalidInput`), so does one
 /// another job consumed (`Conflict`), and so does a file name that gives no workspace path
 /// (`InvalidInput` on `/upload_ids`); then no upload of the batch is consumed, so another job
-/// may still take the good ones. Only then is each consumed by this job. The race that remains
-/// is another job consuming an upload between this check and the consume: that is a
-/// concurrent import of the same upload, which `consume` already refuses with `Conflict`.
+/// may still take the good ones. Only then are they consumed by this job, all in one call
+/// (`UploadStore::consume_batch`, one transaction: all of them or none). Another job that
+/// consumed one of them between this check and that call is a concurrent import of the same
+/// upload: the store refuses the whole batch with `Conflict` and marks none, so two imports
+/// that share uploads never hold some of them each (R-I13).
 async fn pending_cards(
     ports: &HandlerPorts,
     claimed: &ClaimedJob,
@@ -435,9 +453,8 @@ async fn pending_cards(
         .iter()
         .map(|(upload, _object)| free_path(request.destination, &upload.filename, &mut taken))
         .collect::<Result<Vec<_>, _>>()?;
-    for (upload, _object) in &sources {
-        let _consumed = ports.uploads.consume(scope, upload.id, job).await?;
-    }
+    let batch: Vec<UploadId> = sources.iter().map(|(upload, _object)| upload.id).collect();
+    let _consumed = ports.uploads.consume_batch(scope, &batch, job).await?;
     let mut cards = Vec::new();
     for ((ordinal, (upload, object)), path) in (0_u32..).zip(&sources).zip(paths) {
         let local = ports.blobs.materialize(scope, &object.digest).await?;
@@ -488,15 +505,8 @@ pub(crate) async fn redigest(
         ));
     }
     // A redigest an earlier attempt already committed is not converted again.
-    if let Some(committed) = replayed(
-        ports,
-        attempt,
-        scope,
-        (base_revision, 0),
-        Some(item_id),
-        &ports.check,
-    )
-    .await?
+    if let Some(committed) =
+        replayed(ports, attempt, scope, (base_revision, 0), Some(item_id)).await?
     {
         return Ok(Done {
             outputs: committed_outputs(ports, attempt, scope, &committed.revision, item_id).await?,
@@ -553,7 +563,6 @@ pub(crate) async fn redigest(
         (base_revision, 0),
         format!("Redigest {}: {}", card.title, outcome_word(&converted)),
         writes,
-        Arc::clone(&ports.check),
     )
     .await?;
     let refusal = |message: String| Done {
@@ -850,7 +859,7 @@ async fn retain(
 /// the card's rule blocks. A head that moved before the write is read again, at most
 /// `HEAD_RACES` times. A `Conflict` while the head stood still is the store refusing these
 /// edits, a real collision: `Landed::Refused`. A commit that lands, either way, is indexed and
-/// announced.
+/// announced. A card is checked over the card as written onto the head read (`card_check`).
 async fn commit(
     ports: &HandlerPorts,
     attempt: &Attempt<'_>,
@@ -858,20 +867,22 @@ async fn commit(
     (base, ordinal): (&Revision, u32),
     message: String,
     writes: Writes<'_>,
-    check: Arc<dyn CandidateCheck>,
 ) -> Result<Landed, ApiError> {
     let claimed = attempt.claimed;
     let item = written_item(&writes);
-    if let Some(committed) = replayed(ports, attempt, scope, (base, ordinal), item, &check).await? {
+    if let Some(committed) = replayed(ports, attempt, scope, (base, ordinal), item).await? {
         return Ok(Landed::Committed(committed));
     }
     for _race in 0..HEAD_RACES {
         let head = ports.versions.head(scope).await?;
-        let edits = match &writes {
-            Writes::Edits(edits) => edits.clone(),
+        let (edits, check) = match &writes {
+            Writes::Edits(edits, check) => (edits.clone(), Arc::clone(check)),
             Writes::Card { card, since, rule } => {
                 match onto_head(ports, scope, &head, card, since, *rule).await? {
-                    Ok(card) => vec![TreeEdit::WriteSourceCard(Box::new(card))],
+                    Ok(card) => {
+                        let check = card_check(ports, &card);
+                        (vec![TreeEdit::WriteSourceCard(Box::new(card))], check)
+                    }
                     Err(why) => return Ok(Landed::Kept(why)),
                 }
             }
@@ -883,7 +894,7 @@ async fn commit(
             (head.clone(), ordinal),
             message.clone(),
             edits,
-            Arc::clone(&check),
+            check,
         )
         .await;
         match written {
@@ -915,126 +926,28 @@ async fn commit(
 }
 
 /// The `ordinal`-th commit of the job when an earlier attempt already wrote it after `base`,
-/// with the warnings its check returned then. Storage returns no warnings on a replay, so the
-/// same check is run again over the replayed commit's tree (`checked_again`): the completion's
-/// warnings do not depend on where an attempt died. A replayed commit is indexed and announced
-/// again, naming `item`, which has no second effect.
+/// answered as the store answers a replay: with the warnings it kept when that attempt committed
+/// (`VersionStore::find_commit`), so the completion's warnings do not depend on where an attempt
+/// died. No check runs here. A replayed commit is indexed and announced again, naming `item`,
+/// which has no second effect.
 async fn replayed(
     ports: &HandlerPorts,
     attempt: &Attempt<'_>,
     scope: &StorageScope,
     (base, ordinal): (&Revision, u32),
     item: Option<ItemId>,
-    check: &Arc<dyn CandidateCheck>,
 ) -> Result<Option<Committed>, ApiError> {
     let claimed = attempt.claimed;
     let mutation_id = derive_commit_mutation_id(claimed.mutation_id, ordinal);
-    let Some(revision) = ports
+    let Some(found) = ports
         .versions
         .find_commit(scope, mutation_id, Some(base))
         .await?
     else {
         return Ok(None);
     };
-    announce_commit(ports, claimed, scope, &revision, mutation_id, item).await?;
-    let again = checked_again(ports, scope, &revision, Arc::clone(check));
-    let warnings = renewed(ports, attempt, again).await?;
-    Ok(Some(Committed {
-        revision,
-        replayed: true,
-        warnings,
-    }))
-}
-
-/// Run `check` over the tree of `revision`, materialized from the store in a temporary
-/// directory: every item file, each folder's maintained `index.md` and the root `log.md`,
-/// which are the Markdown files of the bundle the check reads (storage's side records under
-/// `.okf/` are not Markdown and no OKF check reads them). This is the candidate tree the
-/// check saw when storage wrote that commit. It reads the whole tree, so its caller runs it
-/// under the heartbeat.
-async fn checked_again(
-    ports: &HandlerPorts,
-    scope: &StorageScope,
-    revision: &Revision,
-    check: Arc<dyn CandidateCheck>,
-) -> Result<Vec<Warning>, ApiError> {
-    let staging = tempfile::tempdir()
-        .map_err(|error| fault(&format!("a staging directory was refused: {error}")))?;
-    let mut folders: Vec<Option<WorkspacePath>> = vec![None];
-    while let Some(folder) = folders.pop() {
-        let mut cursor = None;
-        loop {
-            let listing = ports
-                .versions
-                .list(
-                    scope,
-                    revision,
-                    folder.as_ref(),
-                    Page {
-                        cursor: cursor.take(),
-                        limit: LIST_PAGE,
-                    },
-                )
-                .await?;
-            for item in &listing.items {
-                let bytes = ports
-                    .versions
-                    .read_file(scope, revision, &item.path)
-                    .await?;
-                stage(staging.path(), &item.path, &bytes)?;
-            }
-            folders.extend(listing.folders.into_iter().map(Some));
-            match listing.next_cursor {
-                Some(next) => cursor = Some(next),
-                None => break,
-            }
-        }
-        let index = match &folder {
-            Some(folder) => format!("{}/{MAINTAINED_INDEX}", folder.as_str()),
-            None => MAINTAINED_INDEX.to_owned(),
-        };
-        stage_if_present(ports, scope, revision, staging.path(), index).await?;
-    }
-    stage_if_present(
-        ports,
-        scope,
-        revision,
-        staging.path(),
-        CHANGE_LOG.to_owned(),
-    )
-    .await?;
-    tokio::task::spawn_blocking(move || check.check(staging.path()))
-        .await
-        .map_err(|error| fault(&format!("the replayed commit's check stopped: {error}")))?
-}
-
-/// Stage the versioned file at `path` of `revision`, when the tree holds one.
-async fn stage_if_present(
-    ports: &HandlerPorts,
-    scope: &StorageScope,
-    revision: &Revision,
-    root: &Path,
-    path: String,
-) -> Result<(), ApiError> {
-    let path = WorkspacePath::try_from(path)
-        .map_err(|error| fault(&format!("a maintained file has no workspace path: {error}")))?;
-    match ports.versions.read_file(scope, revision, &path).await {
-        Ok(bytes) => stage(root, &path, &bytes),
-        Err(error) if error.code == ErrorCode::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-/// Write one file of a staged tree; small files, written in place (the workspace tokio has no
-/// `fs` feature).
-fn stage(root: &Path, path: &WorkspacePath, bytes: &[u8]) -> Result<(), ApiError> {
-    let file = root.join(path.as_str());
-    let unwritable =
-        |error: std::io::Error| fault(&format!("{} could not be staged: {error}", path.as_str()));
-    if let Some(folder) = file.parent() {
-        std::fs::create_dir_all(folder).map_err(unwritable)?;
-    }
-    std::fs::write(&file, bytes).map_err(unwritable)
+    announce_commit(ports, claimed, scope, &found.revision, mutation_id, item).await?;
+    Ok(Some(found))
 }
 
 /// `card` written onto the head's version of its item, or why it must not be written: the item
@@ -1122,7 +1035,7 @@ fn same_item(now: &ItemDocument, then: &ItemDocument) -> bool {
 fn written_item(writes: &Writes<'_>) -> Option<ItemId> {
     match writes {
         Writes::Card { card, .. } => Some(card.item_id),
-        Writes::Edits(edits) => match edits.as_slice() {
+        Writes::Edits(edits, _check) => match edits.as_slice() {
             [TreeEdit::WriteSourceCard(card)] => Some(card.item_id),
             _ => None,
         },

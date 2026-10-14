@@ -10,7 +10,8 @@
 //! application header before any port is touched (`items::refuse_supplied_header`,
 //! `items::refuse_header_in_type`) and commit through `shared::commit` with the edit check:
 //! OKF conformance refuses, and the validator's warnings and OKF lint about the files the write
-//! touched come back as warnings.
+//! touched come back as warnings; the files whose links a move rewrote are touched, and the
+//! store names them to the check.
 
 use okf_jawn_contract::common::MutationResult;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
@@ -229,7 +230,8 @@ pub(super) async fn move_item(
         Write {
             base: request.base_revision,
             message: format!("Move to {}", request.destination.as_str()),
-            // The referrers whose links the move rewrites are not counted (R-I12).
+            // The old and the new path. The referrers whose links the move rewrites are the
+            // store's to name: it reports them to the check, which counts them as touched.
             touched: Touched {
                 paths: vec![request.destination.clone()],
                 items: vec![request.item_id],

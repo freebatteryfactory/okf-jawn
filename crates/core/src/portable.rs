@@ -11,6 +11,8 @@
 //!   file is review evidence (SPEC section 8).
 //! - OKF lint runs at import. `ImportCheck` wraps the conformance check of an import commit and
 //!   adds okf-validator's lint findings for the imported files as warnings; lint never refuses.
+//!   It reports what its commit wrote: the conformance check's warnings about other files are
+//!   not passed on.
 //!
 //! Ingest's export and import handlers call these functions and never re-implement them. They
 //! hold the rules and do no IO beyond reading the candidate directory a `CandidateCheck` is
@@ -40,7 +42,22 @@ use crate::storage::CandidateCheck;
 /// The candidate check of an import commit: the conformance check first, whose refusal stands,
 /// then OKF lint of the imported files, whose findings are added to its warnings.
 ///
+/// A commit's check reports what that commit wrote. `imported` names the files this commit
+/// writes, not every file of the import: an import of N cards runs N + 1 commits, and a check
+/// that reported all N cards on each would have the job complete with, and the store keep
+/// (`VersionStore::commit`), about N x N warnings for one import. So the conformance check's
+/// refusal stands whatever file it names, but of its warnings only those located at an
+/// imported file, or at a file the store reports it rewrote, are passed on: the production
+/// conformance check (`conformance::OkfConformance`) answers the validator's findings for the
+/// whole candidate on every commit, the files this commit did not write included. It locates a
+/// broken link at the file of the concept that holds it, so a broken link in an imported card
+/// is passed on, located at the card. A warning that names no file is left out, as
+/// `conformance::EditCheck` leaves it out.
+///
 /// Lint findings never refuse a commit; okf-validator's lint is not a conformance check.
+/// The paths the store reports it rewrote on its own (`CandidateCheck::check`, `rewritten`) are
+/// handed to the conformance check as they are. The lint stays on the imported files: an
+/// import commit writes source cards, which move nothing, so the store rewrites no other file.
 pub struct ImportCheck {
     conformance: Arc<dyn CandidateCheck>,
     imported: Vec<WorkspacePath>,
@@ -66,7 +83,7 @@ const LINT_CODE: &str = "okf_lint";
 
 impl ImportCheck {
     /// Wrap `conformance` (the production `CandidateCheck`) for a commit that writes the
-    /// `imported` paths.
+    /// `imported` paths: the files this one commit writes.
     #[must_use]
     pub fn new(conformance: Arc<dyn CandidateCheck>, imported: Vec<WorkspacePath>) -> Self {
         Self {
@@ -77,8 +94,24 @@ impl ImportCheck {
 }
 
 impl CandidateCheck for ImportCheck {
-    fn check(&self, root: &Path) -> Result<Vec<Warning>, ApiError> {
-        let mut warnings = self.conformance.check(root)?;
+    fn check(&self, root: &Path, rewritten: &[WorkspacePath]) -> Result<Vec<Warning>, ApiError> {
+        // A refusal stands whatever file it names: a non-conformant candidate is never committed.
+        let found = self.conformance.check(root, rewritten)?;
+        let written: BTreeSet<&str> = self
+            .imported
+            .iter()
+            .chain(rewritten)
+            .map(WorkspacePath::as_str)
+            .collect();
+        let mut warnings: Vec<Warning> = found
+            .into_iter()
+            .filter(|warning| {
+                warning
+                    .location
+                    .as_deref()
+                    .is_some_and(|location| written.contains(location))
+            })
+            .collect();
         warnings.extend(lint_imported(root, &self.imported)?);
         Ok(warnings)
     }

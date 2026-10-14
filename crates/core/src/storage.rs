@@ -366,7 +366,12 @@ pub struct Committed {
     pub revision: Revision,
     /// `true` when that commit already existed and this call wrote nothing.
     pub replayed: bool,
-    /// Findings the candidate check returned; empty on a replay.
+    /// Findings the candidate check returned when the commit was written. A replay answers the
+    /// warnings the store kept with that commit, so a retry answers what its first attempt
+    /// did; for a commit the store kept no warnings for it answers the one warning
+    /// `replay_warnings_unavailable` instead. Warnings kept under the same mutation for another
+    /// attempt's commit are not this commit's, and are never answered for it
+    /// (`VersionStore::commit`).
     pub warnings: Vec<Warning>,
 }
 
@@ -424,9 +429,24 @@ pub struct BlameQuery {
 pub trait CandidateCheck: Send + Sync {
     /// Inspect the complete candidate bundle rooted at `root`.
     ///
+    /// `rewritten` names the files of the candidate that the store rewrote on its own while it
+    /// applied the edits, beyond the paths the edits name: the referrers whose links a move
+    /// rewrote (`okf_core::move_concept`), for a `MoveItem` and for a `RestoreItem` that moves
+    /// an item back to its earlier path, of every such move of the commit or the candidate. The
+    /// caller that built the edits cannot know them, so the store reports them here, as
+    /// workspace paths spelled as the tree spells them, in path order and each once; a moved
+    /// item's own old and new path are not among them. It names what the store rewrote while
+    /// it applied the edits, not what differs at the end: a file rewritten and then rewritten
+    /// back (the referrer of an item moved away and back by one commit) is named, though its
+    /// bytes end as they began. A referrer a later edit of the same commit removed or moved
+    /// away is left out at the path it no longer has, and so is a rewritten file whose path is
+    /// no `WorkspacePath` (no item has such a path). A check that reports findings only for the
+    /// files a write touched (`conformance::EditCheck`) counts these as touched. Empty when the
+    /// edits moved nothing, and for a candidate no edit produced.
+    ///
     /// # Errors
     /// Returns the error that rejects the write; nothing is committed when this fails.
-    fn check(&self, root: &Path) -> Result<Vec<Warning>, ApiError>;
+    fn check(&self, root: &Path, rewritten: &[WorkspacePath]) -> Result<Vec<Warning>, ApiError>;
 }
 
 /// Versioned workspace content: one Git repository per workspace.
@@ -506,8 +526,29 @@ pub trait VersionStore: Send + Sync {
     /// `replayed` set, the check is not run and nothing is written. Otherwise, when the head is
     /// not `expected_head`, the call fails with `Conflict` and writes nothing.
     ///
-    /// `check` runs once on the staged candidate tree. Its error rejects the commit; its
-    /// warnings are returned in the result.
+    /// `check` runs once on the staged candidate tree, and is told which other files the edits
+    /// made the store rewrite (`CandidateCheck::check`, `rewritten`). Its error rejects the
+    /// commit; its warnings are returned in the result.
+    ///
+    /// The store keeps those warnings, an empty list included, in a record of its own keyed by
+    /// the workspace and the mutation, written before the commit lands, and the record names
+    /// the commit it was kept for. The rule a caller can rely on: a replay answers the warnings
+    /// that commit was given, or says they are unavailable; never another attempt's. A crash
+    /// between that record and the commit leaves a record without a commit; the next attempt
+    /// finds no commit, runs the check again, replaces the record and commits. A replay of a
+    /// commit the store holds no such record for (a commit written before the store kept them,
+    /// one a restore brought from an archive, which carries none, or a record that no longer
+    /// reads) answers the one warning `replay_warnings_unavailable`
+    /// (`REPLAY_WARNINGS_UNAVAILABLE`) and still succeeds: the commit has landed. So does a
+    /// replay of a commit whose record a later attempt replaced: an attempt of the same
+    /// mutation whose `expected_head` is at or after the landed commit does not find it, runs
+    /// its check and keeps its own warnings, and when it then cannot land (the head moved) the
+    /// record is that attempt's. The landed commit is from then on answered with the one
+    /// warning, not with the warnings of an attempt that wrote another tree; what its own check
+    /// gave is no longer held. The records are removed only with their workspace, by
+    /// its purge (`Purger`), so they grow by one for each commit. An item purge is not built;
+    /// when it is, it has to remove the records of the workspace too, because a warning can
+    /// quote a path or a title.
     ///
     /// Refuses, writing nothing, an edit whose path collides with another item (Stage 1b design
     /// section 7) and a caller edit that changes an application header
@@ -537,12 +578,20 @@ pub trait VersionStore: Send + Sync {
     /// with `None`. It is asked only on a resumed attempt, so the walk's cost falls on resumes.
     /// It never asks from one draft's base: a draft saved again after the commit has a base the
     /// commit does not lie after.
+    ///
+    /// The commit is answered as a replay of it by `commit` is: `replayed` set, with the
+    /// warnings the store kept for that commit, or the one warning
+    /// `replay_warnings_unavailable` when it kept none or holds only those of another attempt's
+    /// commit under the mutation. A commit no check ran for and that neither `commit` nor
+    /// `promote_candidate` wrote (the one `Backups::restore_import` writes, a workspace's first)
+    /// has no such record, so it is answered with that one warning; its caller reads the
+    /// revision only.
     fn find_commit<'a>(
         &'a self,
         scope: &'a StorageScope,
         mutation_id: MutationId,
         since: Option<&'a Revision>,
-    ) -> PortFuture<'a, Option<Revision>>;
+    ) -> PortFuture<'a, Option<Committed>>;
     /// Write a proposal candidate commit on top of `changes.base` and retain it at
     /// `refs/okf-jawn/proposals/<proposal id>`. The head does not move.
     ///
@@ -565,8 +614,9 @@ pub trait VersionStore: Send + Sync {
     /// Fails with `Conflict`, writing nothing, when the head is not `expected_head`, when the
     /// candidate's parent is not `expected_head`, or when `candidate` is not the revision the
     /// proposal reference retains. The promoted tree is the tree that was checked when the
-    /// candidate was created, so no check runs here. Idempotent on `promotion.mutation_id`
-    /// exactly as `commit` is.
+    /// candidate was created, so no check runs here and the result has no warnings. Idempotent
+    /// on `promotion.mutation_id` exactly as `commit` is: the store keeps that empty answer as it
+    /// keeps a commit's warnings, so a replay answers no warnings either.
     fn promote_candidate<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -738,7 +788,9 @@ pub trait WorkspaceCatalog: Send + Sync {
 ///   the purge, checked inside the write's own SQLite transaction: new jobs, job retries and
 ///   claims, drafts (save, discard), upload slots, upload content, upload completions (also
 ///   checked before anything is read, so a completion after the purge is refused rather than
-///   answered `NotFound`), artifacts, job completions, derived objects, receipts, reviews,
+///   answered `NotFound`), upload consumptions, one upload or a batch (`UploadStore::consume`
+///   and `consume_batch`, each checked before anything is read as well), artifacts, job
+///   completions, derived objects, receipts, reviews,
 ///   proposals (insert, update), comments, confirmations (create, consume), sandbox
 ///   capabilities and catalog changes. Commits, candidates and promotions are refused under the
 ///   workspace's write lock, under which the purge reads the workspace's records and history
@@ -856,6 +908,10 @@ pub trait Backups: Send + Sync {
     ) -> PortFuture<'a, RestoreReport>;
 }
 
+/// The code of the one warning a replayed commit answers when the store holds no warnings for
+/// it (`VersionStore::commit`); see `replay_warnings_unavailable`.
+pub const REPLAY_WARNINGS_UNAVAILABLE: &str = "replay_warnings_unavailable";
+
 impl TreeEdit {
     /// The tree edit a proposed change stands for.
     ///
@@ -971,6 +1027,21 @@ impl Provenance {
             route: principal.route.clone(),
             client_id: principal.client_id.clone(),
         }
+    }
+}
+
+/// The one warning a replayed commit answers in place of warnings the store does not hold for
+/// it, saying `why` (`VersionStore::commit`). A version store, real or fake, answers a replay
+/// with exactly this, so a caller sees one code whatever store it runs over.
+#[must_use]
+pub fn replay_warnings_unavailable(why: &str) -> Warning {
+    Warning {
+        code: REPLAY_WARNINGS_UNAVAILABLE.to_owned(),
+        message: format!(
+            "the commit landed on an earlier attempt, and the warnings its check gave then are \
+             not available: {why}"
+        ),
+        location: None,
     }
 }
 

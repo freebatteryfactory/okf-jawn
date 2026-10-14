@@ -186,6 +186,12 @@ async function trackedText(repo){
  }
  return files;
 }
+/**
+ * The only paths a tracked .zip may have: the workspace archive and the installation archive
+ * that the build at one records schema wrote, kept so a later build proves it still restores
+ * them (crates/storage/tests/archive_fixtures.rs; SPEC section 12). Any other .zip is refused.
+ */
+const archiveFixture=/^crates\/storage\/tests\/fixtures\/archives\/records-schema-[1-9]\d*\/(?:workspace|installation)\.zip$/;
 /** The UTF-8 encoding of U+FEFF. */
 const feff=Buffer.from([0xef,0xbb,0xbf]);
 /** What is wrong with the tracked text files of `repo`, as `{ path, kind, message }`: a raw control byte, bytes that are not UTF-8, or a raw U+FEFF anywhere. */
@@ -222,9 +228,30 @@ test('what is binary is declared in .gitattributes, and git finds no line ending
  // The binary files are the fixture documents (and a crate's own test fixtures), and each of their types is declared by extension.
  const attributes=await read('.gitattributes');
  const types=[...new Set(binary.map(file=>file.path.slice(file.path.lastIndexOf('.'))))].sort();
- assert.deepEqual(types,['.docx','.jpg','.pdf','.png','.pptx','.xlsx']);
+ // A .zip is no document type: it is tracked only as one of storage's archive fixtures (`archiveFixture`), so the document types are this list with or without one.
+ assert.deepEqual(types.filter(type=>type!=='.zip'),['.docx','.jpg','.pdf','.png','.pptx','.xlsx']);
  for(const type of types)assert.match(attributes,new RegExp(`^\\*\\${type} binary$`,'m'),`${type} is not declared binary`);
- assert.ok(binary.every(file=>file.path.startsWith('tests/fixtures/documents/')||/^crates\/[a-z]+\/tests\/fixtures\/[^/]+$/.test(file.path)),'a binary file outside the document fixtures and the crates\' own test fixtures');
+ const archives=binary.filter(file=>file.path.endsWith('.zip'));
+ assert.deepEqual(archives.map(file=>file.path).filter(path=>!archiveFixture.test(path)),[],'a .zip that is not one of the storage crate\'s archive fixtures');
+ assert.ok(binary.filter(file=>!archives.includes(file)).every(file=>file.path.startsWith('tests/fixtures/documents/')||/^crates\/[a-z]+\/tests\/fixtures\/[^/]+$/.test(file.path)),'a binary file outside the document fixtures and the crates\' own test fixtures');
+});
+test('a tracked .zip can only be a workspace or installation archive under the storage crate\'s archive fixtures',()=>{
+ for(const path of [
+  'crates/storage/tests/fixtures/archives/records-schema-2/workspace.zip',
+  'crates/storage/tests/fixtures/archives/records-schema-2/installation.zip',
+  'crates/storage/tests/fixtures/archives/records-schema-13/workspace.zip',
+ ])assert.match(path,archiveFixture);
+ for(const path of [
+  'tests/fixtures/documents/a.zip',
+  'crates/storage/tests/fixtures/a.zip',
+  'crates/storage/tests/fixtures/archives/workspace.zip',
+  'crates/storage/tests/fixtures/archives/records-schema-2/other.zip',
+  'crates/storage/tests/fixtures/archives/records-schema-2/nested/workspace.zip',
+  'crates/storage/tests/fixtures/archives/records-schema-0/workspace.zip',
+  'crates/storage/tests/fixtures/archives/records-schema-2/workspace.zip.zip',
+  'crates/ingest/tests/fixtures/archives/records-schema-2/workspace.zip',
+  'crates/storage/src/fixtures/archives/records-schema-2/workspace.zip',
+ ])assert.doesNotMatch(path,archiveFixture);
 });
 test('the text guards read every directory and leave out only what .gitattributes declares binary',async t=>{
  const bytes=(...parts)=>Buffer.concat(parts.map(part=>typeof part==='string'?Buffer.from(part,'utf8'):Buffer.from(part)));

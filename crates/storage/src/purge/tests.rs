@@ -39,7 +39,11 @@ type Holder = (
 const UPLOADED: &[u8] = b"zanzibar upload bytes ";
 
 impl CandidateCheck for Accept {
-    fn check(&self, _root: &std::path::Path) -> Result<Vec<Warning>, ApiError> {
+    fn check(
+        &self,
+        _root: &std::path::Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
         Ok(Vec::new())
     }
 }

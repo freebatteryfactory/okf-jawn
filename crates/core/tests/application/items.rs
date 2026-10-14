@@ -2,8 +2,6 @@
 //! only the caller's own draft, and every write commits on its base with the conformance
 //! check, then indexes, announces and (for a `MutationResult`) records a receipt.
 
-use std::path::PathBuf;
-
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -24,7 +22,9 @@ use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_core::events::EventScope;
 use okf_jawn_core::jobs::RevisionMapping;
 use okf_jawn_core::ports::Application;
-use okf_jawn_core::storage::{FolderListing, Provenance, TreeEdit, derive_item_id};
+use okf_jawn_core::storage::{
+    FolderListing, Provenance, REPLAY_WARNINGS_UNAVAILABLE, TreeEdit, derive_item_id,
+};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -756,6 +756,47 @@ async fn an_edit_reports_lint_only_for_the_files_it_touched() -> TestResult {
     assert_eq!(world.versions.commits()?.len(), 1);
     Ok(())
 }
+/// R-I12: a move reports the lint of a file whose link to the moved item the store rewrote. The
+/// request names only the item and its destination, so only the store can name that file; a
+/// file nothing was done to stays unreported.
+#[tokio::test]
+async fn a_move_reports_the_lint_of_the_referrer_the_store_rewrote() -> TestResult {
+    let world = World::new()?;
+    note_at(&world, &['a'])?;
+    world.versions.queue_revision(revision('b')?)?;
+    world
+        .versions
+        .put_referrer(ItemId(Uuid::from_u128(NOTE)), path("notes/referrer.md")?)?;
+    let stage = world.versions.stage();
+    for at in ["notes/referrer.md", "notes/bystander.md"] {
+        stage.write(at, "---\ntype: Note\n---\n\nNo heading.\n")?;
+    }
+    let moved = world
+        .service
+        .move_item(
+            &alice(OperationName::MoveItem, Some(mutation(1)))?,
+            move_request()?,
+        )
+        .await?;
+    let located: Vec<&str> = moved
+        .warnings
+        .iter()
+        .filter(|warning| warning.code.starts_with("okf_lint"))
+        .filter_map(|warning| warning.location.as_deref())
+        .collect();
+    assert!(
+        located.contains(&"notes/referrer.md"),
+        "{:?}",
+        moved.warnings
+    );
+    assert!(
+        !located.contains(&"notes/bystander.md"),
+        "{:?}",
+        moved.warnings
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_write_on_a_moved_head_conflicts_and_one_on_a_purged_base_is_refused() -> TestResult {
     let world = World::new()?;
@@ -903,10 +944,9 @@ async fn a_resumed_write_answers_the_first_attempts_revision_and_receipt() -> Te
     Ok(())
 }
 
-/// A world where moving the fixture note to `archive/plan.md` commits `b`, whose moved file has
-/// no heading and holds `committed` as its properties. The staged tree the store checks is
-/// that file with a type, so it is the commit's tree when `committed` holds the same type.
-fn move_with_lint(committed: serde_json::Value) -> Built<World> {
+/// A world where moving the fixture note to `archive/plan.md` commits `b`, and the staged tree
+/// the store checks holds the moved file without a heading, which OKF lint flags.
+fn move_with_lint() -> Built<World> {
     let world = World::new()?;
     note_at(&world, &['a'])?;
     let staged = note(
@@ -916,14 +956,6 @@ fn move_with_lint(committed: serde_json::Value) -> Built<World> {
         "No heading.\n",
         json!({ "type": "Note" }),
     )?;
-    let moved = note(
-        NOTE,
-        &revision('b')?,
-        "archive/plan.md",
-        "No heading.\n",
-        committed,
-    )?;
-    world.versions.put_document(&revision('b')?, moved)?;
     world.versions.queue_revision(revision('b')?)?;
     let stage = world.versions.stage();
     std::fs::remove_file(stage.0.join("notes/plan.md"))?;
@@ -935,7 +967,7 @@ fn move_with_lint(committed: serde_json::Value) -> Built<World> {
 #[tokio::test]
 async fn a_resumed_write_answers_the_warnings_its_first_attempt_produced() -> TestResult {
     let caller = alice(OperationName::MoveItem, Some(mutation(1)))?;
-    let uninterrupted = move_with_lint(json!({ "type": "Note" }))?;
+    let uninterrupted = move_with_lint()?;
     let first = uninterrupted
         .service
         .move_item(&caller, move_request()?)
@@ -949,9 +981,15 @@ async fn a_resumed_write_answers_the_warnings_its_first_attempt_produced() -> Te
         first.warnings
     );
     // The same write fails after its commit; the store replays the commit on the retry.
-    let world = move_with_lint(json!({ "type": "Note" }))?;
+    let world = move_with_lint()?;
     world.search.fail_next();
     err_of(world.service.move_item(&caller, move_request()?).await)?;
+    // The tree a check would read now has its heading: a check run again would find no lint,
+    // so only the warnings the store kept can answer.
+    world.versions.stage().write(
+        "archive/plan.md",
+        "---\ntype: Note\n---\n\n# Plan\n\nA heading now.\n",
+    )?;
     let retried = world.service.move_item(&caller, move_request()?).await?;
     assert_eq!(world.versions.commits()?.len(), 1, "no second commit");
     // `Warning` has no equality; its wire form is compared.
@@ -963,95 +1001,27 @@ async fn a_resumed_write_answers_the_warnings_its_first_attempt_produced() -> Te
 }
 
 #[tokio::test]
-async fn a_replayed_write_whose_warnings_cannot_be_rebuilt_still_answers_its_commit() -> TestResult
-{
-    // The commit the store holds has no type, so the check refuses it on its second run; the
-    // staged tree it passed on its first run is conformant.
-    let world = move_with_lint(json!({}))?;
+async fn a_replayed_write_the_store_kept_no_warnings_for_still_answers_its_commit() -> TestResult {
+    let world = move_with_lint()?;
     world.search.fail_next();
     let caller = alice(OperationName::MoveItem, Some(mutation(1)))?;
     err_of(world.service.move_item(&caller, move_request()?).await)?;
+    // The store holds the commit and no warnings for it, as for a commit it wrote before it
+    // kept them.
+    world.versions.forget_warnings()?;
     let retried = world.service.move_item(&caller, move_request()?).await?;
     assert_eq!(retried.revision, revision('b')?);
     assert_eq!(world.versions.commits()?.len(), 1, "no second commit");
     let receipts = world.records.receipts()?;
     let (_, receipt) = some(receipts.first(), "the write's receipt")?;
     assert_eq!(receipt.id, retried.receipt_id);
+    // The store's one warning, passed on as it is: no lint is invented in its place.
     let [only] = retried.warnings.as_slice() else {
         return Err(format!("not one warning: {:?}", retried.warnings).into());
     };
+    assert_eq!(only.code, REPLAY_WARNINGS_UNAVAILABLE);
     assert_eq!(only.code, "replay_warnings_unavailable");
-    assert!(
-        only.message.contains("could not be rebuilt") && only.message.contains("type"),
-        "says why: {}",
-        only.message
-    );
-    Ok(())
-}
-
-/// The directories a replayed commit's check wrote under the system's temporary directory
-/// (`okf-jawn-recheck-*`) that still hold `file`.
-fn recheck_directories_holding(file: &str) -> Built<Vec<PathBuf>> {
-    let mut holding = Vec::new();
-    for entry in std::fs::read_dir(std::env::temp_dir())? {
-        let directory = entry?.path();
-        let rechecks = directory
-            .file_name()
-            .is_some_and(|name| name.to_string_lossy().starts_with("okf-jawn-recheck-"));
-        if rechecks && directory.join(file).exists() {
-            holding.push(directory);
-        }
-    }
-    Ok(holding)
-}
-
-#[tokio::test]
-async fn the_directory_a_replayed_commits_check_wrote_is_removed_after_the_check() -> TestResult {
-    // The commit's tree holds one file no other test writes, so the directory this check wrote
-    // is told apart from one a concurrent test's check is still using.
-    let unique = format!("archive/{}.md", Uuid::new_v4().simple());
-    let world = World::new()?;
-    note_at(&world, &['a'])?;
-    let moved = note(
-        NOTE,
-        &revision('b')?,
-        &unique,
-        "No heading.\n",
-        json!({ "type": "Note" }),
-    )?;
-    world
-        .versions
-        .put_document(&revision('b')?, moved.clone())?;
-    world.versions.queue_revision(revision('b')?)?;
-    let stage = world.versions.stage();
-    std::fs::remove_file(stage.0.join("notes/plan.md"))?;
-    std::fs::create_dir_all(stage.0.join("archive"))?;
-    stage.write(&unique, &file_text(&moved))?;
-    let request = || -> Built<MoveItemRequest> {
-        Ok(MoveItemRequest {
-            destination: path(&unique)?,
-            ..move_request()?
-        })
-    };
-    let caller = alice(OperationName::MoveItem, Some(mutation(1)))?;
-    // The write fails after its commit; the retry replays the commit and checks its tree again.
-    world.search.fail_next();
-    err_of(world.service.move_item(&caller, request()?).await)?;
-    let retried = world.service.move_item(&caller, request()?).await?;
-    // The check did run over a directory holding that tree: its warning names the file.
-    assert!(
-        retried.warnings.iter().any(|warning| {
-            warning.code.starts_with("okf_lint")
-                && warning.location.as_deref() == Some(unique.as_str())
-        }),
-        "{:?}",
-        retried.warnings
-    );
-    assert_eq!(
-        recheck_directories_holding(&unique)?,
-        Vec::<PathBuf>::new(),
-        "the check's directory is gone"
-    );
+    assert_eq!(only.location, None);
     Ok(())
 }
 

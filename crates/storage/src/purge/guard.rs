@@ -14,7 +14,10 @@
 //! discard), upload slots,
 //! upload content (which then removes the part file it appended to), upload completions (also
 //! checked before anything is read, so one after the purge is refused, not answered
-//! `NotFound`), artifacts, job completions, derived objects, receipts, reviews, proposals
+//! `NotFound`), upload consumptions, one upload or a batch (`UploadStore::consume` and
+//! `consume_batch`, each checked before any
+//! upload is read, for the same reason), artifacts, job completions, derived objects, receipts,
+//! reviews, proposals
 //! (insert, update), comments, confirmations (create, consume), sandbox capabilities and the
 //! catalog (update, archive, unarchive). Commits, candidates and promotions check under the
 //! workspace's write lock, under which the purge's plan reads the workspace. An object put

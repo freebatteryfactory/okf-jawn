@@ -6,7 +6,9 @@
 //!
 //! - every table with `tenant_id` and `workspace_id` loses the workspace's rows, except the
 //!   purge records (`purges`, `purge_progress`) and the revision map, which hold identities only
-//!   and outlive the workspace, and the mutation ledger (next);
+//!   and outlive the workspace, and the mutation ledger (next). The warnings kept for each
+//!   commit's replay (`commit_warnings`, records schema 3) are among the rows removed: a
+//!   warning can quote a path or a title of the workspace, so the table must never join `KEPT`;
 //! - a table keyed by `job_id` without a workspace column loses the rows of the workspace's
 //!   jobs, before the jobs go;
 //! - every connector's `workspace_ids` loses the workspace;

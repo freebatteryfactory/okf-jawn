@@ -12,13 +12,14 @@ mod ports;
 mod records;
 
 mod job_handler {
+    use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use okf_jawn_contract::access::AccessRoute;
-    use okf_jawn_contract::common::PageRange;
-    use okf_jawn_contract::error::ErrorCode;
+    use okf_jawn_contract::common::{PageRange, Warning};
+    use okf_jawn_contract::error::{ApiError, ErrorCode};
     use okf_jawn_contract::events::EventKind;
     use okf_jawn_contract::extraction::{
         ConversionOutcome, ConversionSettings, FailureReason, TextOrigin,
@@ -34,7 +35,7 @@ mod job_handler {
     use okf_jawn_core::events::EventScope;
     use okf_jawn_core::jobs::{JobHandler, JobScope, JobSpec, NewJob, RecordStore};
     use okf_jawn_core::storage::{
-        CandidateCheck, ObjectInfo, Provenance, SourceCard, StorageScope, TreeEdit,
+        CandidateCheck, ObjectInfo, Provenance, SourceCard, StorageScope, TreeEdit, VersionStore,
         derive_commit_mutation_id, derive_item_id,
     };
     use okf_jawn_core::uploads::UploadRecord;
@@ -81,9 +82,61 @@ mod job_handler {
         handler: IngestHandler,
     }
 
+    /// A conformance check that answers for the whole candidate whatever the commit wrote, as
+    /// the production `conformance::OkfConformance` does with the validator's findings: one
+    /// warning for each file under the staged root, located at the file's workspace path, in
+    /// path order.
+    struct WholeCandidate;
+
     const PURGE: &str = "00000000-0000-0000-0000-0000000000cc";
     const WORKSPACE: &str = "00000000-0000-0000-0000-0000000000aa";
     const SOURCE_ITEM: &str = "00000000-0000-0000-0000-0000000000ac";
+    /// Another item of the workspace, which a redigest of `SOURCE_ITEM` does not write.
+    const OTHER_ITEM: &str = "00000000-0000-0000-0000-0000000000ad";
+    /// The code of the warnings `WholeCandidate` gives.
+    const WHOLE_CANDIDATE: &str = "whole_candidate";
+    /// How many sources the many-card import of review N2 takes.
+    const MANY_CARDS: u32 = 12;
+
+    impl CandidateCheck for WholeCandidate {
+        fn check(
+            &self,
+            root: &Path,
+            _rewritten: &[WorkspacePath],
+        ) -> Result<Vec<Warning>, ApiError> {
+            let mut files = Vec::new();
+            files_under(root, "", &mut files)
+                .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+            files.sort_unstable();
+            Ok(files
+                .into_iter()
+                .map(|path| Warning {
+                    code: WHOLE_CANDIDATE.to_owned(),
+                    message: "a finding of the whole candidate".to_owned(),
+                    location: Some(path),
+                })
+                .collect())
+        }
+    }
+
+    /// Every file under `directory`, as a `/`-separated path below it, after `prefix`.
+    fn files_under(directory: &Path, prefix: &str, found: &mut Vec<String>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let path = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            if entry.file_type()?.is_dir() {
+                files_under(&entry.path(), &path, found)?;
+            } else {
+                found.push(path);
+            }
+        }
+        Ok(())
+    }
 
     fn tenant() -> Built<TenantId> {
         Ok(TenantId::try_from("tenant-a".to_owned())?)
@@ -946,6 +999,54 @@ mod job_handler {
         Ok(())
     }
 
+    /// Review B1: a restore's completion carries no warning. No check runs for a restore's
+    /// commit, so the store keeps no warnings for it and `find_commit` answers it with the one
+    /// `replay_warnings_unavailable` warning, as real storage does and as this fake does (it is
+    /// asserted here, so the handler is shown to be given one). The handler reads the revision
+    /// only: on a first attempt, and on a resumed attempt that finds the commit its first
+    /// attempt wrote.
+    #[tokio::test]
+    async fn a_restores_completion_carries_no_warning_on_a_first_or_a_resumed_attempt() -> TestResult
+    {
+        let world = world()?;
+        let id = restore_job(&world, 125)?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let completion = some(entry.completions.first(), "the completion")?;
+        let restored = some(completion.revision.clone(), "the restore's revision")?;
+        // The store answers the restore's commit with the unavailable warning.
+        let found = world
+            .versions
+            .find_commit(&storage_scope()?, entry.created.mutation_id, None)
+            .await?;
+        let found = some(found, "the restore's commit")?;
+        assert_eq!(found.revision, restored);
+        assert_eq!(
+            found
+                .warnings
+                .iter()
+                .map(|warning| warning.code.as_str())
+                .collect::<Vec<_>>(),
+            ["replay_warnings_unavailable"]
+        );
+        assert!(completion.warnings.is_empty(), "{:?}", completion.warnings);
+
+        // The completion is lost: the attempt that runs again finds the commit, and completes
+        // with its revision and still no warning.
+        world
+            .records
+            .insert(id, entry.scope.clone(), entry.created.clone())?;
+        assert!(run(&world, id).await?);
+        let again = world.records.entry(id)?;
+        assert_eq!(again.job.state, JobState::Succeeded, "{:?}", again.failures);
+        assert_eq!(world.versions.written()?.len(), 1, "no second commit");
+        let resumed = some(again.completions.first(), "the resumed completion")?;
+        assert_eq!(resumed.revision.as_ref(), Some(&restored));
+        assert!(resumed.warnings.is_empty(), "{:?}", resumed.warnings);
+        Ok(())
+    }
+
     /// A restore job of `world` under the job number `number`.
     fn restore_job(world: &World, number: u128) -> Built<okf_jawn_contract::identity::JobId> {
         let upload_id = upload(world, number, "backup.zip", b"archive bytes")?;
@@ -1157,25 +1258,6 @@ mod job_handler {
     }
 
     #[tokio::test]
-    async fn a_replayed_commits_check_that_outlasts_several_lease_intervals_keeps_its_lease()
-    -> TestResult {
-        let (world, id) = resumed_import(175).await?;
-        // The first tree read of the replayed pending commit's check is long.
-        *world.versions.read_hold.lock().map_err(|_| "poisoned")? = Some(lapsing(&world.records));
-        assert!(run(&world, id).await?);
-        assert_completed_under(&world, id, 1)?;
-        assert!(
-            world
-                .versions
-                .read_hold
-                .lock()
-                .map_err(|_| "poisoned")?
-                .is_none()
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn a_replayed_cards_outputs_read_that_outlasts_several_lease_intervals_keeps_its_lease()
     -> TestResult {
         let (world, id) = resumed_import(177).await?;
@@ -1305,6 +1387,92 @@ mod job_handler {
         );
         Ok(())
     }
+
+    /// A purge now names the test workspace: the upload store refuses every consumption.
+    fn purge_names_the_workspace(world: &World) -> TestResult {
+        *world.uploads.purged.lock().map_err(|_| "poisoned")? =
+            Some(serde_json::from_value::<PurgeId>(json!(PURGE))?);
+        Ok(())
+    }
+
+    /// Assert that job `id` was refused for good by the purge's `Conflict`: failed once, not
+    /// retryable, its failure naming the purge.
+    fn assert_refused_by_the_purge(
+        world: &World,
+        id: okf_jawn_contract::identity::JobId,
+    ) -> TestResult {
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        assert!(entry.completions.is_empty(), "{:?}", entry.completions);
+        assert_eq!(entry.failures.len(), 1, "{:?}", entry.failures);
+        let (message, retryable) = some(entry.failures.first(), "the failure")?;
+        assert!(
+            message.contains("is purged by purge") && message.contains(PURGE),
+            "the failure names the purge: {message}"
+        );
+        assert!(!retryable, "a retry would meet the same refusal");
+        Ok(())
+    }
+
+    /// Review N9: a restore whose `consume` meets the purge's `Conflict` (the store refuses a
+    /// consumption in a workspace a purge names) is refused for good, like a restore of an
+    /// upload another job took: nothing is restored, the upload stays unmarked, and no commit
+    /// is written or announced.
+    #[tokio::test]
+    async fn a_restore_whose_upload_is_refused_by_a_purge_is_refused_for_good() -> TestResult {
+        let world = world()?;
+        let id = restore_job(&world, 126)?;
+        let upload_id = match &world.records.entry(id)?.created.spec {
+            JobSpec::RestoreWorkspace { upload_id, .. } => *upload_id,
+            _ => return Err("a restore was expected".into()),
+        };
+        purge_names_the_workspace(&world)?;
+        assert!(run(&world, id).await?);
+        assert_refused_by_the_purge(&world, id)?;
+        // It asked for its one upload, once, and the store marked nothing.
+        assert_eq!(world.uploads.singles()?, [(upload_id, id)]);
+        assert_eq!(world.uploads.consumed()?, Vec::new());
+        assert_eq!(
+            world.backups.restored.lock().map_err(|_| "poisoned")?.len(),
+            0,
+            "refused before restore_import"
+        );
+        assert!(world.versions.written()?.is_empty());
+        assert_eq!(events_of(&world, &EventKind::Changed)?, Vec::new());
+        Ok(())
+    }
+
+    /// Review N9: an import whose batch meets the purge's `Conflict` is refused for good, like
+    /// an import of an upload another job took: no upload is marked and nothing is written.
+    #[tokio::test]
+    async fn an_import_whose_batch_is_refused_by_a_purge_is_refused_for_good() -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let first = upload(&world, 170, "first.pdf", b"%PDF first")?;
+        let second = upload(&world, 171, "second.pdf", b"%PDF second")?;
+        let id = job(
+            &world,
+            170,
+            workspace_scope()?,
+            import_spec(vec![first, second], false)?,
+        )?;
+        purge_names_the_workspace(&world)?;
+        assert!(run(&world, id).await?);
+        assert_refused_by_the_purge(&world, id)?;
+        // One batch was asked for, whole, and the store marked neither upload.
+        assert_eq!(world.uploads.batches()?, [(vec![first, second], id)]);
+        assert_eq!(world.uploads.singles()?, Vec::new());
+        assert_eq!(world.uploads.consumed()?, Vec::new());
+        assert!(world.versions.written()?.is_empty());
+        assert!(
+            world
+                .converter
+                .windows
+                .lock()
+                .map_err(|_| "poisoned")?
+                .is_empty()
+        );
+        Ok(())
+    }
     #[tokio::test]
     async fn an_import_commits_pending_cards_then_each_converted_card() -> TestResult {
         // Six pages in windows of four; the second window hits the cap.
@@ -1321,6 +1489,9 @@ mod job_handler {
         let entry = world.records.entry(id)?;
         assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
         assert_eq!(world.uploads.consumed()?, [(report, id), (notes, id)]);
+        // Taken in one batch, in the request's order, and never one upload at a time (R-I13).
+        assert_eq!(world.uploads.batches()?, [(vec![report, notes], id)]);
+        assert_eq!(world.uploads.singles()?, Vec::new());
 
         // One commit of both pending cards, then one per converted card, each expecting the
         // revision before it, and each under its own identity derived from the job's.
@@ -1480,6 +1651,43 @@ mod job_handler {
         assert!(!retryable);
         assert_eq!(entry.failures.len(), 1);
         assert_eq!(world.uploads.consumed()?, [(complete, taker)]);
+        // Both refusals were the handler's own check: neither refused batch reached the store.
+        assert_eq!(world.uploads.batches()?, [(vec![complete], taker)]);
+        Ok(())
+    }
+
+    /// R-I13: another job takes one upload of the batch after the import checked it and before
+    /// the import consumes. The store refuses the whole batch, so the import holds none of its
+    /// uploads (the other job can still take the rest), and the import is refused for good.
+    #[tokio::test]
+    async fn an_import_whose_upload_another_job_takes_after_its_check_takes_none() -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let first = upload(&world, 160, "first.pdf", b"%PDF first")?;
+        let shared = upload(&world, 161, "shared.pdf", b"%PDF shared")?;
+        let other = job_id(161)?;
+        *world
+            .uploads
+            .taken_before_batch
+            .lock()
+            .map_err(|_| "poisoned")? = Some((shared, other));
+        let id = job(
+            &world,
+            160,
+            workspace_scope()?,
+            import_spec(vec![first, shared], false)?,
+        )?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        let (message, retryable) = some(entry.failures.first(), "the failure")?;
+        assert!(message.contains("another job"), "{message}");
+        assert!(!retryable, "a retry would meet the same refusal");
+        assert_eq!(entry.failures.len(), 1);
+        // One batch was asked for, whole; the import marked neither upload.
+        assert_eq!(world.uploads.batches()?, [(vec![first, shared], id)]);
+        assert_eq!(world.uploads.singles()?, Vec::new());
+        assert_eq!(world.uploads.consumed()?, [(shared, other)]);
+        assert!(world.versions.written()?.is_empty());
         Ok(())
     }
 
@@ -1661,6 +1869,197 @@ mod job_handler {
         // Died after the pending commit, and after the first card's commit: the same warnings.
         assert_eq!(completed_warnings(Some(1), 132).await?, whole);
         assert_eq!(completed_warnings(Some(2), 134).await?, whole);
+        Ok(())
+    }
+
+    /// A world whose conformance check answers for the whole candidate (`WholeCandidate`), with
+    /// an import of `MANY_CARDS` sources (`doc-00.pdf` onward) as job 300.
+    fn many_cards_import() -> Built<(World, okf_jawn_contract::identity::JobId)> {
+        let world = world_full(
+            Some(3),
+            Vec::new(),
+            Arc::new(WholeCandidate),
+            Duration::from_secs(60),
+        )?;
+        let mut uploads = Vec::new();
+        for card in 0..MANY_CARDS {
+            uploads.push(upload(
+                &world,
+                300_u128.saturating_add(u128::from(card)),
+                &format!("doc-{card:02}.pdf"),
+                format!("%PDF {card}").as_bytes(),
+            )?);
+        }
+        let id = job(
+            &world,
+            300,
+            workspace_scope()?,
+            import_spec(uploads, false)?,
+        )?;
+        Ok((world, id))
+    }
+
+    /// The locations of the warnings of `warnings` whose code starts with `code`, in order.
+    fn located(warnings: &[Warning], code: &str) -> Vec<String> {
+        warnings
+            .iter()
+            .filter(|warning| warning.code.starts_with(code))
+            .filter_map(|warning| warning.location.clone())
+            .collect()
+    }
+
+    /// `warnings` as a test compares them: code, message and location.
+    fn compared(warnings: &[Warning]) -> Vec<(String, String, Option<String>)> {
+        warnings
+            .iter()
+            .map(|warning| {
+                (
+                    warning.code.clone(),
+                    warning.message.clone(),
+                    warning.location.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// Review N2: a commit's check reports what that commit wrote. An import of twelve cards
+    /// runs thirteen commits over a candidate that holds all twelve, each with a conformance
+    /// finding (`WholeCandidate`) and OKF lint findings. The pending commit, which writes all
+    /// twelve, keeps and reports all twelve cards' findings; each card's own commit keeps and
+    /// reports that card's only. So the completion holds each commit's findings once (two
+    /// conformance findings a card, not thirteen), and no commit keeps more than the pending
+    /// commit. A replayed attempt completes with the same warnings wherever it died.
+    #[tokio::test]
+    async fn an_import_keeps_and_reports_each_commits_own_warnings_not_every_cards_on_every_commit()
+    -> TestResult {
+        let (world, id) = many_cards_import()?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let mutation = entry.created.mutation_id;
+        let cards = usize::try_from(MANY_CARDS)?;
+        assert_eq!(world.versions.written()?.len(), cards.saturating_add(1));
+        let paths: Vec<String> = (0..MANY_CARDS)
+            .map(|card| format!("inbox/doc-{card:02}-pdf.md"))
+            .collect();
+        // What the store kept for each commit is what that commit's check answered.
+        let kept = world
+            .versions
+            .warnings
+            .lock()
+            .map_err(|_| "poisoned")?
+            .clone();
+        let kept_for = |ordinal: u32| -> Built<Vec<Warning>> {
+            let commit = derive_commit_mutation_id(mutation, ordinal);
+            let found = kept.iter().find(|(of, _)| *of == commit);
+            Ok(some(found, "the warnings kept for a commit")?.1.clone())
+        };
+        // The pending commit writes every card: every card's findings, each once.
+        let pending = kept_for(0)?;
+        assert_eq!(located(&pending, WHOLE_CANDIDATE), paths);
+        let pending_lint = located(&pending, "okf_lint");
+        for path in &paths {
+            assert!(pending_lint.contains(path), "{path}: {pending:?}");
+        }
+        assert_eq!(pending.len(), 36, "no commit keeps more than this one");
+        // Each card's own commit writes that card: that card's findings and no other card's,
+        // though the candidate it checks holds all twelve.
+        let mut card_lint = 0_usize;
+        for (ordinal, path) in (1_u32..).zip(&paths) {
+            let own = kept_for(ordinal)?;
+            assert_eq!(
+                located(&own, WHOLE_CANDIDATE),
+                std::slice::from_ref(path),
+                "{own:?}"
+            );
+            assert!(
+                own.iter()
+                    .all(|warning| warning.location.as_deref() == Some(path.as_str())),
+                "the commit of {path} keeps a warning about another file: {own:?}"
+            );
+            let lint = located(&own, "okf_lint").len();
+            assert_eq!(lint, 2, "{path} has two lint findings of its own: {own:?}");
+            assert_eq!(own.len(), 3, "kept for the commit of {path}: {own:?}");
+            card_lint = card_lint.saturating_add(lint);
+        }
+        // The completion is the sum: each commit's findings once.
+        let completion = some(entry.completions.first(), "the completion")?;
+        assert_eq!(
+            located(&completion.warnings, WHOLE_CANDIDATE).len(),
+            cards.saturating_mul(2),
+            "twelve from the pending commit and one from each card's commit"
+        );
+        assert_eq!(
+            located(&completion.warnings, "okf_lint").len(),
+            pending_lint.len().saturating_add(card_lint)
+        );
+        // In numbers, for twelve cards with two lint findings each as pending and as converted:
+        // the pending commit's 24 lint findings, the card commits' 24, and with the 24
+        // conformance findings 72 warnings in all. A check over every card on every commit
+        // would complete with 468 (36 for each of thirteen commits).
+        assert_eq!(
+            (pending_lint.len(), card_lint, completion.warnings.len()),
+            (24, 24, 72)
+        );
+
+        // A resumed attempt replays the commits its first attempt wrote and completes with the
+        // same warnings: died after the pending commit, after six cards, and after the last.
+        for died in [1, 7, cards.saturating_add(1)] {
+            let (resumed, id) = many_cards_import()?;
+            resumed.versions.die_after(died)?;
+            assert!(run(&resumed, id).await?);
+            let stopped = resumed.records.entry(id)?;
+            assert_eq!(stopped.job.state, JobState::Failed, "died after {died}");
+            resumed.records.insert(id, stopped.scope, stopped.created)?;
+            assert!(run(&resumed, id).await?);
+            let again = resumed.records.entry(id)?;
+            assert_eq!(again.job.state, JobState::Succeeded, "{:?}", again.failures);
+            assert_eq!(resumed.versions.written()?.len(), cards.saturating_add(1));
+            assert_eq!(
+                compared(&some(again.completions.first(), "the completion")?.warnings),
+                compared(&completion.warnings),
+                "died after {died}"
+            );
+        }
+        Ok(())
+    }
+
+    /// R-I10, the commit with no kept warnings: an import resumes over two commits the store
+    /// holds no warnings for (as for commits written before it kept them). It completes, and
+    /// each replayed commit contributes the store's one warning in place of its own.
+    #[tokio::test]
+    async fn a_resumed_import_over_commits_without_kept_warnings_says_so_and_completes()
+    -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let first = upload(&world, 136, "first.pdf", b"%PDF first")?;
+        let second = upload(&world, 137, "second.pdf", b"%PDF second")?;
+        let id = job(
+            &world,
+            136,
+            workspace_scope()?,
+            import_spec(vec![first, second], false)?,
+        )?;
+        world.versions.die_after(2)?;
+        assert!(run(&world, id).await?);
+        let died = world.records.entry(id)?;
+        assert_eq!(died.job.state, JobState::Failed);
+        world.versions.forget_warnings()?;
+        world.records.insert(id, died.scope, died.created)?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        assert_eq!(
+            world.versions.written()?.len(),
+            3,
+            "no commit written twice"
+        );
+        let completion = some(entry.completions.first(), "the completion")?;
+        let unavailable = completion
+            .warnings
+            .iter()
+            .filter(|warning| warning.code == "replay_warnings_unavailable")
+            .count();
+        assert_eq!(unavailable, 2, "{:?}", completion.warnings);
         Ok(())
     }
 
@@ -2228,7 +2627,15 @@ mod job_handler {
     /// A world whose base holds one converted source card at `inbox/report-pdf.md`, with a
     /// property of its own; and a redigest of it against the base.
     fn redigest_world(number: u128) -> Built<(World, okf_jawn_contract::identity::JobId, ItemId)> {
-        let world = world_with(Some(3), Vec::new())?;
+        redigest_world_with(number, Arc::new(AcceptAll))
+    }
+
+    /// `redigest_world`, with `check` as the conformance check composition injects.
+    fn redigest_world_with(
+        number: u128,
+        check: Arc<dyn CandidateCheck>,
+    ) -> Built<(World, okf_jawn_contract::identity::JobId, ItemId)> {
+        let world = world_full(Some(3), Vec::new(), check, Duration::from_secs(60))?;
         let object = world.blobs.insert(b"%PDF report")?;
         let item_id = serde_json::from_value::<ItemId>(json!(SOURCE_ITEM))?;
         let mut properties = std::collections::BTreeMap::new();
@@ -2273,6 +2680,120 @@ mod job_handler {
             },
         )?;
         Ok((world, id, item_id))
+    }
+
+    /// Another item at the base, at `notes/other.md`: a file of the workspace a redigest of the
+    /// report does not write.
+    fn other_file_at_base(world: &World) -> TestResult {
+        let mut other = some(
+            world.versions.item_at(
+                &base()?,
+                serde_json::from_value::<ItemId>(json!(SOURCE_ITEM))?,
+            )?,
+            "the card",
+        )?;
+        other.item_id = serde_json::from_value::<ItemId>(json!(OTHER_ITEM))?;
+        other.path = WorkspacePath::try_from("notes/other.md".to_owned())?;
+        "Other".clone_into(&mut other.title);
+        world
+            .versions
+            .at_base
+            .lock()
+            .map_err(|_| "poisoned")?
+            .push(other);
+        Ok(())
+    }
+
+    /// The warnings a redigest completed with, and the ones the store kept for its commit.
+    fn redigest_warnings(
+        world: &World,
+        id: okf_jawn_contract::identity::JobId,
+    ) -> Built<(Vec<Warning>, Vec<Warning>)> {
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let completed = some(entry.completions.first(), "the completion")?
+            .warnings
+            .clone();
+        let commit = derive_commit_mutation_id(entry.created.mutation_id, 0);
+        let kept = world
+            .versions
+            .warnings
+            .lock()
+            .map_err(|_| "poisoned")?
+            .clone();
+        let row = some(kept.iter().find(|(of, _)| *of == commit), "the kept row")?;
+        Ok((completed, row.1.clone()))
+    }
+
+    /// A redigest's one commit writes the card (and the card's appearance record, the folder
+    /// indexes and the log, which are no concept), so its check reports that card: in a workspace
+    /// whose other files hold findings, the redigest completes with the card's findings only, and
+    /// the store keeps the same for its commit.
+    #[tokio::test]
+    async fn a_redigest_completes_and_keeps_only_the_findings_of_the_card_it_wrote() -> TestResult {
+        let (world, id, _item_id) = redigest_world_with(40, Arc::new(WholeCandidate))?;
+        other_file_at_base(&world)?;
+        assert!(run(&world, id).await?);
+        let (completed, kept) = redigest_warnings(&world, id)?;
+        assert_eq!(
+            located(&completed, WHOLE_CANDIDATE),
+            ["inbox/report-pdf.md"],
+            "{completed:?}"
+        );
+        assert!(
+            completed
+                .iter()
+                .all(|warning| warning.location.as_deref() == Some("inbox/report-pdf.md")),
+            "{completed:?}"
+        );
+        assert_eq!(compared(&kept), compared(&completed));
+        Ok(())
+    }
+
+    /// The card is written at the head's path, so a redigest of a card a person moved reports the
+    /// findings of the card at its new path, and of no other file.
+    #[tokio::test]
+    async fn a_redigest_of_a_moved_card_reports_the_findings_at_its_new_path() -> TestResult {
+        let (world, id, item_id) = redigest_world_with(41, Arc::new(WholeCandidate))?;
+        other_file_at_base(&world)?;
+        world
+            .versions
+            .edit_elsewhere_with(vec![TreeEdit::MoveItem {
+                item_id,
+                destination: WorkspacePath::try_from("archive/report.md".to_owned())?,
+            }])?;
+        assert!(run(&world, id).await?);
+        let (completed, kept) = redigest_warnings(&world, id)?;
+        assert_eq!(
+            located(&completed, WHOLE_CANDIDATE),
+            ["archive/report.md"],
+            "{completed:?}"
+        );
+        assert!(
+            completed
+                .iter()
+                .all(|warning| warning.location.as_deref() == Some("archive/report.md")),
+            "{completed:?}"
+        );
+        assert_eq!(compared(&kept), compared(&completed));
+        Ok(())
+    }
+
+    /// A refusal of the injected conformance check still refuses a redigest for good, and nothing
+    /// of it is written.
+    #[tokio::test]
+    async fn a_redigest_the_conformance_check_refuses_is_refused_for_good() -> TestResult {
+        let (world, id, _item_id) = redigest_world_with(42, Arc::new(RefuseAll))?;
+        other_file_at_base(&world)?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        assert!(entry.completions.is_empty());
+        let (message, retryable) = some(entry.failures.first(), "the failure")?;
+        assert!(message.contains("not a conformant"), "{message}");
+        assert!(!retryable);
+        assert!(world.versions.written()?.is_empty());
+        Ok(())
     }
 
     #[tokio::test]

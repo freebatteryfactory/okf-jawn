@@ -54,12 +54,15 @@ pub(crate) const WORKSPACE_TABLES: &[&str] = &[
 
 /// Records tables a workspace archive leaves empty: tenant and installation records (the
 /// installation archive carries them); retry records, which mean something only to the live
-/// ledger; short-lived capabilities and challenges; the records of backup archives, written
-/// histories and restores, whose bytes an archive never holds; the archive each replacement
+/// ledger (among them the check warnings kept for a commit's replay, `commit_warnings`: a
+/// restored workspace holds none, so a replay of a restored commit answers that its warnings
+/// are not available); short-lived capabilities and challenges; the records of backup archives,
+/// written histories and restores, whose bytes an archive never holds; the archive each replacement
 /// restore restored a workspace from, which means something only to this directory; and pending
 /// puts, which belong to writes of this installation.
 pub(crate) const NOT_IN_WORKSPACE_ARCHIVE: &[&str] = &[
     "backup_archives",
+    "commit_warnings",
     "confirmations",
     "connectors",
     "draft_mutations",

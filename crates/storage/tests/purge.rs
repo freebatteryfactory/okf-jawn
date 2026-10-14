@@ -2,7 +2,9 @@
 //! `storage-purge-workspace` (`cargo test -p okf-jawn-storage --features runtime -- purge`).
 //!
 //! The target workspace's content carries the marker `zanzibar` (in a note's path and body, a
-//! draft, original bytes, a conversion record's asset, retained archives and exports, an
+//! draft, original bytes, a conversion record's asset, retained archives and exports, the
+//! warnings kept for a commit's replay (the fixture's check warns about each staged path that
+//! carries the marker, as a lint finding quotes a path), an
 //! upload's part file); nothing that survives carries it. After the purge no file anywhere
 //! under the data directory may contain the marker, which reaches the SQLite files' free pages
 //! and write-ahead logs, the index, the object store and the pre-migration backups.
@@ -61,7 +63,9 @@ type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 /// A ledger row as the table holds it: state, token, lease expiry, response and finish time.
 type RowState = (String, i64, i64, Option<String>, Option<i64>);
 
-/// Accepts every candidate.
+/// Accepts every candidate, with one warning for each staged file whose path carries the marker,
+/// quoting that path as a lint finding would. Storage keeps a commit's warnings for its replay
+/// (`commit_warnings`), so every commit of the target's marked note leaves the marker there.
 struct Accept;
 
 /// Two workspaces of one tenant: the purge target and a survivor.
@@ -90,9 +94,43 @@ struct Seeded {
 const MARKER: &[u8] = b"zanzibar";
 
 impl CandidateCheck for Accept {
-    fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
-        Ok(Vec::new())
+    fn check(
+        &self,
+        root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
+        let mut marked = Vec::new();
+        marked_paths(root, "", &mut marked)
+            .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+        Ok(marked
+            .into_iter()
+            .map(|path| Warning {
+                code: "test_marked_path".to_owned(),
+                message: format!("{path} is named for a trip"),
+                location: Some(path),
+            })
+            .collect())
     }
+}
+
+/// The files under `root`, as `/`-separated paths relative to it, whose path holds the marker.
+fn marked_paths(root: &Path, prefix: &str, found: &mut Vec<String>) -> std::io::Result<()> {
+    let marker = String::from_utf8_lossy(MARKER);
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if entry.file_type()?.is_dir() {
+            marked_paths(&entry.path(), &path, found)?;
+        } else if path.contains(marker.as_ref()) {
+            found.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// A fixed UUID spelling numbered `n`.
@@ -747,6 +785,155 @@ async fn purge_target(fixture: &Fixture) -> Fallible<PurgeReport> {
         .await?)
 }
 
+/// The warnings kept for the commits of `workspace` in the records database at `records`: the
+/// stored text of each row.
+fn kept_warnings(records: &Path, workspace: &StorageScope) -> Fallible<Vec<String>> {
+    let connection = rusqlite::Connection::open(records)?;
+    let mut statement = connection.prepare(
+        "SELECT warnings FROM commit_warnings WHERE tenant_id = ?1 AND workspace_id = ?2
+         ORDER BY mutation_id",
+    )?;
+    let rows = statement
+        .query_map(
+            [
+                workspace.tenant_id.as_str().to_owned(),
+                workspace.workspace_id.0.to_string(),
+            ],
+            |row| row.get(0),
+        )?
+        .collect::<Result<Vec<String>, _>>()?;
+    Ok(rows)
+}
+
+/// R-I10: the warnings storage keeps for a commit's replay are rows of the workspace, and its
+/// purge removes them from the live records and from a pre-migration copy; the survivor's stay,
+/// and the survivor's commit still replays with its own. The target's row quotes the marked
+/// path, so a table the purge skipped would leave the marker in both files.
+#[tokio::test]
+async fn purge_removes_the_warnings_kept_for_its_workspaces_commits() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let (target, survivor) = (&fixture.target, &fixture.survivor);
+    pre_migration_copy(directory.path(), "records.sqlite", "records-v1-1.sqlite")?;
+    let live = directory.path().join("records.sqlite");
+    let copy = directory
+        .path()
+        .join("backups/pre-migration/records-v1-1.sqlite");
+    let marker = String::from_utf8_lossy(MARKER).into_owned();
+    for records in [&live, &copy] {
+        let kept = kept_warnings(records, target)?;
+        assert!(
+            kept.iter().any(|row| row.contains(&marker)),
+            "the fixture keeps a warning that quotes the marked path: {kept:?}"
+        );
+        assert_eq!(
+            kept_warnings(records, survivor)?,
+            ["[]"],
+            "the survivor's one commit, which warned of nothing"
+        );
+    }
+    purge_target(&fixture).await?;
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    for records in [&live, &copy] {
+        assert_eq!(kept_warnings(records, target)?, Vec::<String>::new());
+        assert_eq!(kept_warnings(records, survivor)?, ["[]"]);
+    }
+    // The survivor's commit (mutation 5 of the fixture) still replays, with what was kept.
+    let head = fixture.storage.versions().head(survivor).await?;
+    let replay = fixture
+        .storage
+        .versions()
+        .find_commit(survivor, uuid!(5)?, None)
+        .await?;
+    let replay = some(replay, "the survivor's commit")?;
+    assert_eq!(replay.revision, head);
+    assert!(replay.warnings.is_empty(), "{:?}", replay.warnings);
+    Ok(())
+}
+
+/// R-I10: a pre-migration records copy that holds nothing of the target but one kept warning,
+/// which quotes the marker. The purge's "does this copy hold the workspace" reads the table as
+/// its removal does, so the copy is rewritten and the marker is gone from every file.
+/// (Reviewer probe PP1, adopted.)
+#[tokio::test]
+async fn purge_rewrites_a_copy_that_holds_only_a_kept_warning_of_its_workspace() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    // A records database of another, empty installation at this build's schema.
+    let elsewhere = tempfile::tempdir()?;
+    drop(Storage::open(elsewhere.path())?);
+    pre_migration_copy(elsewhere.path(), "records.sqlite", "empty.sqlite")?;
+    let copies = directory.path().join("backups").join("pre-migration");
+    std::fs::create_dir_all(&copies)?;
+    let copy = copies.join("records-v3-9.sqlite");
+    std::fs::copy(
+        elsewhere
+            .path()
+            .join("backups")
+            .join("pre-migration")
+            .join("empty.sqlite"),
+        &copy,
+    )?;
+    let marker = String::from_utf8_lossy(MARKER).into_owned();
+    rusqlite::Connection::open(&copy)?.execute(
+        "INSERT INTO commit_warnings (tenant_id, workspace_id, mutation_id, commit_id, warnings)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        [
+            fixture.target.tenant_id.as_str().to_owned(),
+            fixture.target.workspace_id.0.to_string(),
+            uuid_text(999),
+            "c".repeat(40),
+            format!("[{{\"code\":\"lint\",\"message\":\"{marker} trip.md has no heading\"}}]"),
+        ],
+    )?;
+    assert_eq!(kept_warnings(&copy, &fixture.target)?.len(), 1);
+    assert!(
+        marked_files(directory.path())?.contains(&copy.display().to_string()),
+        "the copy holds the marker before the purge"
+    );
+    purge_target(&fixture).await?;
+    assert_eq!(
+        kept_warnings(&copy, &fixture.target)?,
+        Vec::<String>::new(),
+        "the copy's one row of the workspace is removed"
+    );
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    Ok(())
+}
+
+/// R-I10: a pre-migration records copy as records schema 2 left it, with no `commit_warnings`
+/// table. The purge completes, no file keeps the marker, and the copy is still at schema 2.
+/// (Reviewer probe PP2, adopted.)
+#[tokio::test]
+async fn purge_reaches_a_schema_2_copy_that_has_no_table_of_kept_warnings() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    pre_migration_copy(directory.path(), "records.sqlite", "records-v2-1.sqlite")?;
+    let copy = directory
+        .path()
+        .join("backups")
+        .join("pre-migration")
+        .join("records-v2-1.sqlite");
+    rusqlite::Connection::open(&copy)?
+        .execute_batch("DROP TABLE commit_warnings; PRAGMA user_version = 2;")?;
+    assert!(
+        marked_files(directory.path())?.contains(&copy.display().to_string()),
+        "the copy holds the marker before the purge"
+    );
+    purge_target(&fixture).await?;
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    let connection = rusqlite::Connection::open(&copy)?;
+    let tables: i64 = connection.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE name = 'commit_warnings'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(tables, 0, "the purge added no table to the copy");
+    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    assert_eq!(version, 2, "the copy is still at schema 2");
+    Ok(())
+}
+
 /// Review probe R1: the backup handler failed (or its job was abandoned) after the archive was
 /// written, so only `backup_archives` knows it.
 #[tokio::test]
@@ -926,12 +1113,13 @@ async fn completed_row(
     Ok(())
 }
 
-/// Put a records database back as records schema 1 left it: without the tables schema 2 adds,
+/// Put a records database back as records schema 1 left it: without the tables schemas 2 and 3 add,
 /// without the ledger's workspace column, and with the events table as it was before event keys.
 fn as_records_schema_1(records: &Path) -> TestResult {
     let connection = rusqlite::Connection::open(records)?;
     connection.execute_batch(
-        "DROP TABLE purge_progress; DROP TABLE backup_archives; DROP TABLE restores;
+        "DROP TABLE commit_warnings;
+         DROP TABLE purge_progress; DROP TABLE backup_archives; DROP TABLE restores;
          DROP TABLE pending_puts; DROP TABLE replacement_restores;
          DROP INDEX mutations_by_workspace; ALTER TABLE mutations DROP COLUMN workspace_id;
          CREATE TABLE unkeyed_events (
@@ -1165,9 +1353,27 @@ fn refused<T: std::fmt::Debug>(result: Result<T, ApiError>, what: &str) -> TestR
     Ok(())
 }
 
-/// The upload writes of the refusal test: each refused.
-async fn refuse_uploads(storage: &Storage, target: &StorageScope, slot: UploadId) -> TestResult {
+/// The upload writes of the refusal test: each refused. `slot` is open and `complete` holds a
+/// retained object no job consumed, so only the purge refuses a batch of it, and it stays
+/// unconsumed.
+async fn refuse_uploads(
+    storage: &Storage,
+    target: &StorageScope,
+    slot: UploadId,
+    complete: UploadId,
+) -> TestResult {
     let uploads = storage.uploads();
+    refused(
+        uploads.consume_batch(target, &[complete], uuid!(70)?).await,
+        "an upload batch",
+    )?;
+    let unconsumed: Option<String> = rusqlite::Connection::open(storage.data().records_path())?
+        .query_row(
+            "SELECT consumed_by FROM uploads WHERE upload_id = ?1",
+            [complete.0.to_string()],
+            |row| row.get(0),
+        )?;
+    assert_eq!(unconsumed, None, "the refused batch marked nothing");
     refused(
         uploads
             .create(
@@ -1285,6 +1491,7 @@ async fn purge_refuses_every_write_to_the_workspace_it_names() -> TestResult {
         .await?;
     let claimed = some(records.claim_job(job.id).await?, "the claimed job")?;
     let slot = upload(&storage, &target, 8, b"", false).await?;
+    let complete = upload(&storage, &target, 7, b"an import's source", true).await?;
     let object = put(&storage, &target, b"before the purge").await?;
     let purge: PurgeId = uuid!(60)?;
     record_purge_of(&storage, &target, purge).await?;
@@ -1354,7 +1561,7 @@ async fn purge_refuses_every_write_to_the_workspace_it_names() -> TestResult {
             .await,
         "a draft",
     )?;
-    refuse_uploads(&storage, &target, slot).await?;
+    refuse_uploads(&storage, &target, slot, complete).await?;
     refuse_records(&storage, &target, &head, claimed, &object).await?;
     put(&storage, &survivor, b"the other workspace goes on").await?;
     Ok(())
@@ -2168,6 +2375,118 @@ async fn purge_refuses_an_upload_completion_after_it_completes_naming_the_purge(
             .await,
         "an upload completion after the purge",
     )?;
+    Ok(())
+}
+
+/// R-I13: a batch consumption of the purged workspace's uploads after the purge completed is
+/// refused with `Conflict` naming the purge, not answered `NotFound` for the rows it removed.
+#[tokio::test]
+async fn purge_refuses_an_upload_batch_after_it_completes_naming_the_purge() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let slot = upload(&storage, &target, 8, b"an import's source", true).await?;
+    let purge: PurgeId = uuid!(60)?;
+    record_purge_of(&storage, &target, purge).await?;
+    storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(61)?, purge, target.workspace_id)
+        .await?;
+    refused(
+        storage
+            .uploads()
+            .consume_batch(&target, &[slot], uuid!(70)?)
+            .await,
+        "an upload batch after the purge",
+    )?;
+    Ok(())
+}
+
+/// R-I13, review N7: an empty batch is refused by a purge too. The refusal comes before
+/// anything else the batch does, so a batch that lists nothing does not answer "none taken"
+/// for a workspace a purge names. (Reviewer probe PP3, adopted.)
+#[tokio::test]
+async fn purge_refuses_an_empty_upload_batch() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let taken = storage
+        .uploads()
+        .consume_batch(&target, &[], uuid!(70)?)
+        .await?;
+    assert!(
+        taken.is_empty(),
+        "without a purge an empty batch takes none"
+    );
+    let purge: PurgeId = uuid!(60)?;
+    record_purge_of(&storage, &target, purge).await?;
+    refused(
+        storage
+            .uploads()
+            .consume_batch(&target, &[], uuid!(70)?)
+            .await,
+        "an empty upload batch",
+    )?;
+    Ok(())
+}
+
+/// The consumer the records database holds for each row of `upload`: one entry when the upload
+/// exists (`None` when no job consumed it), and none when its row is gone.
+fn consumers_of(storage: &Storage, upload: UploadId) -> Fallible<Vec<Option<String>>> {
+    let connection = rusqlite::Connection::open(storage.data().records_path())?;
+    let mut statement =
+        connection.prepare("SELECT consumed_by FROM uploads WHERE upload_id = ?1")?;
+    let rows = statement
+        .query_map([upload.0.to_string()], |row| row.get(0))?
+        .collect::<Result<Vec<Option<String>>, _>>()?;
+    Ok(rows)
+}
+
+/// Review N9: a single `consume` (a restore takes its one archive with it) is refused by a
+/// purge of its workspace as the batch is, in the transaction of its read and its mark. From
+/// the moment the purge is recorded the upload is refused naming the purge and stays unmarked;
+/// after the purge completes, when the row is gone, it is still refused naming the purge and
+/// not answered `NotFound`. The other workspace's upload is consumed as before.
+#[tokio::test]
+async fn purge_refuses_a_single_upload_consumption_during_and_after_naming_the_purge() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let (survivor, _) = create(&storage, 2, "Garden").await?;
+    let archive = upload(&storage, &target, 8, b"a restore's archive", true).await?;
+    let elsewhere = upload(&storage, &survivor, 9, b"another archive", true).await?;
+    let uploads = storage.uploads();
+    let (restore, purge): (okf_jawn_contract::identity::JobId, PurgeId) = (uuid!(70)?, uuid!(60)?);
+    record_purge_of(&storage, &target, purge).await?;
+    refused(
+        uploads.consume(&target, archive, restore).await,
+        "a single upload consumption during the purge",
+    )?;
+    assert_eq!(
+        consumers_of(&storage, archive)?,
+        [None],
+        "the refused consumption marked nothing"
+    );
+    storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(61)?, purge, target.workspace_id)
+        .await?;
+    assert_eq!(
+        consumers_of(&storage, archive)?,
+        Vec::<Option<String>>::new(),
+        "the row is gone"
+    );
+    refused(
+        uploads.consume(&target, archive, restore).await,
+        "a single upload consumption after the purge",
+    )?;
+    let taken = uploads.consume(&survivor, elsewhere, restore).await?;
+    assert_eq!(
+        taken.consumed_by,
+        Some(restore),
+        "the other workspace goes on"
+    );
     Ok(())
 }
 
