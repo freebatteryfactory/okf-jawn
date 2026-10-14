@@ -495,6 +495,68 @@ fn assert_lower_case(error: &ApiError, named: &str, field: &str) {
 
 // S3: a note's file ends in `.md`, in lower case.
 
+/// A note at a path that does not end in `.md` in any letter case is refused as not Markdown,
+/// and no lower-case name is offered for it: `x.txt` is not `x.tmd`.
+#[tokio::test]
+async fn a_note_not_ending_in_md_is_refused_as_not_markdown() -> TestResult {
+    let space = Workspace::new().await?;
+    let seeded = space
+        .commit(2, &space.initial, vec![note(10, "a.md", "Ten.")?])
+        .await?;
+    for (mutation, at) in [(3, "x.txt"), (4, "Notes/y.tmd")] {
+        let error = space
+            .refused(mutation, &seeded, vec![note(11, at, "Eleven.")?])
+            .await?;
+        assert_eq!(error.code, ErrorCode::InvalidInput, "{}", error.message);
+        assert_eq!(error.field.as_deref(), Some("/path"), "{}", error.message);
+        assert_eq!(
+            error.message,
+            format!("{at} is not a Markdown file, so it cannot hold an item")
+        );
+    }
+    Ok(())
+}
+
+/// An item under a folder whose name ends in `.md`, and one named `a.md.b.md`, each move as
+/// themselves, and the links that point at them follow: only the last `.md` of a path is the
+/// extension okf-core's concept leaves off.
+#[tokio::test]
+async fn an_item_with_md_inside_its_path_moves_as_itself() -> TestResult {
+    let space = Workspace::new().await?;
+    let seeded = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "notes.md/a.md", "Ten.")?,
+                note(11, "a.md.b.md", "Eleven.")?,
+                note(
+                    12,
+                    "ref.md",
+                    "See [ten](notes.md/a.md) and [eleven](a.md.b.md).",
+                )?,
+            ],
+        )
+        .await?;
+    let moved_on = space
+        .commit(
+            3,
+            &seeded,
+            vec![moved(10, "notes.md/b.md")?, moved(11, "c.md")?],
+        )
+        .await?;
+    assert_eq!(
+        space.item_at(&moved_on, "notes.md/b.md").await?,
+        Some(uuid!(10)?)
+    );
+    assert_eq!(space.item_at(&moved_on, "c.md").await?, Some(uuid!(11)?));
+    assert_eq!(
+        space.body(&moved_on, 12).await?,
+        "See [ten](notes.md/b.md) and [eleven](c.md)."
+    );
+    Ok(())
+}
+
 /// A note created, moved or written as a source card at a path ending in `.MD`, `.Md` or
 /// `.mD` is refused naming the lower-case name, and nothing is committed.
 #[tokio::test]
@@ -1433,6 +1495,67 @@ async fn a_tree_with_two_spellings_of_a_folder_refuses_every_commit_but_a_whole_
         space.file(&repaired, "Notes/a.md")?,
         space.file(&seeded, "Notes/a.md")?
     );
+    Ok(())
+}
+
+/// Two spellings of a folder that are not the immediate folders of any file, `Notes/x/a.md`
+/// beside `notes/y/b.md`, are refused like any other: every folder above a file counts.
+#[tokio::test]
+async fn a_tree_with_two_spellings_of_a_folder_two_levels_up_refuses_a_commit() -> TestResult {
+    let space = Workspace::new().await?;
+    let seeded = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "Notes/x/a.md", "Ten.")?,
+                note(11, "b.md", "Eleven.")?,
+            ],
+        )
+        .await?;
+    let spelled = two_spellings(&space, &seeded, "notes/y/b.md")?;
+    let error = space
+        .refused(3, &spelled, vec![edited(10, "Changed.")?])
+        .await?;
+    assert_conflict_naming(&error, &["notes collides with Notes"]);
+    Ok(())
+}
+
+/// A whole-tree Rewind replaces the base only when it is the commit's first edit: then a base
+/// holding two spellings is not staged and the edits after the Rewind land; when another edit
+/// comes first, the base is staged and refused.
+#[tokio::test]
+async fn only_a_first_whole_tree_rewind_spares_a_base_with_two_spellings() -> TestResult {
+    let space = Workspace::new().await?;
+    let seeded = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "Notes/a.md", "Ten.")?,
+                note(11, "b.md", "Eleven.")?,
+            ],
+        )
+        .await?;
+    let spelled = two_spellings(&space, &seeded, "notes/b.md")?;
+    let rewind = TreeEdit::RestoreWorkspace {
+        from: seeded.clone(),
+    };
+    let error = space
+        .refused(
+            3,
+            &spelled,
+            vec![note(12, "c.md", "Twelve.")?, rewind.clone()],
+        )
+        .await?;
+    assert_conflict_naming(&error, &["notes collides with Notes"]);
+    let repaired = space
+        .commit(4, &spelled, vec![rewind, note(12, "c.md", "Twelve.")?])
+        .await?;
+    let files = space.files(&repaired)?;
+    assert!(files.iter().any(|file| file == "c.md"), "{files:?}");
+    assert!(files.iter().any(|file| file == "b.md"), "{files:?}");
+    one_spelling(&files);
     Ok(())
 }
 
