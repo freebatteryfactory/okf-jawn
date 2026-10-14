@@ -91,6 +91,8 @@ mod job_handler {
     const PURGE: &str = "00000000-0000-0000-0000-0000000000cc";
     const WORKSPACE: &str = "00000000-0000-0000-0000-0000000000aa";
     const SOURCE_ITEM: &str = "00000000-0000-0000-0000-0000000000ac";
+    /// Another item of the workspace, which a redigest of `SOURCE_ITEM` does not write.
+    const OTHER_ITEM: &str = "00000000-0000-0000-0000-0000000000ad";
     /// The code of the warnings `WholeCandidate` gives.
     const WHOLE_CANDIDATE: &str = "whole_candidate";
     /// How many sources the many-card import of review N2 takes.
@@ -2625,7 +2627,15 @@ mod job_handler {
     /// A world whose base holds one converted source card at `inbox/report-pdf.md`, with a
     /// property of its own; and a redigest of it against the base.
     fn redigest_world(number: u128) -> Built<(World, okf_jawn_contract::identity::JobId, ItemId)> {
-        let world = world_with(Some(3), Vec::new())?;
+        redigest_world_with(number, Arc::new(AcceptAll))
+    }
+
+    /// `redigest_world`, with `check` as the conformance check composition injects.
+    fn redigest_world_with(
+        number: u128,
+        check: Arc<dyn CandidateCheck>,
+    ) -> Built<(World, okf_jawn_contract::identity::JobId, ItemId)> {
+        let world = world_full(Some(3), Vec::new(), check, Duration::from_secs(60))?;
         let object = world.blobs.insert(b"%PDF report")?;
         let item_id = serde_json::from_value::<ItemId>(json!(SOURCE_ITEM))?;
         let mut properties = std::collections::BTreeMap::new();
@@ -2670,6 +2680,120 @@ mod job_handler {
             },
         )?;
         Ok((world, id, item_id))
+    }
+
+    /// Another item at the base, at `notes/other.md`: a file of the workspace a redigest of the
+    /// report does not write.
+    fn other_file_at_base(world: &World) -> TestResult {
+        let mut other = some(
+            world.versions.item_at(
+                &base()?,
+                serde_json::from_value::<ItemId>(json!(SOURCE_ITEM))?,
+            )?,
+            "the card",
+        )?;
+        other.item_id = serde_json::from_value::<ItemId>(json!(OTHER_ITEM))?;
+        other.path = WorkspacePath::try_from("notes/other.md".to_owned())?;
+        "Other".clone_into(&mut other.title);
+        world
+            .versions
+            .at_base
+            .lock()
+            .map_err(|_| "poisoned")?
+            .push(other);
+        Ok(())
+    }
+
+    /// The warnings a redigest completed with, and the ones the store kept for its commit.
+    fn redigest_warnings(
+        world: &World,
+        id: okf_jawn_contract::identity::JobId,
+    ) -> Built<(Vec<Warning>, Vec<Warning>)> {
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let completed = some(entry.completions.first(), "the completion")?
+            .warnings
+            .clone();
+        let commit = derive_commit_mutation_id(entry.created.mutation_id, 0);
+        let kept = world
+            .versions
+            .warnings
+            .lock()
+            .map_err(|_| "poisoned")?
+            .clone();
+        let row = some(kept.iter().find(|(of, _)| *of == commit), "the kept row")?;
+        Ok((completed, row.1.clone()))
+    }
+
+    /// A redigest's one commit writes the card (and the card's appearance record, the folder
+    /// indexes and the log, which are no concept), so its check reports that card: in a workspace
+    /// whose other files hold findings, the redigest completes with the card's findings only, and
+    /// the store keeps the same for its commit.
+    #[tokio::test]
+    async fn a_redigest_completes_and_keeps_only_the_findings_of_the_card_it_wrote() -> TestResult {
+        let (world, id, _item_id) = redigest_world_with(40, Arc::new(WholeCandidate))?;
+        other_file_at_base(&world)?;
+        assert!(run(&world, id).await?);
+        let (completed, kept) = redigest_warnings(&world, id)?;
+        assert_eq!(
+            located(&completed, WHOLE_CANDIDATE),
+            ["inbox/report-pdf.md"],
+            "{completed:?}"
+        );
+        assert!(
+            completed
+                .iter()
+                .all(|warning| warning.location.as_deref() == Some("inbox/report-pdf.md")),
+            "{completed:?}"
+        );
+        assert_eq!(compared(&kept), compared(&completed));
+        Ok(())
+    }
+
+    /// The card is written at the head's path, so a redigest of a card a person moved reports the
+    /// findings of the card at its new path, and of no other file.
+    #[tokio::test]
+    async fn a_redigest_of_a_moved_card_reports_the_findings_at_its_new_path() -> TestResult {
+        let (world, id, item_id) = redigest_world_with(41, Arc::new(WholeCandidate))?;
+        other_file_at_base(&world)?;
+        world
+            .versions
+            .edit_elsewhere_with(vec![TreeEdit::MoveItem {
+                item_id,
+                destination: WorkspacePath::try_from("archive/report.md".to_owned())?,
+            }])?;
+        assert!(run(&world, id).await?);
+        let (completed, kept) = redigest_warnings(&world, id)?;
+        assert_eq!(
+            located(&completed, WHOLE_CANDIDATE),
+            ["archive/report.md"],
+            "{completed:?}"
+        );
+        assert!(
+            completed
+                .iter()
+                .all(|warning| warning.location.as_deref() == Some("archive/report.md")),
+            "{completed:?}"
+        );
+        assert_eq!(compared(&kept), compared(&completed));
+        Ok(())
+    }
+
+    /// A refusal of the injected conformance check still refuses a redigest for good, and nothing
+    /// of it is written.
+    #[tokio::test]
+    async fn a_redigest_the_conformance_check_refuses_is_refused_for_good() -> TestResult {
+        let (world, id, _item_id) = redigest_world_with(42, Arc::new(RefuseAll))?;
+        other_file_at_base(&world)?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        assert!(entry.completions.is_empty());
+        let (message, retryable) = some(entry.failures.first(), "the failure")?;
+        assert!(message.contains("not a conformant"), "{message}");
+        assert!(!retryable);
+        assert!(world.versions.written()?.is_empty());
+        Ok(())
     }
 
     #[tokio::test]

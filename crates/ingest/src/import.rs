@@ -55,7 +55,9 @@
 //! A redigest writes one commit, under ordinal 0, by the same rule against its base revision
 //! (R-I8 extended): replayed when an earlier attempt wrote it, refused (not retried) only when
 //! the item was deleted or its original changed since the base, and otherwise written onto the
-//! head's version of the card, keeping its path, title, properties and supplied text.
+//! head's version of the card, keeping its path, title, properties and supplied text. Its check
+//! is a card commit's (`card_check`): it reports the card it writes, at the head's path, not
+//! the whole workspace.
 //!
 //! Every commit the job lands, written now or replayed (the pending commit, each card's commit,
 //! the redigest's commit), is indexed and announced as `changed` under its own derived
@@ -152,11 +154,12 @@ enum Landed {
     Kept(String),
 }
 
-/// What one commit writes, given the head it is written on.
+/// What one commit writes, given the head it is written on, and so what its check reports.
 enum Writes<'a> {
-    /// These edits, whatever the head holds.
-    Edits(Vec<TreeEdit>),
-    /// This card, onto the head's version of its item, by `rule` against the item at `since`.
+    /// These edits, whatever the head holds, checked by this check.
+    Edits(Vec<TreeEdit>, Arc<dyn CandidateCheck>),
+    /// This card, onto the head's version of its item, by `rule` against the item at `since`;
+    /// checked over the card as written there (`card_check`).
     Card {
         /// The card as the job would write it.
         card: &'a SourceCard,
@@ -234,8 +237,8 @@ pub(crate) async fn import(
                 .iter()
                 .map(|(card, _)| TreeEdit::WriteSourceCard(Box::new(card.clone())))
                 .collect(),
+            check,
         ),
-        check,
     )
     .await?
     {
@@ -275,18 +278,7 @@ pub(crate) async fn import(
                 since: &pending_revision,
                 rule: Blocked::AnyChange,
             };
-            let check = card_check(ports, &card);
-            match commit(
-                ports,
-                attempt,
-                scope,
-                (base, ordinal),
-                message,
-                writes,
-                check,
-            )
-            .await?
-            {
+            match commit(ports, attempt, scope, (base, ordinal), message, writes).await? {
                 Landed::Committed(committed) => {
                     let landed = (card.item_id, committed, converted.outputs);
                     take_committed(ports, attempt, scope, landed, &mut done).await?;
@@ -311,13 +303,17 @@ pub(crate) async fn import(
     Ok(done)
 }
 
-/// The check of the commit that writes `card` alone: the injected conformance check and OKF
-/// lint, reported for that card's file only (`portable::ImportCheck`). The other cards of the
-/// import are files of the candidate too, but this commit does not write them: their findings
-/// were reported by the pending commit and are reported again by their own commits, so an
-/// import of N cards completes with each commit's findings once, not with all N cards' on
-/// each of its N + 1 commits. The card is written at the path the pending commit gave it (a
-/// card a person moved meanwhile is not written at all, `Blocked::AnyChange`).
+/// The check of a commit that writes `card` alone, an import's converted card or a redigest's:
+/// the injected conformance check and OKF lint, reported for that card's file only
+/// (`portable::ImportCheck`). `card` is the card as written onto the head, so its path is the
+/// one the commit writes: an import's card at the path its pending commit gave it (a card a
+/// person moved meanwhile is not written at all, `Blocked::AnyChange`), a redigest's at the
+/// head's path of the item. Such a commit also writes the card's appearance record under
+/// `.okf/`, the regenerated folder indexes and the log, none of them a concept, so the card is
+/// all it is told. The workspace's other files are files of the candidate too, but this commit
+/// does not write them: an import of N cards completes with each commit's findings once, not
+/// with all N cards' on each of its N + 1 commits, and a redigest with the findings of its card,
+/// not of the whole workspace.
 fn card_check(ports: &HandlerPorts, card: &SourceCard) -> Arc<dyn CandidateCheck> {
     Arc::new(ImportCheck::new(
         Arc::clone(&ports.check),
@@ -567,7 +563,6 @@ pub(crate) async fn redigest(
         (base_revision, 0),
         format!("Redigest {}: {}", card.title, outcome_word(&converted)),
         writes,
-        Arc::clone(&ports.check),
     )
     .await?;
     let refusal = |message: String| Done {
@@ -864,7 +859,7 @@ async fn retain(
 /// the card's rule blocks. A head that moved before the write is read again, at most
 /// `HEAD_RACES` times. A `Conflict` while the head stood still is the store refusing these
 /// edits, a real collision: `Landed::Refused`. A commit that lands, either way, is indexed and
-/// announced.
+/// announced. A card is checked over the card as written onto the head read (`card_check`).
 async fn commit(
     ports: &HandlerPorts,
     attempt: &Attempt<'_>,
@@ -872,7 +867,6 @@ async fn commit(
     (base, ordinal): (&Revision, u32),
     message: String,
     writes: Writes<'_>,
-    check: Arc<dyn CandidateCheck>,
 ) -> Result<Landed, ApiError> {
     let claimed = attempt.claimed;
     let item = written_item(&writes);
@@ -881,11 +875,14 @@ async fn commit(
     }
     for _race in 0..HEAD_RACES {
         let head = ports.versions.head(scope).await?;
-        let edits = match &writes {
-            Writes::Edits(edits) => edits.clone(),
+        let (edits, check) = match &writes {
+            Writes::Edits(edits, check) => (edits.clone(), Arc::clone(check)),
             Writes::Card { card, since, rule } => {
                 match onto_head(ports, scope, &head, card, since, *rule).await? {
-                    Ok(card) => vec![TreeEdit::WriteSourceCard(Box::new(card))],
+                    Ok(card) => {
+                        let check = card_check(ports, &card);
+                        (vec![TreeEdit::WriteSourceCard(Box::new(card))], check)
+                    }
                     Err(why) => return Ok(Landed::Kept(why)),
                 }
             }
@@ -897,7 +894,7 @@ async fn commit(
             (head.clone(), ordinal),
             message.clone(),
             edits,
-            Arc::clone(&check),
+            check,
         )
         .await;
         match written {
@@ -1038,7 +1035,7 @@ fn same_item(now: &ItemDocument, then: &ItemDocument) -> bool {
 fn written_item(writes: &Writes<'_>) -> Option<ItemId> {
     match writes {
         Writes::Card { card, .. } => Some(card.item_id),
-        Writes::Edits(edits) => match edits.as_slice() {
+        Writes::Edits(edits, _check) => match edits.as_slice() {
             [TreeEdit::WriteSourceCard(card)] => Some(card.item_id),
             _ => None,
         },
