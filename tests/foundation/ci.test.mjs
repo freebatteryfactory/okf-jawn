@@ -101,3 +101,15 @@ test('a pull request from this repository runs CI once, and an upload that finds
  assert.ok(ciUploads.length>0);
  for(const upload of ciUploads)assert.equal(upload.with['if-no-files-found'],'error',`ci.yml ${upload.with.name}`);
 });
+test('the contract and storage are tested on Windows and macOS, whose file systems ignore case',()=>{
+ const job=workflow.jobs.platforms;
+ assert.deepEqual(job.strategy.matrix.os,['windows-2025','macos-15']);
+ assert.equal(job.strategy['fail-fast'],false,'a failure on one system must not hide the other');
+ assert.equal(job['runs-on'],'${{ matrix.os }}');
+ assert.match(job.if,/github\.event_name != 'schedule'/);
+ const test=job.steps.find(step=>step.run?.startsWith('cargo test '))?.run??'';
+ for(const part of ['--locked','--all-features','-p okf-jawn-contract','-p okf-jawn-storage'])assert.ok(test.split(' ').includes(part.split(' ').at(-1)),part);
+ const caches=job.steps.filter(step=>step.uses?.startsWith('actions/cache@')).map(step=>step.with.path);
+ assert.ok(caches.some(path=>path.includes('~/.cargo/registry')&&/^target$/m.test(path)),'no cargo cache');
+ assert.equal(checkout('platforms').with['persist-credentials'],false);
+});
