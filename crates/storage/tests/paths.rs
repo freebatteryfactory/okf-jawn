@@ -517,6 +517,50 @@ async fn search_does_not_index_an_upper_case_md_file_as_an_item() -> TestResult 
     Ok(())
 }
 
+/// An item whose file name ends in `.md.md` is okf-core's concept `a.md` (one `.md` comes off,
+/// as `ConceptId::from_path` takes it): a move of it moves it and never the item at `a.md`, the
+/// links that point at it follow it, and with no title it is titled `c.md`.
+#[tokio::test]
+async fn an_item_whose_name_ends_in_md_md_moves_as_itself() -> TestResult {
+    let space = Workspace::new().await?;
+    let seeded = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "a.md", "Ten.")?,
+                note(11, "a.md.md", "Eleven.")?,
+                note(12, "ref.md", "See [eleven](a.md.md) and [ten](a.md).")?,
+                TreeEdit::CreateItem {
+                    item_id: uuid!(13)?,
+                    path: path("c.md.md")?,
+                    title: None,
+                    type_name: "Note".to_owned(),
+                    kind: ItemKind::Note,
+                    body: "Thirteen.".to_owned(),
+                    properties: BTreeMap::new(),
+                },
+            ],
+        )
+        .await?;
+    let moved_on = space.commit(3, &seeded, vec![moved(11, "b.md")?]).await?;
+    assert_eq!(space.item_at(&moved_on, "b.md").await?, Some(uuid!(11)?));
+    assert_eq!(space.item_at(&moved_on, "a.md").await?, Some(uuid!(10)?));
+    assert_eq!(space.file(&moved_on, "a.md")?, space.file(&seeded, "a.md")?);
+    let referrer = space.body(&moved_on, 12).await?;
+    assert!(
+        referrer.contains("[eleven](b.md)") && referrer.contains("[ten](a.md)"),
+        "{referrer}"
+    );
+    let untitled = space
+        .storage
+        .versions()
+        .item_at_path(&space.scope, &moved_on, &path("c.md.md")?)
+        .await?;
+    assert_eq!(some(untitled, "c.md.md")?.title, "c.md");
+    Ok(())
+}
+
 // S1: a rename that changes only letter case.
 
 /// A note at `at` (item 10) that links to a sibling at `plan` (item 11), and a note at the root

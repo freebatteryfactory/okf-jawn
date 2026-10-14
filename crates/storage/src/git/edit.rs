@@ -899,8 +899,10 @@ fn supplied_path(root: &Path, item: ItemId) -> PathBuf {
     root.join(supplied_file(item))
 }
 
+/// The okf-core concept of the item file at `path`: the path with one `.md` taken off, as
+/// `ConceptId::from_path` takes it, so the file `a.md.md` is the concept `a.md`.
 fn concept(path: &str) -> Result<ConceptId, ApiError> {
-    ConceptId::parse(path.trim_end_matches(".md")).map_err(|error| {
+    ConceptId::parse(path.strip_suffix(".md").unwrap_or(path)).map_err(|error| {
         ApiError::new(ErrorCode::InvalidInput, format!("{path}: {error}"))
             .with_field("/destination")
     })

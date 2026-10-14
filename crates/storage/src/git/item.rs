@@ -102,12 +102,9 @@ impl ItemFile {
         let frontmatter = &self.document.frontmatter;
         let title = frontmatter.title().map_or_else(
             || {
-                path.as_str()
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or_default()
-                    .trim_end_matches(".md")
-                    .to_owned()
+                // One `.md` comes off, so `a.md.md` is titled `a.md`.
+                let name = path.as_str().rsplit('/').next().unwrap_or_default();
+                name.strip_suffix(".md").unwrap_or(name).to_owned()
             },
             std::borrow::Cow::into_owned,
         );
