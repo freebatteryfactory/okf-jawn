@@ -1440,7 +1440,7 @@ export type Draft = {
      */
     base_revision: Revision;
     /**
-     * Digest of the drafted body and properties.
+     * Digest of the drafted body and properties, computed as `ItemDocument::content_digest` is.
      */
     content_digest: Digest;
     /**
@@ -2357,9 +2357,11 @@ export type ItemDocument = {
      */
     body: string;
     /**
-     * SHA-256 of the item's body and properties without the server-owned header, keys sorted.
-     * It is the value a confirmation and a review cite, so a client never computes it; the
-     * server computes it with `okf_jawn_core::portable::item_content_digest`.
+     * SHA-256 of the item's body and properties without the server-owned header and without the
+     * `aliases` property, keys sorted: a rename that records the old path in `aliases` does not
+     * change it, so it keeps a review's coverage. It is the value a confirmation and a review
+     * cite, so a client never computes it; the server computes it with
+     * `okf_jawn_core::portable::item_content_digest`.
      */
     content_digest: Digest;
     /**

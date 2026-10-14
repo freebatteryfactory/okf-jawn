@@ -377,6 +377,39 @@ fn the_reviewed_content_digest_ignores_the_header_and_key_order() -> TestResult 
     Ok(())
 }
 
+/// A rename records the old path in `aliases`; the review fingerprint leaves that property out,
+/// so a pure rename keeps a review current, while any other property still counts.
+#[test]
+fn the_reviewed_content_digest_leaves_out_aliases_and_nothing_else() -> TestResult {
+    let base = document("# Plan\n", json!({ "type": "Note", "status": "stable" }))?;
+    let digest_of_base = item_content_digest(&base)?;
+    let renamed = document(
+        "# Plan\n",
+        json!({ "type": "Note", "status": "stable", "aliases": ["notes/old-plan.md"] }),
+    )?;
+    assert_eq!(item_content_digest(&renamed)?, digest_of_base);
+    let renamed_twice = document(
+        "# Plan\n",
+        json!({
+            "type": "Note",
+            "status": "stable",
+            "aliases": ["notes/old-plan.md", "plans/plan.md"],
+        }),
+    )?;
+    assert_eq!(item_content_digest(&renamed_twice)?, digest_of_base);
+    let tagged = document(
+        "# Plan\n",
+        json!({ "type": "Note", "status": "stable", "tags": ["notes/old-plan.md"] }),
+    )?;
+    assert_ne!(item_content_digest(&tagged)?, digest_of_base);
+    let deprecated = document(
+        "# Plan\n",
+        json!({ "type": "Note", "status": "deprecated", "aliases": ["notes/old-plan.md"] }),
+    )?;
+    assert_ne!(item_content_digest(&deprecated)?, digest_of_base);
+    Ok(())
+}
+
 #[test]
 fn an_imported_verified_is_an_unconfirmed_claim() -> TestResult {
     let listed = properties(json!({

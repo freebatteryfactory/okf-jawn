@@ -78,9 +78,11 @@ pub struct ItemDocument {
     /// All user and OKF properties; unknown extension values are retained. The server-owned
     /// application header appears under `APP_HEADER_KEY`.
     pub properties: std::collections::BTreeMap<String, serde_json::Value>,
-    /// SHA-256 of the item's body and properties without the server-owned header, keys sorted.
-    /// It is the value a confirmation and a review cite, so a client never computes it; the
-    /// server computes it with `okf_jawn_core::portable::item_content_digest`.
+    /// SHA-256 of the item's body and properties without the server-owned header and without the
+    /// `aliases` property, keys sorted: a rename that records the old path in `aliases` does not
+    /// change it, so it keeps a review's coverage. It is the value a confirmation and a review
+    /// cite, so a client never computes it; the server computes it with
+    /// `okf_jawn_core::portable::item_content_digest`.
     pub content_digest: crate::identity::Digest,
     /// Source occurrence metadata when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,7 +102,7 @@ pub struct Draft {
     pub editor: String,
     /// Head revision the draft is based on; a Snapshot conflicts if the item changed since.
     pub base_revision: crate::identity::Revision,
-    /// Digest of the drafted body and properties.
+    /// Digest of the drafted body and properties, computed as `ItemDocument::content_digest` is.
     pub content_digest: crate::identity::Digest,
     /// Time of the latest save.
     pub saved_at: crate::identity::Timestamp,

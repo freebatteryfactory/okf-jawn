@@ -65,7 +65,7 @@ pub struct ImportCheck {
 
 /// What a whole-item review covers: the body and the properties without the application
 /// header, which is server bookkeeping (an archive or a redigest's header update is not a
-/// content change).
+/// content change), and without `aliases` (`ALIASES_KEY`), where a rename records old paths.
 #[derive(Serialize)]
 struct ReviewedContent<'a> {
     body: &'a str,
@@ -74,6 +74,11 @@ struct ReviewedContent<'a> {
 
 /// The OKF frontmatter key of verification events.
 pub const VERIFIED_KEY: &str = "verified";
+
+/// The frontmatter key of an item's former paths. A rename by the naming rules records the old
+/// path there, and a pure rename must not turn a review's coverage to `changed`, so the review
+/// fingerprint leaves it out (owner decision 2026-10-14).
+pub const ALIASES_KEY: &str = "aliases";
 
 /// The OKF actor prefix of a person; a reviewer is always one (only a human session reviews).
 const HUMAN_ACTOR: &str = "human:";
@@ -125,8 +130,10 @@ pub const fn claim_coverage(_claim: &ImportedClaim) -> ReviewCoverage {
 
 /// The digest a review of a whole item records, computed from the item's committed content.
 ///
-/// SHA-256 over the body and the properties without the application header, with object keys
-/// sorted (`mutations::request_digest`), so it does not depend on how a store orders keys.
+/// SHA-256 over the body and the properties without the application header and without
+/// `aliases` (`ALIASES_KEY`), with object keys sorted (`mutations::request_digest`), so it does
+/// not depend on how a store orders keys. A rename that only records the old path in `aliases`
+/// keeps the digest, and so keeps a review `current`.
 ///
 /// # Errors
 /// Returns `Internal` when the content cannot be serialized.
@@ -143,9 +150,11 @@ pub fn content_digest(
     body: &str,
     properties: &BTreeMap<String, Value>,
 ) -> Result<Digest, ApiError> {
+    let mut reviewed = without_header(properties);
+    reviewed.remove(ALIASES_KEY);
     request_digest(&ReviewedContent {
         body,
-        properties: without_header(properties),
+        properties: reviewed,
     })
 }
 

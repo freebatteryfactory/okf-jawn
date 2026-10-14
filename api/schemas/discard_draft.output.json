@@ -29,7 +29,7 @@
     },
     "content_digest": {
       "$ref": "#/$defs/Digest",
-      "description": "Digest of the drafted body and properties."
+      "description": "Digest of the drafted body and properties, computed as `ItemDocument::content_digest` is."
     },
     "editor": {
       "description": "Server-established subject who owns this draft.",

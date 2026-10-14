@@ -2437,7 +2437,7 @@
           },
           "content_digest": {
             "$ref": "#/components/schemas/Digest",
-            "description": "Digest of the drafted body and properties."
+            "description": "Digest of the drafted body and properties, computed as `ItemDocument::content_digest` is."
           },
           "editor": {
             "description": "Server-established subject who owns this draft.",
@@ -4113,7 +4113,7 @@
           },
           "content_digest": {
             "$ref": "#/components/schemas/Digest",
-            "description": "SHA-256 of the item's body and properties without the server-owned header, keys sorted.\nIt is the value a confirmation and a review cite, so a client never computes it; the\nserver computes it with `okf_jawn_core::portable::item_content_digest`."
+            "description": "SHA-256 of the item's body and properties without the server-owned header and without the\n`aliases` property, keys sorted: a rename that records the old path in `aliases` does not\nchange it, so it keeps a review's coverage. It is the value a confirmation and a review\ncite, so a client never computes it; the server computes it with\n`okf_jawn_core::portable::item_content_digest`."
           },
           "draft": {
             "anyOf": [
