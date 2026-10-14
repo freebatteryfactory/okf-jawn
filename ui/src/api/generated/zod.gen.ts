@@ -659,6 +659,8 @@ export const zOperationName = z.union([
     z.literal('delete_item'),
     z.literal('purge_item'),
     z.literal('create_folder'),
+    z.literal('move_folder'),
+    z.literal('delete_folder'),
     z.literal('list_types'),
     z.literal('set_type'),
     z.literal('read_item'),
@@ -679,11 +681,15 @@ export const zOperationName = z.union([
     z.literal('accept_proposal'),
     z.literal('decline_proposal'),
     z.literal('add_comment'),
+    z.literal('list_comments'),
     z.literal('create_confirmation'),
     z.literal('create_review'),
     z.literal('list_reviews'),
     z.literal('create_upload'),
     z.literal('complete_upload'),
+    z.literal('get_upload'),
+    z.literal('list_uploads'),
+    z.literal('discard_upload'),
     z.literal('start_import'),
     z.literal('get_job'),
     z.literal('list_jobs'),
@@ -1454,6 +1460,15 @@ export const zSourceLocation = z.union([
 export const zUploadId = z.uuid();
 
 /**
+ * Which uploads of a workspace to list.
+ */
+export const zUploadListState = z.union([
+    z.literal('incomplete'),
+    z.literal('waiting'),
+    z.literal('consumed')
+]);
+
+/**
  * Pinned historical views and explicit live refresh have different semantics.
  */
 export const zViewMode = z.union([
@@ -1477,6 +1492,16 @@ export const zDiffResponse = z.object({
     changes: z.array(zFileChange),
     from: zRevision,
     to: zRevision,
+    warnings: z.array(zWarning)
+});
+
+/**
+ * The commit a folder move or delete made.
+ */
+export const zFolderResult = z.object({
+    items: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+    receipt_id: zReceiptId,
+    revision: zRevision,
     warnings: z.array(zWarning)
 });
 
@@ -1718,6 +1743,18 @@ export const zDiscardDraftRequest = z.object({
 });
 
 /**
+ * Remove an upload slot and its bytes.
+ *
+ * Refused with `conflict` when a job has consumed the upload or a queued or running job names
+ * it. A repeat under the same key answers the response first given.
+ */
+export const zDiscardUploadRequest = z.object({
+    idempotency_key: zIdempotencyKey,
+    upload_id: zUploadId,
+    workspace_id: zWorkspaceId
+});
+
+/**
  * A resumable change notification, not canonical content.
  *
  * A tenant-level event (a sign-in or a refused one, a connector issued or revoked, a refusal
@@ -1844,6 +1881,14 @@ export const zGetSourcesRequest = z.object({
 });
 
 /**
+ * Read one upload slot as it now stands.
+ */
+export const zGetUploadRequest = z.object({
+    upload_id: zUploadId,
+    workspace_id: zWorkspaceId
+});
+
+/**
  * Read a stored visual artifact at its selected revision.
  */
 export const zGetViewRequest = z.object({
@@ -1886,6 +1931,15 @@ export const zJob = z.object({
     state: zJobState,
     warnings: z.array(zWarning),
     workspace_id: zWorkspaceId.nullish()
+});
+
+/**
+ * Read a proposal's discussion, oldest first.
+ */
+export const zListCommentsRequest = z.object({
+    page: zPageRequest,
+    proposal_id: zProposalId,
+    workspace_id: zWorkspaceId
 });
 
 /**
@@ -1969,6 +2023,15 @@ export const zListReviewsRequest = z.object({
  * List type definitions available in a workspace.
  */
 export const zListTypesRequest = z.object({
+    workspace_id: zWorkspaceId
+});
+
+/**
+ * List a workspace's upload slots, newest first.
+ */
+export const zListUploadsRequest = z.object({
+    page: zPageRequest,
+    state: zUploadListState.nullish(),
     workspace_id: zWorkspaceId
 });
 
@@ -2267,6 +2330,14 @@ export const zUpload = z.object({
 });
 
 /**
+ * A bounded list of upload slots, newest first.
+ */
+export const zListUploadsResponse = z.object({
+    items: z.array(zUpload),
+    next_cursor: z.string().nullish()
+});
+
+/**
  * A user-owned OKF workspace with a resolved head revision.
  */
 export const zWorkspace = z.object({
@@ -2350,6 +2421,21 @@ export const zCreateItemRequest = z.object({
 });
 
 /**
+ * Delete a folder, with everything in it, in one committed change.
+ *
+ * Archived items in the folder are deleted with it and are counted. A draft of a deleted item
+ * is kept as a deleted item's draft is. A folder changed since `base_revision` is a `conflict`
+ * with `ErrorDetail::StaleBase` on `/base_revision`; a folder that does not exist is
+ * `not_found`.
+ */
+export const zDeleteFolderRequest = z.object({
+    base_revision: zRevision,
+    folder: zWorkspacePath,
+    idempotency_key: zIdempotencyKey,
+    workspace_id: zWorkspaceId
+});
+
+/**
  * One path observed as a duplicate during rename preview, including paths that differ only in
  * case or Unicode normalization (`WorkspacePath::collision_key`).
  */
@@ -2427,6 +2513,22 @@ export const zListItemsResponse = z.object({
     items: z.array(zItemSummary),
     next_cursor: z.string().nullish(),
     revision: zRevision
+});
+
+/**
+ * Move a folder, with everything in it, in one committed change.
+ *
+ * Archived items in the folder move with it and are counted. A draft of a moved item stays
+ * with its item. Every moved item's links are rewritten as `move_item` does, and the rewritten
+ * files are told to the check. A folder changed since `base_revision` is a `conflict` with
+ * `ErrorDetail::StaleBase` on `/base_revision`.
+ */
+export const zMoveFolderRequest = z.object({
+    base_revision: zRevision,
+    destination: zWorkspacePath,
+    folder: zWorkspacePath,
+    idempotency_key: zIdempotencyKey,
+    workspace_id: zWorkspaceId
 });
 
 /**
@@ -2636,6 +2738,17 @@ export const zGetSourcesResponse = z.object({
     declared: z.array(zDeclaredSource).optional(),
     revision: zRevision,
     sources: z.array(zSourceReference)
+});
+
+/**
+ * A page of a proposal's comments, oldest first.
+ *
+ * A comment whose `source` lies in a workspace the reader may not read is returned with
+ * `source` left out.
+ */
+export const zListCommentsResponse = z.object({
+    items: z.array(zComment),
+    next_cursor: z.string().nullish()
 });
 
 /**
@@ -2933,6 +3046,13 @@ export const zCreateUploadBody = zCreateUploadRequest;
  */
 export const zCreateUploadResponse = zUpload;
 
+export const zDiscardUploadBody = zDiscardUploadRequest;
+
+/**
+ * Successful operation result
+ */
+export const zDiscardUploadResponse = zUpload;
+
 export const zGetJobBody = zGetJobRequest;
 
 /**
@@ -2947,6 +3067,13 @@ export const zGetTenantJobBody = zGetTenantJobRequest;
  */
 export const zGetTenantJobResponse = zJob;
 
+export const zGetUploadBody = zGetUploadRequest;
+
+/**
+ * Successful operation result
+ */
+export const zGetUploadResponse = zUpload;
+
 export const zListJobsBody = zListJobsRequest;
 
 /**
@@ -2960,6 +3087,13 @@ export const zListTenantJobsBody = zListTenantJobsRequest;
  * Successful operation result
  */
 export const zListTenantJobsResponse = zListJobsResponse;
+
+export const zListUploadsBody = zListUploadsRequest;
+
+/**
+ * Successful operation result
+ */
+export const zListUploadsResponse2 = zListUploadsResponse;
 
 export const zRedigestItemBody = zRedigestRequest;
 
@@ -2996,6 +3130,13 @@ export const zCreateItemBody = zCreateItemRequest;
  */
 export const zCreateItemResponse = zItemDocument;
 
+export const zDeleteFolderBody = zDeleteFolderRequest;
+
+/**
+ * Successful operation result
+ */
+export const zDeleteFolderResponse = zFolderResult;
+
 export const zDeleteItemBody = zDeleteItemRequest;
 
 /**
@@ -3030,6 +3171,13 @@ export const zListItemsBody = zListItemsRequest;
  * Successful operation result
  */
 export const zListItemsResponse2 = zListItemsResponse;
+
+export const zMoveFolderBody = zMoveFolderRequest;
+
+/**
+ * Successful operation result
+ */
+export const zMoveFolderResponse = zFolderResult;
 
 export const zMoveItemBody = zMoveItemRequest;
 
@@ -3086,6 +3234,13 @@ export const zGetProposalBody = zGetProposalRequest;
  * Successful operation result
  */
 export const zGetProposalResponse = zProposal;
+
+export const zListCommentsBody = zListCommentsRequest;
+
+/**
+ * Successful operation result
+ */
+export const zListCommentsResponse2 = zListCommentsResponse;
 
 export const zListProposalsBody = zListProposalsRequest;
 

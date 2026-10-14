@@ -31,17 +31,19 @@ use crate::history::{BlameRequest, CommitRequest, DiffRequest, LogRequest, Resto
 use crate::identity::{IdempotencyKey, WorkspaceId};
 use crate::import::{
     CancelJobRequest, CompleteUploadRequest, CorrectDigestRequest, CreateUploadRequest,
-    GetJobRequest, GetTenantJobRequest, ListJobsRequest, ListTenantJobsRequest, RedigestRequest,
-    RetryJobRequest, StartImportRequest,
+    DiscardUploadRequest, GetJobRequest, GetTenantJobRequest, GetUploadRequest, ListJobsRequest,
+    ListTenantJobsRequest, ListUploadsRequest, RedigestRequest, RetryJobRequest,
+    StartImportRequest,
 };
 use crate::item::{
-    CreateFolderRequest, CreateItemRequest, DeleteItemRequest, DiscardDraftRequest, GetItemRequest,
-    ItemStatus, ListDraftsRequest, ListItemsRequest, ListTypesRequest, MoveItemRequest,
-    SaveDraftRequest, SetLifecycleRequest, SetTypeRequest, check_item_text,
+    CreateFolderRequest, CreateItemRequest, DeleteFolderRequest, DeleteItemRequest,
+    DiscardDraftRequest, GetItemRequest, ItemStatus, ListDraftsRequest, ListItemsRequest,
+    ListTypesRequest, MoveFolderRequest, MoveItemRequest, SaveDraftRequest, SetLifecycleRequest,
+    SetTypeRequest, check_item_text,
 };
 use crate::proposal::{
     AcceptProposalRequest, AddCommentRequest, DeclineProposalRequest, GetProposalRequest,
-    ListProposalsRequest, OpenProposalRequest, ProposalKind,
+    ListCommentsRequest, ListProposalsRequest, OpenProposalRequest, ProposalKind,
 };
 use crate::purge::{GetPurgeRequest, PurgeItemRequest, PurgeWorkspaceRequest};
 use crate::read::{CreateSandboxCapabilityRequest, ReadItemRequest};
@@ -212,6 +214,7 @@ workspace_read!(
     BlameRequest,
     ListProposalsRequest,
     GetProposalRequest,
+    ListCommentsRequest,
     ListReviewsRequest,
     GetJobRequest,
     ListJobsRequest,
@@ -230,10 +233,13 @@ workspace_keyed!(Write:
     MoveItemRequest,
     DeleteItemRequest,
     CreateFolderRequest,
+    MoveFolderRequest,
+    DeleteFolderRequest,
     SetTypeRequest,
     CommitRequest,
     RestoreRequest,
     CompleteUploadRequest,
+    DiscardUploadRequest,
     RetryJobRequest,
     CancelJobRequest,
     RedigestRequest,
@@ -386,6 +392,27 @@ impl RequestScope for CreateUploadRequest {
     /// A name within its byte bound, and a `filename` that gives its source card a path.
     fn check_rules(&self) -> Result<(), ApiError> {
         self.check_names()
+    }
+}
+
+/// A read that needs `write`: a slot's file name is the uploader's business until it is
+/// imported.
+impl RequestScope for GetUploadRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Write)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        None
+    }
+}
+
+/// A read that needs `write`, as `get_upload` does.
+impl RequestScope for ListUploadsRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Write)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        None
     }
 }
 

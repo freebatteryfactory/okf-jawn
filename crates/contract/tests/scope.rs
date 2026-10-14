@@ -82,8 +82,12 @@ struct ViewRules {
     moved: usize,
 }
 
-/// Admin-gated operations that read state and therefore carry no idempotency key.
+/// Operations gated by more than `read` that read state and therefore carry no idempotency key:
+/// the tenant reads need `admin`; an upload slot is read with `write` (its file name is the
+/// uploader's business until it is imported).
 const PRIVILEGED_READS: &[&str] = &[
+    "get_upload",
+    "list_uploads",
     "get_purge",
     "get_tenant_job",
     "list_tenant_jobs",

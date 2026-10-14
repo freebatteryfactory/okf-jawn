@@ -52,6 +52,8 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('delete_item', 'delete_item', [CompletionResultType]::ParameterValue, 'Remove the current reference while retaining historical source objects.')
             [CompletionResult]::new('purge_item', 'purge_item', [CompletionResultType]::ParameterValue, 'Permanently remove one item''s bytes, derivatives, index entries and history, rewrite or delete the managed backups that hold it, and mark what referred to it invalidated. Tenant administrator in a human session only.')
             [CompletionResult]::new('create_folder', 'create_folder', [CompletionResultType]::ParameterValue, 'Create a user-selected folder with a maintained index.')
+            [CompletionResult]::new('move_folder', 'move_folder', [CompletionResultType]::ParameterValue, 'Move a folder with everything in it, archived items included, and rewrite every moved item''s links in one committed change; a draft of a moved item stays with its item, and a folder changed since the base revision conflicts.')
+            [CompletionResult]::new('delete_folder', 'delete_folder', [CompletionResultType]::ParameterValue, 'Remove a folder with everything in it, archived items included, in one committed change while retaining historical objects; a draft of a deleted item is kept as a deleted item''s draft is, and a folder that does not exist is not found.')
             [CompletionResult]::new('list_types', 'list_types', [CompletionResultType]::ParameterValue, 'List built-in and user-defined OKF property schemas.')
             [CompletionResult]::new('set_type', 'set_type', [CompletionResultType]::ParameterValue, 'Persist a user-defined type without dropping extension properties.')
             [CompletionResult]::new('read_item', 'read_item', [CompletionResultType]::ParameterValue, 'Read an outline, Markdown, selected images, pages, or original. Resolve latest once; return exact citations and visible continuation.')
@@ -88,12 +90,16 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('decline_proposal', 'decline_proposal', [CompletionResultType]::ParameterValue, 'Close a proposal without applying its content.')
             [CompletionResult]::new('decline', 'decline', [CompletionResultType]::ParameterValue, 'Close a proposal without applying its content.')
             [CompletionResult]::new('add_comment', 'add_comment', [CompletionResultType]::ParameterValue, 'Add discussion without certifying content.')
+            [CompletionResult]::new('list_comments', 'list_comments', [CompletionResultType]::ParameterValue, 'Read a proposal''s comments, oldest first. A comment whose source lies in a workspace the reader may not read is returned without its source.')
             [CompletionResult]::new('create_confirmation', 'create_confirmation', [CompletionResultType]::ParameterValue, 'Create a session-bound confirmation for explicit human action; issuance is not review.')
             [CompletionResult]::new('create_review', 'create_review', [CompletionResultType]::ParameterValue, 'Record exact revision and content reviewed by an explicit authorized action; never infer review from OAuth identity.')
             [CompletionResult]::new('verify', 'verify', [CompletionResultType]::ParameterValue, 'Record exact revision and content reviewed by an explicit authorized action; never infer review from OAuth identity.')
             [CompletionResult]::new('list_reviews', 'list_reviews', [CompletionResultType]::ParameterValue, 'Show review coverage and revisions without extending it to later edits.')
-            [CompletionResult]::new('create_upload', 'create_upload', [CompletionResultType]::ParameterValue, 'Register a source occurrence before authenticated binary upload.')
+            [CompletionResult]::new('create_upload', 'create_upload', [CompletionResultType]::ParameterValue, 'Register a source occurrence before authenticated binary upload. A repeat under the same key answers the response first given; read the slot as it now stands with `get_upload`.')
             [CompletionResult]::new('complete_upload', 'complete_upload', [CompletionResultType]::ParameterValue, 'Check expected bytes and digest before conversion.')
+            [CompletionResult]::new('get_upload', 'get_upload', [CompletionResultType]::ParameterValue, 'Read one upload slot as it now stands: the bytes it holds, whether it is complete and which job took it. Needs write: a slot''s file name is the uploader''s business until it is imported.')
+            [CompletionResult]::new('list_uploads', 'list_uploads', [CompletionResultType]::ParameterValue, 'List the workspace''s upload slots, newest first, optionally only those incomplete, waiting (complete and not imported) or consumed. Nothing expires: a slot stays until it is discarded, imported or its workspace is purged.')
+            [CompletionResult]::new('discard_upload', 'discard_upload', [CompletionResultType]::ParameterValue, 'Remove an upload slot and its bytes. Refused with conflict when a job has consumed the upload or a queued or running job names it.')
             [CompletionResult]::new('start_import', 'start_import', [CompletionResultType]::ParameterValue, 'Durably register conversion and source creation, preserving originals.')
             [CompletionResult]::new('import', 'import', [CompletionResultType]::ParameterValue, 'Durably register conversion and source creation, preserving originals.')
             [CompletionResult]::new('get_job', 'get_job', [CompletionResultType]::ParameterValue, 'Read durable job progress; a receipt does not imply completion.')
@@ -104,7 +110,7 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('cancel_job', 'cancel_job', [CompletionResultType]::ParameterValue, 'Cancel work while retaining completed uploads and recorded state.')
             [CompletionResult]::new('redigest_item', 'redigest_item', [CompletionResultType]::ParameterValue, 'Re-run extraction with declared settings; preserve prior digests and separate corrections.')
             [CompletionResult]::new('correct_digest', 'correct_digest', [CompletionResultType]::ParameterValue, 'Save a correction separately from generated extraction.')
-            [CompletionResult]::new('get_rules', 'get_rules', [CompletionResultType]::ParameterValue, 'Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with set_rules.')
+            [CompletionResult]::new('get_rules', 'get_rules', [CompletionResultType]::ParameterValue, 'Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with `set_rules`.')
             [CompletionResult]::new('set_rules', 'set_rules', [CompletionResultType]::ParameterValue, 'Save explicit rules as versioned context.')
             [CompletionResult]::new('preview_names', 'preview_names', [CompletionResultType]::ParameterValue, 'Compute before and after naming changes without mutating content.')
             [CompletionResult]::new('apply_names', 'apply_names', [CompletionResultType]::ParameterValue, 'Apply the checked preview and rewrite references in one versioned action.')
@@ -307,6 +313,20 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             break
         }
         'okf-jawn;create_folder' {
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'okf-jawn;move_folder' {
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'okf-jawn;delete_folder' {
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
             [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
@@ -565,6 +585,13 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
+        'okf-jawn;list_comments' {
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
         'okf-jawn;create_confirmation' {
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
             [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
@@ -601,6 +628,27 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             break
         }
         'okf-jawn;complete_upload' {
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'okf-jawn;get_upload' {
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'okf-jawn;list_uploads' {
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'okf-jawn;discard_upload' {
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
             [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
@@ -871,6 +919,8 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('delete_item', 'delete_item', [CompletionResultType]::ParameterValue, 'Remove the current reference while retaining historical source objects.')
             [CompletionResult]::new('purge_item', 'purge_item', [CompletionResultType]::ParameterValue, 'Permanently remove one item''s bytes, derivatives, index entries and history, rewrite or delete the managed backups that hold it, and mark what referred to it invalidated. Tenant administrator in a human session only.')
             [CompletionResult]::new('create_folder', 'create_folder', [CompletionResultType]::ParameterValue, 'Create a user-selected folder with a maintained index.')
+            [CompletionResult]::new('move_folder', 'move_folder', [CompletionResultType]::ParameterValue, 'Move a folder with everything in it, archived items included, and rewrite every moved item''s links in one committed change; a draft of a moved item stays with its item, and a folder changed since the base revision conflicts.')
+            [CompletionResult]::new('delete_folder', 'delete_folder', [CompletionResultType]::ParameterValue, 'Remove a folder with everything in it, archived items included, in one committed change while retaining historical objects; a draft of a deleted item is kept as a deleted item''s draft is, and a folder that does not exist is not found.')
             [CompletionResult]::new('list_types', 'list_types', [CompletionResultType]::ParameterValue, 'List built-in and user-defined OKF property schemas.')
             [CompletionResult]::new('set_type', 'set_type', [CompletionResultType]::ParameterValue, 'Persist a user-defined type without dropping extension properties.')
             [CompletionResult]::new('read_item', 'read_item', [CompletionResultType]::ParameterValue, 'Read an outline, Markdown, selected images, pages, or original. Resolve latest once; return exact citations and visible continuation.')
@@ -891,11 +941,15 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('accept_proposal', 'accept_proposal', [CompletionResultType]::ParameterValue, 'Accept exactly the confirmed proposal against the displayed head; never an agent tool.')
             [CompletionResult]::new('decline_proposal', 'decline_proposal', [CompletionResultType]::ParameterValue, 'Close a proposal without applying its content.')
             [CompletionResult]::new('add_comment', 'add_comment', [CompletionResultType]::ParameterValue, 'Add discussion without certifying content.')
+            [CompletionResult]::new('list_comments', 'list_comments', [CompletionResultType]::ParameterValue, 'Read a proposal''s comments, oldest first. A comment whose source lies in a workspace the reader may not read is returned without its source.')
             [CompletionResult]::new('create_confirmation', 'create_confirmation', [CompletionResultType]::ParameterValue, 'Create a session-bound confirmation for explicit human action; issuance is not review.')
             [CompletionResult]::new('create_review', 'create_review', [CompletionResultType]::ParameterValue, 'Record exact revision and content reviewed by an explicit authorized action; never infer review from OAuth identity.')
             [CompletionResult]::new('list_reviews', 'list_reviews', [CompletionResultType]::ParameterValue, 'Show review coverage and revisions without extending it to later edits.')
-            [CompletionResult]::new('create_upload', 'create_upload', [CompletionResultType]::ParameterValue, 'Register a source occurrence before authenticated binary upload.')
+            [CompletionResult]::new('create_upload', 'create_upload', [CompletionResultType]::ParameterValue, 'Register a source occurrence before authenticated binary upload. A repeat under the same key answers the response first given; read the slot as it now stands with `get_upload`.')
             [CompletionResult]::new('complete_upload', 'complete_upload', [CompletionResultType]::ParameterValue, 'Check expected bytes and digest before conversion.')
+            [CompletionResult]::new('get_upload', 'get_upload', [CompletionResultType]::ParameterValue, 'Read one upload slot as it now stands: the bytes it holds, whether it is complete and which job took it. Needs write: a slot''s file name is the uploader''s business until it is imported.')
+            [CompletionResult]::new('list_uploads', 'list_uploads', [CompletionResultType]::ParameterValue, 'List the workspace''s upload slots, newest first, optionally only those incomplete, waiting (complete and not imported) or consumed. Nothing expires: a slot stays until it is discarded, imported or its workspace is purged.')
+            [CompletionResult]::new('discard_upload', 'discard_upload', [CompletionResultType]::ParameterValue, 'Remove an upload slot and its bytes. Refused with conflict when a job has consumed the upload or a queued or running job names it.')
             [CompletionResult]::new('start_import', 'start_import', [CompletionResultType]::ParameterValue, 'Durably register conversion and source creation, preserving originals.')
             [CompletionResult]::new('get_job', 'get_job', [CompletionResultType]::ParameterValue, 'Read durable job progress; a receipt does not imply completion.')
             [CompletionResult]::new('list_jobs', 'list_jobs', [CompletionResultType]::ParameterValue, 'List conversion, export, and maintenance work.')
@@ -905,7 +959,7 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('cancel_job', 'cancel_job', [CompletionResultType]::ParameterValue, 'Cancel work while retaining completed uploads and recorded state.')
             [CompletionResult]::new('redigest_item', 'redigest_item', [CompletionResultType]::ParameterValue, 'Re-run extraction with declared settings; preserve prior digests and separate corrections.')
             [CompletionResult]::new('correct_digest', 'correct_digest', [CompletionResultType]::ParameterValue, 'Save a correction separately from generated extraction.')
-            [CompletionResult]::new('get_rules', 'get_rules', [CompletionResultType]::ParameterValue, 'Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with set_rules.')
+            [CompletionResult]::new('get_rules', 'get_rules', [CompletionResultType]::ParameterValue, 'Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with `set_rules`.')
             [CompletionResult]::new('set_rules', 'set_rules', [CompletionResultType]::ParameterValue, 'Save explicit rules as versioned context.')
             [CompletionResult]::new('preview_names', 'preview_names', [CompletionResultType]::ParameterValue, 'Compute before and after naming changes without mutating content.')
             [CompletionResult]::new('apply_names', 'apply_names', [CompletionResultType]::ParameterValue, 'Apply the checked preview and rewrite references in one versioned action.')
@@ -998,6 +1052,12 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
         'okf-jawn;help;create_folder' {
             break
         }
+        'okf-jawn;help;move_folder' {
+            break
+        }
+        'okf-jawn;help;delete_folder' {
+            break
+        }
         'okf-jawn;help;list_types' {
             break
         }
@@ -1058,6 +1118,9 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
         'okf-jawn;help;add_comment' {
             break
         }
+        'okf-jawn;help;list_comments' {
+            break
+        }
         'okf-jawn;help;create_confirmation' {
             break
         }
@@ -1071,6 +1134,15 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             break
         }
         'okf-jawn;help;complete_upload' {
+            break
+        }
+        'okf-jawn;help;get_upload' {
+            break
+        }
+        'okf-jawn;help;list_uploads' {
+            break
+        }
+        'okf-jawn;help;discard_upload' {
             break
         }
         'okf-jawn;help;start_import' {

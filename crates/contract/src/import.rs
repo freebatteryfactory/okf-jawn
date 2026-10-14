@@ -197,6 +197,55 @@ pub struct CompleteUploadRequest {
     pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
+/// Read one upload slot as it now stands.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetUploadRequest {
+    /// Workspace whose permissions and storage scope apply.
+    pub workspace_id: crate::identity::WorkspaceId,
+    /// Upload identity.
+    pub upload_id: crate::identity::UploadId,
+}
+
+/// List a workspace's upload slots, newest first.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListUploadsRequest {
+    /// Workspace whose permissions and storage scope apply.
+    pub workspace_id: crate::identity::WorkspaceId,
+    /// Only the uploads in this state; absent lists every upload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<UploadListState>,
+    /// Bounded pagination with an opaque cursor.
+    pub page: crate::common::PageRequest,
+}
+
+/// A bounded list of upload slots, newest first.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListUploadsResponse {
+    /// Upload slots.
+    pub items: Vec<Upload>,
+    /// Continuation cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+/// Remove an upload slot and its bytes.
+///
+/// Refused with `conflict` when a job has consumed the upload or a queued or running job names
+/// it. A repeat under the same key answers the response first given.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DiscardUploadRequest {
+    /// Workspace whose permissions and storage scope apply.
+    pub workspace_id: crate::identity::WorkspaceId,
+    /// Upload to remove.
+    pub upload_id: crate::identity::UploadId,
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
+}
+
 /// Convert finalized uploads into source cards in the user-selected folder.
 ///
 /// `upload_ids` holds between one and `MAX_IMPORT_UPLOADS` uploads (`check_rules`): a longer

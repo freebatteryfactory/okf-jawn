@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-delete_folder 1  "delete_folder " 
+.SH NAME
+okf\-jawn\-delete_folder \- Remove a folder with everything in it, archived items included, in one committed change while retaining historical objects; a draft of a deleted item is kept as a deleted item\*(Aqs draft is, and a folder that does not exist is not found.
+.SH SYNOPSIS
+\fBokf\-jawn delete_folder\fR [\fB\-\-json\fR] [\fB\-\-server\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Remove a folder with everything in it, archived items included, in one committed change while retaining historical objects; a draft of a deleted item is kept as a deleted item\*(Aqs draft is, and a folder that does not exist is not found.
+.SH OPTIONS
+.TP
+\fB\-\-json\fR \fI<JSON>\fR [default: {}]
+The operation\*(Aqs JSON input: inline, @file, or \- for standard input
+.TP
+\fB\-\-server\fR \fI<URL>\fR [default: http://127.0.0.1:7711]
+The service address: HTTPS, or HTTP for a loopback address
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

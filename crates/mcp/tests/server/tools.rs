@@ -56,7 +56,11 @@ async fn the_tool_listing_is_the_generated_catalog_exactly() -> TestResult {
 fn every_listed_tool_is_an_operation_and_none_carries_a_draft() -> TestResult {
     let world = reader();
     let server = McpServer::new(world.ports, bundle("tools-operations.html", "<p>app</p>")?)?;
-    assert_eq!(server.tools().len(), 13);
+    assert_eq!(
+        server.tools().len(),
+        14,
+        "thirteen model tools and one app tool"
+    );
     for tool in server.tools() {
         let operation = some(operation_of_tool(&tool.name), "the tool's operation")?;
         assert!(

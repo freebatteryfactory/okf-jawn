@@ -1605,6 +1605,34 @@ components:
       required:
       - permissions
       type: object
+    DeleteFolderRequest:
+      additionalProperties: false
+      description: |-
+        Delete a folder, with everything in it, in one committed change.
+
+        Archived items in the folder are deleted with it and are counted. A draft of a deleted item
+        is kept as a deleted item's draft is. A folder changed since `base_revision` is a `conflict`
+        with `ErrorDetail::StaleBase` on `/base_revision`; a folder that does not exist is
+        `not_found`.
+      properties:
+        base_revision:
+          $ref: '#/components/schemas/Revision'
+          description: Exact revision on which this change is based; a folder changed since conflicts.
+        folder:
+          $ref: '#/components/schemas/WorkspacePath'
+          description: The folder to delete.
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
+        workspace_id:
+          $ref: '#/components/schemas/WorkspaceId'
+          description: Workspace whose permissions and storage scope apply.
+      required:
+      - workspace_id
+      - base_revision
+      - folder
+      - idempotency_key
+      type: object
     DeleteItemRequest:
       additionalProperties: false
       description: Remove the active item reference while retaining historical objects.
@@ -1713,6 +1741,28 @@ components:
       required:
       - workspace_id
       - item_id
+      - idempotency_key
+      type: object
+    DiscardUploadRequest:
+      additionalProperties: false
+      description: |-
+        Remove an upload slot and its bytes.
+
+        Refused with `conflict` when a job has consumed the upload or a queued or running job names
+        it. A repeat under the same key answers the response first given.
+      properties:
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
+        upload_id:
+          $ref: '#/components/schemas/UploadId'
+          description: Upload to remove.
+        workspace_id:
+          $ref: '#/components/schemas/WorkspaceId'
+          description: Workspace whose permissions and storage scope apply.
+      required:
+      - workspace_id
+      - upload_id
       - idempotency_key
       type: object
     DownloadArtifact:
@@ -2483,6 +2533,32 @@ components:
       - const: removed
         description: Present only in the base revision.
         type: string
+    FolderResult:
+      additionalProperties: false
+      description: The commit a folder move or delete made.
+      properties:
+        items:
+          description: Items moved or deleted, archived ones included.
+          format: uint32
+          minimum: 0
+          type: integer
+        receipt_id:
+          $ref: '#/components/schemas/ReceiptId'
+          description: Durable application operation receipt.
+        revision:
+          $ref: '#/components/schemas/Revision'
+          description: New committed workspace revision.
+        warnings:
+          description: Non-fatal issues recorded during the operation.
+          items:
+            $ref: '#/components/schemas/Warning'
+          type: array
+      required:
+      - revision
+      - receipt_id
+      - warnings
+      - items
+      type: object
     GetAttentionRequest:
       additionalProperties: false
       description: Read workspace diagnostics at an explicit revision.
@@ -2849,6 +2925,20 @@ components:
           description: Job identity.
       required:
       - job_id
+      type: object
+    GetUploadRequest:
+      additionalProperties: false
+      description: Read one upload slot as it now stands.
+      properties:
+        upload_id:
+          $ref: '#/components/schemas/UploadId'
+          description: Upload identity.
+        workspace_id:
+          $ref: '#/components/schemas/WorkspaceId'
+          description: Workspace whose permissions and storage scope apply.
+      required:
+      - workspace_id
+      - upload_id
       type: object
     GetViewRequest:
       additionalProperties: false
@@ -3277,6 +3367,45 @@ components:
       - const: both
         description: Both directions.
         type: string
+    ListCommentsRequest:
+      additionalProperties: false
+      description: Read a proposal's discussion, oldest first.
+      properties:
+        page:
+          $ref: '#/components/schemas/PageRequest'
+          description: Bounded pagination with an opaque cursor.
+        proposal_id:
+          $ref: '#/components/schemas/ProposalId'
+          description: Suggestion whose discussion is read.
+        workspace_id:
+          $ref: '#/components/schemas/WorkspaceId'
+          description: Workspace whose permissions and storage scope apply.
+      required:
+      - workspace_id
+      - proposal_id
+      - page
+      type: object
+    ListCommentsResponse:
+      additionalProperties: false
+      description: |-
+        A page of a proposal's comments, oldest first.
+
+        A comment whose `source` lies in a workspace the reader may not read is returned with
+        `source` left out.
+      properties:
+        items:
+          description: Comments.
+          items:
+            $ref: '#/components/schemas/Comment'
+          type: array
+        next_cursor:
+          description: Continuation cursor.
+          type:
+          - string
+          - 'null'
+      required:
+      - items
+      type: object
     ListConnectorsRequest:
       additionalProperties: false
       description: List the installation's connector credentials.
@@ -3571,6 +3700,42 @@ components:
       required:
       - items
       type: object
+    ListUploadsRequest:
+      additionalProperties: false
+      description: List a workspace's upload slots, newest first.
+      properties:
+        page:
+          $ref: '#/components/schemas/PageRequest'
+          description: Bounded pagination with an opaque cursor.
+        state:
+          anyOf:
+          - $ref: '#/components/schemas/UploadListState'
+          - type: 'null'
+          description: Only the uploads in this state; absent lists every upload.
+        workspace_id:
+          $ref: '#/components/schemas/WorkspaceId'
+          description: Workspace whose permissions and storage scope apply.
+      required:
+      - workspace_id
+      - page
+      type: object
+    ListUploadsResponse:
+      additionalProperties: false
+      description: A bounded list of upload slots, newest first.
+      properties:
+        items:
+          description: Upload slots.
+          items:
+            $ref: '#/components/schemas/Upload'
+          type: array
+        next_cursor:
+          description: Continuation cursor.
+          type:
+          - string
+          - 'null'
+      required:
+      - items
+      type: object
     ListWorkspacesRequest:
       additionalProperties: false
       description: List only workspaces visible to the authenticated principal.
@@ -3707,6 +3872,38 @@ components:
       - file
       - size
       - sha256
+      type: object
+    MoveFolderRequest:
+      additionalProperties: false
+      description: |-
+        Move a folder, with everything in it, in one committed change.
+
+        Archived items in the folder move with it and are counted. A draft of a moved item stays
+        with its item. Every moved item's links are rewritten as `move_item` does, and the rewritten
+        files are told to the check. A folder changed since `base_revision` is a `conflict` with
+        `ErrorDetail::StaleBase` on `/base_revision`.
+      properties:
+        base_revision:
+          $ref: '#/components/schemas/Revision'
+          description: Exact revision on which this change is based; a folder changed since conflicts.
+        destination:
+          $ref: '#/components/schemas/WorkspacePath'
+          description: Its new relative path.
+        folder:
+          $ref: '#/components/schemas/WorkspacePath'
+          description: The folder to move.
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
+        workspace_id:
+          $ref: '#/components/schemas/WorkspaceId'
+          description: Workspace whose permissions and storage scope apply.
+      required:
+      - workspace_id
+      - base_revision
+      - folder
+      - destination
+      - idempotency_key
       type: object
     MoveItemRequest:
       additionalProperties: false
@@ -4029,6 +4226,12 @@ components:
       - const: create_folder
         description: The `create_folder` operation.
         type: string
+      - const: move_folder
+        description: The `move_folder` operation.
+        type: string
+      - const: delete_folder
+        description: The `delete_folder` operation.
+        type: string
       - const: list_types
         description: The `list_types` operation.
         type: string
@@ -4089,6 +4292,9 @@ components:
       - const: add_comment
         description: The `add_comment` operation.
         type: string
+      - const: list_comments
+        description: The `list_comments` operation.
+        type: string
       - const: create_confirmation
         description: The `create_confirmation` operation.
         type: string
@@ -4103,6 +4309,15 @@ components:
         type: string
       - const: complete_upload
         description: The `complete_upload` operation.
+        type: string
+      - const: get_upload
+        description: The `get_upload` operation.
+        type: string
+      - const: list_uploads
+        description: The `list_uploads` operation.
+        type: string
+      - const: discard_upload
+        description: The `discard_upload` operation.
         type: string
       - const: start_import
         description: The `start_import` operation.
@@ -6295,6 +6510,18 @@ components:
       description: Identity of one authenticated source upload occurrence.
       format: uuid
       type: string
+    UploadListState:
+      description: Which uploads of a workspace to list.
+      oneOf:
+      - const: incomplete
+        description: 'Not yet complete: bytes are still to come, or the slot is not finished.'
+        type: string
+      - const: waiting
+        description: 'Complete and not consumed: waiting to be imported or discarded.'
+        type: string
+      - const: consumed
+        description: Taken by a job as its input.
+        type: string
     ViewBinding:
       additionalProperties: false
       description: |-
@@ -6796,7 +7023,7 @@ paths:
       x-ui-resource: null
   /api/conventions/get-rules:
     post:
-      description: Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with set_rules.
+      description: Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with `set_rules`.
       operationId: get_rules
       requestBody:
         content:
@@ -8284,7 +8511,7 @@ paths:
       x-ui-resource: null
   /api/imports/create-upload:
     post:
-      description: Register a source occurrence before authenticated binary upload.
+      description: Register a source occurrence before authenticated binary upload. A repeat under the same key answers the response first given; read the slot as it now stands with `get_upload`.
       operationId: create_upload
       requestBody:
         content:
@@ -8370,6 +8597,99 @@ paths:
       x-permission: write
       x-tool-annotations:
         destructiveHint: false
+        idempotentHint: false
+        openWorldHint: false
+        readOnlyHint: false
+      x-tool-visibility: ''
+      x-ui-resource: null
+  /api/imports/discard-upload:
+    post:
+      description: Remove an upload slot and its bytes. Refused with conflict when a job has consumed the upload or a queued or running job names it.
+      operationId: discard_upload
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DiscardUploadRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Upload'
+          description: Successful operation result
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+      summary: Discard upload
+      tags:
+      - imports
+      x-agent-alias: ''
+      x-agent-tool: false
+      x-cli-alias: null
+      x-mcp-tool: false
+      x-operator-label: Discard upload
+      x-permission: write
+      x-tool-annotations:
+        destructiveHint: true
         idempotentHint: false
         openWorldHint: false
         readOnlyHint: false
@@ -8561,6 +8881,99 @@ paths:
         readOnlyHint: false
       x-tool-visibility: ''
       x-ui-resource: null
+  /api/imports/get-upload:
+    post:
+      description: 'Read one upload slot as it now stands: the bytes it holds, whether it is complete and which job took it. Needs write: a slot''s file name is the uploader''s business until it is imported.'
+      operationId: get_upload
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GetUploadRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Upload'
+          description: Successful operation result
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+      summary: Upload
+      tags:
+      - imports
+      x-agent-alias: ''
+      x-agent-tool: false
+      x-cli-alias: null
+      x-mcp-tool: false
+      x-operator-label: Upload
+      x-permission: write
+      x-tool-annotations:
+        destructiveHint: false
+        idempotentHint: false
+        openWorldHint: false
+        readOnlyHint: false
+      x-tool-visibility: ''
+      x-ui-resource: null
   /api/imports/list-jobs:
     post:
       description: List conversion, export, and maintenance work.
@@ -8740,6 +9153,99 @@ paths:
       x-mcp-tool: false
       x-operator-label: Installation jobs
       x-permission: admin
+      x-tool-annotations:
+        destructiveHint: false
+        idempotentHint: false
+        openWorldHint: false
+        readOnlyHint: false
+      x-tool-visibility: ''
+      x-ui-resource: null
+  /api/imports/list-uploads:
+    post:
+      description: 'List the workspace''s upload slots, newest first, optionally only those incomplete, waiting (complete and not imported) or consumed. Nothing expires: a slot stays until it is discarded, imported or its workspace is purged.'
+      operationId: list_uploads
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ListUploadsRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListUploadsResponse'
+          description: Successful operation result
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+      summary: Uploads
+      tags:
+      - imports
+      x-agent-alias: ''
+      x-agent-tool: false
+      x-cli-alias: null
+      x-mcp-tool: false
+      x-operator-label: Uploads
+      x-permission: write
       x-tool-annotations:
         destructiveHint: false
         idempotentHint: false
@@ -9212,6 +9718,99 @@ paths:
         readOnlyHint: false
       x-tool-visibility: ''
       x-ui-resource: null
+  /api/items/delete-folder:
+    post:
+      description: Remove a folder with everything in it, archived items included, in one committed change while retaining historical objects; a draft of a deleted item is kept as a deleted item's draft is, and a folder that does not exist is not found.
+      operationId: delete_folder
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteFolderRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FolderResult'
+          description: Successful operation result
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+      summary: Delete folder
+      tags:
+      - items
+      x-agent-alias: ''
+      x-agent-tool: false
+      x-cli-alias: null
+      x-mcp-tool: false
+      x-operator-label: Delete folder
+      x-permission: write
+      x-tool-annotations:
+        destructiveHint: true
+        idempotentHint: false
+        openWorldHint: false
+        readOnlyHint: false
+      x-tool-visibility: ''
+      x-ui-resource: null
   /api/items/delete-item:
     post:
       description: Remove the current reference while retaining historical source objects.
@@ -9676,6 +10275,99 @@ paths:
         openWorldHint: false
         readOnlyHint: true
       x-tool-visibility: model
+      x-ui-resource: null
+  /api/items/move-folder:
+    post:
+      description: Move a folder with everything in it, archived items included, and rewrite every moved item's links in one committed change; a draft of a moved item stays with its item, and a folder changed since the base revision conflicts.
+      operationId: move_folder
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MoveFolderRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FolderResult'
+          description: Successful operation result
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+      summary: Move folder
+      tags:
+      - items
+      x-agent-alias: ''
+      x-agent-tool: false
+      x-cli-alias: null
+      x-mcp-tool: false
+      x-operator-label: Move folder
+      x-permission: write
+      x-tool-annotations:
+        destructiveHint: false
+        idempotentHint: false
+        openWorldHint: false
+        readOnlyHint: false
+      x-tool-visibility: ''
       x-ui-resource: null
   /api/items/move-item:
     post:
@@ -10413,6 +11105,99 @@ paths:
       x-cli-alias: null
       x-mcp-tool: false
       x-operator-label: Open proposal
+      x-permission: read
+      x-tool-annotations:
+        destructiveHint: false
+        idempotentHint: true
+        openWorldHint: false
+        readOnlyHint: true
+      x-tool-visibility: ''
+      x-ui-resource: null
+  /api/proposals/list-comments:
+    post:
+      description: Read a proposal's comments, oldest first. A comment whose source lies in a workspace the reader may not read is returned without its source.
+      operationId: list_comments
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ListCommentsRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListCommentsResponse'
+          description: Successful operation result
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+      summary: Discussion
+      tags:
+      - proposals
+      x-agent-alias: ''
+      x-agent-tool: false
+      x-cli-alias: null
+      x-mcp-tool: false
+      x-operator-label: Discussion
       x-permission: read
       x-tool-annotations:
         destructiveHint: false

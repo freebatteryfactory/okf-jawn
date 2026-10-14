@@ -88,6 +88,12 @@ Permanently remove one item\*(Aqs bytes, derivatives, index entries and history,
 okf\-jawn\-create_folder(1)
 Create a user\-selected folder with a maintained index.
 .TP
+okf\-jawn\-move_folder(1)
+Move a folder with everything in it, archived items included, and rewrite every moved item\*(Aqs links in one committed change; a draft of a moved item stays with its item, and a folder changed since the base revision conflicts.
+.TP
+okf\-jawn\-delete_folder(1)
+Remove a folder with everything in it, archived items included, in one committed change while retaining historical objects; a draft of a deleted item is kept as a deleted item\*(Aqs draft is, and a folder that does not exist is not found.
+.TP
 okf\-jawn\-list_types(1)
 List built\-in and user\-defined OKF property schemas.
 .TP
@@ -148,6 +154,9 @@ Close a proposal without applying its content.
 okf\-jawn\-add_comment(1)
 Add discussion without certifying content.
 .TP
+okf\-jawn\-list_comments(1)
+Read a proposal\*(Aqs comments, oldest first. A comment whose source lies in a workspace the reader may not read is returned without its source.
+.TP
 okf\-jawn\-create_confirmation(1)
 Create a session\-bound confirmation for explicit human action; issuance is not review.
 .TP
@@ -158,10 +167,19 @@ okf\-jawn\-list_reviews(1)
 Show review coverage and revisions without extending it to later edits.
 .TP
 okf\-jawn\-create_upload(1)
-Register a source occurrence before authenticated binary upload.
+Register a source occurrence before authenticated binary upload. A repeat under the same key answers the response first given; read the slot as it now stands with `get_upload`.
 .TP
 okf\-jawn\-complete_upload(1)
 Check expected bytes and digest before conversion.
+.TP
+okf\-jawn\-get_upload(1)
+Read one upload slot as it now stands: the bytes it holds, whether it is complete and which job took it. Needs write: a slot\*(Aqs file name is the uploader\*(Aqs business until it is imported.
+.TP
+okf\-jawn\-list_uploads(1)
+List the workspace\*(Aqs upload slots, newest first, optionally only those incomplete, waiting (complete and not imported) or consumed. Nothing expires: a slot stays until it is discarded, imported or its workspace is purged.
+.TP
+okf\-jawn\-discard_upload(1)
+Remove an upload slot and its bytes. Refused with conflict when a job has consumed the upload or a queued or running job names it.
 .TP
 okf\-jawn\-start_import(1)
 Durably register conversion and source creation, preserving originals.
@@ -191,7 +209,7 @@ okf\-jawn\-correct_digest(1)
 Save a correction separately from generated extraction.
 .TP
 okf\-jawn\-get_rules(1)
-Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with set_rules.
+Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with `set_rules`.
 .TP
 okf\-jawn\-set_rules(1)
 Save explicit rules as versioned context.

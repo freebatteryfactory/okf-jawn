@@ -1252,6 +1252,33 @@ export type DelegationCeiling = {
 };
 
 /**
+ * Delete a folder, with everything in it, in one committed change.
+ *
+ * Archived items in the folder are deleted with it and are counted. A draft of a deleted item
+ * is kept as a deleted item's draft is. A folder changed since `base_revision` is a `conflict`
+ * with `ErrorDetail::StaleBase` on `/base_revision`; a folder that does not exist is
+ * `not_found`.
+ */
+export type DeleteFolderRequest = {
+    /**
+     * Exact revision on which this change is based; a folder changed since conflicts.
+     */
+    base_revision: Revision;
+    /**
+     * The folder to delete.
+     */
+    folder: WorkspacePath;
+    /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+    /**
+     * Workspace whose permissions and storage scope apply.
+     */
+    workspace_id: WorkspaceId;
+};
+
+/**
  * Remove the active item reference while retaining historical objects.
  */
 export type DeleteItemRequest = {
@@ -1349,6 +1376,27 @@ export type DiscardDraftRequest = {
      * Stable application item identity; paths remain the portable OKF identity.
      */
     item_id: ItemId;
+    /**
+     * Workspace whose permissions and storage scope apply.
+     */
+    workspace_id: WorkspaceId;
+};
+
+/**
+ * Remove an upload slot and its bytes.
+ *
+ * Refused with `conflict` when a job has consumed the upload or a queued or running job names
+ * it. A repeat under the same key answers the response first given.
+ */
+export type DiscardUploadRequest = {
+    /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+    /**
+     * Upload to remove.
+     */
+    upload_id: UploadId;
     /**
      * Workspace whose permissions and storage scope apply.
      */
@@ -1846,6 +1894,28 @@ export type FileChange = {
 export type FileChangeKind = 'added' | 'modified' | 'moved' | 'removed';
 
 /**
+ * The commit a folder move or delete made.
+ */
+export type FolderResult = {
+    /**
+     * Items moved or deleted, archived ones included.
+     */
+    items: number;
+    /**
+     * Durable application operation receipt.
+     */
+    receipt_id: ReceiptId;
+    /**
+     * New committed workspace revision.
+     */
+    revision: Revision;
+    /**
+     * Non-fatal issues recorded during the operation.
+     */
+    warnings: Array<Warning>;
+};
+
+/**
  * Read workspace diagnostics at an explicit revision.
  */
 export type GetAttentionRequest = {
@@ -2189,6 +2259,20 @@ export type GetTenantJobRequest = {
 };
 
 /**
+ * Read one upload slot as it now stands.
+ */
+export type GetUploadRequest = {
+    /**
+     * Upload identity.
+     */
+    upload_id: UploadId;
+    /**
+     * Workspace whose permissions and storage scope apply.
+     */
+    workspace_id: WorkspaceId;
+};
+
+/**
  * Read a stored visual artifact at its selected revision.
  */
 export type GetViewRequest = {
@@ -2501,6 +2585,41 @@ export type Link = {
 export type LinkDirection = 'outgoing' | 'incoming' | 'both';
 
 /**
+ * Read a proposal's discussion, oldest first.
+ */
+export type ListCommentsRequest = {
+    /**
+     * Bounded pagination with an opaque cursor.
+     */
+    page: PageRequest;
+    /**
+     * Suggestion whose discussion is read.
+     */
+    proposal_id: ProposalId;
+    /**
+     * Workspace whose permissions and storage scope apply.
+     */
+    workspace_id: WorkspaceId;
+};
+
+/**
+ * A page of a proposal's comments, oldest first.
+ *
+ * A comment whose `source` lies in a workspace the reader may not read is returned with
+ * `source` left out.
+ */
+export type ListCommentsResponse = {
+    /**
+     * Comments.
+     */
+    items: Array<Comment>;
+    /**
+     * Continuation cursor.
+     */
+    next_cursor?: string | null;
+};
+
+/**
  * List the installation's connector credentials.
  */
 export type ListConnectorsRequest = {
@@ -2766,6 +2885,38 @@ export type ListTypesResponse = {
 };
 
 /**
+ * List a workspace's upload slots, newest first.
+ */
+export type ListUploadsRequest = {
+    /**
+     * Bounded pagination with an opaque cursor.
+     */
+    page: PageRequest;
+    /**
+     * Only the uploads in this state; absent lists every upload.
+     */
+    state?: UploadListState | null;
+    /**
+     * Workspace whose permissions and storage scope apply.
+     */
+    workspace_id: WorkspaceId;
+};
+
+/**
+ * A bounded list of upload slots, newest first.
+ */
+export type ListUploadsResponse = {
+    /**
+     * Upload slots.
+     */
+    items: Array<Upload>;
+    /**
+     * Continuation cursor.
+     */
+    next_cursor?: string | null;
+};
+
+/**
  * List only workspaces visible to the authenticated principal.
  */
 export type ListWorkspacesRequest = {
@@ -2885,6 +3036,37 @@ export type ModelIdentity = {
      * Pipeline stage, such as `layout` or `ocr.rec`.
      */
     stage: string;
+};
+
+/**
+ * Move a folder, with everything in it, in one committed change.
+ *
+ * Archived items in the folder move with it and are counted. A draft of a moved item stays
+ * with its item. Every moved item's links are rewritten as `move_item` does, and the rewritten
+ * files are told to the check. A folder changed since `base_revision` is a `conflict` with
+ * `ErrorDetail::StaleBase` on `/base_revision`.
+ */
+export type MoveFolderRequest = {
+    /**
+     * Exact revision on which this change is based; a folder changed since conflicts.
+     */
+    base_revision: Revision;
+    /**
+     * Its new relative path.
+     */
+    destination: WorkspacePath;
+    /**
+     * The folder to move.
+     */
+    folder: WorkspacePath;
+    /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+    /**
+     * Workspace whose permissions and storage scope apply.
+     */
+    workspace_id: WorkspaceId;
 };
 
 /**
@@ -3112,7 +3294,7 @@ export type OpenWorkspaceRequest = {
 /**
  * Closed set of canonical operation identifiers, serialized as the `snake_case` id.
  */
-export type OperationName = 'list_workspaces' | 'create_workspace' | 'open_workspace' | 'update_workspace' | 'archive_workspace' | 'unarchive_workspace' | 'purge_workspace' | 'get_purge' | 'export_workspace' | 'backup_workspace' | 'restore_workspace' | 'backup_installation' | 'list_items' | 'get_item' | 'create_item' | 'save_draft' | 'list_drafts' | 'discard_draft' | 'move_item' | 'set_lifecycle' | 'delete_item' | 'purge_item' | 'create_folder' | 'list_types' | 'set_type' | 'read_item' | 'get_sources' | 'get_object' | 'create_sandbox_capability' | 'search_items' | 'get_links' | 'get_graph' | 'log_items' | 'diff_items' | 'commit_items' | 'restore_items' | 'blame_item' | 'open_proposal' | 'list_proposals' | 'get_proposal' | 'accept_proposal' | 'decline_proposal' | 'add_comment' | 'create_confirmation' | 'create_review' | 'list_reviews' | 'create_upload' | 'complete_upload' | 'start_import' | 'get_job' | 'list_jobs' | 'get_tenant_job' | 'list_tenant_jobs' | 'retry_job' | 'cancel_job' | 'redigest_item' | 'correct_digest' | 'get_rules' | 'set_rules' | 'preview_names' | 'apply_names' | 'get_attention' | 'rebuild_index' | 'get_view' | 'present_view' | 'resolve_view' | 'export_view' | 'get_catalog' | 'get_receipt' | 'list_events' | 'list_tenant_events' | 'get_session' | 'create_connector' | 'list_connectors' | 'revoke_connector' | 'get_health' | 'get_readiness';
+export type OperationName = 'list_workspaces' | 'create_workspace' | 'open_workspace' | 'update_workspace' | 'archive_workspace' | 'unarchive_workspace' | 'purge_workspace' | 'get_purge' | 'export_workspace' | 'backup_workspace' | 'restore_workspace' | 'backup_installation' | 'list_items' | 'get_item' | 'create_item' | 'save_draft' | 'list_drafts' | 'discard_draft' | 'move_item' | 'set_lifecycle' | 'delete_item' | 'purge_item' | 'create_folder' | 'move_folder' | 'delete_folder' | 'list_types' | 'set_type' | 'read_item' | 'get_sources' | 'get_object' | 'create_sandbox_capability' | 'search_items' | 'get_links' | 'get_graph' | 'log_items' | 'diff_items' | 'commit_items' | 'restore_items' | 'blame_item' | 'open_proposal' | 'list_proposals' | 'get_proposal' | 'accept_proposal' | 'decline_proposal' | 'add_comment' | 'list_comments' | 'create_confirmation' | 'create_review' | 'list_reviews' | 'create_upload' | 'complete_upload' | 'get_upload' | 'list_uploads' | 'discard_upload' | 'start_import' | 'get_job' | 'list_jobs' | 'get_tenant_job' | 'list_tenant_jobs' | 'retry_job' | 'cancel_job' | 'redigest_item' | 'correct_digest' | 'get_rules' | 'set_rules' | 'preview_names' | 'apply_names' | 'get_attention' | 'rebuild_index' | 'get_view' | 'present_view' | 'resolve_view' | 'export_view' | 'get_catalog' | 'get_receipt' | 'list_events' | 'list_tenant_events' | 'get_session' | 'create_connector' | 'list_connectors' | 'revoke_connector' | 'get_health' | 'get_readiness';
 
 /**
  * A navigable structural element from a document.
@@ -4779,6 +4961,11 @@ export type Upload = {
 export type UploadId = string;
 
 /**
+ * Which uploads of a workspace to list.
+ */
+export type UploadListState = 'incomplete' | 'waiting' | 'consumed';
+
+/**
  * A named source selection used by a chart or layout.
  *
  * A saved View binds only to sources in its own workspace: `source.workspace_id` must equal
@@ -6168,6 +6355,67 @@ export type CreateUploadResponses = {
 
 export type CreateUploadResponse = CreateUploadResponses[keyof CreateUploadResponses];
 
+export type DiscardUploadData = {
+    body: DiscardUploadRequest;
+    path?: never;
+    query?: never;
+    url: '/api/imports/discard-upload';
+};
+
+export type DiscardUploadErrors = {
+    /**
+     * Structured application failure
+     */
+    400: ApiError;
+    /**
+     * Structured application failure
+     */
+    401: ApiError;
+    /**
+     * Structured application failure
+     */
+    403: ApiError;
+    /**
+     * Structured application failure
+     */
+    404: ApiError;
+    /**
+     * Structured application failure
+     */
+    409: ApiError;
+    /**
+     * Structured application failure
+     */
+    413: ApiError;
+    /**
+     * Structured application failure
+     */
+    422: ApiError;
+    /**
+     * Structured application failure
+     */
+    500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
+    503: ApiError;
+};
+
+export type DiscardUploadError = DiscardUploadErrors[keyof DiscardUploadErrors];
+
+export type DiscardUploadResponses = {
+    /**
+     * Successful operation result
+     */
+    200: Upload;
+};
+
+export type DiscardUploadResponse = DiscardUploadResponses[keyof DiscardUploadResponses];
+
 export type GetJobData = {
     body: GetJobRequest;
     path?: never;
@@ -6290,6 +6538,67 @@ export type GetTenantJobResponses = {
 
 export type GetTenantJobResponse = GetTenantJobResponses[keyof GetTenantJobResponses];
 
+export type GetUploadData = {
+    body: GetUploadRequest;
+    path?: never;
+    query?: never;
+    url: '/api/imports/get-upload';
+};
+
+export type GetUploadErrors = {
+    /**
+     * Structured application failure
+     */
+    400: ApiError;
+    /**
+     * Structured application failure
+     */
+    401: ApiError;
+    /**
+     * Structured application failure
+     */
+    403: ApiError;
+    /**
+     * Structured application failure
+     */
+    404: ApiError;
+    /**
+     * Structured application failure
+     */
+    409: ApiError;
+    /**
+     * Structured application failure
+     */
+    413: ApiError;
+    /**
+     * Structured application failure
+     */
+    422: ApiError;
+    /**
+     * Structured application failure
+     */
+    500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
+    503: ApiError;
+};
+
+export type GetUploadError = GetUploadErrors[keyof GetUploadErrors];
+
+export type GetUploadResponses = {
+    /**
+     * Successful operation result
+     */
+    200: Upload;
+};
+
+export type GetUploadResponse = GetUploadResponses[keyof GetUploadResponses];
+
 export type ListJobsData = {
     body: ListJobsRequest;
     path?: never;
@@ -6411,6 +6720,67 @@ export type ListTenantJobsResponses = {
 };
 
 export type ListTenantJobsResponse = ListTenantJobsResponses[keyof ListTenantJobsResponses];
+
+export type ListUploadsData = {
+    body: ListUploadsRequest;
+    path?: never;
+    query?: never;
+    url: '/api/imports/list-uploads';
+};
+
+export type ListUploadsErrors = {
+    /**
+     * Structured application failure
+     */
+    400: ApiError;
+    /**
+     * Structured application failure
+     */
+    401: ApiError;
+    /**
+     * Structured application failure
+     */
+    403: ApiError;
+    /**
+     * Structured application failure
+     */
+    404: ApiError;
+    /**
+     * Structured application failure
+     */
+    409: ApiError;
+    /**
+     * Structured application failure
+     */
+    413: ApiError;
+    /**
+     * Structured application failure
+     */
+    422: ApiError;
+    /**
+     * Structured application failure
+     */
+    500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
+    503: ApiError;
+};
+
+export type ListUploadsError = ListUploadsErrors[keyof ListUploadsErrors];
+
+export type ListUploadsResponses = {
+    /**
+     * Successful operation result
+     */
+    200: ListUploadsResponse;
+};
+
+export type ListUploadsResponse2 = ListUploadsResponses[keyof ListUploadsResponses];
 
 export type RedigestItemData = {
     body: RedigestRequest;
@@ -6717,6 +7087,67 @@ export type CreateItemResponses = {
 
 export type CreateItemResponse = CreateItemResponses[keyof CreateItemResponses];
 
+export type DeleteFolderData = {
+    body: DeleteFolderRequest;
+    path?: never;
+    query?: never;
+    url: '/api/items/delete-folder';
+};
+
+export type DeleteFolderErrors = {
+    /**
+     * Structured application failure
+     */
+    400: ApiError;
+    /**
+     * Structured application failure
+     */
+    401: ApiError;
+    /**
+     * Structured application failure
+     */
+    403: ApiError;
+    /**
+     * Structured application failure
+     */
+    404: ApiError;
+    /**
+     * Structured application failure
+     */
+    409: ApiError;
+    /**
+     * Structured application failure
+     */
+    413: ApiError;
+    /**
+     * Structured application failure
+     */
+    422: ApiError;
+    /**
+     * Structured application failure
+     */
+    500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
+    503: ApiError;
+};
+
+export type DeleteFolderError = DeleteFolderErrors[keyof DeleteFolderErrors];
+
+export type DeleteFolderResponses = {
+    /**
+     * Successful operation result
+     */
+    200: FolderResult;
+};
+
+export type DeleteFolderResponse = DeleteFolderResponses[keyof DeleteFolderResponses];
+
 export type DeleteItemData = {
     body: DeleteItemRequest;
     path?: never;
@@ -7021,6 +7452,67 @@ export type ListItemsResponses = {
 };
 
 export type ListItemsResponse2 = ListItemsResponses[keyof ListItemsResponses];
+
+export type MoveFolderData = {
+    body: MoveFolderRequest;
+    path?: never;
+    query?: never;
+    url: '/api/items/move-folder';
+};
+
+export type MoveFolderErrors = {
+    /**
+     * Structured application failure
+     */
+    400: ApiError;
+    /**
+     * Structured application failure
+     */
+    401: ApiError;
+    /**
+     * Structured application failure
+     */
+    403: ApiError;
+    /**
+     * Structured application failure
+     */
+    404: ApiError;
+    /**
+     * Structured application failure
+     */
+    409: ApiError;
+    /**
+     * Structured application failure
+     */
+    413: ApiError;
+    /**
+     * Structured application failure
+     */
+    422: ApiError;
+    /**
+     * Structured application failure
+     */
+    500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
+    503: ApiError;
+};
+
+export type MoveFolderError = MoveFolderErrors[keyof MoveFolderErrors];
+
+export type MoveFolderResponses = {
+    /**
+     * Successful operation result
+     */
+    200: FolderResult;
+};
+
+export type MoveFolderResponse = MoveFolderResponses[keyof MoveFolderResponses];
 
 export type MoveItemData = {
     body: MoveItemRequest;
@@ -7509,6 +8001,67 @@ export type GetProposalResponses = {
 };
 
 export type GetProposalResponse = GetProposalResponses[keyof GetProposalResponses];
+
+export type ListCommentsData = {
+    body: ListCommentsRequest;
+    path?: never;
+    query?: never;
+    url: '/api/proposals/list-comments';
+};
+
+export type ListCommentsErrors = {
+    /**
+     * Structured application failure
+     */
+    400: ApiError;
+    /**
+     * Structured application failure
+     */
+    401: ApiError;
+    /**
+     * Structured application failure
+     */
+    403: ApiError;
+    /**
+     * Structured application failure
+     */
+    404: ApiError;
+    /**
+     * Structured application failure
+     */
+    409: ApiError;
+    /**
+     * Structured application failure
+     */
+    413: ApiError;
+    /**
+     * Structured application failure
+     */
+    422: ApiError;
+    /**
+     * Structured application failure
+     */
+    500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
+    503: ApiError;
+};
+
+export type ListCommentsError = ListCommentsErrors[keyof ListCommentsErrors];
+
+export type ListCommentsResponses = {
+    /**
+     * Successful operation result
+     */
+    200: ListCommentsResponse;
+};
+
+export type ListCommentsResponse2 = ListCommentsResponses[keyof ListCommentsResponses];
 
 export type ListProposalsData = {
     body: ListProposalsRequest;

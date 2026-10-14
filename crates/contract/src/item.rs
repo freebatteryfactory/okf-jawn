@@ -311,6 +311,60 @@ pub struct CreateFolderRequest {
     pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
+/// Move a folder, with everything in it, in one committed change.
+///
+/// Archived items in the folder move with it and are counted. A draft of a moved item stays
+/// with its item. Every moved item's links are rewritten as `move_item` does, and the rewritten
+/// files are told to the check. A folder changed since `base_revision` is a `conflict` with
+/// `ErrorDetail::StaleBase` on `/base_revision`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MoveFolderRequest {
+    /// Workspace whose permissions and storage scope apply.
+    pub workspace_id: crate::identity::WorkspaceId,
+    /// Exact revision on which this change is based; a folder changed since conflicts.
+    pub base_revision: crate::identity::Revision,
+    /// The folder to move.
+    pub folder: crate::identity::WorkspacePath,
+    /// Its new relative path.
+    pub destination: crate::identity::WorkspacePath,
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
+}
+
+/// Delete a folder, with everything in it, in one committed change.
+///
+/// Archived items in the folder are deleted with it and are counted. A draft of a deleted item
+/// is kept as a deleted item's draft is. A folder changed since `base_revision` is a `conflict`
+/// with `ErrorDetail::StaleBase` on `/base_revision`; a folder that does not exist is
+/// `not_found`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteFolderRequest {
+    /// Workspace whose permissions and storage scope apply.
+    pub workspace_id: crate::identity::WorkspaceId,
+    /// Exact revision on which this change is based; a folder changed since conflicts.
+    pub base_revision: crate::identity::Revision,
+    /// The folder to delete.
+    pub folder: crate::identity::WorkspacePath,
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
+}
+
+/// The commit a folder move or delete made.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FolderResult {
+    /// New committed workspace revision.
+    pub revision: crate::identity::Revision,
+    /// Durable application operation receipt.
+    pub receipt_id: crate::identity::ReceiptId,
+    /// Non-fatal issues recorded during the operation.
+    pub warnings: Vec<crate::common::Warning>,
+    /// Items moved or deleted, archived ones included.
+    pub items: u32,
+}
+
 /// A user-defined type schema and UI hints.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

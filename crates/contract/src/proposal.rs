@@ -240,6 +240,32 @@ pub struct Comment {
     pub source: Option<crate::source::SourceReference>,
 }
 
+/// Read a proposal's discussion, oldest first.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListCommentsRequest {
+    /// Workspace whose permissions and storage scope apply.
+    pub workspace_id: crate::identity::WorkspaceId,
+    /// Suggestion whose discussion is read.
+    pub proposal_id: crate::identity::ProposalId,
+    /// Bounded pagination with an opaque cursor.
+    pub page: crate::common::PageRequest,
+}
+
+/// A page of a proposal's comments, oldest first.
+///
+/// A comment whose `source` lies in a workspace the reader may not read is returned with
+/// `source` left out.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListCommentsResponse {
+    /// Comments.
+    pub items: Vec<Comment>,
+    /// Continuation cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
 impl Change {
     /// Refuse an item text longer than `item::MAX_ITEM_TEXT_BYTES` in this change.
     ///

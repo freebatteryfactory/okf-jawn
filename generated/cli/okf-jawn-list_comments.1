@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-list_comments 1  "list_comments " 
+.SH NAME
+okf\-jawn\-list_comments \- Read a proposal\*(Aqs comments, oldest first. A comment whose source lies in a workspace the reader may not read is returned without its source.
+.SH SYNOPSIS
+\fBokf\-jawn list_comments\fR [\fB\-\-json\fR] [\fB\-\-server\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Read a proposal\*(Aqs comments, oldest first. A comment whose source lies in a workspace the reader may not read is returned without its source.
+.SH OPTIONS
+.TP
+\fB\-\-json\fR \fI<JSON>\fR [default: {}]
+The operation\*(Aqs JSON input: inline, @file, or \- for standard input
+.TP
+\fB\-\-server\fR \fI<URL>\fR [default: http://127.0.0.1:7711]
+The service address: HTTPS, or HTTP for a loopback address
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

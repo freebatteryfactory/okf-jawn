@@ -63,7 +63,9 @@ const DESTRUCTIVE: &[&str] = &[
     "discard_draft",
     "delete_item",
     "purge_item",
+    "delete_folder",
     "restore_items",
+    "discard_upload",
     "apply_names",
     "revoke_connector",
 ];
@@ -123,9 +125,9 @@ fn declared(id: &str) -> Result<OperationInfo, Box<dyn Error>> {
 }
 
 #[test]
-fn the_surface_is_77_operations_12_model_tools_and_1_app_tool() {
+fn the_surface_is_83_operations_12_model_tools_and_1_app_tool() {
     let table = operations();
-    assert_eq!(table.len(), 77);
+    assert_eq!(table.len(), 83);
     let model: Vec<&str> = table
         .iter()
         .filter(|operation| operation.visibility == "model")
@@ -260,6 +262,22 @@ fn no_new_operation_is_an_agent_tool() -> Result<(), Box<dyn Error>> {
             "{id} is not an MCP tool"
         );
         assert_eq!(operation.permission, Permission::Admin, "{id}");
+    }
+    // Contract batch 2: six rows, none of them an agent tool.
+    for (id, permission) in [
+        ("get_upload", Permission::Write),
+        ("list_uploads", Permission::Write),
+        ("discard_upload", Permission::Write),
+        ("move_folder", Permission::Write),
+        ("delete_folder", Permission::Write),
+        ("list_comments", Permission::Read),
+    ] {
+        let operation = declared(id)?;
+        assert!(
+            operation.alias.is_empty() && operation.visibility.is_empty(),
+            "{id} is not an MCP tool"
+        );
+        assert_eq!(operation.permission, permission, "{id}");
     }
     Ok(())
 }

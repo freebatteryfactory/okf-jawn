@@ -8,6 +8,7 @@ use okf_jawn_contract::identity::At;
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_core::application::ApplicationConfig;
 use okf_jawn_core::ports::Application;
+use serde_json::json;
 
 use crate::check::{TestResult, err_of};
 use crate::fixture::{World, alice, config, scope};
@@ -135,5 +136,100 @@ async fn an_operation_of_a_later_part_answers_not_implemented() -> TestResult {
     )?;
     assert_eq!(refused.code, ErrorCode::NotImplemented);
     assert!(refused.message.contains("get_rules"), "{}", refused.message);
+    Ok(())
+}
+
+/// The six rows contract batch 2 added answer `NotImplemented`, naming themselves, through the
+/// production service: core's `route!` sends an operation it does not name to `pending`.
+#[tokio::test]
+async fn the_rows_of_contract_batch_2_answer_not_implemented() -> TestResult {
+    let world = World::new()?;
+    let workspace = scope()?.workspace_id;
+    let upload = json!("77777777-7777-4777-8777-777777777777");
+    let key = json!("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    let base = json!("a".repeat(40));
+    let page = json!({"limit": 20});
+    let refused = [
+        err_of(
+            world
+                .service
+                .get_upload(
+                    &alice(OperationName::GetUpload, None)?,
+                    serde_json::from_value(
+                        json!({"workspace_id": workspace, "upload_id": upload}),
+                    )?,
+                )
+                .await,
+        )?,
+        err_of(
+            world
+                .service
+                .list_uploads(
+                    &alice(OperationName::ListUploads, None)?,
+                    serde_json::from_value(json!({"workspace_id": workspace, "page": page}))?,
+                )
+                .await,
+        )?,
+        err_of(
+            world
+                .service
+                .discard_upload(
+                    &alice(OperationName::DiscardUpload, None)?,
+                    serde_json::from_value(json!({
+                        "workspace_id": workspace, "upload_id": upload, "idempotency_key": key
+                    }))?,
+                )
+                .await,
+        )?,
+        err_of(
+            world
+                .service
+                .move_folder(
+                    &alice(OperationName::MoveFolder, None)?,
+                    serde_json::from_value(json!({
+                        "workspace_id": workspace, "base_revision": base, "folder": "a",
+                        "destination": "b", "idempotency_key": key
+                    }))?,
+                )
+                .await,
+        )?,
+        err_of(
+            world
+                .service
+                .delete_folder(
+                    &alice(OperationName::DeleteFolder, None)?,
+                    serde_json::from_value(json!({
+                        "workspace_id": workspace, "base_revision": base, "folder": "a",
+                        "idempotency_key": key
+                    }))?,
+                )
+                .await,
+        )?,
+        err_of(
+            world
+                .service
+                .list_comments(
+                    &alice(OperationName::ListComments, None)?,
+                    serde_json::from_value(json!({
+                        "workspace_id": workspace,
+                        "proposal_id": "99999999-9999-4999-8999-999999999999",
+                        "page": page
+                    }))?,
+                )
+                .await,
+        )?,
+    ];
+    let names = [
+        "get_upload",
+        "list_uploads",
+        "discard_upload",
+        "move_folder",
+        "delete_folder",
+        "list_comments",
+    ];
+    for (error, name) in refused.iter().zip(names) {
+        assert_eq!(error.code, ErrorCode::NotImplemented, "{name}");
+        assert!(error.message.contains(name), "{name}: {}", error.message);
+    }
     Ok(())
 }
