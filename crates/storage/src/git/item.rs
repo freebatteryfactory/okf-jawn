@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use okf_core::yaml::{Mapping, Value as Yaml};
 use okf_core::{Document, Frontmatter};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::identity::{ItemId, Revision, WorkspacePath};
+use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath};
 use okf_jawn_contract::item::{APP_HEADER_KEY, ItemKind, ItemStatus, ItemSummary};
 use okf_jawn_contract::source::SourceAppearance;
 use okf_jawn_core::items::ApplicationHeader;
@@ -34,14 +34,52 @@ pub(crate) struct ItemFile {
     pub(crate) header: ApplicationHeader,
 }
 
+/// What the store refuses to find in a tree (`respelled`): two spellings of one path, or a path
+/// the server writes spelled another way.
+#[derive(Debug)]
+pub(crate) struct Respelled {
+    /// The tree's spelling: a file, or a folder above one.
+    path: String,
+    /// The other spelling: another path of the tree with the same collision key, or, for
+    /// `server`, the server's spelling, which the tree need not hold.
+    other: String,
+    /// Whether `other` is the spelling of a name the server writes (`SERVER_NAMES`).
+    server: bool,
+}
+
 /// The application's private directory inside a workspace tree.
 pub(crate) const APP_DIR: &str = ".okf";
 /// Naming rules file.
 pub(crate) const RULES_FILE: &str = ".okf/rules.yaml";
 /// Type definitions file.
 pub(crate) const TYPES_FILE: &str = ".okf/types.json";
+/// The folder of the cards' source appearances, `<item id>.json` each.
+pub(crate) const SOURCES_DIR: &str = ".okf/sources";
+/// The folder of accepted agent-supplied text, `<item id>.json` each.
+pub(crate) const SUPPLIED_DIR: &str = ".okf/supplied";
+/// The folder of human corrections, `<item id>/<digest>.json` each.
+pub(crate) const CORRECTIONS_DIR: &str = ".okf/corrections";
+/// A folder's generated index, in every folder.
+pub(crate) const INDEX_FILE: &str = "index.md";
 /// The maintained change log at the root.
 pub(crate) const LOG_FILE: &str = "log.md";
+/// Every fixed name the server writes, spelled exactly as it writes it: the paths from the root
+/// of `.okf/` and of what it keeps there (type definitions, naming rules, source appearances,
+/// supplied text, corrections), the root's change log, and the index it writes in every folder.
+/// Below `sources/`, `supplied/` and `corrections/` it also writes names made of an item's
+/// identity and a digest, in lower case like these (`server_writes`). A tree that holds one of
+/// these, or one of those, spelled another way is refused (`respelled`), so every path the
+/// server writes has one spelling on every filesystem.
+pub(crate) const SERVER_NAMES: [&str; 8] = [
+    APP_DIR,
+    TYPES_FILE,
+    RULES_FILE,
+    SOURCES_DIR,
+    SUPPLIED_DIR,
+    CORRECTIONS_DIR,
+    LOG_FILE,
+    INDEX_FILE,
+];
 /// The extension of an item's file, exactly: the only one okf-core reads as a concept.
 const ITEM_EXTENSION: &str = "md";
 /// The request field of the server-owned header.
@@ -139,6 +177,43 @@ impl ItemFile {
     }
 }
 
+impl Respelled {
+    /// The refusal of edits that would make a tree hold this (`Staged::refuse_collisions`):
+    /// `Conflict`, naming both spellings.
+    pub(crate) fn made(&self) -> ApiError {
+        ApiError::new(ErrorCode::Conflict, self.clash())
+    }
+
+    /// The refusal of a revision that already holds this (`repo::materialize`): `Conflict`,
+    /// naming both spellings and the repair, a whole-tree restore of an earlier revision.
+    pub(crate) fn held(&self) -> ApiError {
+        let message = if self.server {
+            format!(
+                "{}: the revision spells a path the server writes another way, which Windows and \
+                 macOS would merge with it; the workspace can be restored to a revision from \
+                 before {} appeared",
+                self.clash(),
+                self.path
+            )
+        } else {
+            format!(
+                "{}: the revision holds two spellings of one path, which Windows and macOS keep \
+                 as one; the workspace can be restored to a revision from before they appeared",
+                self.clash()
+            )
+        };
+        ApiError::new(ErrorCode::Conflict, message)
+    }
+
+    fn clash(&self) -> String {
+        if self.server {
+            format!("{} collides with the server's {}", self.path, self.other)
+        } else {
+            format!("{} collides with {}", self.path, self.other)
+        }
+    }
+}
+
 /// A new item file from its properties, body and header.
 pub(crate) fn new_item(
     properties: &BTreeMap<String, Json>,
@@ -196,30 +271,94 @@ pub(crate) fn is_reserved(path: &str) -> bool {
     })
 }
 
-/// Refuse two of `files` (every file of one tree, as `/`-separated paths), or two of the
-/// folders above them, that share a collision key but are spelled differently: `Conflict`
-/// naming both. Files and folders count alike, so `notes/a.md` and `Notes/b.md` collide on
-/// their folders, and `a.md` and `A.md/x.md` collide too. A case-insensitive filesystem would
-/// merge each such pair into one.
-pub(crate) fn refuse_shared_keys<'a>(
-    files: impl IntoIterator<Item = &'a str>,
-) -> Result<(), ApiError> {
+/// What a tree of `files` (every file of the tree, as `/`-separated paths) holds that a
+/// case-insensitive filesystem would merge, if anything. First two of the files, or of the
+/// folders above them, that share a collision key but are spelled differently: files and
+/// folders count alike, so `notes/a.md` and `Notes/b.md` collide on their folders, and `a.md`
+/// and `A.md/x.md` collide too. Else a file, or a folder above one, whose key is that of a name
+/// the server writes there but whose spelling is not the server's (`SERVER_NAMES`): the
+/// server's next write of that name would land in it on such a filesystem and beside it on
+/// another.
+pub(crate) fn respelled<'a>(files: impl IntoIterator<Item = &'a str>) -> Option<Respelled> {
+    let files: Vec<&str> = files.into_iter().collect();
     let mut paths = BTreeSet::new();
-    for file in files {
-        paths.insert(file);
+    for file in &files {
+        paths.insert(*file);
         paths.extend(file.match_indices('/').filter_map(|(at, _)| file.get(..at)));
     }
     // Every spelling once, so two paths with one key are two spellings of it.
     let mut keys = BTreeMap::new();
     for path in paths {
         if let Some(other) = keys.insert(collision_key(path), path) {
-            return Err(ApiError::new(
-                ErrorCode::Conflict,
-                format!("{path} collides with {other}"),
-            ));
+            return Some(Respelled {
+                path: path.to_owned(),
+                other: other.to_owned(),
+                server: false,
+            });
         }
     }
-    Ok(())
+    files.into_iter().find_map(respelled_server_name)
+}
+
+/// The first of `path` and the folders above it whose key is that of a name the server writes
+/// there (`server_writes`) but whose spelling is not the server's, with the server's spelling:
+/// `.OKF/x.json` gives `.OKF` and `.okf`; `notes/INDEX.md` gives itself and `notes/index.md`.
+/// The server spells every name it writes in lower case, so its spelling is the name's key.
+fn respelled_server_name(path: &str) -> Option<Respelled> {
+    let mut tree = String::new();
+    let mut server = String::new();
+    for segment in path.split('/') {
+        let key = collision_key(segment);
+        let written = server_writes(&server, &key);
+        if !tree.is_empty() {
+            tree.push('/');
+            server.push('/');
+        }
+        tree.push_str(segment);
+        server.push_str(if written { &key } else { segment });
+        if written && key != segment {
+            return Some(Respelled {
+                path: tree,
+                other: server,
+                server: true,
+            });
+        }
+    }
+    None
+}
+
+/// Whether the server writes a name whose collision key is `key` in `folder` (as the server
+/// spells it; empty for the root): a name of `SERVER_NAMES` there, `index.md` in any folder,
+/// `<item id>.json` in the source appearances and the supplied text, and `<item id>/` with
+/// `<digest>.json` in it in the corrections.
+fn server_writes(folder: &str, key: &str) -> bool {
+    let path = if folder.is_empty() {
+        key.to_owned()
+    } else {
+        format!("{folder}/{key}")
+    };
+    let item_file = || key.strip_suffix(".json").is_some_and(is_item_id);
+    key == INDEX_FILE
+        || SERVER_NAMES.contains(&path.as_str())
+        || match folder {
+            SOURCES_DIR | SUPPLIED_DIR => item_file(),
+            CORRECTIONS_DIR => is_item_id(key),
+            _ => {
+                folder
+                    .strip_prefix(CORRECTIONS_DIR)
+                    .and_then(|below| below.strip_prefix('/'))
+                    .is_some_and(is_item_id)
+                    && key
+                        .strip_suffix(".json")
+                        .is_some_and(|digest| Digest::try_from(digest.to_owned()).is_ok())
+            }
+        }
+}
+
+/// Whether `text` is an item's identity as the server writes it in a path: the lower-case,
+/// hyphenated UUID `ItemId` displays.
+fn is_item_id(text: &str) -> bool {
+    uuid::Uuid::parse_str(text).is_ok_and(|id| id.to_string() == text)
 }
 
 /// The key two paths collide on (`WorkspacePath::collision_key`); a path that is not a valid

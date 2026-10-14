@@ -19,7 +19,7 @@ use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::history::FileChangeKind;
 use okf_jawn_contract::identity::{ItemId, Revision, TenantId, WorkspacePath};
-use okf_jawn_contract::item::ItemKind;
+use okf_jawn_contract::item::{ItemKind, TypeDefinition};
 use okf_jawn_core::search::{GraphQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
     CandidateCheck, CommitChanges, Committed, DiffQuery, LogQuery, NewWorkspace, Page, Provenance,
@@ -38,6 +38,9 @@ macro_rules! uuid {
 }
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
+
+/// Paths to remove from a tree and files to write into it, for `Workspace::raw`.
+type GitChanges = (Vec<String>, Vec<(String, Vec<u8>)>);
 
 /// Accepts every candidate.
 struct Accept;
@@ -60,6 +63,10 @@ struct Workspace {
 
 /// The private name a case-only rename parks its item under, in any folder.
 const PARKED: &str = "okf-jawn-recase-";
+
+/// An item identity with letters in it, so the names the server writes for it have an
+/// upper-case spelling.
+const LETTERED: &str = "abcdef00-0000-4000-8000-000000000014";
 
 /// The frontmatter of note 10 as `note` writes it, and of note 12.
 const NOTE_10: &str = "---\ntype: Note\ntitle: Note 10\nokf_jawn:\n  item_id: \
@@ -404,8 +411,25 @@ fn edited(item: u32, body: &str) -> Fallible<TreeEdit> {
 
 /// A source card at `at`.
 fn card(item: u32, at: &str) -> Fallible<TreeEdit> {
+    card_of(&uuid_text(item), at)
+}
+
+/// A type definition named `name`.
+fn set_type(name: &str) -> TreeEdit {
+    TreeEdit::SetType {
+        definition: TypeDefinition {
+            name: name.to_owned(),
+            schema_version: 1,
+            properties_schema: json!({ "type": "object" }),
+            ui_schema: json!({}),
+        },
+    }
+}
+
+/// A source card at `at` for the item whose identity is spelled `id`.
+fn card_of(id: &str, at: &str) -> Fallible<TreeEdit> {
     Ok(TreeEdit::WriteSourceCard(Box::new(SourceCard {
-        item_id: uuid!(item)?,
+        item_id: serde_json::from_value(json!(id))?,
         path: path(at)?,
         title: "scan.pdf".to_owned(),
         type_name: "Source".to_owned(),
@@ -1339,6 +1363,13 @@ async fn a_tree_with_two_spellings_of_a_folder_refuses_every_commit_but_a_whole_
     ] {
         let error = space.refused(mutation, &spelled, vec![edit]).await?;
         assert_conflict_naming(&error, &["notes", "Notes", "collides"]);
+        // The refusal names both spellings and the repair.
+        assert_eq!(
+            error.message,
+            "notes collides with Notes: the revision holds two spellings of one path, which \
+             Windows and macOS keep as one; the workspace can be restored to a revision from \
+             before they appeared"
+        );
     }
     let repaired = space
         .commit(
@@ -1390,6 +1421,189 @@ async fn a_tree_with_two_spellings_of_a_file_refuses_every_commit_but_a_whole_re
     assert_eq!(space.file(&repaired, "A.md")?, None);
     assert_eq!(space.body(&repaired, 10).await?, "Ten.");
     assert_eq!(space.body(&repaired, 11).await?, "Eleven.");
+    Ok(())
+}
+
+// R1: every path the server writes has one spelling.
+
+/// Respellings of the names the server writes, for a tree seeded with `Notes/a.md`, a card of
+/// item `LETTERED` and a type: each is `[from, to, tree, server]` for `respelling`, with the
+/// spelling the refusal names first and the server's spelling it names second.
+fn server_name_cases() -> Vec<[String; 4]> {
+    let upper = LETTERED.to_uppercase();
+    let digest = "c".repeat(64);
+    let upper_digest = digest.to_uppercase();
+    let fixed = [
+        [".okf/", ".OKF/", ".OKF", ".okf"],
+        [
+            ".okf/types.json",
+            ".okf/Types.json",
+            ".okf/Types.json",
+            ".okf/types.json",
+        ],
+        [
+            ".okf/rules.yaml",
+            ".okf/Rules.yaml",
+            ".okf/Rules.yaml",
+            ".okf/rules.yaml",
+        ],
+        [
+            ".okf/sources/",
+            ".okf/Sources/",
+            ".okf/Sources",
+            ".okf/sources",
+        ],
+        [
+            "Notes/index.md",
+            "Notes/INDEX.md",
+            "Notes/INDEX.md",
+            "Notes/index.md",
+        ],
+        ["log.md", "LOG.md", "LOG.md", "log.md"],
+    ];
+    let mut cases: Vec<[String; 4]> = fixed.iter().map(|case| case.map(str::to_owned)).collect();
+    cases.extend([
+        [
+            ".okf/supplied/".to_owned(),
+            format!(".okf/Supplied/{LETTERED}.json"),
+            ".okf/Supplied".to_owned(),
+            ".okf/supplied".to_owned(),
+        ],
+        [
+            ".okf/corrections/".to_owned(),
+            format!(".okf/Corrections/{LETTERED}/{digest}.json"),
+            ".okf/Corrections".to_owned(),
+            ".okf/corrections".to_owned(),
+        ],
+        [
+            format!(".okf/sources/{LETTERED}"),
+            format!(".okf/sources/{upper}"),
+            format!(".okf/sources/{upper}.json"),
+            format!(".okf/sources/{LETTERED}.json"),
+        ],
+        [
+            ".okf/supplied/".to_owned(),
+            format!(".okf/supplied/{upper}.json"),
+            format!(".okf/supplied/{upper}.json"),
+            format!(".okf/supplied/{LETTERED}.json"),
+        ],
+        [
+            ".okf/corrections/".to_owned(),
+            format!(".okf/corrections/{upper}/{digest}.json"),
+            format!(".okf/corrections/{upper}"),
+            format!(".okf/corrections/{LETTERED}"),
+        ],
+        [
+            ".okf/corrections/".to_owned(),
+            format!(".okf/corrections/{LETTERED}/{upper_digest}.json"),
+            format!(".okf/corrections/{LETTERED}/{upper_digest}.json"),
+            format!(".okf/corrections/{LETTERED}/{digest}.json"),
+        ],
+    ]);
+    cases
+}
+
+/// The removals and writes that respell `revision`'s paths: every file whose path starts with
+/// `from` is moved to start with `to` instead, with its bytes; with no such file, the path `to`
+/// is written with the bytes `{}`.
+fn respelling(
+    space: &Workspace,
+    revision: &Revision,
+    from: &str,
+    to: &str,
+) -> Fallible<GitChanges> {
+    let mut removed = Vec::new();
+    let mut written = Vec::new();
+    for file in space.files(revision)? {
+        if let Some(rest) = file.strip_prefix(from) {
+            written.push((
+                format!("{to}{rest}"),
+                some(space.file(revision, &file)?, "a file")?,
+            ));
+            removed.push(file);
+        }
+    }
+    if written.is_empty() {
+        written.push((to.to_owned(), b"{}".to_vec()));
+    }
+    Ok((removed, written))
+}
+
+/// A revision that spells a name the server writes another way, written straight through Git
+/// as an earlier build or an archive could have left it, refuses every commit on every system,
+/// naming its spelling, the server's and the repair, before the server's write could land in
+/// it (Windows, macOS) or beside it (Linux); a whole-tree Rewind to a revision without it lands.
+/// Each fixed name of `SERVER_NAMES` is respelled, as a folder or as a file, and so are the
+/// names the server makes of an item's identity and a digest.
+#[tokio::test]
+async fn a_revision_spelling_a_server_name_another_way_is_refused_naming_the_repair() -> TestResult
+{
+    let space = Workspace::new().await?;
+    let seeded = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "Notes/a.md", "Ten.")?,
+                card_of(LETTERED, "one.md")?,
+                set_type("Memo"),
+            ],
+        )
+        .await?;
+    let mut head = seeded.clone();
+    for (case, [from, to, tree, server]) in (0_u32..).zip(server_name_cases()) {
+        let mutation = case.saturating_mul(10).saturating_add(100);
+        let (removed, written) = respelling(&space, &head, &from, &to)?;
+        let removed: Vec<&str> = removed.iter().map(String::as_str).collect();
+        let written: Vec<(&str, Vec<u8>)> = written
+            .iter()
+            .map(|(at, bytes)| (at.as_str(), bytes.clone()))
+            .collect();
+        let respelled = space.raw(mutation, &removed, &written)?;
+        for (offset, edit) in [(1, note(20, "z.md", "Twenty.")?), (2, set_type("Letter"))] {
+            let error = space
+                .refused(mutation.saturating_add(offset), &respelled, vec![edit])
+                .await?;
+            assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+            assert_eq!(
+                error.message,
+                format!(
+                    "{tree} collides with the server's {server}: the revision spells a path the \
+                     server writes another way, which Windows and macOS would merge with it; the \
+                     workspace can be restored to a revision from before {tree} appeared"
+                )
+            );
+        }
+        head = space
+            .commit(
+                mutation.saturating_add(3),
+                &respelled,
+                vec![TreeEdit::RestoreWorkspace {
+                    from: seeded.clone(),
+                }],
+            )
+            .await?;
+        assert_eq!(space.files(&head)?, space.files(&seeded)?, "{tree}");
+    }
+    Ok(())
+}
+
+/// A restore of paths that writes a name the server writes in another spelling, into a tree
+/// that holds neither spelling, is refused naming both spellings: the staged copy is checked
+/// for it after the edits, so no commit can hold it.
+#[tokio::test]
+async fn restored_paths_spelling_a_server_name_another_way_are_refused() -> TestResult {
+    let space = Workspace::new().await?;
+    space
+        .commit(2, &space.initial, vec![note(10, "a.md", "Ten.")?])
+        .await?;
+    let early = space.raw(900, &[], &[(".OKF/x.json", b"{}".to_vec())])?;
+    let clean = space.raw(901, &[".OKF/x.json"], &[])?;
+    let error = space
+        .refused(3, &clean, vec![restore_paths(&early, &[".OKF/x.json"])?])
+        .await?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    assert_eq!(error.message, ".OKF collides with the server's .okf");
     Ok(())
 }
 

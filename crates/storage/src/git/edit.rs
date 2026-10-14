@@ -11,9 +11,10 @@
 //! back at another path than the one it holds now. An item, a move or a folder may not land on a
 //! reserved name (`.okf/`, `index.md`, `log.md`) in any letter case: it is refused naming the
 //! path before anything is written. After the edits, no two paths, files or folders, may share
-//! a collision key (`Staged::refuse_collisions`; a tree that already holds such a pair is
-//! refused when it is staged, `repo::materialize`), the folder indexes are regenerated and the
-//! change is appended to `log.md`. The files a
+//! a collision key, and no path may spell a name the server writes (`item::SERVER_NAMES`)
+//! another way (`Staged::refuse_collisions`; a tree that already holds either is refused when
+//! it is staged, `repo::materialize`, naming the repair); the folder indexes are regenerated,
+//! the change is appended to `log.md`, and the same refusal runs again on the result. The files a
 //! move rewrote besides the moved item's own (the referrers) are remembered, and the candidate
 //! check is told them (`Staged::rewritten`, `CandidateCheck::check`).
 //! Conformance is the `CandidateCheck`'s decision, not this module's.
@@ -58,10 +59,11 @@ use okf_jawn_core::items::{ApplicationHeader, refuse_header_change, refuse_heade
 use okf_jawn_core::storage::{SourceCard, TreeEdit};
 
 use super::item::{
-    APP_DIR, ItemFile, LOG_FILE, RULES_FILE, TYPES_FILE, bare_header, check_item_path,
-    collision_key, is_item_path, is_reserved, new_item, refuse_shared_keys,
+    CORRECTIONS_DIR, INDEX_FILE, ItemFile, LOG_FILE, RULES_FILE, SOURCES_DIR, SUPPLIED_DIR,
+    TYPES_FILE, bare_header, check_item_path, collision_key, is_item_path, is_reserved, new_item,
+    respelled,
 };
-use super::repo::{commit_of, internal, materialize};
+use super::repo::{commit_of, internal, materialize, materialize_at};
 use crate::data::io_error;
 use crate::seam;
 
@@ -151,11 +153,13 @@ impl Staged {
     }
 
     /// Refuse two paths of the staged tree that share a collision key (Stage 1b design section
-    /// 7), files and the folders above them alike (`refuse_shared_keys`), so a tree never holds
-    /// two files, or two spellings of one folder, that a case-insensitive filesystem would
-    /// merge, whatever the edits did. On such a filesystem the staged copy cannot hold such a
-    /// pair; the tree it was staged from is checked for one when it is staged
-    /// (`repo::materialize`).
+    /// 7), files and the folders above them alike, and a path the server writes spelled another
+    /// way (`respelled`), so a tree never holds two files, or two spellings of one folder, that
+    /// a case-insensitive filesystem would merge, whatever the edits did. On such a filesystem
+    /// the staged copy cannot hold such a pair; the tree it was staged from is checked for one
+    /// when it is staged (`repo::materialize`). It runs after the edits and again after the
+    /// indexes and the log are written (`stage_and_commit`), so the rule holds on what is
+    /// committed.
     pub(crate) fn refuse_collisions(&self) -> Result<(), ApiError> {
         for path in self.items.values() {
             WorkspacePath::try_from(path.clone()).map_err(|error| {
@@ -163,7 +167,10 @@ impl Staged {
             })?;
         }
         let files = files_under(&self.root, "")?;
-        refuse_shared_keys(files.iter().map(String::as_str))
+        match respelled(files.iter().map(String::as_str)) {
+            Some(found) => Err(found.made()),
+            None => Ok(()),
+        }
     }
 
     /// Refuse `path` when a folder it names is in the staged tree already, spelled another way
@@ -408,7 +415,7 @@ fn create_folder(staged: &Staged, folder: &WorkspacePath) -> Result<(), ApiError
     }
     std::fs::create_dir_all(&target).map_err(|error| io_error("create", &target, &error))?;
     write_text(
-        &target.join("index.md"),
+        &target.join(INDEX_FILE),
         &okf_core::index::build_index_text(&[]),
     )
 }
@@ -658,7 +665,7 @@ fn restore_folder(
                 .map_err(|error| super::repo::git(&error))?;
             std::fs::create_dir_all(&target)
                 .map_err(|error| io_error("create", &target, &error))?;
-            materialize(repository, &folder, &target)
+            materialize_at(repository, &folder, &target, path)
         }
         Ok(_) => Ok(()),
         Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(()),
@@ -960,7 +967,7 @@ pub(crate) fn appearance_path(root: &Path, item: ItemId) -> PathBuf {
 
 /// The tree path of a card's source appearance.
 pub(crate) fn appearance_file(item: ItemId) -> String {
-    format!("{APP_DIR}/sources/{}.json", item.0)
+    format!("{SOURCES_DIR}/{}.json", item.0)
 }
 
 /// The tree path of a correction of one digest.
@@ -970,12 +977,12 @@ pub(crate) fn correction_file(item: ItemId, digest: &Digest) -> String {
 
 /// The tree path of the folder holding every correction of one item.
 fn corrections_folder(item: ItemId) -> String {
-    format!("{APP_DIR}/corrections/{}", item.0)
+    format!("{CORRECTIONS_DIR}/{}", item.0)
 }
 
 /// The tree path of accepted agent-supplied text.
 pub(crate) fn supplied_file(item: ItemId) -> String {
-    format!("{APP_DIR}/supplied/{}.json", item.0)
+    format!("{SUPPLIED_DIR}/{}.json", item.0)
 }
 
 fn correction_path(root: &Path, item: ItemId, digest: &Digest) -> PathBuf {
