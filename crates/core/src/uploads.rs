@@ -4,10 +4,11 @@
 //! hash) so the import that follows preserves the occurrence. Opening a slot takes
 //! `MutationId`; a repeated id opens nothing and returns the prior slot.
 
-use okf_jawn_contract::identity::{Digest, JobId, MutationId, Timestamp, UploadId};
+use okf_jawn_contract::identity::{Digest, JobId, MutationId, Timestamp, UploadId, WorkspaceId};
+use okf_jawn_contract::import::{Upload, UploadListState};
 
 use crate::ports::PortFuture;
-use crate::storage::{ByteReader, ObjectInfo, Provenance, StorageScope};
+use crate::storage::{ByteReader, ObjectInfo, Page, Provenance, StorageScope};
 
 /// One source occurrence about to be uploaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +51,25 @@ pub struct UploadRecord {
     pub consumed_by: Option<JobId>,
 }
 
+/// Which slots `UploadStore::list` answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadQuery {
+    /// Only the slots in this state: `incomplete` (no retained object), `waiting` (complete and
+    /// not consumed) or `consumed` (taken by a job); `None` answers every slot.
+    pub state: Option<UploadListState>,
+    /// Bounded page; its cursor is one an earlier page of the same listing answered.
+    pub page: Page,
+}
+
+/// One page of a workspace's slots, newest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadPage {
+    /// The slots, the most recently opened first.
+    pub items: Vec<UploadRecord>,
+    /// Where the next page begins; `None` on the last page.
+    pub next_cursor: Option<String>,
+}
+
 /// Durable upload registration and completion; storage owns the implementation.
 pub trait UploadStore: Send + Sync {
     /// Open a slot before authenticated binary bytes arrive.
@@ -64,6 +84,14 @@ pub trait UploadStore: Send + Sync {
     /// Read one slot; `NotFound` when the workspace has no such slot.
     fn get<'a>(&'a self, scope: &'a StorageScope, upload: UploadId)
     -> PortFuture<'a, UploadRecord>;
+    /// List the workspace's slots, the most recently opened first, in `query.state`, a page at a
+    /// time; nothing expires, so every slot not discarded, imported away or purged is listed.
+    /// `InvalidInput` on `/page/cursor` for a cursor this listing did not answer.
+    fn list<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        query: UploadQuery,
+    ) -> PortFuture<'a, UploadPage>;
     /// Append authenticated bytes to a slot.
     ///
     /// Fails with `TooLarge` when the slot would exceed `limit` or its announced size.
@@ -130,4 +158,28 @@ pub trait UploadStore: Send + Sync {
         uploads: &'a [UploadId],
         job: JobId,
     ) -> PortFuture<'a, Vec<UploadRecord>>;
+}
+
+impl UploadRecord {
+    /// The wire `Upload` of this slot in `workspace`: its byte transport path
+    /// (`transport::TRANSPORTS` `upload_content`), the counts as decimal strings, whether it is
+    /// complete, the names as supplied, when it was opened and which job took it.
+    #[must_use]
+    pub fn to_wire(&self, workspace: WorkspaceId) -> Upload {
+        Upload {
+            id: self.id,
+            workspace_id: workspace,
+            upload_path: format!(
+                "/api/workspaces/{}/uploads/{}/content",
+                workspace.0, self.id.0
+            ),
+            received_bytes: self.received_bytes.to_string(),
+            complete: self.object.is_some(),
+            filename: Some(self.filename.clone()),
+            relative_path: Some(self.relative_path.clone()),
+            size: Some(self.expected_size.to_string()),
+            created_at: Some(self.created_at.clone()),
+            consumed_by: self.consumed_by,
+        }
+    }
 }

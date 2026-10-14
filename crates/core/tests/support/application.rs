@@ -124,7 +124,7 @@ use okf_jawn_core::storage::{
     Promotion, Provenance, StorageScope, TreeEdit, VersionStore, WorkspaceArchive,
     WorkspaceCatalog, WorkspaceUpdate, replay_warnings_unavailable,
 };
-use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
+use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadRecord, UploadStore};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -2252,6 +2252,13 @@ impl UploadStore for Unused {
         _mutation_id: MutationId,
         _upload: NewUpload,
     ) -> PortFuture<'a, UploadRecord> {
+        unused()
+    }
+    fn list<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _query: UploadQuery,
+    ) -> PortFuture<'a, UploadPage> {
         unused()
     }
     fn get<'a>(

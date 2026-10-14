@@ -37,7 +37,7 @@ use okf_jawn_core::storage::{
     Promotion, Purger, SourceCard, StorageScope, TreeEdit, VersionStore, WrittenArchive,
     replay_warnings_unavailable,
 };
-use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
+use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadRecord, UploadStore};
 
 /// A `VersionStore` that keeps a line of commits and nothing of their trees.
 ///
@@ -1107,6 +1107,13 @@ impl Purger for FakePurger {
 }
 
 impl UploadStore for FakeUploads {
+    fn list<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _query: UploadQuery,
+    ) -> PortFuture<'a, UploadPage> {
+        unused("list")
+    }
     fn create<'a>(
         &'a self,
         _scope: &'a StorageScope,

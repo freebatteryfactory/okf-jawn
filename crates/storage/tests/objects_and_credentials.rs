@@ -4,9 +4,10 @@
 use okf_jawn_contract::access::{AccessRoute, Permission};
 use okf_jawn_contract::error::{ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::{Digest, JobId, TenantId, UploadId};
+use okf_jawn_contract::import::UploadListState;
 use okf_jawn_core::credentials::{ConnectorIssue, CredentialStore, NewConnector, secret_hash};
-use okf_jawn_core::storage::{BlobStore, ByteReader, Provenance, StorageScope};
-use okf_jawn_core::uploads::{NewUpload, UploadStore};
+use okf_jawn_core::storage::{BlobStore, ByteReader, Page, Provenance, StorageScope};
+use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadStore};
 use okf_jawn_storage::Storage;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
@@ -447,6 +448,88 @@ async fn an_upload_is_received_verified_retained_and_consumed_once() -> TestResu
     assert_eq!(error.code, ErrorCode::Conflict);
     let error = err_of(uploads.get(&scope("local", 2)?, slot.id).await)?;
     assert_eq!(error.code, ErrorCode::NotFound);
+    Ok(())
+}
+
+/// Ruling 3: a workspace's slots are listed newest first, in each state (incomplete, waiting,
+/// consumed) or all of them, a page at a time; another workspace's slots are not listed.
+#[tokio::test]
+async fn uploads_are_listed_newest_first_by_state_and_paged() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let uploads = storage.uploads();
+    let local = scope("local", 1)?;
+    let open = uploads.create(&local, uuid!(30)?, announced(4)).await?.id;
+    let waiting = complete_slot(&uploads, &local, 31, b"wait").await?;
+    let consumed = complete_slot(&uploads, &local, 32, b"take").await?;
+    uploads.consume(&local, consumed, uuid!(33)?).await?;
+    complete_slot(&uploads, &scope("local", 2)?, 34, b"else").await?;
+    let listed = |state: Option<UploadListState>, cursor: Option<String>, limit: u16| {
+        let uploads = storage.uploads();
+        let local = local.clone();
+        async move {
+            uploads
+                .list(
+                    &local,
+                    UploadQuery {
+                        state,
+                        page: Page { cursor, limit },
+                    },
+                )
+                .await
+        }
+    };
+    let ids =
+        |page: &UploadPage| -> Vec<UploadId> { page.items.iter().map(|slot| slot.id).collect() };
+    let every = listed(None, None, 10).await?;
+    assert_eq!(ids(&every), [consumed, waiting, open], "newest first");
+    assert_eq!(every.next_cursor, None);
+    for (state, expected) in [
+        (UploadListState::Incomplete, open),
+        (UploadListState::Waiting, waiting),
+        (UploadListState::Consumed, consumed),
+    ] {
+        assert_eq!(
+            ids(&listed(Some(state), None, 10).await?),
+            [expected],
+            "{state:?}"
+        );
+    }
+    let first = listed(None, None, 2).await?;
+    assert_eq!(ids(&first), [consumed, waiting]);
+    let second = listed(None, first.next_cursor.clone(), 2).await?;
+    assert_eq!(ids(&second), [open]);
+    assert_eq!(second.next_cursor, None);
+    let refused = err_of(listed(None, Some("not-a-cursor".to_owned()), 2).await)?;
+    assert_eq!(refused.field.as_deref(), Some("/page/cursor"));
+    Ok(())
+}
+
+/// The wire form of a slot carries what the slot recorded: its names, size, opening and taker.
+#[tokio::test]
+async fn a_slots_wire_form_carries_what_the_slot_recorded() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let uploads = storage.uploads();
+    let local = scope("local", 1)?;
+    let slot = complete_slot(&uploads, &local, 35, b"wire").await?;
+    uploads.consume(&local, slot, uuid!(36)?).await?;
+    let record = uploads.get(&local, slot).await?;
+    let wire = record.to_wire(local.workspace_id);
+    assert_eq!(
+        wire.upload_path,
+        format!(
+            "/api/workspaces/{}/uploads/{}/content",
+            local.workspace_id.0, slot.0
+        )
+    );
+    assert!(wire.complete);
+    assert_eq!(wire.received_bytes, "4");
+    assert_eq!(wire.size.as_deref(), Some("4"));
+    assert_eq!(wire.filename.as_deref(), Some("notes.txt"));
+    assert_eq!(wire.relative_path.as_deref(), Some(""));
+    assert_eq!(wire.created_at.as_ref(), Some(&record.created_at));
+    assert_eq!(wire.consumed_by, Some(uuid!(36)?));
     Ok(())
 }
 
