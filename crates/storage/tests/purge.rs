@@ -1023,6 +1023,65 @@ async fn purge_scrubs_every_field_of_a_citation_that_can_hold_the_target() -> Te
     Ok(())
 }
 
+/// Ruling 18: a comment of another workspace whose source cites the target is scrubbed as a
+/// receipt's and a review's citations are, marked invalidated by the purge, and counted.
+#[tokio::test]
+async fn purge_scrubs_a_comment_that_cites_the_target() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let revision = some(fixture.revisions.get(1), "the seeded revision")?;
+    let comment = json!({
+        "id": uuid_text(44),
+        "author": "ana",
+        "text": "Is this the right page?",
+        "created_at": "2026-10-09T12:00:00.000Z",
+        "source": {
+            "workspace_id": fixture.target.workspace_id,
+            "item_id": uuid_text(10),
+            "path": "notes/zanzibar-plans.md",
+            "revision": revision.as_str(),
+            "digest": "d".repeat(64),
+            "selection": { "kind": "section", "heading": "zanzibar ferry" }
+        }
+    });
+    let records = fixture.storage.data().records_path();
+    rusqlite::Connection::open(&records)?.execute(
+        "INSERT INTO comments (comment_id, tenant_id, workspace_id, proposal_id, mutation_id,
+             record) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            uuid_text(44),
+            fixture.survivor.tenant_id.as_str(),
+            fixture.survivor.workspace_id.0.to_string(),
+            uuid_text(45),
+            uuid_text(46),
+            comment.to_string()
+        ],
+    )?;
+    let report = purge_target(&fixture).await?;
+    assert_eq!(
+        report.citations_invalidated, 2,
+        "the fixture's own citation and the comment's"
+    );
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    let stored: String = rusqlite::Connection::open(&records)?.query_row(
+        "SELECT record FROM comments WHERE comment_id = ?1",
+        [uuid_text(44)],
+        |row| row.get(0),
+    )?;
+    let stored: Comment = serde_json::from_str(&stored)?;
+    assert_eq!(stored.invalidated_by, Some(uuid!(60)?));
+    let source = some(stored.source, "the scrubbed source")?;
+    assert_eq!(source.path.as_str(), format!("purged/{}", uuid_text(10)));
+    assert_eq!(source.selection, okf_jawn_contract::read::Selection::All);
+    assert!(source.digest.is_none(), "the target's derived digest goes");
+    assert_eq!(source.revision, *revision);
+    assert_eq!(
+        stored.text, "Is this the right page?",
+        "the survivor's own words stay"
+    );
+    Ok(())
+}
+
 /// Review probe R2: the survivor's own archive, taken before the purge, holds its receipt citing
 /// the target. Restoring it must not bring the citation back.
 #[tokio::test]
