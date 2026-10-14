@@ -861,28 +861,37 @@ async fn an_item_named_like_its_private_name_is_renamed_by_case() -> TestResult 
     Ok(())
 }
 
-/// A link, or a `sources` entry, that points at the first private name while nothing holds it
-/// is a broken reference that a rename by letter case leaves alone: the rename parks the item
-/// elsewhere, so only the links to the item follow it, and the check is told only the file
-/// that held one.
-#[tokio::test]
-async fn a_link_to_the_private_name_is_not_rewritten_by_a_case_only_rename() -> TestResult {
+/// Item 10 at `Notes/Report.md`, `Notes/other.md` (item 12) linking to it, and a reference to
+/// item 10's first private name while nothing holds that name: with `cited`, a `sources` entry
+/// of `Notes/cited.md`; otherwise Markdown links in `Notes/other.md` and `Notes/bystander.md`.
+/// A rename by letter case parks the item elsewhere, so the broken reference stays as it was,
+/// only the link to the item follows it, and the check is told only `Notes/other.md`.
+async fn renamed_beside_a_broken_reference(cited: bool) -> TestResult {
     let space = Workspace::new().await?;
     let ghost = parked_name("recase", 10);
-    let sources = BTreeMap::from([("sources".to_owned(), json!([{ "resource": ghost }]))]);
+    let (other, at, reference) = if cited {
+        let sources = BTreeMap::from([("sources".to_owned(), json!([{ "resource": ghost }]))]);
+        (
+            "Only [real](Report.md).".to_owned(),
+            "Notes/cited.md",
+            note_with(14, "Notes/cited.md", "Cites it.", sources)?,
+        )
+    } else {
+        let only = format!("Only [ghost]({ghost}).");
+        (
+            format!("[ghost]({ghost}) and [real](Report.md)."),
+            "Notes/bystander.md",
+            note(14, "Notes/bystander.md", &only)?,
+        )
+    };
     let seeded = space
         .commit(
             2,
             &space.initial,
             vec![
                 note(10, "Notes/Report.md", "The report.")?,
-                note(
-                    12,
-                    "Notes/other.md",
-                    &format!("[ghost]({ghost}) and [real](Report.md)."),
-                )?,
-                note(13, "Notes/bystander.md", &format!("Only [ghost]({ghost})."))?,
-                note_with(14, "Notes/cited.md", "Cites it.", sources)?,
+                note(12, "Notes/other.md", &other)?,
+                reference,
             ],
         )
         .await?;
@@ -898,13 +907,19 @@ async fn a_link_to_the_private_name_is_not_rewritten_by_a_case_only_rename() -> 
         .revision;
     assert_eq!(
         space.body(&renamed, 12).await?,
-        format!("[ghost]({ghost}) and [real](report.md).")
+        other.replace("](Report.md)", "](report.md)")
     );
-    for at in ["Notes/bystander.md", "Notes/cited.md"] {
-        assert_eq!(space.file(&renamed, at)?, space.file(&seeded, at)?, "{at}");
-    }
+    assert_eq!(space.file(&renamed, at)?, space.file(&seeded, at)?, "{at}");
     assert_eq!(recording.seen()?, [vec!["Notes/other.md".to_owned()]]);
     Ok(())
+}
+
+/// A link, or a `sources` entry, that points at the first private name while nothing holds it
+/// is a broken reference that a rename by letter case leaves alone.
+#[tokio::test]
+async fn a_link_to_the_private_name_is_not_rewritten_by_a_case_only_rename() -> TestResult {
+    renamed_beside_a_broken_reference(false).await?;
+    renamed_beside_a_broken_reference(true).await
 }
 
 /// Item 20 moved from `a/x.md` to `b/c/x.md`, then rewound. With `plain`, a plain file holds
