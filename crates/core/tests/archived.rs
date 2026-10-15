@@ -389,10 +389,7 @@ async fn a_connector_operation_on_any_route_but_the_local_owners_is_refused_and_
             let appended = ports.events.appended()?;
             let (log, event) = some(appended.first(), "the refusal event")?;
             assert_eq!(*log, EventScope::Tenant(tenant("tenant-local")?));
-            assert_eq!(
-                event.operation.map(OperationName::as_str),
-                Some(operation)
-            );
+            assert_eq!(event.operation.map(OperationName::as_str), Some(operation));
         }
         let (app, ports) = world()?;
         let owner = principal("alice", AccessRoute::LocalOwner)?;

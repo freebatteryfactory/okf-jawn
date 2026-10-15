@@ -97,4 +97,3 @@ fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, ApiError> {
         .lock()
         .map_err(|_| ApiError::new(ErrorCode::Internal, "an archiving fixture lock is poisoned"))
 }
-
