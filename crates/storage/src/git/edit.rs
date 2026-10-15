@@ -10,17 +10,48 @@
 //! point at the item (`okf_core::move_concept`), and so does a `RestoreItem` that puts an item
 //! back at another path than the one it holds now. An item, a move or a folder may not land on a
 //! reserved name (`.okf/`, `index.md`, `log.md`) in any letter case: it is refused naming the
-//! path before anything is written. After the edits, no two files may share a path collision
-//! key, the folder indexes are regenerated and the change is appended to `log.md`. The files a
+//! path before anything is written. After the edits, no two paths, files or folders, may share
+//! a collision key, and no path may spell a name the server writes (`item::SERVER_NAMES`)
+//! another way (`Staged::refuse_collisions`; a tree that already holds either is refused when
+//! it is staged, `repo::materialize`, naming the repair); the folder indexes are regenerated,
+//! the change is appended to `log.md`, and the same refusal runs again on the result. The files a
 //! move rewrote besides the moved item's own (the referrers) are remembered, and the candidate
 //! check is told them (`Staged::rewritten`, `CandidateCheck::check`).
 //! Conformance is the `CandidateCheck`'s decision, not this module's.
+//!
+//! The staged tree is on the server's own filesystem, where Windows and macOS hold `Report.md`
+//! and `report.md` as one file and Linux and Git hold two. A move whose destination differs
+//! from the item's path only that way (the two share a collision key) is a rename that changes
+//! only letter case, and it goes in two hops, each with its links (`relink`): first to a free
+//! private path beside the item (`park`), then to the destination. In one hop okf-core would
+//! write the destination and then remove the source, which on such a filesystem is the file it
+//! just wrote. okf-core also rewrites the item's own links on every hop, even within one folder
+//! (`./plan.md` becomes `plan.md`), and not idempotently, so the item's file is written at the
+//! destination as the first hop left it, which is what a direct move writes (`move_item`). The
+//! private path is in no commit's tree, in no `rewritten` list and in no log entry: the person
+//! sees one move in one commit. For that move only, the item's own file does not count as
+//! taking the destination (`Staged::occupied`); a move onto any other item's or file's key is
+//! refused as taken.
+//!
+//! For the same reason, every write that names a new path checks the folders it names against
+//! the staged tree's own spellings before that path is written there
+//! (`Staged::refuse_respelled_folder`): `notes/new.md` when the tree holds `Notes/` would land in
+//! `Notes/` on Windows and macOS and make a second folder on Linux, so it is refused on every
+//! system as `InvalidInput`, naming the tree's spelling and the request field. The writes are
+//! `CreateItem`, `MoveItem`, `CreateFolder` (whose own last segment counts too),
+//! `WriteSourceCard`, and the restores that write an earlier path: `RestoreItem` (each move back
+//! and each restored file) and `RestorePaths`, which also refuses a listed file the tree spells
+//! another way (`refuse_respelled_file`) and a listed path below a file
+//! (`refuse_file_as_folder`). A refusal leaves only the staged copy changed, and the
+//! staged copy is discarded, so nothing is committed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use git2::Repository;
-use okf_core::{Bundle, ConceptId, MoveOptions, RefactorError};
+use okf_core::{
+    Bundle, ConceptId, Link, LinkRewriteAction, MoveOptions, RefactorError, rewrite_markdown_links,
+};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::TextOrigin;
 use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath};
@@ -29,10 +60,11 @@ use okf_jawn_core::items::{ApplicationHeader, refuse_header_change, refuse_heade
 use okf_jawn_core::storage::{SourceCard, TreeEdit};
 
 use super::item::{
-    APP_DIR, ItemFile, LOG_FILE, RULES_FILE, TYPES_FILE, bare_header, check_item_path,
-    collision_key, is_item_path, is_reserved, new_item,
+    CORRECTIONS_DIR, INDEX_FILE, ItemFile, LOG_FILE, RULES_FILE, SOURCES_DIR, SUPPLIED_DIR,
+    TYPES_FILE, bare_header, check_item_path, collision_key, is_item_path, is_reserved, new_item,
+    respelled,
 };
-use super::repo::{commit_of, internal, materialize};
+use super::repo::{commit_of, internal, materialize, materialize_at};
 use crate::data::io_error;
 use crate::seam;
 
@@ -104,43 +136,99 @@ impl Staged {
 
     /// The files the edits made this store rewrite on its own, for the candidate check
     /// (`CandidateCheck::check`, `rewritten`): the referrers every move so far rewrote that
-    /// are still files of the staged tree, in path order, each once. A referrer a later edit
-    /// removed or moved away is left out (its new path, if any, is one the caller's own edit
-    /// names), and so is one whose path is no `WorkspacePath`: no item has such a path
-    /// (`refuse_collisions`), so only a file that is no item can be left out for it.
-    pub(crate) fn rewritten(&self) -> Vec<WorkspacePath> {
-        self.rewritten
+    /// the staged tree still holds in that exact spelling, in path order, each once. A
+    /// referrer a later edit removed, moved away or renamed by letter case is left out (its
+    /// new path, if any, is one the caller's own edit names), and so is one whose path is no
+    /// `WorkspacePath`: no item has such a path (`refuse_collisions`), so only a file that is
+    /// no item can be left out for it. The spelling is compared with the staged tree's own
+    /// listing (`files_under`), because on a filesystem that holds `Ref.md` and `ref.md` as one
+    /// file, a path lookup finds either spelling.
+    pub(crate) fn rewritten(&self) -> Result<Vec<WorkspacePath>, ApiError> {
+        let files: BTreeSet<String> = files_under(&self.root, "")?.into_iter().collect();
+        Ok(self
+            .rewritten
             .iter()
-            .filter(|path| self.root.join(path).is_file())
+            .filter(|path| files.contains(*path))
             .filter_map(|path| WorkspacePath::try_from(path.clone()).ok())
-            .collect()
+            .collect())
     }
 
-    /// Refuse two files of the staged tree whose paths share a collision key (Stage 1b design
-    /// section 7), so a tree never holds two files a case-insensitive filesystem would merge.
+    /// Refuse two paths of the staged tree that share a collision key (Stage 1b design section
+    /// 7), files and the folders above them alike, and a path the server writes spelled another
+    /// way (`respelled`), so a tree never holds two files, or two spellings of one folder, that
+    /// a case-insensitive filesystem would merge, whatever the edits did. On such a filesystem
+    /// the staged copy cannot hold such a pair; the tree it was staged from is checked for one
+    /// when it is staged (`repo::materialize`). It runs after the edits and again after the
+    /// indexes and the log are written (`stage_and_commit`), so the rule holds on what is
+    /// committed.
     pub(crate) fn refuse_collisions(&self) -> Result<(), ApiError> {
         for path in self.items.values() {
             WorkspacePath::try_from(path.clone()).map_err(|error| {
                 ApiError::new(ErrorCode::InvalidInput, format!("{path}: {error}"))
             })?;
         }
-        let mut keys = BTreeMap::new();
-        for path in files_under(&self.root, "")? {
-            if let Some(other) = keys.insert(collision_key(&path), path.clone()) {
+        let files = files_under(&self.root, "")?;
+        match respelled(files.iter().map(String::as_str)) {
+            Some(found) => Err(found.made()),
+            None => Ok(()),
+        }
+    }
+
+    /// Refuse `path` when a folder it names is in the staged tree already, spelled another way
+    /// (one collision key, other letters): `InvalidInput` on `field`, naming the spelling the
+    /// tree has (see the module header). `with_last` counts the last segment as a folder too,
+    /// for a folder being created; otherwise only the folders above it are checked. A folder
+    /// the tree does not hold yet, under any spelling, is new and passes.
+    fn refuse_respelled_folder(
+        &self,
+        path: &WorkspacePath,
+        with_last: bool,
+        field: &str,
+    ) -> Result<(), ApiError> {
+        let mut folders: Vec<&str> = path.as_str().split('/').collect();
+        if !with_last {
+            folders.pop();
+        }
+        let mut directory = self.root.clone();
+        let mut spelled = Vec::with_capacity(folders.len());
+        for folder in folders {
+            let Some(name) = spelled_in(&directory, folder, true)? else {
+                return Ok(());
+            };
+            directory.push(&name);
+            let same = name == folder;
+            spelled.push(name);
+            if !same {
                 return Err(ApiError::new(
-                    ErrorCode::Conflict,
-                    format!("{path} collides with {other}"),
-                ));
+                    ErrorCode::InvalidInput,
+                    format!(
+                        "{}: the folder is spelled {}/",
+                        path.as_str(),
+                        spelled.join("/")
+                    ),
+                )
+                .with_field(field));
             }
         }
         Ok(())
     }
 
-    /// Whether a file or folder of the staged tree, or an item, already holds `path`'s
-    /// collision key (or a folder above it holds a file's).
-    fn occupied(&self, path: &WorkspacePath) -> Result<bool, ApiError> {
+    /// Whether a file or folder of the staged tree (an empty folder an earlier edit left
+    /// included), or an item, already holds `path`'s collision key, or a path below it, or
+    /// whether a file holds the key of a folder above it. The staged directory is listed and
+    /// compared by key (`entries_under`), so a folder spelled another way counts on a
+    /// filesystem that holds `report.md/` and `Report.md` apart as on one that holds them as
+    /// one.
+    ///
+    /// `own` is the moved item's own file, for a move. Only when it holds `path`'s own key (a
+    /// rename that changes only letter case, see the module header) is it not counted; then,
+    /// on a filesystem that holds both spellings as one file, `path` exists because of it, so
+    /// only the listing is asked. Otherwise the filesystem is asked too whether anything is at
+    /// `path`. Every other file, folder and item counts.
+    fn occupied(&self, path: &WorkspacePath, own: Option<&str>) -> Result<bool, ApiError> {
         let key = path.collision_key();
-        if self.root.join(path.as_str()).exists() {
+        let own = own.filter(|own| collision_key(own) == key);
+        if own.is_none() && self.root.join(path.as_str()).exists() {
             return Ok(true);
         }
         let folder_prefix = format!("{key}/");
@@ -149,15 +237,18 @@ impl Staged {
             .match_indices('/')
             .filter_map(|(at, _)| key.get(..at))
             .collect();
-        Ok(files_under(&self.root, "")?.iter().any(|existing| {
+        Ok(entries_under(&self.root)?.iter().any(|(existing, folder)| {
+            if own == Some(existing.as_str()) {
+                return false;
+            }
             let existing = collision_key(existing);
             existing == key
                 || existing.starts_with(&folder_prefix)
-                || folders.contains(&existing.as_str())
+                || (!folder && folders.contains(&existing.as_str()))
         }) || self
             .items
             .values()
-            .any(|existing| collision_key(existing) == key))
+            .any(|existing| own != Some(existing.as_str()) && collision_key(existing) == key))
     }
 }
 
@@ -289,11 +380,12 @@ fn create_item(
     mut properties: BTreeMap<String, serde_json::Value>,
 ) -> Result<(), ApiError> {
     check_item_path(path, "/path")?;
+    staged.refuse_respelled_folder(path, false, "/path")?;
     refuse_header_change(&BTreeMap::new(), &properties, "/properties")?;
     if staged.items.contains_key(&header.item_id) {
         return Err(conflict("an item with this identity already exists"));
     }
-    if staged.occupied(path)? {
+    if staged.occupied(path, None)? {
         return Err(conflict(format!("{} is already taken", path.as_str())));
     }
     properties.insert("type".to_owned(), serde_json::Value::String(type_name));
@@ -317,13 +409,14 @@ fn create_folder(staged: &Staged, folder: &WorkspacePath) -> Result<(), ApiError
         )
         .with_field("/folder"));
     }
+    staged.refuse_respelled_folder(folder, true, "/folder")?;
     let target = staged.root.join(folder.as_str());
-    if target.exists() || staged.occupied(folder)? {
+    if target.exists() || staged.occupied(folder, None)? {
         return Err(conflict(format!("{} is already taken", folder.as_str())));
     }
     std::fs::create_dir_all(&target).map_err(|error| io_error("create", &target, &error))?;
     write_text(
-        &target.join("index.md"),
+        &target.join(INDEX_FILE),
         &okf_core::index::build_index_text(&[]),
     )
 }
@@ -389,7 +482,11 @@ fn restore_paths(
 ) -> Result<(), ApiError> {
     let commit = commit_of(repository, from)?;
     let tree = commit.tree().map_err(|error| super::repo::git(&error))?;
-    for path in paths {
+    for (index, path) in paths.iter().enumerate() {
+        let field = format!("/paths/{index}");
+        staged.refuse_respelled_folder(path, false, &field)?;
+        refuse_file_as_folder(&staged.root, path, &field)?;
+        refuse_respelled_file(&staged.root, path, &field)?;
         let target = staged.root.join(path.as_str());
         match tree.get_path(Path::new(path.as_str())) {
             Ok(entry) => {
@@ -452,7 +549,8 @@ fn restore_items(
             remove(&staged.root.join(restored))?;
         }
         if let Some(earlier) = earlier {
-            if staged.occupied(earlier)? {
+            staged.refuse_respelled_folder(earlier, false, "/target")?;
+            if staged.occupied(earlier, None)? {
                 return Err(conflict(format!("{} is already taken", earlier.as_str())));
             }
             restore_file(repository, tree, &staged.root, earlier.as_str())?;
@@ -471,10 +569,12 @@ fn restore_items(
 /// path has nothing to move; an item listed twice moves to its last listing's path.
 ///
 /// Items that traded paths since `from` would block each other, so the movers go first to a
-/// private path each, then the other listed items' files are removed (they are restored from
-/// `from` after this), then each mover goes to its `from` path, refused as `Conflict` when that
-/// path is taken (`Staged::occupied`). Each step rewrites the links, so a link that pointed at
-/// a mover ends pointing at its restored path.
+/// private path each (`park`, beside its current path), then the other listed items' files are
+/// removed (they are restored from `from` after this), then each mover goes to its `from` path,
+/// refused as `Conflict` when that path is taken (`Staged::occupied`). Each step rewrites the
+/// links, so a link that pointed at a mover ends pointing at its restored path. A mover whose
+/// `from` path differs from its current one only in letter case is parked like any other, so
+/// it never moves straight between the two spellings.
 fn move_back(
     staged: &mut Staged,
     found: &[(ItemId, git2::Tree<'_>, Option<WorkspacePath>)],
@@ -496,12 +596,7 @@ fn move_back(
     }
     let mut parked = Vec::with_capacity(movers.len());
     for (item, current, destination) in movers {
-        let private = WorkspacePath::try_from(format!("okf-jawn-rewind-{}.md", item.0))
-            .map_err(|error| internal(format!("a private restore path is invalid: {error}")))?;
-        if staged.occupied(&private)? {
-            return Err(conflict(format!("{} is already taken", private.as_str())));
-        }
-        relink(staged, &current, private.as_str(), None)?;
+        let private = park(staged, item, &current, "rewind", None)?;
         parked.push((private, destination));
     }
     for item in destinations.keys() {
@@ -519,7 +614,8 @@ fn move_back(
         remove(&staged.root.join(current))?;
     }
     for (private, destination) in parked {
-        if staged.occupied(destination)? {
+        staged.refuse_respelled_folder(destination, false, "/target")?;
+        if staged.occupied(destination, None)? {
             return Err(conflict(format!(
                 "{} is already taken",
                 destination.as_str()
@@ -571,7 +667,7 @@ fn restore_folder(
                 .map_err(|error| super::repo::git(&error))?;
             std::fs::create_dir_all(&target)
                 .map_err(|error| io_error("create", &target, &error))?;
-            materialize(repository, &folder, &target)
+            materialize_at(repository, &folder, &target, path)
         }
         Ok(_) => Ok(()),
         Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(()),
@@ -598,31 +694,144 @@ fn move_item(
     destination: &WorkspacePath,
 ) -> Result<(), ApiError> {
     check_item_path(destination, "/destination")?;
+    staged.refuse_respelled_folder(destination, false, "/destination")?;
     let source = staged.path_of(item)?;
     if source == destination.as_str() {
         return Ok(());
     }
-    if staged.occupied(destination)? {
+    if staged.occupied(destination, Some(&source))? {
         return Err(conflict(format!(
             "{} is already taken",
             destination.as_str()
         )));
     }
-    relink(staged, &source, destination.as_str(), Some("/destination"))
+    if collision_key(&source) != destination.collision_key() {
+        return relink(staged, &source, destination.as_str(), Some("/destination"));
+    }
+    // A rename that changes only letter case goes by a private path (the module header). The
+    // first hop is a move within the item's own folder, which is the destination's (S2 refuses
+    // another spelling of it), so the item's file is then what a direct move writes. The second
+    // hop would rewrite the item's own links once more, and okf-core's rewrite is not
+    // idempotent (`../../a.pdf` becomes `../a.pdf`, then `../a.pdf.md`), so the first hop's
+    // bytes are written at the destination after it.
+    let private = park(staged, item, &source, "recase", Some("/destination"))?;
+    let parked = staged.root.join(private.as_str());
+    let bytes = std::fs::read(&parked).map_err(|error| io_error("read", &parked, &error))?;
+    relink(
+        staged,
+        private.as_str(),
+        destination.as_str(),
+        Some("/destination"),
+    )?;
+    let landed = staged.root.join(destination.as_str());
+    std::fs::write(&landed, bytes).map_err(|error| io_error("write", &landed, &error))
+}
+
+/// Move the item file at `current` to a private path beside it, with every link that points at
+/// it (`move_in`), and answer that path. The caller moves the item on from there within the
+/// same commit, so the private path reaches no commit's tree. `field` is passed to `move_in`.
+///
+/// The private path is the first free one of `okf-jawn-<purpose>-<item id>.md`, then
+/// `okf-jawn-<purpose>-<item id>-1.md`, `-2` and so on, in `current`'s folder. Free means that
+/// no file, folder or item holds its collision key in any spelling (`Staged::occupied`), and
+/// that no link or `sources` entry of the staged tree resolves to it (`linked`): the next hop
+/// rewrites every reference that resolves to the private path, so it must find only the ones
+/// this hop wrote. Each entry of the folder takes at most one of these names (the one with its
+/// key), and so does each linked concept, so one of the first `entries + linked + 1` is free.
+fn park(
+    staged: &mut Staged,
+    item: ItemId,
+    current: &str,
+    purpose: &str,
+    field: Option<&str>,
+) -> Result<WorkspacePath, ApiError> {
+    let bundle = load(&staged.root)?;
+    let linked = linked(&bundle);
+    let folder = current.rsplit_once('/').map(|(folder, _)| folder);
+    let directory = folder.map_or_else(|| staged.root.clone(), |folder| staged.root.join(folder));
+    let entries = std::fs::read_dir(&directory)
+        .map_err(|error| io_error("read", &directory, &error))?
+        .count();
+    for attempt in 0..=entries.saturating_add(linked.len()) {
+        let name = match attempt {
+            0 => format!("okf-jawn-{purpose}-{}.md", item.0),
+            _ => format!("okf-jawn-{purpose}-{}-{attempt}.md", item.0),
+        };
+        let private = folder.map_or_else(|| name.clone(), |folder| format!("{folder}/{name}"));
+        let private = WorkspacePath::try_from(private)
+            .map_err(|error| internal(format!("a private path is invalid: {error}")))?;
+        if linked.contains(&concept(private.as_str())?) || staged.occupied(&private, None)? {
+            continue;
+        }
+        move_in(staged, &bundle, current, private.as_str(), field)?;
+        return Ok(private);
+    }
+    Err(internal(format!(
+        "no private path beside {current} was free"
+    )))
+}
+
+/// Every concept a reference of `bundle` resolves to, found as `okf_core::move_concept` finds
+/// the references it rewrites: each Markdown link of a body (`rewrite_markdown_links`, then
+/// `Link::resolve` from the document's own concept) and each `sources[].resource` of a
+/// frontmatter. A reference to a concept that does not exist counts: a move to that concept
+/// would rewrite it.
+fn linked(bundle: &Bundle) -> BTreeSet<ConceptId> {
+    let mut found = BTreeSet::new();
+    for concept in bundle.concepts() {
+        rewrite_markdown_links(&concept.document.body, |link, _| {
+            found.extend(link.resolve(&concept.id));
+            LinkRewriteAction::Keep
+        });
+        let Some(okf_core::Value::Sequence(sources)) = concept.document.frontmatter.get("sources")
+        else {
+            continue;
+        };
+        for source in sources {
+            if let okf_core::Value::Mapping(entry) = source
+                && let Some(okf_core::Value::String(resource)) = entry.get("resource")
+            {
+                let link = Link {
+                    text: String::new(),
+                    kind: Link::classify(resource),
+                    target: resource.clone(),
+                };
+                found.extend(link.resolve(&concept.id));
+            }
+        }
+    }
+    found
+}
+
+/// The staged tree as okf-core reads it.
+fn load(root: &Path) -> Result<Bundle, ApiError> {
+    Bundle::load(root)
+        .map_err(|error| internal(format!("the staged tree did not load as a bundle: {error}")))
 }
 
 /// Move the item file at `source` to `destination` with `okf_core::move_concept`, which rewrites
-/// every link that points at it, and index the staged tree again. The caller has checked
-/// `destination` free. A refusal other than an existing target is `InvalidInput` on `field`
-/// for a caller's move, and `Internal` for the server's own (`field` is `None`).
+/// every link that points at it, and index the staged tree again (`move_in`). The caller has
+/// checked `destination` free.
 fn relink(
     staged: &mut Staged,
     source: &str,
     destination: &str,
     field: Option<&str>,
 ) -> Result<(), ApiError> {
-    let bundle = Bundle::load(&staged.root)
-        .map_err(|error| internal(format!("the staged tree did not load as a bundle: {error}")))?;
+    let bundle = load(&staged.root)?;
+    move_in(staged, &bundle, source, destination, field)
+}
+
+/// `relink` on `bundle`, the staged tree as it is now. A refusal other than an existing target
+/// is `InvalidInput` on `field` for a caller's move, and `Internal` for the server's own
+/// (`field` is `None`).
+fn move_in(
+    staged: &mut Staged,
+    bundle: &Bundle,
+    source: &str,
+    destination: &str,
+    field: Option<&str>,
+) -> Result<(), ApiError> {
     let from = concept(source)?;
     let to = concept(destination)?;
     let options = MoveOptions {
@@ -631,7 +840,7 @@ fn relink(
         ..MoveOptions::default()
     };
     let moved =
-        okf_core::move_concept(&bundle, &from, &to, &options).map_err(|error| match error {
+        okf_core::move_concept(bundle, &from, &to, &options).map_err(|error| match error {
             RefactorError::ConceptAlreadyExists(_) => conflict(error.to_string()),
             other => match field {
                 Some(field) => {
@@ -704,6 +913,7 @@ fn set_type(root: &Path, definition: TypeDefinition) -> Result<(), ApiError> {
 /// any correction recorded for the digest it now shows.
 fn write_card(staged: &mut Staged, card: &SourceCard) -> Result<(), ApiError> {
     check_item_path(&card.path, "/path")?;
+    staged.refuse_respelled_folder(&card.path, false, "/path")?;
     refuse_header_change(&BTreeMap::new(), &card.properties, "/properties")?;
     let existing = staged.items.get(&card.item_id).cloned();
     let archived = match &existing {
@@ -715,7 +925,7 @@ fn write_card(staged: &mut Staged, card: &SourceCard) -> Result<(), ApiError> {
         }
         None => false,
     };
-    if staged.occupied(&card.path)? {
+    if staged.occupied(&card.path, None)? {
         return Err(conflict(format!("{} is already taken", card.path.as_str())));
     }
     let mut header = card.header(archived)?;
@@ -759,7 +969,7 @@ pub(crate) fn appearance_path(root: &Path, item: ItemId) -> PathBuf {
 
 /// The tree path of a card's source appearance.
 pub(crate) fn appearance_file(item: ItemId) -> String {
-    format!("{APP_DIR}/sources/{}.json", item.0)
+    format!("{SOURCES_DIR}/{}.json", item.0)
 }
 
 /// The tree path of a correction of one digest.
@@ -769,12 +979,12 @@ pub(crate) fn correction_file(item: ItemId, digest: &Digest) -> String {
 
 /// The tree path of the folder holding every correction of one item.
 fn corrections_folder(item: ItemId) -> String {
-    format!("{APP_DIR}/corrections/{}", item.0)
+    format!("{CORRECTIONS_DIR}/{}", item.0)
 }
 
 /// The tree path of accepted agent-supplied text.
 pub(crate) fn supplied_file(item: ItemId) -> String {
-    format!("{APP_DIR}/supplied/{}.json", item.0)
+    format!("{SUPPLIED_DIR}/{}.json", item.0)
 }
 
 fn correction_path(root: &Path, item: ItemId, digest: &Digest) -> PathBuf {
@@ -785,11 +995,94 @@ fn supplied_path(root: &Path, item: ItemId) -> PathBuf {
     root.join(supplied_file(item))
 }
 
+/// The okf-core concept of the item file at `path`: the path with one `.md` taken off, as
+/// `ConceptId::from_path` takes it, so the file `a.md.md` is the concept `a.md`.
 fn concept(path: &str) -> Result<ConceptId, ApiError> {
-    ConceptId::parse(path.trim_end_matches(".md")).map_err(|error| {
+    ConceptId::parse(path.strip_suffix(".md").unwrap_or(path)).map_err(|error| {
         ApiError::new(ErrorCode::InvalidInput, format!("{path}: {error}"))
             .with_field("/destination")
     })
+}
+
+/// Refuse a path whose last segment the staged tree under `root` holds spelled another way
+/// (one collision key, other letters), as a file or a folder: `Conflict` on `field`, naming
+/// both. Writing there would replace that file on a filesystem that holds both spellings as
+/// one, and add a second spelling on one that does not; removing it would remove that file on
+/// the first and nothing on the second.
+fn refuse_respelled_file(root: &Path, path: &WorkspacePath, field: &str) -> Result<(), ApiError> {
+    let (folder, name) = match path.as_str().rsplit_once('/') {
+        Some((folder, name)) => (Some(folder), name),
+        None => (None, path.as_str()),
+    };
+    let directory = folder.map_or_else(|| root.to_path_buf(), |folder| root.join(folder));
+    match spelled_in(&directory, name, false)? {
+        Some(spelled) if spelled != name => {
+            let other =
+                folder.map_or_else(|| spelled.clone(), |folder| format!("{folder}/{spelled}"));
+            Err(conflict(format!("{} collides with {other}", path.as_str())).with_field(field))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Refuse a path one of whose folders the staged tree under `root` holds as a file, in any
+/// spelling: `Conflict` on `field`, naming the path and the file. Writing or removing below a
+/// file fails differently by system (Windows reads `notes/a.md` through a file `NOTES` and
+/// fails, Linux finds nothing there), so it is refused alike, before anything below it is read.
+fn refuse_file_as_folder(root: &Path, path: &WorkspacePath, field: &str) -> Result<(), ApiError> {
+    let mut folders: Vec<&str> = path.as_str().split('/').collect();
+    folders.pop();
+    let mut directory = root.to_path_buf();
+    let mut walked = Vec::with_capacity(folders.len());
+    for folder in folders {
+        let Some(name) = spelled_in(&directory, folder, false)? else {
+            return Ok(());
+        };
+        directory.push(&name);
+        walked.push(name);
+        if !directory.is_dir() {
+            return Err(conflict(format!(
+                "{}: {} is a file, not a folder",
+                path.as_str(),
+                walked.join("/")
+            ))
+            .with_field(field));
+        }
+    }
+    Ok(())
+}
+
+/// How `directory` spells `segment`: the name of its entry named exactly `segment`, or else of
+/// one whose collision key is `segment`'s; `None` when it has neither, or does not exist.
+/// `folders` counts only its folders.
+fn spelled_in(directory: &Path, segment: &str, folders: bool) -> Result<Option<String>, ApiError> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error("read", directory, &error)),
+    };
+    let key = collision_key(segment);
+    let mut other = None;
+    for entry in entries {
+        let entry = entry.map_err(|error| io_error("read", directory, &error))?;
+        let kind = entry
+            .file_type()
+            .map_err(|error| io_error("inspect", &entry.path(), &error))?;
+        if folders && !kind.is_dir() {
+            continue;
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| internal("a staged file name is not UTF-8"))?;
+        if name == segment {
+            return Ok(Some(name));
+        }
+        if collision_key(&name) == key {
+            other = Some(name);
+        }
+    }
+    Ok(other)
 }
 
 /// `path` as a `/`-separated path relative to `root`; `None` when it is not under `root` or a
@@ -810,6 +1103,25 @@ fn relative(root: &Path, path: &Path) -> Option<String> {
 /// Every file under `root`, as `/`-separated paths relative to it.
 pub(crate) fn files_under(root: &Path, prefix: &str) -> Result<Vec<String>, ApiError> {
     let mut found = Vec::new();
+    walk(root, prefix, false, &mut found)?;
+    Ok(found.into_iter().map(|(path, _)| path).collect())
+}
+
+/// Every file and every folder under `root`, empty folders included, as `/`-separated paths
+/// relative to it, each with whether it is a folder.
+fn entries_under(root: &Path) -> Result<Vec<(String, bool)>, ApiError> {
+    let mut found = Vec::new();
+    walk(root, "", true, &mut found)?;
+    Ok(found)
+}
+
+/// Add every file under `prefix` of `root` to `found`, and with `folders` every folder too.
+fn walk(
+    root: &Path,
+    prefix: &str,
+    folders: bool,
+    found: &mut Vec<(String, bool)>,
+) -> Result<(), ApiError> {
     let directory = if prefix.is_empty() {
         root.to_path_buf()
     } else {
@@ -832,12 +1144,15 @@ pub(crate) fn files_under(root: &Path, prefix: &str) -> Result<Vec<String>, ApiE
             .file_type()
             .map_err(|error| io_error("inspect", &entry.path(), &error))?;
         if kind.is_dir() {
-            found.extend(files_under(root, &relative)?);
+            walk(root, &relative, folders, found)?;
+            if folders {
+                found.push((relative, true));
+            }
         } else if kind.is_file() {
-            found.push(relative);
+            found.push((relative, false));
         }
     }
-    Ok(found)
+    Ok(())
 }
 
 fn read_text(path: &Path) -> Result<String, ApiError> {

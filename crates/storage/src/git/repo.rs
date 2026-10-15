@@ -374,12 +374,50 @@ pub(crate) fn signature(who: &Provenance) -> Result<Signature<'static>, ApiError
     Signature::now(&sanitize(&who.subject), &sanitize(&email)).map_err(|error| git(&error))
 }
 
-/// Write the files of `tree` under `root`.
+/// Write the files of a workspace tree under `root` (`materialize_at` for the whole tree).
 pub(crate) fn materialize(
     repository: &Repository,
     tree: &Tree<'_>,
     root: &Path,
 ) -> Result<(), ApiError> {
+    materialize_at(repository, tree, root, "")
+}
+
+/// Write the files of `tree`, the folder at `at` of a workspace tree (empty for the whole
+/// tree), under `root`.
+///
+/// A tree that holds two paths sharing a collision key (two spellings of one file or folder),
+/// or a path the server writes spelled another way (`item::respelled`), is refused as
+/// `Conflict` before anything is written, naming both spellings and the repair (a whole-tree
+/// restore of a revision from before they appeared): on a case-insensitive filesystem the
+/// staged copy would merge the two, or the server's next write would land in the other
+/// spelling, so a commit made from it would silently respell, drop or hide a file. Git, and a
+/// case-sensitive filesystem, can hold such a tree (a commit of an earlier build, an archive);
+/// it is refused the same way on every system.
+pub(crate) fn materialize_at(
+    repository: &Repository,
+    tree: &Tree<'_>,
+    root: &Path,
+    at: &str,
+) -> Result<(), ApiError> {
+    let paths: Vec<String> = files(repository, tree)?
+        .into_iter()
+        .map(|(path, _)| {
+            if at.is_empty() {
+                path
+            } else {
+                format!("{at}/{path}")
+            }
+        })
+        .collect();
+    if let Some(found) = super::item::respelled(paths.iter().map(String::as_str)) {
+        return Err(found.held());
+    }
+    write_files(repository, tree, root)
+}
+
+/// Write the files of `tree` under `root`, as `materialize` does once the tree is checked.
+fn write_files(repository: &Repository, tree: &Tree<'_>, root: &Path) -> Result<(), ApiError> {
     for entry in tree {
         let name = entry
             .name()
@@ -393,7 +431,7 @@ pub(crate) fn materialize(
                 let child = repository
                     .find_tree(entry.id())
                     .map_err(|error| git(&error))?;
-                materialize(repository, &child, &target)?;
+                write_files(repository, &child, &target)?;
             }
             Some(ObjectType::Blob) => {
                 let blob = repository
