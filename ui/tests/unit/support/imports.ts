@@ -387,6 +387,10 @@ export const JOB_ID = '88888888-8888-4888-8888-888888888888';
 /** The revision an import made. */
 export const IMPORTED = 'f'.repeat(40);
 
+/**
+ * A job as the service records it. A failed one says whether `retry_job` will take it
+ * (`retryable`, present exactly when the job failed): by default it will.
+ */
 export function jobOf(state: Job['state'], extra: Partial<Job> = {}): Job {
   return {
     id: JOB_ID,
@@ -397,6 +401,7 @@ export function jobOf(state: Job['state'], extra: Partial<Job> = {}): Job {
     item_ids: [],
     warnings: [],
     workspace_id: WS,
+    ...(state === 'failed' ? { retryable: true } : {}),
     ...extra,
   };
 }

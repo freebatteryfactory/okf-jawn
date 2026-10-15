@@ -387,7 +387,7 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
           setIncluded((now) => new Set([...now].filter((uploadId) => !taken.includes(uploadId))))
         }
       />
-      <StartedJobs workspaceId={workspaceId} canWrite={canWrite} />
+      <StartedJobs workspaceId={workspaceId} />
     </section>
   );
 }

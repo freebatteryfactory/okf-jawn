@@ -5,7 +5,7 @@
  */
 import { act, cleanup, fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Job } from '../../src/api/generated/types.gen';
+import type { Job, Workspace } from '../../src/api/generated/types.gen';
 import { MAX_RECONNECT_MS, RECONNECT_MS } from '../../src/features/jobs/feed';
 import { JOB_ITEMS_STEP } from '../../src/features/jobs/JobRow';
 import { JOBS_POLL_MS, JOBS_SAFETY_POLL_MS } from '../../src/features/jobs/jobs';
@@ -869,6 +869,70 @@ describe('cancelling a job, and trying a failed one again', () => {
       [false, true],
       [false, false],
     ]);
+  });
+
+  it('offers a retry of a failed job only when the service says it will take it', async () => {
+    const ids = ['a', 'b', 'c'].map((letter) => `${letter.repeat(8)}-8888-4888-8888-888888888888`);
+    const failed = (id: string, retryable: boolean | undefined) => {
+      const job = jobOf('failed', { id });
+      if (retryable === undefined) {
+        const { retryable: _left, ...older } = job;
+        return older;
+      }
+      return { ...job, retryable };
+    };
+    await openJobs({
+      [JOBS]: () =>
+        listOf([
+          failed(ids[0] ?? '', true),
+          failed(ids[1] ?? '', false),
+          failed(ids[2] ?? '', undefined),
+        ]),
+    });
+    await eventually(() => rowOf(ids[0]));
+    expect(ids.map((id) => button('Try the job again', id) !== null)).toEqual([true, false, false]);
+    expect(rowOf(ids[1]).textContent).toContain('The service will not take this job again.');
+    expect(rowOf(ids[2]).textContent).not.toContain('will not take');
+  });
+
+  it('offers control of a job only to a person with the permission of what started it', async () => {
+    const purge = jobOf('running', { kind: 'purge_workspace' });
+    const withRights = (permissions: Workspace['permissions']) => ({
+      ...writableWorkspace,
+      permissions,
+    });
+    await openJobs({ [JOBS]: () => listOf([purge]) }, withRights(['read', 'write']));
+    await listed();
+    // A purge is started by `purge_workspace`, which needs `admin`: a writer may not cancel it.
+    expect(button('Cancel')).toBeNull();
+    cleanup();
+    vi.useRealTimers();
+    await openJobs({ [JOBS]: () => listOf([purge]) }, withRights(['read', 'admin']));
+    await listed();
+    expect(button('Cancel')).not.toBeNull();
+  });
+
+  it('says when a job was accepted, started and ended, as the wire gives them', async () => {
+    await openJobs({
+      [JOBS]: () =>
+        listOf([
+          jobOf('succeeded', {
+            created_at: '2026-01-02T08:15:00.000Z',
+            started_at: '2026-01-02T08:16:00.000Z',
+            finished_at: '2026-01-02T08:20:00.000Z',
+          }),
+        ]),
+    });
+    await listed();
+    const times = [...rowOf().querySelectorAll('time')].map((time) =>
+      time.getAttribute('datetime'),
+    );
+    expect(times).toEqual([
+      '2026-01-02T08:15:00.000Z',
+      '2026-01-02T08:16:00.000Z',
+      '2026-01-02T08:20:00.000Z',
+    ]);
+    expect(rowOf().textContent).toMatch(/Accepted .+; Started .+; Ended .+\./);
   });
 
   it('offers neither to a person who may only read', async () => {
