@@ -8,7 +8,10 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::Path;
 
-use okf_jawn_contract::access::{CSRF_COOKIE, CSRF_HEADER, Permission, ResourceMetadata};
+use okf_jawn_contract::access::{
+    CSRF_COOKIE, CSRF_COOKIE_HTTPS, CSRF_HEADER, Permission, ResourceMetadata, SESSION_COOKIE,
+    SESSION_COOKIE_HTTPS,
+};
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::health::HealthResponse;
 use okf_jawn_contract::import::Upload;
@@ -198,36 +201,54 @@ fn openapi_document(
                 "browserSession": {
                     "type": "apiKey",
                     "in": "cookie",
-                    "name": "okf-session",
-                    "description": "Local-owner or WorkOS browser session. A cookie-authenticated request that is not a GET also carries the csrfCookie and csrfHeader pair."
+                    "name": SESSION_COOKIE,
+                    "description": "Local-owner browser session of a service whose public origin is plain http on loopback. A cookie-authenticated request that is not a GET also carries the csrfCookie and csrfHeader pair. The server reads only the session cookie of its own scheme."
+                },
+                "browserSessionHttps": {
+                    "type": "apiKey",
+                    "in": "cookie",
+                    "name": SESSION_COOKIE_HTTPS,
+                    "description": "Browser session (local owner or WorkOS) of a service whose public origin is https: always Secure, Path=/ and no Domain, so a sibling host or another port cannot set it. A cookie-authenticated request that is not a GET also carries the csrfCookieHttps and csrfHeader pair. The server reads only the session cookie of its own scheme."
                 },
                 "csrfCookie": {
                     "type": "apiKey",
                     "in": "cookie",
                     "name": CSRF_COOKIE,
-                    "description": "Anti-CSRF token the server sets at sign-in beside the session cookie: not HttpOnly, SameSite=Strict, Secure under HTTPS. Double-submit rule: every cookie-authenticated mutation sends its value in the csrfHeader header, in addition to the server's Origin and Sec-Fetch-Site check. Every canonical operation is a POST, so every route that is not a GET asks for the pair."
+                    "description": "Anti-CSRF token the server sets at sign-in beside the session cookie of a service whose public origin is plain http on loopback: not HttpOnly, SameSite=Strict, Path=/. Double-submit rule: every cookie-authenticated mutation sends its value in the csrfHeader header, in addition to the server's Origin and Sec-Fetch-Site check. Every canonical operation is a POST, so every route that is not a GET asks for the pair. A page reads only the anti-CSRF cookie of its own scheme."
+                },
+                "csrfCookieHttps": {
+                    "type": "apiKey",
+                    "in": "cookie",
+                    "name": CSRF_COOKIE_HTTPS,
+                    "description": "The csrfCookie of a service whose public origin is https: always Secure, Path=/ and no Domain, so a sibling host or another port cannot set a second one. Over https a page reads this name only; a cookie named as csrfCookie is not its own."
                 },
                 "csrfHeader": {
                     "type": "apiKey",
                     "in": "header",
                     "name": CSRF_HEADER,
-                    "description": "The csrfCookie value, sent back on every cookie-authenticated request that is not a GET; a missing header, or one that differs from the cookie, is refused."
+                    "description": "The anti-CSRF cookie's value (csrfCookie, or csrfCookieHttps over https), sent back on every cookie-authenticated request that is not a GET; a missing header, or one that differs from the cookie, is refused."
                 }
             }
         }
     }))
 }
 
-/// Who may call a route: a bearer token, or the browser session cookie, which on every route
-/// that is not a GET (`csrf`) comes with the double-submit CSRF pair.
+/// Who may call a route: a bearer token, or a browser session cookie of either scheme
+/// (`browserSession` on loopback http, `browserSessionHttps` over https), which on every route
+/// that is not a GET (`csrf`) comes with the double-submit CSRF pair of the same scheme
+/// (`csrfCookie` or `csrfCookieHttps`, with `csrfHeader`).
 ///
-/// The pair is one requirement object with the session, so OpenAPI reads it as all three
+/// The pair is one requirement object with each session, so OpenAPI reads it as all three
 /// together; GET routes are safe and need the session cookie alone.
 fn security_requirement(csrf: bool) -> Value {
     if csrf {
-        json!([{"bearerAuth": []}, {"browserSession": [], "csrfCookie": [], "csrfHeader": []}])
+        json!([
+            {"bearerAuth": []},
+            {"browserSession": [], "csrfCookie": [], "csrfHeader": []},
+            {"browserSessionHttps": [], "csrfCookieHttps": [], "csrfHeader": []}
+        ])
     } else {
-        json!([{"bearerAuth": []}, {"browserSession": []}])
+        json!([{"bearerAuth": []}, {"browserSession": []}, {"browserSessionHttps": []}])
     }
 }
 
@@ -437,6 +458,10 @@ fn path_operation(operation: &TypedOperation, shared: &SharedTypes) -> Value {
         "x-operator-label": info.label,
         "x-cli-alias": optional(info.operator_alias),
         "x-permission": info.permission,
+        "x-starts-job": info.rules.starts_job,
+        "x-human-session-only": info.rules.human_session_only,
+        "x-local-owner-only": info.rules.local_owner_only,
+        "x-allowed-while-archived": info.rules.allowed_while_archived,
         "x-ui-resource": resource_uri(info.ui),
         "x-tool-annotations": annotations(info)
     })
@@ -544,8 +569,10 @@ mod tests {
     use std::error::Error;
     use std::path::Path;
 
-    use okf_jawn_contract::access::{CSRF_COOKIE, CSRF_HEADER};
-    use okf_jawn_contract::metadata::operations;
+    use okf_jawn_contract::access::{
+        CSRF_COOKIE, CSRF_COOKIE_HTTPS, CSRF_HEADER, SESSION_COOKIE, SESSION_COOKIE_HTTPS,
+    };
+    use okf_jawn_contract::metadata::{OperationName, operations};
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
     use serde_json::{Value, json};
@@ -789,7 +816,10 @@ mod tests {
             .ok_or("securitySchemes")?;
         for (scheme, location, name) in [
             ("csrfCookie", "cookie", CSRF_COOKIE),
+            ("csrfCookieHttps", "cookie", CSRF_COOKIE_HTTPS),
             ("csrfHeader", "header", CSRF_HEADER),
+            ("browserSession", "cookie", SESSION_COOKIE),
+            ("browserSessionHttps", "cookie", SESSION_COOKIE_HTTPS),
         ] {
             assert_eq!(
                 schemes.pointer(&format!("/{scheme}/type")),
@@ -806,9 +836,14 @@ mod tests {
         }
         let paired = json!([
             {"bearerAuth": []},
-            {"browserSession": [], "csrfCookie": [], "csrfHeader": []}
+            {"browserSession": [], "csrfCookie": [], "csrfHeader": []},
+            {"browserSessionHttps": [], "csrfCookieHttps": [], "csrfHeader": []}
         ]);
-        let session = json!([{"bearerAuth": []}, {"browserSession": []}]);
+        let session = json!([
+            {"bearerAuth": []},
+            {"browserSession": []},
+            {"browserSessionHttps": []}
+        ]);
         assert_eq!(api.get("security"), Some(&paired));
         let paths = api.get("paths").and_then(Value::as_object).ok_or("paths")?;
         let mut unsafe_routes = 0_usize;
@@ -829,6 +864,72 @@ mod tests {
             unsafe_routes > operations().len(),
             "every canonical operation and the transports that are not GET ask for the pair"
         );
+        Ok(())
+    }
+
+    /// The job an operation starts and the route and archive rules it falls under are emitted
+    /// from the contract's lists, as `x-` fields in OpenAPI and as fields of
+    /// `api/operations.json`, for every operation.
+    #[test]
+    fn job_route_and_archive_rules_are_emitted_from_the_contract_lists() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        super::generate(directory.path())?;
+        let api = read(&directory.path().join("openapi.json"))?;
+        let listed = read(&directory.path().join("operations.json"))?;
+        let listed = listed.as_array().ok_or("operations.json is a list")?;
+        let mut seen = [0_usize; 4];
+        for operation in operations() {
+            let name = OperationName::ALL
+                .iter()
+                .find(|name| name.as_str() == operation.id)
+                .ok_or_else(|| format!("{} has no OperationName", operation.id))?;
+            let expected = [
+                ("starts-job", "starts_job", json!(name.starts_job())),
+                (
+                    "human-session-only",
+                    "human_session_only",
+                    json!(name.human_session_only()),
+                ),
+                (
+                    "local-owner-only",
+                    "local_owner_only",
+                    json!(name.local_owner_only()),
+                ),
+                (
+                    "allowed-while-archived",
+                    "allowed_while_archived",
+                    json!(name.allowed_while_archived()),
+                ),
+            ];
+            let post = api
+                .pointer(&format!(
+                    "/paths/{}/post",
+                    operation.path.replace('/', "~1")
+                ))
+                .ok_or_else(|| format!("{}: no path", operation.id))?;
+            let entry = listed
+                .iter()
+                .find(|entry| entry.get("id") == Some(&json!(operation.id)))
+                .ok_or_else(|| format!("{} is not in operations.json", operation.id))?;
+            for (index, (extension, field, value)) in expected.iter().enumerate() {
+                assert_eq!(
+                    post.get(format!("x-{extension}")),
+                    Some(value),
+                    "{} x-{extension}",
+                    operation.id
+                );
+                assert_eq!(entry.get(*field), Some(value), "{} {field}", operation.id);
+                if value != &json!(false)
+                    && value != &json!(null)
+                    && let Some(count) = seen.get_mut(index)
+                {
+                    *count = count.saturating_add(1);
+                }
+            }
+        }
+        // Ten operations start a job, five are human-session only, three are the local owner's,
+        // and the archive allow-list holds fifty.
+        assert_eq!(seen, [10, 5, 3, 50]);
         Ok(())
     }
 

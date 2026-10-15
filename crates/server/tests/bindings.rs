@@ -134,6 +134,15 @@ fn create_item_body() -> Value {
 }
 
 /// A committed item as the application returns it; its digest is the core function's, never typed.
+/// What `create_item` answers: the item, its receipt and the commit's findings.
+fn created_item() -> Result<Value, ApiError> {
+    Ok(json!({
+        "item": item_document()?,
+        "receipt_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "warnings": []
+    }))
+}
+
 fn item_document() -> Result<Value, ApiError> {
     let mut document = json!({
         "summary": {
@@ -301,7 +310,7 @@ async fn a_body_over_the_limit_is_413_too_large() -> TestResult {
 async fn in_progress_is_409_with_retry_after_from_the_detail() -> TestResult {
     let ports = ports()?;
     let counting = Arc::new(CountingApplication::new());
-    counting.set_response("create_item", item_document()?)?;
+    counting.set_response("create_item", created_item()?)?;
     counting.park_next("create_item")?;
     let app = signed_in(counting.clone(), &ports)?;
 

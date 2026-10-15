@@ -99,7 +99,6 @@ import {
 } from '../../api/generated/@tanstack/react-query.gen';
 import { discardDraft, saveDraft } from '../../api/generated/sdk.gen';
 import type { ItemDocument, ItemSummary, Revision, Workspace } from '../../api/generated/types.gen';
-import { zSaveDraftRequest } from '../../api/generated/zod.gen';
 import { REQUEST_TIMEOUT_MS, RequestStopped } from '../../app/api-client';
 import { classifyFailure } from '../errors/failure';
 import { rememberDraft } from './drafts-list';
@@ -119,8 +118,13 @@ import {
 /** How long after the last change a session is saved. */
 export const AUTOSAVE_DELAY_MS = 1_000;
 
-/** The service's bound on a drafted body in UTF-8 bytes, as the generated request schema has it. */
-export const MAX_BODY_BYTES = zSaveDraftRequest.shape.body.maxLength ?? Number.POSITIVE_INFINITY;
+/**
+ * The service's bound on a drafted body in UTF-8 bytes: the contract's `MAX_ITEM_TEXT_BYTES`. The
+ * request schema states it as `x-max-utf8-bytes`, which the generated zod schema does not carry
+ * (a `maxLength` would be counted in characters), so the number is written here and a unit test
+ * holds it to the schema's. The session's `limits.item_text_bytes` reports the same bound.
+ */
+export const MAX_BODY_BYTES = 8 * 1024 * 1024;
 
 /**
  * The longest a change waits to be sent, however fast the person goes on typing: someone who

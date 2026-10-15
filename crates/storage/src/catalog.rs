@@ -11,7 +11,7 @@
 //! repeated id changes nothing and returns the first result. The catalog never filters and
 //! returns `Workspace::permissions` empty.
 
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::{MutationId, TenantId, WorkspaceId};
 use okf_jawn_contract::workspace::Workspace;
 use okf_jawn_core::ports::PortFuture;
@@ -72,7 +72,11 @@ impl GitCatalog {
                 if let Some(expected) = expected
                     && workspace.head != expected
                 {
-                    return Err(conflict("the workspace head moved since it was shown"));
+                    // Ruling 5: the refusal names the head; the caller names its request's field.
+                    return Err(conflict("the workspace head moved since it was shown")
+                        .with_detail(ErrorDetail::StaleBase {
+                            head: workspace.head.clone(),
+                        }));
                 }
                 if let Some((name, description)) = update {
                     workspace.name = name;

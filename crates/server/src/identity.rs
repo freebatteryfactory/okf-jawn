@@ -13,7 +13,8 @@
 //!   cookie. A hosted token the verifier cannot judge yet (`Unverified::retry_after`) is 503
 //!   `Unavailable` with `Retry-After`, never a 401 that would send a good client back to sign
 //!   in. The CLI, a connector and every other non-browser client arrive this way.
-//! - **Browser session cookie** (`okf-session`): resolved through `CredentialStore::get_session`
+//! - **Browser session cookie** (`__Host-okf-session` when the public origin is `https`,
+//!   `okf-session` on plain `http`; only the name of the service's own scheme is read): resolved through `CredentialStore::get_session`
 //!   by the SHA-256 of its secret. Only this path may carry `BrowserSession` or `LocalOwner`
 //!   (core lets those two routes reach drafts and decides by route alone, SPEC section 8), and a
 //!   stored session with any other route, or of the other mode's route, is refused. A cookie
@@ -50,6 +51,7 @@ use okf_jawn_core::credentials::{CredentialStore, secret_hash};
 use okf_jawn_core::events::{EventLog, EventScope, NewEvent};
 
 use crate::SessionId;
+use crate::cookies::{CookiePolicy, CookieScheme};
 use crate::errors::{error_response, retry_response};
 
 /// Verifies a WorkOS Connect access token: JWKS signature, issuer, audience and expiry.
@@ -171,11 +173,11 @@ struct Inner {
     ports: IdentityPorts,
     /// Origins a cookie request may come from: the service's own public origin.
     origins: Vec<String>,
+    /// The deployment's cookie names, decided once from `origins`: the session cookie is read by
+    /// it here, and the session routes write by it (`Identity::cookie_policy`).
+    cookies: CookieScheme,
     clock: Arc<dyn WallClock>,
 }
-
-/// The browser session cookie (`api/openapi.json` `browserSession`).
-pub const SESSION_COOKIE: &str = "okf-session";
 
 /// The MCP endpoint path (`api/transports.json` `mcp_request`).
 pub const MCP_PATH: &str = "/mcp";
@@ -209,8 +211,12 @@ impl WallClock for SystemWallClock {
 
 impl Identity {
     /// The middleware state: bearer tokens resolved by `bearer`, sessions and connectors read
-    /// through `ports`, and cookie requests accepted only from `origins`. Session expiry is
-    /// compared with the operating system's clock.
+    /// through `ports`, and cookie requests accepted only from `origins`, the service's own
+    /// public origin. The cookie names are decided here, once, by that origin's scheme
+    /// (`cookies::CookieScheme`): the session cookie read is `__Host-okf-session` when every
+    /// origin is `https`, and `okf-session` otherwise, and the session routes are given the same
+    /// names to write (`Identity::cookie_policy`). Session expiry is compared with the operating
+    /// system's clock.
     #[must_use]
     pub fn new(bearer: BearerAuth, ports: IdentityPorts, origins: Vec<String>) -> Self {
         Self::with_clock(bearer, ports, origins, Arc::new(SystemWallClock))
@@ -224,14 +230,24 @@ impl Identity {
         origins: Vec<String>,
         clock: Arc<dyn WallClock>,
     ) -> Self {
+        let cookies = CookieScheme::of_origins(&origins);
         Self {
             inner: Arc::new(Inner {
                 bearer,
                 ports,
                 origins,
+                cookies,
                 clock,
             }),
         }
+    }
+
+    /// How the session routes behind this middleware write and clear their cookies: the cookie
+    /// names this middleware reads by, and sessions that last `lifetime`. It is the only way to
+    /// make a `CookiePolicy`, so the name written is always the name read.
+    #[must_use]
+    pub fn cookie_policy(&self, lifetime: std::time::Duration) -> CookiePolicy {
+        CookiePolicy::new(self.inner.cookies, lifetime)
     }
 
     /// Whether `credential` would authenticate a new request now: the session still stored, of
@@ -450,7 +466,12 @@ pub async fn identify(
             "The MCP endpoint needs a bearer token",
         ));
     }
-    let Some(secret) = identity.inner.ports.cookies.read(headers, SESSION_COOKIE) else {
+    let Some(secret) = identity
+        .inner
+        .ports
+        .cookies
+        .read(headers, identity.inner.cookies.session_cookie())
+    else {
         return next.run(request).await;
     };
     let session = match identity.session(&secret).await {

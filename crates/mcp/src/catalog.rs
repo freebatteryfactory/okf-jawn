@@ -219,7 +219,11 @@ mod tests {
     #[test]
     fn the_committed_catalogs_load() -> Checked {
         let catalog = Catalog::load()?;
-        assert_eq!(catalog.tools().len(), 13);
+        assert_eq!(
+            catalog.tools().len(),
+            14,
+            "thirteen model tools and one app tool"
+        );
         assert_eq!(catalog.app().uri, APP_URI);
         assert_eq!(catalog.app_mime_type(), APP_MIME_TYPE);
         Ok(())

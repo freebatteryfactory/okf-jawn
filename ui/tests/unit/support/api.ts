@@ -15,9 +15,11 @@
  */
 import { vi } from 'vitest';
 import type { ZodType } from 'zod';
+import type { Draft } from '../../../src/api/generated/types.gen';
 import {
   zApplyNamesRequest,
   zCommitRequest,
+  zCreatedItem,
   zCreateFolderRequest,
   zCreateItemRequest,
   zDeleteItemRequest,
@@ -25,6 +27,7 @@ import {
   zDraft,
   zGetItemRequest,
   zGetRulesRequest,
+  zGetRulesResponse,
   zGetSourcesRequest,
   zGetSourcesResponse,
   zItemDocument,
@@ -38,7 +41,6 @@ import {
   zListWorkspacesResponse,
   zMoveItemRequest,
   zMutationResult,
-  zNamingRules,
   zOpenWorkspaceRequest,
   zPreviewNamesRequest,
   zReadItemRequest,
@@ -81,12 +83,12 @@ export const CONTRACT: Record<string, { request: ZodType; response: ZodType }> =
   '/api/items/list-drafts': { request: zListDraftsRequest, response: zListDraftsResponse },
   '/api/items/discard-draft': { request: zDiscardDraftRequest, response: zDraft },
   '/api/history/commit-items': { request: zCommitRequest, response: zMutationResult },
-  '/api/items/create-item': { request: zCreateItemRequest, response: zItemDocument },
+  '/api/items/create-item': { request: zCreateItemRequest, response: zCreatedItem },
   '/api/items/create-folder': { request: zCreateFolderRequest, response: zMutationResult },
   '/api/items/move-item': { request: zMoveItemRequest, response: zMutationResult },
   '/api/items/delete-item': { request: zDeleteItemRequest, response: zMutationResult },
   '/api/items/set-lifecycle': { request: zSetLifecycleRequest, response: zMutationResult },
-  '/api/conventions/get-rules': { request: zGetRulesRequest, response: zNamingRules },
+  '/api/conventions/get-rules': { request: zGetRulesRequest, response: zGetRulesResponse },
   '/api/conventions/set-rules': { request: zSetRulesRequest, response: zMutationResult },
   '/api/conventions/preview-names': { request: zPreviewNamesRequest, response: zRenamePlan },
   '/api/conventions/apply-names': { request: zApplyNamesRequest, response: zMutationResult },
@@ -105,6 +107,25 @@ export const CONTRACT: Record<string, { request: ZodType; response: ZodType }> =
  */
 export function fromNewerService<T extends string>(value: string): T {
   return value as T;
+}
+
+/**
+ * A `list_drafts` answer: each draft a row without its item's summary (this build does not read
+ * it), at a revision no test reads.
+ */
+export function draftsPage(drafts: readonly Draft[], nextCursor: string | null = null): Json {
+  return {
+    revision: '0'.repeat(40),
+    items: drafts.map((draft) => ({ draft })),
+    next_cursor: nextCursor,
+  };
+}
+
+/** A `get_rules` answer holding `rules`, read at the revision the request asked for. */
+export function rulesAnswer(rules: unknown, request: Json): Json {
+  const at = request.at as { revision?: unknown } | undefined;
+  const revision = typeof at?.revision === 'string' ? at.revision : '0'.repeat(40);
+  return { revision, rules };
 }
 
 export const ok = (body: unknown): Reply => ({ status: 200, body });

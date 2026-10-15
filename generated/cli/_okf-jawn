@@ -237,6 +237,22 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help]' \
 && ret=0
 ;;
+(move_folder)
+_arguments "${_arguments_options[@]}" : \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(delete_folder)
+_arguments "${_arguments_options[@]}" : \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
 (list_types)
 _arguments "${_arguments_options[@]}" : \
 '--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
@@ -525,6 +541,14 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help]' \
 && ret=0
 ;;
+(list_comments)
+_arguments "${_arguments_options[@]}" : \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
 (create_confirmation)
 _arguments "${_arguments_options[@]}" : \
 '--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
@@ -566,6 +590,30 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (complete_upload)
+_arguments "${_arguments_options[@]}" : \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(get_upload)
+_arguments "${_arguments_options[@]}" : \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(list_uploads)
+_arguments "${_arguments_options[@]}" : \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(discard_upload)
 _arguments "${_arguments_options[@]}" : \
 '--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
 '--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
@@ -654,6 +702,14 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (get_rules)
+_arguments "${_arguments_options[@]}" : \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(rules)
 _arguments "${_arguments_options[@]}" : \
 '--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
 '--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
@@ -951,6 +1007,14 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(move_folder)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete_folder)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (list_types)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -1031,6 +1095,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(list_comments)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (create_confirmation)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -1048,6 +1116,18 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (complete_upload)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get_upload)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list_uploads)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(discard_upload)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1194,7 +1274,7 @@ _okf-jawn_commands() {
 'update_workspace:Update workspace metadata at the supplied base revision.' \
 'archive_workspace:Archive without deleting historical content.' \
 'unarchive_workspace:Return an archived workspace to ordinary listings; its history and records were kept.' \
-'purge_workspace:Permanently remove a workspace'\''s originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge.' \
+'purge_workspace:Permanently remove a workspace'\''s originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request returns the purge\: an unfinished one resumed, a completed one as it is.' \
 'get_purge:Read a purge'\''s progress and counts; available after the workspace is gone.' \
 'export_workspace:Build a portable export with resolvable referenced assets; current app reviews are written into the files as OKF verified. Drafts, sessions and credentials are never included.' \
 'export:Build a portable export with resolvable referenced assets; current app reviews are written into the files as OKF verified. Drafts, sessions and credentials are never included.' \
@@ -1213,6 +1293,8 @@ _okf-jawn_commands() {
 'delete_item:Remove the current reference while retaining historical source objects.' \
 'purge_item:Permanently remove one item'\''s bytes, derivatives, index entries and history, rewrite or delete the managed backups that hold it, and mark what referred to it invalidated. Tenant administrator in a human session only.' \
 'create_folder:Create a user-selected folder with a maintained index.' \
+'move_folder:Move a folder with everything in it, archived items included, and rewrite every moved item'\''s links in one committed change; a draft of a moved item stays with its item, and a folder changed since the base revision conflicts.' \
+'delete_folder:Remove a folder with everything in it, archived items included, in one committed change while retaining historical objects; a draft of a deleted item is kept as a deleted item'\''s draft is, and a folder that does not exist is not found.' \
 'list_types:List built-in and user-defined OKF property schemas.' \
 'set_type:Persist a user-defined type without dropping extension properties.' \
 'read_item:Read an outline, Markdown, selected images, pages, or original. Resolve latest once; return exact citations and visible continuation.' \
@@ -1249,23 +1331,28 @@ _okf-jawn_commands() {
 'decline_proposal:Close a proposal without applying its content.' \
 'decline:Close a proposal without applying its content.' \
 'add_comment:Add discussion without certifying content.' \
+'list_comments:Read a proposal'\''s comments, oldest first. A comment whose source lies in a workspace the reader may not read is returned without its source.' \
 'create_confirmation:Create a session-bound confirmation for explicit human action; issuance is not review.' \
 'create_review:Record exact revision and content reviewed by an explicit authorized action; never infer review from OAuth identity.' \
 'verify:Record exact revision and content reviewed by an explicit authorized action; never infer review from OAuth identity.' \
 'list_reviews:Show review coverage and revisions without extending it to later edits.' \
-'create_upload:Register a source occurrence before authenticated binary upload.' \
+'create_upload:Register a source occurrence before authenticated binary upload. A repeat under the same key answers the response first given; read the slot as it now stands with \`get_upload\`.' \
 'complete_upload:Check expected bytes and digest before conversion.' \
+'get_upload:Read one upload slot as it now stands\: the bytes it holds, whether it is complete and which job took it. Needs write\: a slot'\''s file name is the uploader'\''s business until it is imported.' \
+'list_uploads:List the workspace'\''s upload slots, newest first, optionally only those incomplete, waiting (complete and not imported) or consumed. Nothing expires\: a slot stays until it is discarded, imported or its workspace is purged.' \
+'discard_upload:Remove an upload slot and its bytes. Refused with conflict when a job has consumed the upload or a queued or running job names it.' \
 'start_import:Durably register conversion and source creation, preserving originals.' \
 'import:Durably register conversion and source creation, preserving originals.' \
 'get_job:Read durable job progress; a receipt does not imply completion.' \
 'list_jobs:List conversion, export, and maintenance work.' \
 'get_tenant_job:Read an installation-level job\: an installation backup or a purge.' \
 'list_tenant_jobs:List installation-level jobs, newest first, with their artifacts.' \
-'retry_job:Retry the same durable work identity without duplicating completed effects.' \
-'cancel_job:Cancel work while retaining completed uploads and recorded state.' \
+'retry_job:Retry the same durable work identity without duplicating completed effects. Needs the permission of the operation that started the job, and a human session where that operation needs one.' \
+'cancel_job:Cancel work while retaining completed uploads and recorded state. Needs the permission of the operation that started the job, and a human session where that operation needs one.' \
 'redigest_item:Re-run extraction with declared settings; preserve prior digests and separate corrections.' \
 'correct_digest:Save a correction separately from generated extraction.' \
-'get_rules:Read the same naming conventions used by the form, YAML editor, and import process.' \
+'get_rules:Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with \`set_rules\`.' \
+'rules:Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with \`set_rules\`.' \
 'set_rules:Save explicit rules as versioned context.' \
 'preview_names:Compute before and after naming changes without mutating content.' \
 'apply_names:Apply the checked preview and rewrite references in one versioned action.' \
@@ -1280,7 +1367,7 @@ _okf-jawn_commands() {
 'get_catalog:Describe the allowed visual components; the catalog never grants capabilities.' \
 'catalog:Describe the allowed visual components; the catalog never grants capabilities.' \
 'get_receipt:Inspect the exact sources returned through this server, not an external model internal state.' \
-'list_events:Read resumable notifications without treating them as authoritative document content.' \
+'list_events:Read resumable notifications without treating them as authoritative document content. A workspace'\''s security events are returned only to a caller holding \`admin\` on it, checked on every call; a page may therefore hold fewer rows than asked, or none, and still carry a cursor.' \
 'list_tenant_events:Read installation-level notifications\: sign-ins, connector issue and revocation, and refusals outside a workspace.' \
 'get_session:Read the current authenticated principal without exposing credentials.' \
 'create_connector:Issue a local MCP connector credential scoped to read, or read and propose; never review or approve. Local owner only; hosted agents use WorkOS Connect.' \
@@ -1393,6 +1480,11 @@ _okf-jawn__subcmd__decline_proposal_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn decline_proposal commands' commands "$@"
 }
+(( $+functions[_okf-jawn__subcmd__delete_folder_commands] )) ||
+_okf-jawn__subcmd__delete_folder_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn delete_folder commands' commands "$@"
+}
 (( $+functions[_okf-jawn__subcmd__delete_item_commands] )) ||
 _okf-jawn__subcmd__delete_item_commands() {
     local commands; commands=()
@@ -1407,6 +1499,11 @@ _okf-jawn__subcmd__diff_items_commands() {
 _okf-jawn__subcmd__discard_draft_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn discard_draft commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__discard_upload_commands] )) ||
+_okf-jawn__subcmd__discard_upload_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn discard_upload commands' commands "$@"
 }
 (( $+functions[_okf-jawn__subcmd__export_view_commands] )) ||
 _okf-jawn__subcmd__export_view_commands() {
@@ -1498,6 +1595,11 @@ _okf-jawn__subcmd__get_tenant_job_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn get_tenant_job commands' commands "$@"
 }
+(( $+functions[_okf-jawn__subcmd__get_upload_commands] )) ||
+_okf-jawn__subcmd__get_upload_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn get_upload commands' commands "$@"
+}
 (( $+functions[_okf-jawn__subcmd__get_view_commands] )) ||
 _okf-jawn__subcmd__get_view_commands() {
     local commands; commands=()
@@ -1512,7 +1614,7 @@ _okf-jawn__subcmd__help_commands() {
 'update_workspace:Update workspace metadata at the supplied base revision.' \
 'archive_workspace:Archive without deleting historical content.' \
 'unarchive_workspace:Return an archived workspace to ordinary listings; its history and records were kept.' \
-'purge_workspace:Permanently remove a workspace'\''s originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge.' \
+'purge_workspace:Permanently remove a workspace'\''s originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request returns the purge\: an unfinished one resumed, a completed one as it is.' \
 'get_purge:Read a purge'\''s progress and counts; available after the workspace is gone.' \
 'export_workspace:Build a portable export with resolvable referenced assets; current app reviews are written into the files as OKF verified. Drafts, sessions and credentials are never included.' \
 'backup_workspace:Back up the workspace'\''s history, retained objects and application records, drafts included, into one self-contained archive. Human administrator session only.' \
@@ -1529,6 +1631,8 @@ _okf-jawn__subcmd__help_commands() {
 'delete_item:Remove the current reference while retaining historical source objects.' \
 'purge_item:Permanently remove one item'\''s bytes, derivatives, index entries and history, rewrite or delete the managed backups that hold it, and mark what referred to it invalidated. Tenant administrator in a human session only.' \
 'create_folder:Create a user-selected folder with a maintained index.' \
+'move_folder:Move a folder with everything in it, archived items included, and rewrite every moved item'\''s links in one committed change; a draft of a moved item stays with its item, and a folder changed since the base revision conflicts.' \
+'delete_folder:Remove a folder with everything in it, archived items included, in one committed change while retaining historical objects; a draft of a deleted item is kept as a deleted item'\''s draft is, and a folder that does not exist is not found.' \
 'list_types:List built-in and user-defined OKF property schemas.' \
 'set_type:Persist a user-defined type without dropping extension properties.' \
 'read_item:Read an outline, Markdown, selected images, pages, or original. Resolve latest once; return exact citations and visible continuation.' \
@@ -1549,21 +1653,25 @@ _okf-jawn__subcmd__help_commands() {
 'accept_proposal:Accept exactly the confirmed proposal against the displayed head; never an agent tool.' \
 'decline_proposal:Close a proposal without applying its content.' \
 'add_comment:Add discussion without certifying content.' \
+'list_comments:Read a proposal'\''s comments, oldest first. A comment whose source lies in a workspace the reader may not read is returned without its source.' \
 'create_confirmation:Create a session-bound confirmation for explicit human action; issuance is not review.' \
 'create_review:Record exact revision and content reviewed by an explicit authorized action; never infer review from OAuth identity.' \
 'list_reviews:Show review coverage and revisions without extending it to later edits.' \
-'create_upload:Register a source occurrence before authenticated binary upload.' \
+'create_upload:Register a source occurrence before authenticated binary upload. A repeat under the same key answers the response first given; read the slot as it now stands with \`get_upload\`.' \
 'complete_upload:Check expected bytes and digest before conversion.' \
+'get_upload:Read one upload slot as it now stands\: the bytes it holds, whether it is complete and which job took it. Needs write\: a slot'\''s file name is the uploader'\''s business until it is imported.' \
+'list_uploads:List the workspace'\''s upload slots, newest first, optionally only those incomplete, waiting (complete and not imported) or consumed. Nothing expires\: a slot stays until it is discarded, imported or its workspace is purged.' \
+'discard_upload:Remove an upload slot and its bytes. Refused with conflict when a job has consumed the upload or a queued or running job names it.' \
 'start_import:Durably register conversion and source creation, preserving originals.' \
 'get_job:Read durable job progress; a receipt does not imply completion.' \
 'list_jobs:List conversion, export, and maintenance work.' \
 'get_tenant_job:Read an installation-level job\: an installation backup or a purge.' \
 'list_tenant_jobs:List installation-level jobs, newest first, with their artifacts.' \
-'retry_job:Retry the same durable work identity without duplicating completed effects.' \
-'cancel_job:Cancel work while retaining completed uploads and recorded state.' \
+'retry_job:Retry the same durable work identity without duplicating completed effects. Needs the permission of the operation that started the job, and a human session where that operation needs one.' \
+'cancel_job:Cancel work while retaining completed uploads and recorded state. Needs the permission of the operation that started the job, and a human session where that operation needs one.' \
 'redigest_item:Re-run extraction with declared settings; preserve prior digests and separate corrections.' \
 'correct_digest:Save a correction separately from generated extraction.' \
-'get_rules:Read the same naming conventions used by the form, YAML editor, and import process.' \
+'get_rules:Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with \`set_rules\`.' \
 'set_rules:Save explicit rules as versioned context.' \
 'preview_names:Compute before and after naming changes without mutating content.' \
 'apply_names:Apply the checked preview and rewrite references in one versioned action.' \
@@ -1575,7 +1683,7 @@ _okf-jawn__subcmd__help_commands() {
 'export_view:Export the spec, source references, data table and rendering.' \
 'get_catalog:Describe the allowed visual components; the catalog never grants capabilities.' \
 'get_receipt:Inspect the exact sources returned through this server, not an external model internal state.' \
-'list_events:Read resumable notifications without treating them as authoritative document content.' \
+'list_events:Read resumable notifications without treating them as authoritative document content. A workspace'\''s security events are returned only to a caller holding \`admin\` on it, checked on every call; a page may therefore hold fewer rows than asked, or none, and still carry a cursor.' \
 'list_tenant_events:Read installation-level notifications\: sign-ins, connector issue and revocation, and refusals outside a workspace.' \
 'get_session:Read the current authenticated principal without exposing credentials.' \
 'create_connector:Issue a local MCP connector credential scoped to read, or read and propose; never review or approve. Local owner only; hosted agents use WorkOS Connect.' \
@@ -1688,6 +1796,11 @@ _okf-jawn__subcmd__help__subcmd__decline_proposal_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn help decline_proposal commands' commands "$@"
 }
+(( $+functions[_okf-jawn__subcmd__help__subcmd__delete_folder_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__delete_folder_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help delete_folder commands' commands "$@"
+}
 (( $+functions[_okf-jawn__subcmd__help__subcmd__delete_item_commands] )) ||
 _okf-jawn__subcmd__help__subcmd__delete_item_commands() {
     local commands; commands=()
@@ -1702,6 +1815,11 @@ _okf-jawn__subcmd__help__subcmd__diff_items_commands() {
 _okf-jawn__subcmd__help__subcmd__discard_draft_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn help discard_draft commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__discard_upload_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__discard_upload_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help discard_upload commands' commands "$@"
 }
 (( $+functions[_okf-jawn__subcmd__help__subcmd__export_view_commands] )) ||
 _okf-jawn__subcmd__help__subcmd__export_view_commands() {
@@ -1793,6 +1911,11 @@ _okf-jawn__subcmd__help__subcmd__get_tenant_job_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn help get_tenant_job commands' commands "$@"
 }
+(( $+functions[_okf-jawn__subcmd__help__subcmd__get_upload_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__get_upload_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help get_upload commands' commands "$@"
+}
 (( $+functions[_okf-jawn__subcmd__help__subcmd__get_view_commands] )) ||
 _okf-jawn__subcmd__help__subcmd__get_view_commands() {
     local commands; commands=()
@@ -1802,6 +1925,11 @@ _okf-jawn__subcmd__help__subcmd__get_view_commands() {
 _okf-jawn__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn help help commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__list_comments_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__list_comments_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help list_comments commands' commands "$@"
 }
 (( $+functions[_okf-jawn__subcmd__help__subcmd__list_connectors_commands] )) ||
 _okf-jawn__subcmd__help__subcmd__list_connectors_commands() {
@@ -1853,6 +1981,11 @@ _okf-jawn__subcmd__help__subcmd__list_types_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn help list_types commands' commands "$@"
 }
+(( $+functions[_okf-jawn__subcmd__help__subcmd__list_uploads_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__list_uploads_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help list_uploads commands' commands "$@"
+}
 (( $+functions[_okf-jawn__subcmd__help__subcmd__list_workspaces_commands] )) ||
 _okf-jawn__subcmd__help__subcmd__list_workspaces_commands() {
     local commands; commands=()
@@ -1867,6 +2000,11 @@ _okf-jawn__subcmd__help__subcmd__log_items_commands() {
 _okf-jawn__subcmd__help__subcmd__mcp_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn help mcp commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__move_folder_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__move_folder_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help move_folder commands' commands "$@"
 }
 (( $+functions[_okf-jawn__subcmd__help__subcmd__move_item_commands] )) ||
 _okf-jawn__subcmd__help__subcmd__move_item_commands() {
@@ -1983,6 +2121,11 @@ _okf-jawn__subcmd__help__subcmd__update_workspace_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn help update_workspace commands' commands "$@"
 }
+(( $+functions[_okf-jawn__subcmd__list_comments_commands] )) ||
+_okf-jawn__subcmd__list_comments_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn list_comments commands' commands "$@"
+}
 (( $+functions[_okf-jawn__subcmd__list_connectors_commands] )) ||
 _okf-jawn__subcmd__list_connectors_commands() {
     local commands; commands=()
@@ -2033,6 +2176,11 @@ _okf-jawn__subcmd__list_types_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn list_types commands' commands "$@"
 }
+(( $+functions[_okf-jawn__subcmd__list_uploads_commands] )) ||
+_okf-jawn__subcmd__list_uploads_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn list_uploads commands' commands "$@"
+}
 (( $+functions[_okf-jawn__subcmd__list_workspaces_commands] )) ||
 _okf-jawn__subcmd__list_workspaces_commands() {
     local commands; commands=()
@@ -2047,6 +2195,11 @@ _okf-jawn__subcmd__log_items_commands() {
 _okf-jawn__subcmd__mcp_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn mcp commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__move_folder_commands] )) ||
+_okf-jawn__subcmd__move_folder_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn move_folder commands' commands "$@"
 }
 (( $+functions[_okf-jawn__subcmd__move_item_commands] )) ||
 _okf-jawn__subcmd__move_item_commands() {

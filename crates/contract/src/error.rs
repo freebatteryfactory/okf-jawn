@@ -75,6 +75,30 @@ pub enum ErrorDetail {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         replacement: Option<crate::identity::Revision>,
     },
+    /// An upload's received bytes do not match what was announced for it: their length, or
+    /// their SHA-256. The code is `conflict`, and nothing was retained.
+    UploadMismatch {
+        /// The byte count announced when the slot was opened, as a decimal string.
+        expected_bytes: String,
+        /// The byte count the slot holds, as a decimal string.
+        received_bytes: String,
+        /// Whether the received bytes have the digest asked for; absent when the length
+        /// already differs, so the digest was not compared.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        digest_matches: Option<bool>,
+    },
+    /// The request's base revision (or expected head) is not the workspace's head; `field`
+    /// names that request field. The code is `conflict`.
+    StaleBase {
+        /// The head the request was compared with.
+        head: crate::identity::Revision,
+    },
+    /// The workspace is archived, and this operation is not one an archived workspace allows
+    /// (`operations::ALLOWED_WHILE_ARCHIVED`). The code is `conflict`.
+    WorkspaceArchived {
+        /// When the workspace was archived.
+        archived_at: crate::identity::Timestamp,
+    },
 }
 
 /// One snapshotted item whose committed content moved after its draft's base.
@@ -104,7 +128,8 @@ pub struct ApiError {
     pub code: ErrorCode,
     /// Safe explanation for the caller.
     pub message: String,
-    /// Input field needing correction.
+    /// Input field needing correction. A JSON Pointer into the request (`/base_revision`,
+    /// `/changes/2/body`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
     /// Correlation identifier, not a secret.

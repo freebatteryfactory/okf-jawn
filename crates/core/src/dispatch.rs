@@ -19,10 +19,11 @@
 //! server refuses every route but an agent's), records that refusal through `record_refusal`,
 //! which applies the same rule to the request the binding was handed, so one rule decides the
 //! log of every refusal. A grant is used only when it is for the workspace and tenant that were
-//! asked for. The ledger never inspects other stores: a
-//! resumed attempt re-runs the handler under the same `MutationId`, and what the ledger
-//! retains is decided by the request's `ReplayPolicy`. The ledger records the workspace each
-//! mutation writes: `begin` receives the workspace of the request's first target, the one the
+//! asked for. The ledger never inspects other stores: a resumed attempt re-runs the handler
+//! under the same `MutationId`, and what the ledger retains is decided by the request's
+//! `ReplayPolicy`; a replay answers a body stored in an earlier shape of the response in this
+//! build's shape (`RequestScope::replayed`). The ledger records the workspace each mutation
+//! writes: `begin` receives the workspace of the request's first target, the one the
 //! table permission names (`written_workspace`), and `None` when that target is not a
 //! workspace, so a comment written in one workspace that cites another is recorded under the
 //! first; `complete` receives the workspace the response names at the request's
@@ -236,8 +237,9 @@ async fn prepare_mutation<Req: RequestScope + Serialize>(
             context.attempt = Attempt::Resumed;
             Ok(MutationGate::Run(Some(lease)))
         }
+        // A body stored in an earlier shape of the response is answered in this build's.
         BeginOutcome::Replay(stored) => {
-            replay_response(replay, stored.body).map(MutationGate::ShortCircuit)
+            replay_response(replay, Req::replayed(stored.body)?).map(MutationGate::ShortCircuit)
         }
         BeginOutcome::Conflict { operation } => Err(ApiError::new(
             ErrorCode::Conflict,

@@ -1581,7 +1581,8 @@ async fn a_move_inside_a_proposal_candidate_tells_the_check_the_referrers() -> T
             },
             recording.clone(),
         )
-        .await?;
+        .await?
+        .revision;
     assert_ne!(candidate, seeded);
     assert_eq!(
         recording.seen()?,

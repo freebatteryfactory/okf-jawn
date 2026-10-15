@@ -130,8 +130,9 @@ pub fn routes(streams: EventStreams) -> Router {
 /// empty one (which resets the cursor).
 ///
 /// # Errors
-/// Returns `InvalidInput` naming the header when it is not text or is longer than
-/// [`MAX_CURSOR_CHARS`].
+/// Returns `InvalidInput` when the header is not text or is longer than [`MAX_CURSOR_CHARS`].
+/// The message names the header; the refusal has no `field`, which is a JSON Pointer into the
+/// request body (ruling 5), and a header is not in the body.
 pub fn last_event_id(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
     let Some(value) = headers.get("last-event-id") else {
         return Ok(None);
@@ -139,9 +140,8 @@ pub fn last_event_id(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
     let invalid = || {
         ApiError::new(
             ErrorCode::InvalidInput,
-            "Last-Event-ID must be a cursor of at most 256 characters",
+            "The Last-Event-ID header must be a cursor of at most 256 characters",
         )
-        .with_field("Last-Event-ID")
     };
     let cursor = value.to_str().map_err(|_| invalid())?;
     if cursor.chars().count() > MAX_CURSOR_CHARS {

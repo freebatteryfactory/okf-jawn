@@ -29,9 +29,9 @@
       "description": "Revision the editor saw; equal to the current head to rebase after resolving a conflict."
     },
     "body": {
-      "description": "Drafted Markdown body, at most 8 MiB in UTF-8.",
-      "maxLength": 8388608,
-      "type": "string"
+      "description": "Drafted Markdown body. At most 8388608 bytes in UTF-8: a character takes one to four.",
+      "type": "string",
+      "x-max-utf8-bytes": 8388608
     },
     "idempotency_key": {
       "$ref": "#/$defs/IdempotencyKey",

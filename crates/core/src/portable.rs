@@ -63,17 +63,23 @@ pub struct ImportCheck {
     imported: Vec<WorkspacePath>,
 }
 
-/// What a whole-item review covers: the body and the properties without the application
+/// The content a digest is taken over: a body and a property map without the application
 /// header, which is server bookkeeping (an archive or a redigest's header update is not a
-/// content change).
+/// content change). The review fingerprint also leaves out `aliases` (`ALIASES_KEY`), where a
+/// rename records old paths; a draft's digest keeps them.
 #[derive(Serialize)]
-struct ReviewedContent<'a> {
+struct DigestedContent<'a> {
     body: &'a str,
     properties: BTreeMap<String, Value>,
 }
 
 /// The OKF frontmatter key of verification events.
 pub const VERIFIED_KEY: &str = "verified";
+
+/// The frontmatter key of an item's former paths. A rename by the naming rules records the old
+/// path there, and a pure rename must not turn a review's coverage to `changed`, so the review
+/// fingerprint leaves it out (owner decision 2026-10-14).
+pub const ALIASES_KEY: &str = "aliases";
 
 /// The OKF actor prefix of a person; a reviewer is always one (only a human session reviews).
 const HUMAN_ACTOR: &str = "human:";
@@ -123,10 +129,13 @@ pub const fn claim_coverage(_claim: &ImportedClaim) -> ReviewCoverage {
     ReviewCoverage::Imported
 }
 
-/// The digest a review of a whole item records, computed from the item's committed content.
+/// The review fingerprint: the digest a review of a whole item records, computed from the item's
+/// committed content, and `ItemDocument::content_digest`. A draft is compared by `draft_digest`.
 ///
-/// SHA-256 over the body and the properties without the application header, with object keys
-/// sorted (`mutations::request_digest`), so it does not depend on how a store orders keys.
+/// SHA-256 over the body and the properties without the application header and without
+/// `aliases` (`ALIASES_KEY`), with object keys sorted (`mutations::request_digest`), so it does
+/// not depend on how a store orders keys. A rename that only records the old path in `aliases`
+/// keeps the digest, and so keeps a review `current`.
 ///
 /// # Errors
 /// Returns `Internal` when the content cannot be serialized.
@@ -134,8 +143,8 @@ pub fn item_content_digest(document: &ItemDocument) -> Result<Digest, ApiError> 
     content_digest(&document.body, &document.properties)
 }
 
-/// The same digest of a body and a property map that are not a committed document, such as a
-/// draft's (`DraftWrite::content_digest`), so a draft and the item it would commit compare.
+/// The review fingerprint, `item_content_digest`, of a body and a property map that are not a
+/// committed document.
 ///
 /// # Errors
 /// Returns `Internal` when the content cannot be serialized.
@@ -143,7 +152,25 @@ pub fn content_digest(
     body: &str,
     properties: &BTreeMap<String, Value>,
 ) -> Result<Digest, ApiError> {
-    request_digest(&ReviewedContent {
+    let mut reviewed = without_header(properties);
+    reviewed.remove(ALIASES_KEY);
+    request_digest(&DigestedContent {
+        body,
+        properties: reviewed,
+    })
+}
+
+/// The digest of everything a draft holds: the body and every property but the application
+/// header, `aliases` included, keys sorted. It is not the review fingerprint: it decides whether
+/// a draft is still exactly the content a Snapshot committed (`Draft::content_digest`,
+/// `DraftStore::discard`), so a draft saved again with any change, one to `aliases` alone
+/// included, is never removed as committed. It is taken alike from a draft and from the item a
+/// commit holds, so the two compare.
+///
+/// # Errors
+/// Returns `Internal` when the content cannot be serialized.
+pub fn draft_digest(body: &str, properties: &BTreeMap<String, Value>) -> Result<Digest, ApiError> {
+    request_digest(&DigestedContent {
         body,
         properties: without_header(properties),
     })

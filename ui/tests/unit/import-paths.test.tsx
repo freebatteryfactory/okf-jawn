@@ -140,8 +140,9 @@ describe('a path the page can see is wrong', () => {
     );
   });
 
-  it('finds no path too long today: the generated request schema states no length', () => {
-    // The day `CreateUploadRequest` states one, this expectation changes and the page follows it.
+  it('finds no path too long: the generated request schema states its bounds in bytes, not as lengths', () => {
+    // `CreateUploadRequest` states its bounds as `x-max-utf8-bytes`, which the generated zod
+    // schema does not carry; the page's own count of bytes is UI part 2's.
     expect(
       pathProblem({ folder: 'x'.repeat(5000), filename: `${'y'.repeat(5000)}.txt` }),
     ).toBeNull();

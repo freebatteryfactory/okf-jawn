@@ -1,0 +1,125 @@
+{
+  "$defs": {
+    "JobId": {
+      "description": "Durable background work identity retained across retries.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Timestamp": {
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$",
+      "type": "string"
+    },
+    "Upload": {
+      "additionalProperties": false,
+      "description": "An authenticated upload slot for a specific source occurrence.\n\nA slot stays until it is discarded, imported or its workspace is purged; nothing expires,\nand a completed upload is never removed by the service on its own.",
+      "properties": {
+        "complete": {
+          "description": "Whether expected bytes and digest have been verified.",
+          "type": "boolean"
+        },
+        "consumed_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JobId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The job that took this upload."
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "When the slot was opened."
+        },
+        "filename": {
+          "description": "Original filename, as supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/UploadId",
+          "description": "Upload identity."
+        },
+        "received_bytes": {
+          "description": "Durably retained byte count.",
+          "type": "string"
+        },
+        "relative_path": {
+          "description": "Supplied folder context, as supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "description": "The announced byte count, as a decimal string.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "upload_path": {
+          "description": "Same-origin binary PUT target.",
+          "type": "string"
+        },
+        "workspace_id": {
+          "$ref": "#/$defs/WorkspaceId",
+          "description": "Workspace whose permissions and storage scope apply."
+        }
+      },
+      "required": [
+        "id",
+        "workspace_id",
+        "upload_path",
+        "received_bytes",
+        "complete"
+      ],
+      "type": "object"
+    },
+    "UploadId": {
+      "description": "Identity of one authenticated source upload occurrence.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A bounded list of upload slots, newest first.",
+  "properties": {
+    "items": {
+      "description": "Upload slots.",
+      "items": {
+        "$ref": "#/$defs/Upload"
+      },
+      "type": "array"
+    },
+    "next_cursor": {
+      "description": "Continuation cursor.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "items"
+  ],
+  "title": "ListUploadsResponse",
+  "type": "object"
+}

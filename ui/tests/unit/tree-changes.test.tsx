@@ -28,7 +28,7 @@ import {
   segmentProblem,
   splitPath,
 } from '../../src/features/tree/names';
-import { type Handler, type Json, mockApi, ok, type Reply } from './support/api';
+import { draftsPage, type Handler, type Json, mockApi, ok, type Reply } from './support/api';
 import { CANCELLED, handed, TAKEN } from './support/drags';
 import { findTextBox, textIn } from './support/editor';
 import {
@@ -194,10 +194,7 @@ function service(
     '/api/reads/get-sources': (body) =>
       ok({ revision: revisionAsked(body, state.head), sources: [], declared: [] }),
     '/api/items/list-drafts': () =>
-      ok({
-        items: drafts.map((id) => draftOf(id, saved.get(id)?.base ?? HEAD)),
-        next_cursor: null,
-      }),
+      ok(draftsPage(drafts.map((id) => draftOf(id, saved.get(id)?.base ?? HEAD)))),
     [SAVE]: (body) => {
       const id = text(body, 'item_id');
       const item = treeAt(state.head).items.find((each) => each.id === id);
@@ -233,7 +230,11 @@ function service(
       if (refusal !== null) return refusal;
       const made = summary(NEW, path, text(body, 'title'), text(body, 'type_name'));
       const revision = commit((tree) => ({ ...tree, items: [...tree.items, made] }));
-      return ok({ ...itemDocument({ ...made, revision }), body: text(body, 'body') });
+      return ok({
+        item: { ...itemDocument({ ...made, revision }), body: text(body, 'body') },
+        receipt_id: RECEIPT,
+        warnings: [],
+      });
     },
     [FOLDER]: (body) => {
       const refusal = stale(body);

@@ -3,12 +3,15 @@
  * and how long it may take.
  *
  * CSRF (double submit). The server refuses a cookie-authenticated request whose method is not GET,
- * HEAD or OPTIONS unless its `x-okf-csrf` header holds the value of the `okf-csrf` cookie. Every
+ * HEAD or OPTIONS unless its `x-okf-csrf` header holds the value of the anti-CSRF cookie. Every
  * canonical operation is a POST, so reads need it as well as writes. The header is set here, on
  * each such request to this origin, when the cookie exists. Without the cookie nothing is added
  * and the server's own refusal is what the person sees. The token is not sent to another origin.
- * The two names are held here once; `tests/unit/api-client.test.ts` fails when either differs from
- * its security scheme in `api/openapi.json`.
+ * The server names the cookie by the scheme of its public origin, which is this page's own:
+ * `__Host-okf-csrf` over https, `okf-csrf` on loopback http. Only the name of the page's scheme
+ * is read, so over https a cookie a sibling host set under the other name is not taken. The names
+ * are held here once; `tests/unit/api-client.test.tsx` fails when one differs from its security
+ * scheme in `api/openapi.json`.
  *
  * Bounded wait. A request that has not answered after its wait (`REQUEST_TIMEOUT_MS`, more for a
  * large body: see below) is aborted and fails as
@@ -28,8 +31,10 @@
  */
 import { client } from '../api/generated/client.gen';
 
-/** The cookie the server sets at sign-in beside the session cookie (`csrfCookie`). */
+/** The cookie the server sets at sign-in beside the session cookie on loopback http (`csrfCookie`). */
 export const CSRF_COOKIE = 'okf-csrf';
+/** The same cookie over https (`csrfCookieHttps`): its `__Host-` prefix keeps another host's out. */
+export const CSRF_COOKIE_HTTPS = '__Host-okf-csrf';
 /** The header that sends the cookie's value back (`csrfHeader`). */
 export const CSRF_HEADER = 'x-okf-csrf';
 
@@ -78,11 +83,20 @@ export class RequestStopped extends Error {
   }
 }
 
-/** The CSRF cookie's value exactly as the browser holds it; null when there is none. */
-export function csrfToken(): string | null {
+/** The anti-CSRF cookie's name for a page served over `protocol` (`location.protocol`). */
+export function csrfCookieName(protocol: string): string {
+  return protocol === 'https:' ? CSRF_COOKIE_HTTPS : CSRF_COOKIE;
+}
+
+/**
+ * The CSRF cookie's value exactly as the browser holds it, read under the name of the page's
+ * scheme (`protocol`, this page's own unless a test names one); null when there is none.
+ */
+export function csrfToken(protocol: string = window.location.protocol): string | null {
+  const name = csrfCookieName(protocol);
   for (const pair of document.cookie.split(';')) {
     const cut = pair.indexOf('=');
-    if (cut < 0 || pair.slice(0, cut).trim() !== CSRF_COOKIE) continue;
+    if (cut < 0 || pair.slice(0, cut).trim() !== name) continue;
     const value = pair.slice(cut + 1).trim();
     return value.length > 0 ? value : null;
   }

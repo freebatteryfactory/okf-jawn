@@ -8,7 +8,10 @@ use okf_jawn_contract::extraction::{
     TextOrigin,
 };
 use okf_jawn_contract::history::CommitRequest;
-use okf_jawn_contract::identity::{At, Digest, Revision, Timestamp, WorkspaceId, WorkspacePath};
+use okf_jawn_contract::identity::{
+    At, Digest, MAX_PATH_SEGMENT_UTF16_UNITS, Revision, Timestamp, WorkspaceId, WorkspacePath,
+    collision_key_of,
+};
 use okf_jawn_contract::import::{Job, JobKind, RedigestRequest, StartImportRequest};
 use okf_jawn_contract::item::{APP_HEADER_KEY, ItemStatus, ListItemsRequest};
 use okf_jawn_contract::metadata::{OperationName, operations};
@@ -400,7 +403,9 @@ fn workspace_path_schema_states_the_expressible_part_of_its_rule() -> Result<(),
         ))
     );
     assert_eq!(schema.get("minLength"), Some(&json!(1)));
-    assert_eq!(schema.get("maxLength"), Some(&json!(4096)));
+    // Ruling 34: the bound is in bytes, so it is stated as `x-max-utf8-bytes`, never `maxLength`.
+    assert_eq!(schema.get("maxLength"), None);
+    assert_eq!(schema.get("x-max-utf8-bytes"), Some(&json!(4096)));
     // What a regular expression cannot state stays in `TryFrom`.
     for path in [
         ".",
@@ -1077,6 +1082,41 @@ fn workspace_paths_must_be_nfc() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// NTFS stores a name of at most 255 UTF-16 code units, so a longer segment is refused (SPEC
+/// section 2): counted in UTF-16 units, not in characters or bytes, and on every segment.
+#[test]
+fn workspace_paths_refuse_a_segment_windows_cannot_store() -> Result<(), Box<dyn Error>> {
+    assert_eq!(MAX_PATH_SEGMENT_UTF16_UNITS, 255);
+    let path = |value: String| WorkspacePath::try_from(value);
+    assert!(path("a".repeat(255)).is_ok(), "255 units");
+    assert!(path("a".repeat(256)).is_err(), "256 units");
+    // Two-byte characters: 255 units are 510 bytes, still one name NTFS stores.
+    assert!(path("\u{e9}".repeat(255)).is_ok());
+    assert!(path("\u{e9}".repeat(256)).is_err());
+    // A character outside the BMP is two UTF-16 units.
+    let at_bound = format!("{}\u{1f600}", "a".repeat(253));
+    assert_eq!(at_bound.encode_utf16().count(), 255);
+    assert!(path(at_bound).is_ok(), "254 characters, 255 units");
+    let over = format!("{}\u{1f600}", "a".repeat(254));
+    assert_eq!(over.chars().count(), 255);
+    assert!(path(over).is_err(), "255 characters, 256 units");
+    // Every segment, the first, a later one and the last (review N7).
+    assert!(path(format!("{}/b.md", "a".repeat(256))).is_err());
+    assert!(path(format!("b/{}", "a".repeat(256))).is_err(), "the last");
+    assert!(
+        path(format!("b/{}/c.md", "a".repeat(256))).is_err(),
+        "a middle one"
+    );
+    assert!(path(format!("{}/{}", "a".repeat(255), "b".repeat(255))).is_ok());
+    assert!(path(format!("b/{}/c.md", "a".repeat(255))).is_ok());
+    // A supplied name is measured after NFC: 255 decomposed `e\u{301}` are 255 units once
+    // composed, and one more is refused, never shortened.
+    let composed = WorkspacePath::from_supplied(&"e\u{301}".repeat(255))?;
+    assert_eq!(composed.as_str().encode_utf16().count(), 255);
+    assert!(WorkspacePath::from_supplied(&"e\u{301}".repeat(256)).is_err());
+    Ok(())
+}
+
 #[test]
 fn collision_keys_fold_case_and_normalization() -> Result<(), Box<dyn Error>> {
     let upper = WorkspacePath::try_from("Notes/R\u{e9}sum\u{e9}.md".to_owned())?;
@@ -1087,6 +1127,37 @@ fn collision_keys_fold_case_and_normalization() -> Result<(), Box<dyn Error>> {
     let first = WorkspacePath::try_from("a/b.md".to_owned())?;
     let second = WorkspacePath::try_from("a/c.md".to_owned())?;
     assert_ne!(first.collision_key(), second.collision_key());
+    Ok(())
+}
+
+/// Ruling 33: `collision_key_of` is the key of any string, a valid path or not, and the very key
+/// `WorkspacePath::collision_key` gives a valid one.
+#[test]
+fn the_collision_key_of_any_string_is_a_paths_collision_key() -> Result<(), Box<dyn Error>> {
+    // A decomposed spelling's key is its stored NFC path's key.
+    for valid in [
+        "Notes/R\u{e9}sum\u{e9}.md",
+        "Notes/Re\u{301}sume\u{301}.md",
+        "a/b.md",
+        "\u{130}stanbul/\u{3a3}.md",
+    ] {
+        let path = WorkspacePath::from_supplied(valid)?;
+        assert_eq!(collision_key_of(valid), path.collision_key(), "{valid}");
+    }
+    // Not paths: `?` is refused in a segment. Composed and decomposed spellings are one key.
+    let composed = "Inbox/caf\u{e9}?.md";
+    let decomposed = "Inbox/cafe\u{301}?.md";
+    assert!(WorkspacePath::try_from(composed.to_owned()).is_err());
+    assert_eq!(collision_key_of(composed), collision_key_of(decomposed));
+    // Letter case is folded too, and different names stay apart.
+    assert_eq!(
+        collision_key_of("Inbox/Plan?.md"),
+        collision_key_of("inbox/PLAN?.md")
+    );
+    assert_ne!(
+        collision_key_of("Inbox/a?.md"),
+        collision_key_of("Inbox/b?.md")
+    );
     Ok(())
 }
 
@@ -1209,6 +1280,46 @@ fn item_status_words_are_okf_status_words() -> Result<(), Box<dyn Error>> {
 #[test]
 fn the_application_header_key_is_one_constant() {
     assert_eq!(APP_HEADER_KEY, "okf_jawn");
+}
+
+/// The security events, by wire word: sign-ins and refused sign-ins, connector issue and
+/// revocation, and refused requests. Every other kind is a content or work notification.
+#[test]
+fn security_events_are_sign_ins_connectors_and_refusals() -> Result<(), Box<dyn Error>> {
+    let mut security = Vec::new();
+    for word in enum_words::<EventKind>()? {
+        let kind: EventKind = serde_json::from_value(json!(word))?;
+        if kind.is_security() {
+            security.push(word);
+        }
+    }
+    assert_eq!(
+        security,
+        [
+            "connector_issued",
+            "connector_revoked",
+            "signed_in",
+            "sign_in_refused",
+            "permission_denied"
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_refused_sign_in_may_name_no_actor_and_count_its_refusals() -> Result<(), Box<dyn Error>> {
+    let aggregate = json!({
+        "id": "e-3",
+        "kind": "sign_in_refused",
+        "at": "2026-10-08T14:04:00.000Z",
+        "count": 37
+    });
+    let event: Event = serde_json::from_value(aggregate.clone())?;
+    assert_eq!(event.kind, EventKind::SignInRefused);
+    assert!(event.actor.is_none() && event.workspace_id.is_none());
+    assert_eq!(event.count, Some(37));
+    assert_eq!(serde_json::to_value(&event)?, aggregate);
+    Ok(())
 }
 
 okf_jawn_contract::for_each_operation!(operation_schemas);

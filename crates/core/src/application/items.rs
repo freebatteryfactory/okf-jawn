@@ -18,15 +18,15 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::ExtractionFilter;
 use okf_jawn_contract::identity::{At, WorkspacePath};
 use okf_jawn_contract::item::{
-    CreateFolderRequest, CreateItemRequest, DeleteItemRequest, GetItemRequest, ItemDocument,
-    ItemKind, ItemSummary, ListItemsRequest, ListItemsResponse, ListTypesRequest,
+    CreateFolderRequest, CreateItemRequest, CreatedItem, DeleteItemRequest, GetItemRequest,
+    ItemDocument, ItemKind, ItemSummary, ListItemsRequest, ListItemsResponse, ListTypesRequest,
     ListTypesResponse, MoveItemRequest, SetLifecycleRequest, SetTypeRequest,
 };
 
 use super::ApplicationService;
 use super::shared::{
-    Touched, Write, commit, commit_with_receipt, invalid, mutation_id, next_page, resolve,
-    resolve_page, with_content_digest, workspace_scope,
+    Touched, Write, commit_with_receipt, invalid, mutation_id, next_page, resolve, resolve_page,
+    with_content_digest, workspace_scope,
 };
 use crate::context::OperationContext;
 use crate::echo::bounded;
@@ -149,7 +149,9 @@ pub(super) async fn get_item(
     Ok(document)
 }
 
-/// Create a note at a new path in one commit and return it as committed.
+/// Create a note at a new path in one commit and return it as committed, with the commit's
+/// receipt and the findings of its check (`CreatedItem`); a resumed attempt answers the first
+/// attempt's receipt and the findings the store kept for the commit.
 ///
 /// A source card comes only from an upload or an import, so `kind: source` is refused. A View
 /// is refused as not implemented until its file layout lands with `get_view` (construction plan
@@ -162,7 +164,7 @@ pub(super) async fn create_item(
     service: &ApplicationService,
     context: &OperationContext,
     request: CreateItemRequest,
-) -> Result<ItemDocument, ApiError> {
+) -> Result<CreatedItem, ApiError> {
     match request.kind {
         ItemKind::Note => {}
         ItemKind::Source => {
@@ -182,7 +184,7 @@ pub(super) async fn create_item(
     refuse_supplied_header(&request.properties, "/properties")?;
     let item_id = derive_item_id(mutation_id(context)?, 0);
     let created = request.path.clone();
-    let committed = commit(
+    let committed = commit_with_receipt(
         service,
         context,
         Write {
@@ -206,13 +208,18 @@ pub(super) async fn create_item(
     )
     .await?;
     let scope = workspace_scope(context)?;
-    with_content_digest(
+    let item = with_content_digest(
         service
             .ports()
             .versions
             .show(&scope, &committed.revision, item_id)
             .await?,
-    )
+    )?;
+    Ok(CreatedItem {
+        item,
+        receipt_id: Some(committed.receipt_id),
+        warnings: committed.warnings,
+    })
 }
 
 /// Move an item and rewrite the links that point at it, in one commit.

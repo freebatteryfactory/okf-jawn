@@ -7,8 +7,10 @@
  * - `pathProblem`: a path the page does not send. A `..` step, a path that starts at a root (a
  *   leading separator), a path that names a disk drive ("C:"), and a control character (a line
  *   break among them) are each a problem; so is a name or a folder longer than the generated
- *   request schema of `create_upload` allows. That schema states no length today, so nothing is
- *   found too long until the contract states one.
+ *   request schema of `create_upload` allows. That schema states the contract's bounds in UTF-8
+ *   bytes (`x-max-utf8-bytes`), which the generated zod schema does not carry, so nothing is
+ *   found too long here today and the service refuses a longer name; counting the bytes on the
+ *   page is UI part 2's.
  * - `collisionKey`: two paths with the same key would be the same place for a person: they are the
  *   same, or differ only in capital and small letters, or only in how an accented letter is
  *   composed (a Mac names files decomposed). The upload list holds back both (`upload-list.ts`).

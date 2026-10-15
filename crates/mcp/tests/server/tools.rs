@@ -56,7 +56,7 @@ async fn the_tool_listing_is_the_generated_catalog_exactly() -> TestResult {
 fn every_listed_tool_is_an_operation_and_none_carries_a_draft() -> TestResult {
     let world = reader();
     let server = McpServer::new(world.ports, bundle("tools-operations.html", "<p>app</p>")?)?;
-    assert_eq!(server.tools().len(), 13);
+    assert_eq!(server.tools().len(), 14);
     for tool in server.tools() {
         let operation = some(operation_of_tool(&tool.name), "the tool's operation")?;
         assert!(
@@ -225,5 +225,42 @@ async fn a_proposal_runs_under_the_servers_mutation_ledger() -> TestResult {
     assert_eq!(result.is_error, Some(false), "{result:?}");
     assert_eq!(result.structured_content, Some(proposal_response()));
     assert_eq!(ledger.completed()?.len(), 1);
+    Ok(())
+}
+
+/// The naming rules are a model tool (owner decision 2026-10-14, SPEC section 9): `rules` runs
+/// `get_rules` and answers through the structured result, within the text budget every other
+/// tool's answer has.
+#[tokio::test]
+async fn the_rules_tool_reads_the_naming_rules() -> TestResult {
+    let world = reader();
+    let answer = json!({
+        "revision": "a".repeat(40),
+        "rules": {"schema_version": 1, "rules": []}
+    });
+    world.application.answer_with("get_rules", answer.clone())?;
+    let server = McpServer::new(world.ports, bundle("tools-rules.html", "<p>app</p>")?)?;
+    assert_eq!(operation_of_tool("rules"), Some(OperationName::GetRules));
+    let result = server
+        .call_tool_as(
+            Some(&agent("alice")?),
+            "rules",
+            Some(arguments(json!({
+                "workspace_id": "11111111-1111-4111-8111-111111111111",
+                "at": {"kind": "latest"}
+            }))?),
+        )
+        .await?;
+    assert_eq!(result.is_error, Some(false), "{result:?}");
+    assert_eq!(result.structured_content, Some(answer.clone()));
+    let text: Value = serde_json::from_str(text_of(&result)?)?;
+    assert_eq!(text, answer);
+    assert_eq!(
+        world.application.calls()?,
+        vec![Call {
+            operation: "get_rules",
+            subject: "alice".to_owned()
+        }]
+    );
     Ok(())
 }

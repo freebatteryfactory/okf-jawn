@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
 use futures_util::StreamExt as _;
 use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
@@ -24,7 +24,7 @@ use okf_jawn_core::ports::{Application, PortFuture};
 use okf_jawn_core::storage::ByteReader;
 use okf_jawn_server::app::{ServiceParts, service};
 use okf_jawn_server::cookies::CrateCookies;
-use okf_jawn_server::events::EventStreams;
+use okf_jawn_server::events::{EventStreams, last_event_id};
 use okf_jawn_server::identity::{
     BearerAuth, ConnectIdentity, Identity, IdentityPorts, WallClock, session_id_of,
 };
@@ -35,7 +35,7 @@ use tokio::io::AsyncReadExt as _;
 use tokio::time::timeout;
 use tower::ServiceExt;
 
-use check::{TestResult, some};
+use check::{TestResult, err_of, some};
 use fixtures::workspace;
 use support::{CONNECTOR, HOST, LocalApp, ORIGIN, OWNER, OneToken, SECRET, WORKSPACE};
 
@@ -323,6 +323,11 @@ impl Transfers for Bytes {
                 upload_path: String::new(),
                 received_bytes: count.to_string(),
                 complete: false,
+                filename: None,
+                relative_path: None,
+                size: None,
+                created_at: None,
+                consumed_by: None,
             })
         })
     }
@@ -765,9 +770,25 @@ async fn a_last_event_id_over_the_bound_is_refused_not_dropped() -> TestResult {
     assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
     let error: ApiError = serde_json::from_slice(&to_bytes(refused.into_body(), 65_536).await?)?;
     assert_eq!(error.code, ErrorCode::InvalidInput);
-    assert_eq!(error.field.as_deref(), Some("Last-Event-ID"));
+    // Review N12: a header is not in the body, so the refusal names it in its message and has
+    // no `field`, which is a JSON Pointer into the body.
+    assert_eq!(error.field, None);
+    assert!(error.message.contains("Last-Event-ID"), "{}", error.message);
     // Only the accepted request reached the operation.
     assert_eq!(stream.scripted.asked()?.len(), 1);
+    Ok(())
+}
+
+/// Review N12: a `Last-Event-ID` that is not text is refused the same way: no `field`, and the
+/// header named in the message.
+#[test]
+fn a_last_event_id_that_is_not_text_is_refused_naming_the_header() -> TestResult {
+    let mut headers = HeaderMap::new();
+    headers.insert("last-event-id", HeaderValue::from_bytes(b"cursor-\xff")?);
+    let error = err_of(last_event_id(&headers))?;
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.field, None);
+    assert!(error.message.contains("Last-Event-ID"), "{}", error.message);
     Ok(())
 }
 

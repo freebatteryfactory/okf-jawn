@@ -28,7 +28,8 @@ pub struct DraftWrite {
     pub body: String,
     /// Drafted complete property map.
     pub properties: BTreeMap<String, serde_json::Value>,
-    /// Digest of the drafted body and properties, computed by the application.
+    /// Digest of the drafted body and properties, computed by the application with
+    /// `portable::draft_digest` (the whole content, `aliases` included).
     pub content_digest: Digest,
 }
 

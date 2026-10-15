@@ -304,7 +304,8 @@ pub struct SourceCard {
 pub struct ChangeContext {
     /// Identity for a `Change::Create`, which carries none.
     pub new_item_id: ItemId,
-    /// Rendering role for a `Change::Create`, which carries none.
+    /// Rendering role for a `Change::Create`: the role its `item_kind` names, a note when it
+    /// names none (`ChangeContext::for_change` fills it so).
     pub new_item_kind: ItemKind,
     /// Proposal the change belongs to.
     pub proposal_id: ProposalId,
@@ -524,7 +525,9 @@ pub trait VersionStore: Send + Sync {
     /// (`derive_commit_mutation_id`). When a commit carrying this mutation's trailer
     /// already lies after `expected_head` on the head's history, that commit is returned with
     /// `replayed` set, the check is not run and nothing is written. Otherwise, when the head is
-    /// not `expected_head`, the call fails with `Conflict` and writes nothing.
+    /// not `expected_head` (an `expected_head` the repository does not hold included), the call
+    /// fails with `Conflict` and writes nothing. That refusal carries `ErrorDetail::StaleBase`
+    /// naming the head and no `field`: the caller, which knows its request, names the field.
     ///
     /// `check` runs once on the staged candidate tree, and is told which other files the edits
     /// made the store rewrite (`CandidateCheck::check`, `rewritten`). Its error rejects the
@@ -601,17 +604,23 @@ pub trait VersionStore: Send + Sync {
     /// Idempotent on `changes.mutation_id`: when the reference already points at a commit
     /// carrying this mutation's trailer, that revision is returned and nothing is written.
     /// `check` runs on the staged candidate tree exactly as it does for `commit`, and the
-    /// path-collision and application-header refusals of `commit` apply.
+    /// path-collision and application-header refusals of `commit` apply. The candidate is
+    /// answered with the check's findings (`Committed::warnings`), which the store keeps with
+    /// it as it keeps a commit's, so a repeat answers the same findings, `replayed` set (or
+    /// the one warning `replay_warnings_unavailable` when it kept none for that candidate).
+    /// When another write already set the reference, the call fails with a plain `Conflict`: it
+    /// is about no base, so it carries no `StaleBase`.
     fn create_candidate<'a>(
         &'a self,
         scope: &'a StorageScope,
         proposal_id: ProposalId,
         changes: CandidateChanges,
         check: Arc<dyn CandidateCheck>,
-    ) -> PortFuture<'a, Revision>;
+    ) -> PortFuture<'a, Committed>;
     /// Accept a candidate: commit the candidate's exact tree on top of `expected_head`.
     ///
-    /// Fails with `Conflict`, writing nothing, when the head is not `expected_head`, when the
+    /// Fails with `Conflict`, writing nothing, when the head is not `expected_head` (with
+    /// `ErrorDetail::StaleBase` naming the head and no `field`, as `commit`), when the
     /// candidate's parent is not `expected_head`, or when `candidate` is not the revision the
     /// proposal reference retains. The promoted tree is the tree that was checked when the
     /// candidate was created, so no check runs here and the result has no warnings. Idempotent
@@ -728,8 +737,10 @@ pub trait WorkspaceCatalog: Send + Sync {
     fn open<'a>(&'a self, scope: &'a StorageScope) -> PortFuture<'a, Workspace>;
     /// Replace the name and description.
     ///
-    /// Fails with `Conflict` when the head is not `update.expected_head`. A repeated
-    /// `mutation_id` changes nothing and returns the workspace as the first call left it.
+    /// Fails with `Conflict` when the head is not `update.expected_head`, with
+    /// `ErrorDetail::StaleBase` naming the head and no `field`: the caller names its request's.
+    /// A repeated `mutation_id` changes nothing and returns the workspace as the first call left
+    /// it.
     fn update<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -738,7 +749,8 @@ pub trait WorkspaceCatalog: Send + Sync {
     ) -> PortFuture<'a, Workspace>;
     /// Archive the workspace and set `archived_at`; its history, objects and records stay.
     ///
-    /// Fails with `Conflict` when the head is not `archive.expected_head`. A repeated
+    /// Fails with `Conflict` when the head is not `archive.expected_head`, with
+    /// `ErrorDetail::StaleBase` naming the head and no `field`, as `update` does. A repeated
     /// `mutation_id` changes nothing and returns the archived workspace.
     fn archive<'a>(
         &'a self,
@@ -858,18 +870,31 @@ pub trait Purger: Send + Sync {
     ) -> PortFuture<'a, PurgeReport>;
 }
 
+/// A workspace archive written into the blob store, and what it left out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrittenArchive {
+    /// Identity and size of the archive's bytes.
+    pub object: ObjectInfo,
+    /// Rows of the workspace's records left out of the archive because they named a managed
+    /// backup or a written history; the archive's manifest holds the same count, and a restore
+    /// of the archive reports it (`RestoreReport::rows_left_out`).
+    pub rows_left_out: u32,
+}
+
 /// Independently recoverable backups (Stage 1b design section 8); storage implements them.
 ///
 /// The offline backup, the pre-migration backup and the replacement restore are storage
 /// functions the server command and startup call, not ports.
 pub trait Backups: Send + Sync {
-    /// Write a workspace archive into the blob store; the backup handler records it as a
-    /// `WorkspaceBackup` artifact. Idempotent on the mutation id.
+    /// Write a workspace archive into the blob store and answer it with the rows it left out;
+    /// the backup handler records it as a `WorkspaceBackup` artifact and its job carries the
+    /// count (`Job::backup`). Idempotent on the mutation id: a repeat answers the archive
+    /// already written, with the count its manifest holds.
     fn write_workspace_archive<'a>(
         &'a self,
         scope: &'a StorageScope,
         mutation_id: MutationId,
-    ) -> PortFuture<'a, ObjectInfo>;
+    ) -> PortFuture<'a, WrittenArchive>;
     /// Write an installation archive (identities, grants, connector records without secrets,
     /// purge records, tenant events; no workspace content) into the tenant's store; the
     /// handler records it as an `InstallationBackup` artifact. Idempotent on the mutation id.
@@ -912,12 +937,32 @@ pub trait Backups: Send + Sync {
 /// it (`VersionStore::commit`); see `replay_warnings_unavailable`.
 pub const REPLAY_WARNINGS_UNAVAILABLE: &str = "replay_warnings_unavailable";
 
+impl ChangeContext {
+    /// The context of `change`, with `new_item_kind` filled from it: the role its `item_kind`
+    /// names, a note when it names none (`Change::created_kind`). A change that creates no item
+    /// leaves it a note, which `TreeEdit::from_change` does not read.
+    #[must_use]
+    pub fn for_change(
+        change: &Change,
+        new_item_id: ItemId,
+        proposal_id: ProposalId,
+        proposer: Provenance,
+    ) -> Self {
+        Self {
+            new_item_id,
+            new_item_kind: change.created_kind().unwrap_or(ItemKind::Note),
+            proposal_id,
+            proposer,
+        }
+    }
+}
+
 impl TreeEdit {
     /// The tree edit a proposed change stands for.
     ///
     /// `context.new_item_id` and `context.new_item_kind` are used only for `Change::Create`,
-    /// which carries neither an identity nor a rendering role; the proposal and proposer only
-    /// for `Change::SupplyExtraction`.
+    /// which carries no identity and whose role the context holds (`ChangeContext::for_change`
+    /// fills it from the change); the proposal and proposer only for `Change::SupplyExtraction`.
     #[must_use]
     pub fn from_change(change: Change, context: &ChangeContext) -> Self {
         match change {
@@ -926,6 +971,7 @@ impl TreeEdit {
                 type_name,
                 body,
                 properties,
+                item_kind: _,
             } => Self::CreateItem {
                 item_id: context.new_item_id,
                 path,

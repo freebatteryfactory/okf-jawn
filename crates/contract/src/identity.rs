@@ -110,9 +110,10 @@ pub struct Digest(String);
 /// Every `/`-separated segment is non-empty, is not `.`, `..` or `.git` (any case), holds no
 /// control character and none of `\ : < > " | ? *`, does not end in `.` or a space, and has a
 /// stem (the segment up to its first `.`) that is not a Windows reserved device name such as
-/// `CON`, `NUL`, `COM1` or `CONIN$`, compared ASCII case-insensitively. The whole value is in
-/// Unicode NFC and at most 4096 bytes. A non-NFC value is refused, never changed on parse;
-/// `from_supplied` normalizes a supplied filename first.
+/// `CON`, `NUL`, `COM1` or `CONIN$`, compared ASCII case-insensitively, and is at most 255 UTF-16
+/// code units long (`MAX_PATH_SEGMENT_UTF16_UNITS`, what NTFS stores in one name). The whole
+/// value is in Unicode NFC and at most 4096 bytes. A non-NFC value is refused, never changed on
+/// parse; `from_supplied` normalizes a supplied filename first.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct WorkspacePath(String);
@@ -154,6 +155,14 @@ pub struct IdentityError(pub &'static str);
 /// restore under another. A hosted tenant id is the WorkOS organization id and is never this
 /// value.
 pub const LOCAL_TENANT_ID: &str = "local";
+
+/// The most UTF-8 bytes of a `WorkspacePath`: 4096. Its schema states it as `x-max-utf8-bytes`,
+/// never as a `maxLength` in characters.
+pub const MAX_WORKSPACE_PATH_BYTES: usize = 4096;
+
+/// The most UTF-16 code units of one segment of a `WorkspacePath`: 255, the longest name NTFS
+/// stores (SPEC section 2: a path segment that Windows cannot store is refused).
+pub const MAX_PATH_SEGMENT_UTF16_UNITS: usize = 255;
 
 /// The part of the workspace-path rule a regular expression can state: `/`-separated
 /// segments, none empty, none containing `\`, `:`, `<`, `>`, `"`, `|`, `?`, `*` or a C0
@@ -234,7 +243,8 @@ impl JsonSchema for WorkspacePath {
         schemars::json_schema!({
             "type": "string",
             "minLength": 1,
-            "maxLength": 4096,
+            "x-max-utf8-bytes": MAX_WORKSPACE_PATH_BYTES,
+            "description": "A relative path inside one workspace, in Unicode NFC, with `/` between segments. At most 4096 bytes in UTF-8: a character takes one to four.",
             "pattern": WORKSPACE_PATH_PATTERN
         })
     }
@@ -321,7 +331,12 @@ impl WorkspacePath {
     }
 
     /// Build a path from a supplied filename or folder: convert it to NFC, then apply every
-    /// rule of `TryFrom<String>`. The supplied spelling itself is kept elsewhere unchanged.
+    /// rule of `TryFrom<String>`. The supplied spelling itself is kept elsewhere unchanged. A
+    /// supplied name whose NFC form has a segment over `MAX_PATH_SEGMENT_UTF16_UNITS` is refused,
+    /// never shortened here. A source card's name is fitted to one segment before it gets here
+    /// (`conventions::source_card_name`, `conventions::fit_segment`), so an import is never refused
+    /// because a file's name is long (an upload's `filename` is bounded by
+    /// `import::MAX_UPLOAD_FILENAME_BYTES`).
     ///
     /// # Errors
     /// Returns the rule the normalized value breaks.
@@ -330,10 +345,11 @@ impl WorkspacePath {
     }
 
     /// The key two paths collide on: the NFC value with every segment lower-cased by
-    /// locale-independent Unicode lowercasing. Two items may not hold paths with one key.
+    /// locale-independent Unicode lowercasing (`collision_key_of`, the one definition). Two
+    /// items may not hold paths with one key.
     #[must_use]
     pub fn collision_key(&self) -> String {
-        self.0.nfc().collect::<String>().to_lowercase()
+        collision_key_of(&self.0)
     }
 }
 impl Timestamp {
@@ -395,7 +411,10 @@ impl TryFrom<String> for Digest {
 impl TryFrom<String> for WorkspacePath {
     type Error = IdentityError;
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control) {
+        if value.is_empty()
+            || value.len() > MAX_WORKSPACE_PATH_BYTES
+            || value.chars().any(char::is_control)
+        {
             return Err(IdentityError(
                 "path must be normalized, relative, and outside .git",
             ));
@@ -483,6 +502,17 @@ impl Display for IdentityError {
 }
 impl std::error::Error for IdentityError {}
 
+/// The key `raw` collides on, for any string, a valid `WorkspacePath` or not: its NFC form, then
+/// every segment lower-cased by locale-independent Unicode lowercasing (`/` has no case, so the
+/// whole string is lower-cased at once). Nothing is validated. For a valid path it is exactly
+/// `WorkspacePath::collision_key`, so a store comparing a path it read outside the contract (a
+/// tree written by hand, a segment holding `?`) folds it as the contract does, never by
+/// lower-casing alone.
+#[must_use]
+pub fn collision_key_of(raw: &str) -> String {
+    raw.nfc().collect::<String>().to_lowercase()
+}
+
 fn is_lower_hex(value: &str) -> bool {
     value
         .bytes()
@@ -508,6 +538,11 @@ fn segment_error(segment: &str) -> Option<IdentityError> {
     if segment.ends_with('.') || segment.ends_with(' ') {
         return Some(IdentityError(
             "path segment must not end with a dot or a space",
+        ));
+    }
+    if segment.encode_utf16().count() > MAX_PATH_SEGMENT_UTF16_UNITS {
+        return Some(IdentityError(
+            "path segment is longer than the 255 UTF-16 code units Windows can store",
         ));
     }
     let stem = segment.split('.').next().unwrap_or(segment);

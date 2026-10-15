@@ -1,0 +1,54 @@
+{
+  "$defs": {
+    "IdempotencyKey": {
+      "description": "Caller-chosen retry identity for one write, scoped to tenant, subject and operation.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "WorkspacePath": {
+      "description": "A relative path inside one workspace, in Unicode NFC, with `/` between segments. At most 4096 bytes in UTF-8: a character takes one to four.",
+      "minLength": 1,
+      "pattern": "^[^/\\\\:<>\"|?*\\x00-\\x1f]+(/[^/\\\\:<>\"|?*\\x00-\\x1f]+)*$",
+      "type": "string",
+      "x-max-utf8-bytes": 4096
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Delete a folder, with everything in it, in one committed change.\n\nArchived items in the folder are deleted with it and are counted. A draft of a deleted item\nis kept as a deleted item's draft is. A folder changed since `base_revision` is a `conflict`\nwith `ErrorDetail::StaleBase` on `/base_revision`; a folder that does not exist is\n`not_found`.",
+  "properties": {
+    "base_revision": {
+      "$ref": "#/$defs/Revision",
+      "description": "Exact revision on which this change is based; a folder changed since conflicts."
+    },
+    "folder": {
+      "$ref": "#/$defs/WorkspacePath",
+      "description": "The folder to delete."
+    },
+    "idempotency_key": {
+      "$ref": "#/$defs/IdempotencyKey",
+      "description": "Retry identity."
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/WorkspaceId",
+      "description": "Workspace whose permissions and storage scope apply."
+    }
+  },
+  "required": [
+    "workspace_id",
+    "base_revision",
+    "folder",
+    "idempotency_key"
+  ],
+  "title": "DeleteFolderRequest",
+  "type": "object"
+}

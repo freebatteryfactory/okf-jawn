@@ -22,7 +22,7 @@ use okf_jawn_contract::source::{SourceLocation, SourceLocator};
 use okf_jawn_core::context::{Attempt, OperationContext};
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::jobs::RevisionMapping;
-use okf_jawn_core::portable::content_digest;
+use okf_jawn_core::portable::draft_digest;
 use okf_jawn_core::ports::Application;
 use okf_jawn_core::storage::{CommitChanges, Provenance, TreeEdit, VersionStore};
 use serde_json::json;
@@ -1844,7 +1844,7 @@ fn newer(id: u128) -> Built<DraftWrite> {
         base_revision: revision('b')?,
         body: body.to_owned(),
         properties: BTreeMap::new(),
-        content_digest: content_digest(body, &BTreeMap::new())?,
+        content_digest: draft_digest(body, &BTreeMap::new())?,
     })
 }
 
@@ -1965,6 +1965,107 @@ async fn a_snapshot_keeps_a_draft_saved_again_between_its_read_and_its_removal()
         world.drafts.held()?.len(),
         1,
         "OTHER's committed draft is removed"
+    );
+    Ok(())
+}
+
+/// Alice's draft of `id` saved again with the committed body and type, and only an alias added,
+/// digested as `save_draft` digests it.
+fn aliased(id: u128, base: char) -> Built<DraftWrite> {
+    let body = "# Mine\n";
+    let properties = BTreeMap::from([
+        ("type".to_owned(), json!("Note")),
+        ("aliases".to_owned(), json!(["notes/old-plan.md"])),
+    ]);
+    Ok(DraftWrite {
+        item_id: item(id),
+        editor: ALICE.to_owned(),
+        base_revision: revision(base)?,
+        body: body.to_owned(),
+        content_digest: draft_digest(body, &properties)?,
+        properties,
+    })
+}
+
+fn holds_aliased(world: &World, id: u128) -> Built<bool> {
+    Ok(world
+        .drafts
+        .held()?
+        .iter()
+        .any(|kept| kept.draft.item_id == item(id) && kept.properties.contains_key("aliases")))
+}
+
+/// Review N1: a draft saved again between the Snapshot's read and its removal with only its
+/// `aliases` changed is not the committed content, so it is kept.
+#[tokio::test]
+async fn a_snapshot_keeps_a_draft_saved_again_with_only_its_aliases_changed() -> TestResult {
+    let world = resumable()?;
+    world.drafts.save_before_next_discard(aliased(NOTE, 'a')?)?;
+    let result = world
+        .service
+        .commit_items(
+            &alice(OperationName::CommitItems, Some(mutation(1)))?,
+            snapshot(&[NOTE, OTHER])?,
+        )
+        .await?;
+    assert_eq!(result.revision, revision('b')?);
+    assert!(holds_aliased(&world, NOTE)?, "{:?}", world.drafts.held()?);
+    assert_eq!(
+        world.drafts.held()?.len(),
+        1,
+        "OTHER's committed draft is removed"
+    );
+    Ok(())
+}
+
+/// Review N1: the same after a crash: a resumed Snapshot compares the item its commit holds with
+/// the draft by the whole content, so a draft re-saved with only an alias added is kept.
+#[tokio::test]
+async fn a_resumed_snapshot_keeps_a_draft_saved_again_with_only_its_aliases_changed() -> TestResult
+{
+    let world = resumable()?;
+    let caller = first_attempt_fails_after_its_commit(&world).await?;
+    world
+        .drafts
+        .save(&scope()?, mutation(77), aliased(NOTE, 'b')?)
+        .await?;
+    let retried = world
+        .service
+        .commit_items(&caller, snapshot(&[NOTE, OTHER])?)
+        .await?;
+    assert_eq!(retried.revision, revision('b')?);
+    assert_eq!(world.versions.commits()?.len(), 1, "no second commit");
+    assert!(holds_aliased(&world, NOTE)?, "{:?}", world.drafts.held()?);
+    assert_eq!(
+        world.drafts.held()?.len(),
+        1,
+        "OTHER's committed draft is removed"
+    );
+    Ok(())
+}
+
+/// Review N1, the other side: a resumed Snapshot takes the committed item's digest as the draft's
+/// is taken, aliases included, so a committed draft that carries an alias and was not saved again
+/// is still removed.
+#[tokio::test]
+async fn a_resumed_snapshot_removes_a_committed_draft_that_carries_aliases() -> TestResult {
+    let world = resumable()?;
+    world
+        .drafts
+        .save(&scope()?, mutation(76), aliased(NOTE, 'a')?)
+        .await?;
+    let caller = first_attempt_fails_after_its_commit(&world).await?;
+    let retried = world
+        .service
+        .commit_items(&caller, snapshot(&[NOTE, OTHER])?)
+        .await?;
+    assert_eq!(retried.revision, revision('b')?);
+    assert_eq!(world.versions.commits()?.len(), 1, "no second commit");
+    assert_eq!(
+        world.drafts.held()?.len(),
+        0,
+        "both committed drafts are removed: {:?}",
+        world.drafts.held()?
     );
     Ok(())
 }

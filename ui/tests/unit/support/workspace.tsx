@@ -15,7 +15,7 @@ import { createQueryClient } from '../../../src/app/query-client';
 import { App, createAppRouter } from '../../../src/app/router';
 import { resetDraftSessions } from '../../../src/features/drafts/saving';
 import { emptyView, useExplorerStore } from '../../../src/features/explorer/store';
-import { type Handler, type Json, ok } from './api';
+import { draftsPage, type Handler, type Json, ok } from './api';
 
 export const WS = '11111111-1111-4111-8111-111111111111';
 export const HEAD = 'a'.repeat(40);
@@ -188,7 +188,7 @@ export function explorerHandlers(overrides: Record<string, Handler> = {}): Recor
     },
     '/api/reads/get-sources': () => ok(sourcesOfNote),
     // The person has no drafts, and the workspace defines no types, unless a test says so.
-    '/api/items/list-drafts': () => ok({ items: [], next_cursor: null }),
+    '/api/items/list-drafts': () => ok(draftsPage([])),
     '/api/types/list-types': () => ok({ items: [] }),
     ...overrides,
   };

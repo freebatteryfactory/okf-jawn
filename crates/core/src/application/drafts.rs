@@ -23,7 +23,7 @@
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{ItemId, Revision};
 use okf_jawn_contract::item::{
-    DiscardDraftRequest, Draft, DraftContent, ItemDocument, ItemKind, ListDraftsRequest,
+    DiscardDraftRequest, Draft, DraftContent, DraftRow, ItemKind, ListDraftsRequest,
     ListDraftsResponse, SaveDraftRequest,
 };
 
@@ -32,7 +32,7 @@ use super::shared::{check_named, invalid, mutation_id, workspace_scope};
 use crate::context::OperationContext;
 use crate::drafts::DraftWrite;
 use crate::items::refuse_header_change;
-use crate::portable::item_content_digest;
+use crate::portable::draft_digest;
 use crate::storage::StorageScope;
 
 /// Save or replace the caller's draft of one item.
@@ -92,14 +92,9 @@ pub(super) async fn save_draft(
         // The draft holds the item's own text, not the request's spelling of it.
         body = at_base;
     }
-    // The digest of the drafted body and properties, computed as the item they would commit
-    // is, so a draft and that item compare.
-    let drafted = ItemDocument {
-        body,
-        properties: request.properties,
-        ..current
-    };
-    let content_digest = item_content_digest(&drafted)?;
+    // The digest of the whole drafted content, `aliases` included, as a Snapshot takes it from
+    // the item a commit holds (`portable::draft_digest`), so a draft and that item compare.
+    let content_digest = draft_digest(&body, &request.properties)?;
     ports
         .drafts
         .save(
@@ -109,8 +104,8 @@ pub(super) async fn save_draft(
                 item_id: request.item_id,
                 editor: editor.clone(),
                 base_revision,
-                body: drafted.body,
-                properties: drafted.properties,
+                body,
+                properties: request.properties,
                 content_digest,
             },
         )
@@ -217,10 +212,14 @@ async fn require_item_at(
     }
 }
 
-/// One page of the caller's drafts in the workspace, most recently saved first.
+/// One page of the caller's drafts in the workspace, most recently saved first, each with its
+/// item's summary at the head, which the answer names (`ListDraftsResponse::revision`).
 ///
 /// The store lists every draft of the editor; the page is cut here, and its cursor is the
-/// decimal position of the next draft in that order.
+/// decimal position of the next draft in that order. Each row's item is read at the head with
+/// `VersionStore::show` (one read a row, up to the page's 200); an item the head does not hold
+/// (deleted since its draft was saved) has no summary, and any other refusal of the read fails
+/// the request.
 ///
 /// # Errors
 /// Returns `InvalidInput` on `/page/cursor` for a cursor this operation did not issue, or any
@@ -245,8 +244,24 @@ pub(super) async fn list_drafts(
         .await?;
     let after = offset.saturating_add(limit);
     let next_cursor = (after < drafts.len()).then(|| after.to_string());
+    let revision = service.ports().versions.head(&scope).await?;
+    let mut items = Vec::with_capacity(limit.min(drafts.len()));
+    for draft in drafts.into_iter().skip(offset).take(limit) {
+        let item = match service
+            .ports()
+            .versions
+            .show(&scope, &revision, draft.item_id)
+            .await
+        {
+            Ok(document) => Some(document.summary),
+            Err(error) if error.code == ErrorCode::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        items.push(DraftRow { draft, item });
+    }
     Ok(ListDraftsResponse {
-        items: drafts.into_iter().skip(offset).take(limit).collect(),
+        revision,
+        items,
         next_cursor,
     })
 }

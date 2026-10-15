@@ -30,7 +30,7 @@ mod job_handler {
     };
     use okf_jawn_contract::import::JobState;
     use okf_jawn_contract::purge::{Purge, PurgeReport, PurgeState};
-    use okf_jawn_contract::workspace::ArtifactKind;
+    use okf_jawn_contract::workspace::{ArtifactKind, BackupReport};
     use okf_jawn_core::conversion::{ConversionRecord, ConverterLimits, PixelSize, RetainedAsset};
     use okf_jawn_core::events::EventScope;
     use okf_jawn_core::jobs::{JobHandler, JobScope, JobSpec, NewJob, RecordStore};
@@ -48,8 +48,8 @@ mod job_handler {
 
     use crate::check::{TestResult, err_of, some};
     use crate::ports::{
-        AcceptAll, FakeBackups, FakeBlobs, FakeConverter, FakePurger, FakeSearch, FakeUploads,
-        FakeVersions, Hold, RefuseAll,
+        ARCHIVE_ROWS_LEFT_OUT, AcceptAll, FakeBackups, FakeBlobs, FakeConverter, FakePurger,
+        FakeSearch, FakeUploads, FakeVersions, Hold, RefuseAll,
     };
     use crate::records::{Appended, FakeEvents, FakeRecords, job_id};
 
@@ -811,6 +811,13 @@ mod job_handler {
             completion.outputs,
             std::slice::from_ref(&artifact.object.digest)
         );
+        // The job carries what the archive left out.
+        assert_eq!(
+            completion.backup,
+            Some(BackupReport {
+                rows_left_out: ARCHIVE_ROWS_LEFT_OUT
+            })
+        );
 
         // The attempt is repeated (its completion was lost): the same artifact, no second one.
         world
@@ -836,6 +843,12 @@ mod job_handler {
             JobSpec::BackupInstallation,
         )?;
         assert!(run(&world, tenant_job).await?);
+        let tenant_completion = world.records.entry(tenant_job)?;
+        assert_eq!(
+            some(tenant_completion.completions.first(), "the completion")?.backup,
+            None,
+            "an installation archive has no rows of a workspace to leave out"
+        );
         assert!(
             world
                 .records
@@ -1380,6 +1393,11 @@ mod job_handler {
         let (message, retryable) = some(entry.failures.first(), "the failure")?;
         assert!(message.contains("another job"), "{message}");
         assert!(!retryable);
+        // The store's refusal is the job's failure as it was given, its code kept.
+        assert_eq!(
+            entry.job.error.as_ref().map(|error| &error.code),
+            Some(&ErrorCode::Conflict)
+        );
         // Refused at the consume, before restore_import: one restore applied, by the first job.
         assert_eq!(
             world.backups.restored.lock().map_err(|_| "poisoned")?.len(),
@@ -1616,6 +1634,15 @@ mod job_handler {
         assert_eq!(entry.job.state, JobState::Failed);
         let (message, retryable) = some(entry.failures.first(), "the failure")?;
         assert!(message.contains("not complete"), "{message}");
+        assert_eq!(
+            entry
+                .job
+                .error
+                .as_ref()
+                .and_then(|error| error.field.as_deref()),
+            Some("/upload_ids/1"),
+            "the incomplete upload is the second of the request"
+        );
         // InvalidInput: not retried.
         assert!(!retryable);
         // The complete upload was not consumed, and nothing was written.
@@ -1648,6 +1675,15 @@ mod job_handler {
         let (message, retryable) = some(entry.failures.first(), "the failure")?;
         assert!(message.contains("another job"), "{message}");
         // Refused for good, like a collision: a retry would meet the same refusal.
+        assert_eq!(
+            entry
+                .job
+                .error
+                .as_ref()
+                .and_then(|error| error.field.as_deref()),
+            Some("/upload_ids/1"),
+            "the taken upload is the second of the request"
+        );
         assert!(!retryable);
         assert_eq!(entry.failures.len(), 1);
         assert_eq!(world.uploads.consumed()?, [(complete, taker)]);
@@ -1715,6 +1751,99 @@ mod job_handler {
         Ok(())
     }
 
+    /// The last segment of each card path the import wrote.
+    fn card_names(world: &World) -> Built<Vec<String>> {
+        Ok(cards(world)?
+            .iter()
+            .filter_map(|card| card.path.as_str().rsplit('/').next().map(str::to_owned))
+            .collect())
+    }
+
+    #[tokio::test]
+    async fn an_import_of_a_file_with_a_long_name_succeeds_with_a_card_name_of_one_segment()
+    -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let long = format!("{}.pdf", "q".repeat(296));
+        assert_eq!(long.chars().count(), 300);
+        let only = upload(&world, 157, &long, b"%PDF long")?;
+        let id = job(
+            &world,
+            155,
+            workspace_scope()?,
+            import_spec(vec![only], false)?,
+        )?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let names = card_names(&world)?;
+        assert_ne!(names, Vec::<String>::new(), "the import wrote its card");
+        for name in &names {
+            assert!(name.encode_utf16().count() <= 255, "{name}");
+            assert!(name.ends_with("-pdf.md"), "{name}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_second_file_of_the_same_long_name_is_numbered_within_one_segment() -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let long = format!("{}.pdf", "q".repeat(296));
+        let first = upload(&world, 158, &long, b"%PDF first")?;
+        let second = upload(&world, 159, &long, b"%PDF second")?;
+        let id = job(
+            &world,
+            156,
+            workspace_scope()?,
+            import_spec(vec![first, second], false)?,
+        )?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let names = card_names(&world)?;
+        let pending: Vec<&String> = names.iter().take(2).collect();
+        assert_eq!(
+            pending,
+            [
+                &format!("{}-pdf.md", "q".repeat(248)),
+                // The numbered name keeps the source-card tail `-pdf-2` whole and cuts the stem
+                // before it to fit (review N8).
+                &format!("{}-pdf-2.md", "q".repeat(246))
+            ]
+        );
+        for name in &names {
+            assert!(name.encode_utf16().count() <= 255, "{name}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_second_file_of_a_long_name_with_no_extension_is_numbered_within_one_segment()
+    -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let long = "q".repeat(300);
+        let first = upload(&world, 160, &long, b"%PDF first")?;
+        let second = upload(&world, 161, &long, b"%PDF second")?;
+        let id = job(
+            &world,
+            157,
+            workspace_scope()?,
+            import_spec(vec![first, second], false)?,
+        )?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let names = card_names(&world)?;
+        let pending: Vec<&String> = names.iter().take(2).collect();
+        assert_eq!(
+            pending,
+            [
+                &format!("{}.md", "q".repeat(252)),
+                &format!("{}-2.md", "q".repeat(250))
+            ]
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn an_import_refused_for_a_file_name_names_the_upload_ids_field() -> TestResult {
         let world = world_with(Some(3), Vec::new())?;
@@ -1726,12 +1855,15 @@ mod job_handler {
             workspace_scope()?,
             import_spec(vec![valid, escaping], false)?,
         )?;
-        // A job's failure is recorded as a message only (`RecordStore::fail_job`), so the field
-        // is read where it exists: in the handler's own refusal, before the runtime records it.
-        let claimed = some(world.records.claim_job(id).await?, "the claim")?;
-        let refused = err_of(world.handler.handle(&claimed).await)?;
+        // The refusal names the one upload, the second of the request, and the job's failure
+        // keeps it as given (`RecordStore::fail_job`).
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        assert_eq!(entry.job.retryable, Some(false));
+        let refused = some(entry.job.error, "the failure")?;
         assert_eq!(refused.code, ErrorCode::InvalidInput);
-        assert_eq!(refused.field.as_deref(), Some("/upload_ids"));
+        assert_eq!(refused.field.as_deref(), Some("/upload_ids/1"));
         assert!(
             refused.message.contains("gives no workspace path"),
             "{}",

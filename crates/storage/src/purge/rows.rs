@@ -71,8 +71,12 @@ struct Table {
 const KEPT: &[&str] = &["pending_puts", "purges", "purge_progress", "revision_map"];
 
 /// Tables whose records of one workspace can cite another, with their key column: a receipt's
-/// `sources` and a review's `source`.
-const CITING: &[(&str, &str)] = &[("receipts", "receipt_id"), ("reviews", "review_id")];
+/// `sources`, a review's `source` and a comment's `source`.
+const CITING: &[(&str, &str)] = &[
+    ("receipts", "receipt_id"),
+    ("reviews", "review_id"),
+    ("comments", "comment_id"),
+];
 
 /// The mutation ledger, whose rows of the workspace are emptied, not removed (module header).
 const LEDGER: &str = "mutations";
@@ -226,9 +230,10 @@ pub(crate) fn remove(
     Ok(())
 }
 
-/// The stored citations of other workspaces' receipts and reviews that cite the workspace and
-/// are not yet scrubbed. With `scrub`, each is scrubbed (`scrub_source`) and its record marked
-/// invalidated: a receipt gets `invalidated_by` that purge, a review the coverage `invalidated`.
+/// The stored citations of other workspaces' receipts, reviews and comments that cite the
+/// workspace and are not yet scrubbed. With `scrub`, each is scrubbed (`scrub_source`) and its
+/// record marked invalidated: a receipt and a comment get `invalidated_by` that purge, a review
+/// the coverage `invalidated`.
 pub(crate) fn citations(
     connection: &Connection,
     tenant: &str,
@@ -281,7 +286,7 @@ pub(crate) fn citations(
             if cited == 0 {
                 continue;
             }
-            if *table == "receipts" {
+            if *table == "receipts" || *table == "comments" {
                 fields
                     .entry("invalidated_by")
                     .or_insert_with(|| Value::String(purge.0.to_string()));

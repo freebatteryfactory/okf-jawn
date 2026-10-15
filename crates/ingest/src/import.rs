@@ -7,8 +7,10 @@
 //!    one batch the store takes whole or not at all (`UploadStore::consume_batch`), so a
 //!    refused batch consumes none. An upload another job took refuses the job for good.
 //! 2. Each card is named `conventions::source_card_name` of its file name, with the
-//!    numbered-suffix rule (`report-pdf-2.md`) against the destination folder at the base
-//!    revision and against the other cards of the job.
+//!    numbered-suffix rule (`conventions::numbered_source_card_name`: `report-pdf-2.md`, the
+//!    number after the extension marker) against the destination folder at the base revision
+//!    and against the other cards of the job. Both fit one path segment: the stem is
+//!    shortened and the tail kept whole, so a long name is never refused for its length.
 //! 3. All cards are committed first with outcome `pending`, through `portable::ImportCheck`
 //!    (the injected `CandidateCheck`, then OKF lint of the imported files) over every card's
 //!    path. A commit's check reports what that commit wrote: each card's own commit (step 4)
@@ -86,7 +88,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use okf_jawn_contract::common::{PageRange, Warning};
-use okf_jawn_contract::conventions::source_card_name;
+use okf_jawn_contract::conventions::numbered_source_card_name;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::EventKind;
 use okf_jawn_contract::extraction::{
@@ -416,12 +418,12 @@ fn refused_as(error: ApiError) -> Done {
 /// Every upload of the request is read and checked, and every card path derived, before any
 /// upload is consumed. An incomplete upload refuses the batch (`InvalidInput`), so does one
 /// another job consumed (`Conflict`), and so does a file name that gives no workspace path
-/// (`InvalidInput` on `/upload_ids`); then no upload of the batch is consumed, so another job
-/// may still take the good ones. Only then are they consumed by this job, all in one call
-/// (`UploadStore::consume_batch`, one transaction: all of them or none). Another job that
-/// consumed one of them between this check and that call is a concurrent import of the same
-/// upload: the store refuses the whole batch with `Conflict` and marks none, so two imports
-/// that share uploads never hold some of them each (R-I13).
+/// (`InvalidInput`); each refusal names its upload as `/upload_ids/<index>`. Then no upload of
+/// the batch is consumed, so another job may still take the good ones. Only then are they
+/// consumed by this job, all in one call (`UploadStore::consume_batch`, one transaction: all of
+/// them or none). Another job that consumed one of them between this check and that call is a
+/// concurrent import of the same upload: the store refuses the whole batch with `Conflict` and
+/// marks none, so two imports that share uploads never hold some of them each (R-I13).
 async fn pending_cards(
     ports: &HandlerPorts,
     claimed: &ClaimedJob,
@@ -430,28 +432,37 @@ async fn pending_cards(
 ) -> Result<Vec<(SourceCard, LocalSource)>, ApiError> {
     let job = claimed.lease.job_id;
     let mut sources = Vec::new();
-    for upload_id in request.upload_ids {
+    for (index, upload_id) in request.upload_ids.iter().enumerate() {
+        let field = format!("/upload_ids/{index}");
         let upload = ports.uploads.get(scope, *upload_id).await?;
         let object = upload.object.clone().ok_or_else(|| {
             ApiError::new(
                 ErrorCode::InvalidInput,
                 "an upload to import is not complete",
             )
-            .with_field("/upload_ids")
+            .with_field(field.clone())
         })?;
         if upload.consumed_by.is_some_and(|consumer| consumer != job) {
             return Err(ApiError::new(
                 ErrorCode::Conflict,
                 "an upload to import was already taken by another job",
             )
-            .with_field("/upload_ids"));
+            .with_field(field));
         }
         sources.push((upload, object));
     }
     let mut taken = taken_keys(ports, scope, request.base_revision, request.destination).await?;
     let paths = sources
         .iter()
-        .map(|(upload, _object)| free_path(request.destination, &upload.filename, &mut taken))
+        .enumerate()
+        .map(|(index, (upload, _object))| {
+            free_path(
+                request.destination,
+                &upload.filename,
+                &format!("/upload_ids/{index}"),
+                &mut taken,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let batch: Vec<UploadId> = sources.iter().map(|(upload, _object)| upload.id).collect();
     let _consumed = ports.uploads.consume_batch(scope, &batch, job).await?;
@@ -1100,20 +1111,17 @@ async fn taken_keys(
 }
 
 /// The card path for `file_name` in `destination`, with the numbered-suffix rule against the
-/// keys already taken; the chosen key is taken too.
+/// keys already taken; the chosen key is taken too. A later card is named by
+/// `conventions::numbered_source_card_name`, so its extension marker and number (`-pdf-2.md`)
+/// are never cut and the name fits one path segment.
 fn free_path(
     destination: Option<&WorkspacePath>,
     file_name: &str,
+    field: &str,
     taken: &mut BTreeSet<String>,
 ) -> Result<WorkspacePath, ApiError> {
-    let name = source_card_name(file_name);
-    let stem = name.strip_suffix(".md").unwrap_or(&name).to_owned();
     for number in 1_u32.. {
-        let candidate = if number == 1 {
-            name.clone()
-        } else {
-            format!("{stem}-{number}.md")
-        };
+        let candidate = numbered_source_card_name(file_name, number);
         let full = match destination {
             Some(folder) => format!("{}/{candidate}", folder.as_str()),
             None => candidate,
@@ -1123,7 +1131,7 @@ fn free_path(
                 ErrorCode::InvalidInput,
                 format!("the file name {file_name:?} gives no workspace path: {error}"),
             )
-            .with_field("/upload_ids")
+            .with_field(field)
         })?;
         if taken.insert(path.collision_key()) {
             return Ok(path);

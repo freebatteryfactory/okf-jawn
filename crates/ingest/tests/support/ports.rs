@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use okf_jawn_contract::common::{PageRange, Warning};
 use okf_jawn_contract::conventions::NamingRules;
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::extraction::{ConverterIdentity, FailureReason};
 use okf_jawn_contract::history::{BlameResponse, Commit, DiffResponse, LogResponse};
 use okf_jawn_contract::identity::{
@@ -34,10 +34,10 @@ use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
     Backups, BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges,
     Committed, DiffQuery, FolderListing, LocalSource, LogQuery, ObjectInfo, ObjectRead, Page,
-    Promotion, Purger, SourceCard, StorageScope, TreeEdit, VersionStore,
+    Promotion, Purger, SourceCard, StorageScope, TreeEdit, VersionStore, WrittenArchive,
     replay_warnings_unavailable,
 };
-use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
+use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadRecord, UploadStore};
 
 /// A `VersionStore` that keeps a line of commits and nothing of their trees.
 ///
@@ -224,6 +224,9 @@ pub struct FakePurger {
     /// Awaited as either purge starts (a long purge).
     pub hold: Mutex<Option<Hold>>,
 }
+
+/// The rows `FakeBackups` says each workspace archive it writes left out.
+pub const ARCHIVE_ROWS_LEFT_OUT: u32 = 2;
 
 impl Drop for DropCount {
     fn drop(&mut self) {
@@ -584,7 +587,9 @@ impl FakeVersions {
             .last()
             .map_or_else(|| self.head.clone(), |(_, revision)| revision.clone());
         if changes.expected_head != head {
-            return Err(ApiError::new(ErrorCode::Conflict, "the head moved"));
+            // As storage refuses it: `StaleBase` naming the head.
+            return Err(ApiError::new(ErrorCode::Conflict, "the head moved")
+                .with_detail(ErrorDetail::StaleBase { head }));
         }
         let mut holders: Vec<(String, ItemId)> = self.taken.lock().map_err(|_| poisoned())?.clone();
         holders.extend(commits.iter().flat_map(|(earlier, _)| {
@@ -901,7 +906,7 @@ impl VersionStore for FakeVersions {
         _proposal_id: okf_jawn_contract::identity::ProposalId,
         _changes: CandidateChanges,
         _check: Arc<dyn CandidateCheck>,
-    ) -> PortFuture<'a, Revision> {
+    ) -> PortFuture<'a, Committed> {
         unused("create_candidate")
     }
     fn promote_candidate<'a>(
@@ -1009,13 +1014,16 @@ impl Backups for FakeBackups {
         &'a self,
         _scope: &'a StorageScope,
         _mutation_id: MutationId,
-    ) -> PortFuture<'a, ObjectInfo> {
+    ) -> PortFuture<'a, WrittenArchive> {
         let _previous = self.writes.fetch_add(1, Ordering::SeqCst);
         let archive = self.archive.clone();
         let hold = hold_of(&self.write_hold);
         Box::pin(async move {
             held(hold).await?;
-            Ok(archive)
+            Ok(WrittenArchive {
+                object: archive,
+                rows_left_out: ARCHIVE_ROWS_LEFT_OUT,
+            })
         })
     }
     fn write_installation_archive<'a>(
@@ -1059,6 +1067,7 @@ impl Backups for FakeBackups {
                     items: 3,
                     drafts_restored: 1,
                     drafts_unassigned: 1,
+                    rows_left_out: None,
                 })
         })
     }
@@ -1098,6 +1107,13 @@ impl Purger for FakePurger {
 }
 
 impl UploadStore for FakeUploads {
+    fn list<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _query: UploadQuery,
+    ) -> PortFuture<'a, UploadPage> {
+        unused("list")
+    }
     fn create<'a>(
         &'a self,
         _scope: &'a StorageScope,

@@ -2,11 +2,12 @@
 #![cfg(feature = "runtime")]
 
 use okf_jawn_contract::access::{AccessRoute, Permission};
-use okf_jawn_contract::error::ErrorCode;
+use okf_jawn_contract::error::{ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::{Digest, JobId, TenantId, UploadId};
+use okf_jawn_contract::import::UploadListState;
 use okf_jawn_core::credentials::{ConnectorIssue, CredentialStore, NewConnector, secret_hash};
-use okf_jawn_core::storage::{BlobStore, ByteReader, Provenance, StorageScope};
-use okf_jawn_core::uploads::{NewUpload, UploadStore};
+use okf_jawn_core::storage::{BlobStore, ByteReader, Page, Provenance, StorageScope};
+use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadStore};
 use okf_jawn_storage::Storage;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
@@ -121,6 +122,16 @@ async fn a_blob_past_its_limit_or_with_another_digest_is_not_retained() -> TestR
         assert_eq!(error.code, ErrorCode::NotFound, "nothing was retained");
     }
     Ok(())
+}
+
+/// The detail of a completion refused for a mismatch: `expected` and `received` bytes, and
+/// whether the digest matched.
+fn mismatch(expected: &str, received: &str, digest_matches: Option<bool>) -> ErrorDetail {
+    ErrorDetail::UploadMismatch {
+        expected_bytes: expected.to_owned(),
+        received_bytes: received.to_owned(),
+        digest_matches,
+    }
 }
 
 fn announced(size: u64) -> NewUpload {
@@ -398,6 +409,8 @@ async fn an_upload_is_received_verified_retained_and_consumed_once() -> TestResu
         ErrorCode::Conflict,
         "five of ten bytes received"
     );
+    // Ruling 5: the lengths are named, and the digest was not compared.
+    assert_eq!(error.detail.as_deref(), Some(&mismatch("10", "5", None)));
     let error = err_of(uploads.consume(&local, slot.id, uuid!(7)?).await)?;
     assert_eq!(error.code, ErrorCode::InvalidInput);
     uploads
@@ -405,6 +418,11 @@ async fn an_upload_is_received_verified_retained_and_consumed_once() -> TestResu
         .await?;
     let error = err_of(uploads.complete(&local, slot.id, sha256(b"wrong")?).await)?;
     assert_eq!(error.code, ErrorCode::Conflict);
+    assert_eq!(
+        error.detail.as_deref(),
+        Some(&mismatch("10", "10", Some(false))),
+        "every byte received, the digest differs"
+    );
     let complete = uploads
         .complete(&local, slot.id, sha256(b"0123456789")?)
         .await?;
@@ -414,6 +432,13 @@ async fn an_upload_is_received_verified_retained_and_consumed_once() -> TestResu
         .complete(&local, slot.id, sha256(b"0123456789")?)
         .await?;
     assert_eq!(again, complete);
+    let other = err_of(uploads.complete(&local, slot.id, sha256(b"other")?).await)?;
+    assert_eq!(other.code, ErrorCode::Conflict);
+    assert_eq!(
+        other.detail.as_deref(),
+        Some(&mismatch("10", "10", Some(false))),
+        "completed with another digest"
+    );
     let read = storage.blobs().open(&local, &object.digest, 0, 10).await?;
     assert_eq!(read_all(read.body).await?, b"0123456789");
     let consumed = uploads.consume(&local, slot.id, uuid!(7)?).await?;
@@ -423,6 +448,116 @@ async fn an_upload_is_received_verified_retained_and_consumed_once() -> TestResu
     assert_eq!(error.code, ErrorCode::Conflict);
     let error = err_of(uploads.get(&scope("local", 2)?, slot.id).await)?;
     assert_eq!(error.code, ErrorCode::NotFound);
+    Ok(())
+}
+
+/// Ruling 3: a workspace's slots are listed newest first, in each state (incomplete, waiting,
+/// consumed) or all of them, a page at a time; another workspace's slots are not listed.
+/// Ruling 5: a completion whose digest is not the one the slot announced is refused before any
+/// byte is hashed, naming the lengths and that the digest does not match; the announced one
+/// completes it.
+#[tokio::test]
+async fn a_completion_against_another_digest_than_announced_names_the_mismatch() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let uploads = storage.uploads();
+    let local = scope("local", 1)?;
+    let announce = NewUpload {
+        expected_sha256: Some(sha256(b"0123")?),
+        ..announced(4)
+    };
+    let slot = uploads.create(&local, uuid!(40)?, announce).await?;
+    uploads
+        .put_content(&local, slot.id, body(b"0123"), 1024)
+        .await?;
+    let error = err_of(uploads.complete(&local, slot.id, sha256(b"abcd")?).await)?;
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert_eq!(
+        error.detail.as_deref(),
+        Some(&mismatch("4", "4", Some(false)))
+    );
+    let complete = uploads.complete(&local, slot.id, sha256(b"0123")?).await?;
+    assert!(complete.object.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn uploads_are_listed_newest_first_by_state_and_paged() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let uploads = storage.uploads();
+    let local = scope("local", 1)?;
+    let open = uploads.create(&local, uuid!(30)?, announced(4)).await?.id;
+    let waiting = complete_slot(&uploads, &local, 31, b"wait").await?;
+    let consumed = complete_slot(&uploads, &local, 32, b"take").await?;
+    uploads.consume(&local, consumed, uuid!(33)?).await?;
+    complete_slot(&uploads, &scope("local", 2)?, 34, b"else").await?;
+    let listed = |state: Option<UploadListState>, cursor: Option<String>, limit: u16| {
+        let uploads = storage.uploads();
+        let local = local.clone();
+        async move {
+            uploads
+                .list(
+                    &local,
+                    UploadQuery {
+                        state,
+                        page: Page { cursor, limit },
+                    },
+                )
+                .await
+        }
+    };
+    let ids =
+        |page: &UploadPage| -> Vec<UploadId> { page.items.iter().map(|slot| slot.id).collect() };
+    let every = listed(None, None, 10).await?;
+    assert_eq!(ids(&every), [consumed, waiting, open], "newest first");
+    assert_eq!(every.next_cursor, None);
+    for (state, expected) in [
+        (UploadListState::Incomplete, open),
+        (UploadListState::Waiting, waiting),
+        (UploadListState::Consumed, consumed),
+    ] {
+        assert_eq!(
+            ids(&listed(Some(state), None, 10).await?),
+            [expected],
+            "{state:?}"
+        );
+    }
+    let first = listed(None, None, 2).await?;
+    assert_eq!(ids(&first), [consumed, waiting]);
+    let second = listed(None, first.next_cursor.clone(), 2).await?;
+    assert_eq!(ids(&second), [open]);
+    assert_eq!(second.next_cursor, None);
+    let refused = err_of(listed(None, Some("not-a-cursor".to_owned()), 2).await)?;
+    assert_eq!(refused.field.as_deref(), Some("/page/cursor"));
+    Ok(())
+}
+
+/// The wire form of a slot carries what the slot recorded: its names, size, opening and taker.
+#[tokio::test]
+async fn a_slots_wire_form_carries_what_the_slot_recorded() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let uploads = storage.uploads();
+    let local = scope("local", 1)?;
+    let slot = complete_slot(&uploads, &local, 35, b"wire").await?;
+    uploads.consume(&local, slot, uuid!(36)?).await?;
+    let record = uploads.get(&local, slot).await?;
+    let wire = record.to_wire(local.workspace_id);
+    assert_eq!(
+        wire.upload_path,
+        format!(
+            "/api/workspaces/{}/uploads/{}/content",
+            local.workspace_id.0, slot.0
+        )
+    );
+    assert!(wire.complete);
+    assert_eq!(wire.received_bytes, "4");
+    assert_eq!(wire.size.as_deref(), Some("4"));
+    assert_eq!(wire.filename.as_deref(), Some("notes.txt"));
+    assert_eq!(wire.relative_path.as_deref(), Some(""));
+    assert_eq!(wire.created_at.as_ref(), Some(&record.created_at));
+    assert_eq!(wire.consumed_by, Some(uuid!(36)?));
     Ok(())
 }
 

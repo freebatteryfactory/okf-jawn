@@ -18,7 +18,15 @@ import { resetDraftSessions } from '../../src/features/drafts/saving';
 import { placeOf, samePlace } from '../../src/features/explorer/ExplorerShell';
 import { YAML_PAUSE_MS } from '../../src/lib/yaml';
 import { setYamlEngine, TOO_COMPLEX_WORDS, YAML_LIMIT_MS } from '../../src/lib/yaml-reading';
-import { type Handler, type Json, mockApi, ok, type Reply } from './support/api';
+import {
+  draftsPage,
+  type Handler,
+  type Json,
+  mockApi,
+  ok,
+  type Reply,
+  rulesAnswer,
+} from './support/api';
 import { CANCELLED, handed, TAKEN } from './support/drags';
 import {
   caretIn,
@@ -158,10 +166,11 @@ function service(overrides: Record<string, Handler> = {}, rules: unknown = saved
     },
     '/api/reads/get-sources': (body) =>
       ok({ revision: revisionAsked(body, state.head), sources: [], declared: [] }),
-    '/api/items/list-drafts': () => ok({ items: [], next_cursor: null }),
+    '/api/items/list-drafts': () => ok(draftsPage([])),
     '/api/types/list-types': () => ok({ items: [] }),
     [SCHEMA]: () => ok(namingSchema),
-    [RULES]: (body) => ok(state.rules.get(revisionAsked(body, state.head)) ?? savedRules),
+    [RULES]: (body) =>
+      ok(rulesAnswer(state.rules.get(revisionAsked(body, state.head)) ?? savedRules, body)),
     [SET]: (body) => {
       if (text(body, 'base_revision') !== state.head) {
         return refuse(409, 'conflict', 'the workspace head moved since the base revision');
@@ -174,7 +183,8 @@ function service(overrides: Record<string, Handler> = {}, rules: unknown = saved
     },
     [PREVIEW]: (body) => {
       const revision = revisionAsked(body, state.head);
-      const ids = Array.isArray(body.item_ids) ? body.item_ids : [];
+      const selection = body.selection as { item_ids?: unknown } | undefined;
+      const ids = Array.isArray(selection?.item_ids) ? selection.item_ids : [];
       return ok({
         base_revision: revision,
         rules_digest: DIGEST,
@@ -189,6 +199,9 @@ function service(overrides: Record<string, Handler> = {}, rules: unknown = saved
           })),
         duplicate_observations: [],
         warnings: [{ code: 'note', message: 'Index files are not renamed.' }],
+        considered: ids.length,
+        unchanged: 0,
+        archived_left_out: 0,
       });
     },
     [APPLY]: (body) => {
@@ -217,7 +230,7 @@ function service(overrides: Record<string, Handler> = {}, rules: unknown = saved
 
 const button = (name: string | RegExp) => screen.getByRole('button', { name });
 const panel = () => screen.getByRole('region', { name: 'Naming rules' });
-const prefix = () => within(panel()).getByRole('textbox', { name: /^prefix/ });
+const prefix = () => within(panel()).getByRole('textbox', { name: /^Prefix/ });
 const said = () => panel().querySelector('.rules-said')?.textContent ?? '';
 /** A turn of the event loop: a reading that was started has answered after it. */
 const turn = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
@@ -238,7 +251,7 @@ const writes = (api: ReturnType<typeof mockApi>) => [...api.callsTo(SET), ...api
 async function openRules(url = `/w/${WS}`) {
   const view = renderAt(url);
   await userEvent.click(await screen.findByRole('button', { name: 'Naming rules' }));
-  await within(panel()).findByRole('textbox', { name: /^prefix/ });
+  await within(panel()).findByRole('textbox', { name: /^Prefix/ });
   return view;
 }
 
@@ -260,6 +273,9 @@ describe('whether a preview may still be applied', () => {
     entries: [],
     duplicate_observations: [],
     warnings: [],
+    considered: 0,
+    unchanged: 0,
+    archived_left_out: 0,
   };
   const preview: Preview = { plan, rules: savedRules, folder: '', looked: 3 };
 
@@ -288,7 +304,7 @@ describe('the rules form', () => {
     const onChange = vi.fn();
     const withUnknown = { ...savedRules, rules: [{ ...rule, legacy_flag: true }], note: 'kept' };
     render(<RulesForm schema={schema} value={withUnknown} onChange={onChange} />);
-    fireEvent.change(screen.getByRole('textbox', { name: /^prefix/ }), { target: { value: 'x-' } });
+    fireEvent.change(screen.getByRole('textbox', { name: /^Prefix/ }), { target: { value: 'x-' } });
     expect(onChange).toHaveBeenCalled();
     expect(onChange.mock.lastCall?.at(0)).toEqual({
       ...withUnknown,
@@ -322,7 +338,9 @@ describe('the list of rules in the form', () => {
     );
   }
   const globs = () =>
-    screen.getAllByRole('textbox', { name: /^glob/ }).map((box) => (box as HTMLInputElement).value);
+    screen
+      .getAllByRole('textbox', { name: /^Applies to paths/ })
+      .map((box) => (box as HTMLInputElement).value);
   const press = (name: string, index: number) => {
     const button = screen.getAllByRole('button', { name }).at(index);
     button?.focus();
@@ -361,7 +379,7 @@ describe('the naming rules', () => {
     await openRules();
     expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Naming rules' }));
     expect(prefix()).toHaveProperty('value', '');
-    expect(within(panel()).getByRole('textbox', { name: /^separator/ })).toHaveProperty(
+    expect(within(panel()).getByRole('textbox', { name: /^Word separator/ })).toHaveProperty(
       'value',
       '-',
     );
@@ -410,7 +428,7 @@ describe('the naming rules', () => {
   it('never sends rules that have a problem: it is shown at its field and in the list', async () => {
     const { api } = service();
     await openRules();
-    const version = within(panel()).getByRole('spinbutton', { name: /^schema_version/ });
+    const version = within(panel()).getByRole('spinbutton', { name: /^Format version/ });
     await userEvent.clear(version);
     await waitFor(() =>
       expect(within(panel()).getByRole('alert').textContent).toContain('1 problem'),
@@ -435,7 +453,7 @@ describe('the naming rules', () => {
         workspace_id: WS,
         at: { kind: 'revision', revision: HEAD },
         // The top level, then the folder under it.
-        item_ids: [SOURCE, NOTE, OTHER],
+        selection: { kind: 'items', item_ids: [SOURCE, NOTE, OTHER] },
         rules: { schema_version: 1, rules: [{ ...rule, prefix: '2025-' }] },
       },
     ]);
@@ -476,7 +494,10 @@ describe('the naming rules', () => {
     await openRules();
     await setPrefix('2025-');
     await previewNow();
-    expect(api.callsTo(PREVIEW).at(0)?.item_ids).toEqual([NOTE, OTHER]);
+    expect(api.callsTo(PREVIEW).at(0)?.selection).toEqual({
+      kind: 'items',
+      item_ids: [NOTE, OTHER],
+    });
   });
 
   it('gives the documents back their place when an item is opened from the folders', async () => {
@@ -495,7 +516,10 @@ describe('the naming rules', () => {
     const folder = within(panel()).getByRole('textbox', { name: 'Preview the items in folder' });
     await userEvent.type(folder, 'notes');
     await previewNow();
-    expect(api.callsTo(PREVIEW).at(0)?.item_ids).toEqual([NOTE, OTHER]);
+    expect(api.callsTo(PREVIEW).at(0)?.selection).toEqual({
+      kind: 'items',
+      item_ids: [NOTE, OTHER],
+    });
     await userEvent.clear(folder);
     await userEvent.type(folder, 'empty');
     await userEvent.click(button('Preview the renames'));
@@ -553,6 +577,9 @@ describe('the naming rules', () => {
           ],
           duplicate_observations: [],
           warnings: [{ code: 'note', message: 'Index files are not renamed.' }],
+          considered: 3,
+          unchanged: 0,
+          archived_left_out: 0,
         },
         rules: previewed?.rules,
       },
@@ -1058,7 +1085,7 @@ describe('rules typed as YAML a moment before a press', () => {
     await userEvent.click(screen.getByRole('tab', { name: 'Form' }));
     // The change of view started the reading; until it answers there is no form to edit.
     expect(readings).toHaveLength(1);
-    expect(within(panel()).queryByRole('textbox', { name: /^prefix/ })).toBeNull();
+    expect(within(panel()).queryByRole('textbox', { name: /^Prefix/ })).toBeNull();
     expect(within(panel()).getByText('Reading the text of the YAML view…')).toBeTruthy();
     answer(readings.at(0));
     expect(prefix()).toHaveProperty('value', 'typed-');
@@ -1271,7 +1298,7 @@ describe('the person’s drafts of items a renaming renames', () => {
     saved_at: '2026-01-01T23:30:00.000Z',
   };
   const withDraftOfNote = (save: Handler): Record<string, Handler> => ({
-    '/api/items/list-drafts': () => ok({ items: [draft], next_cursor: null }),
+    '/api/items/list-drafts': () => ok(draftsPage([draft])),
     '/api/items/get-item': (body) => {
       const revision = revisionAsked(body, HEAD);
       const item = body.item_id === NOTE ? noteSummary : otherSummary;
@@ -1373,7 +1400,7 @@ describe('the person’s drafts of items a renaming renames', () => {
     renderAt(`/w/${WS}/i/${NOTE}`);
     await findTextBox('Text of Meeting notes');
     await userEvent.click(await screen.findByRole('button', { name: 'Naming rules' }));
-    await within(panel()).findByRole('textbox', { name: /^prefix/ });
+    await within(panel()).findByRole('textbox', { name: /^Prefix/ });
     await setPrefix('2025-');
     await previewNow();
     await userEvent.click(button('Apply this preview…'));
@@ -1441,7 +1468,7 @@ describe('leaving the naming rules with edits that are not saved', () => {
     expect(screen.queryByRole('region', { name: 'Naming rules' })).toBeNull();
     expect(document.activeElement).toBe(button('Naming rules'));
     await userEvent.click(button('Naming rules'));
-    await within(panel()).findByRole('textbox', { name: /^prefix/ });
+    await within(panel()).findByRole('textbox', { name: /^Prefix/ });
     expect(prefix()).toHaveProperty('value', '');
   });
 
@@ -1466,7 +1493,7 @@ describe('leaving the naming rules with edits that are not saved', () => {
     await turn();
     setYamlEngine(inlineEngine);
     await userEvent.click(button('Naming rules'));
-    await within(panel()).findByRole('textbox', { name: /^prefix/ });
+    await within(panel()).findByRole('textbox', { name: /^Prefix/ });
     expect(prefix()).toHaveProperty('value', '');
     expect(leavingAsks()).toBe(false);
   });
@@ -1534,15 +1561,15 @@ describe('leaving the naming rules with edits that are not saved', () => {
     expect(button('Naming rules').getAttribute('aria-expanded')).toBe('false');
     // Discarded: opened again, the rules are the saved ones.
     await userEvent.click(button('Naming rules'));
-    await within(panel()).findByRole('textbox', { name: /^prefix/ });
+    await within(panel()).findByRole('textbox', { name: /^Prefix/ });
     expect(prefix()).toHaveProperty('value', '');
   });
 
   it('asks before a draft is opened from the list of drafts, and focus is on its button after either answer', async () => {
     service({
       '/api/items/list-drafts': () =>
-        ok({
-          items: [
+        ok(
+          draftsPage([
             {
               item_id: NOTE,
               base_revision: HEAD,
@@ -1550,9 +1577,8 @@ describe('leaving the naming rules with edits that are not saved', () => {
               editor: 'ada',
               saved_at: '2026-01-01T23:30:00.000Z',
             },
-          ],
-          next_cursor: null,
-        }),
+          ]),
+        ),
     });
     const { router } = await openRules();
     await setPrefix('unsaved-');
@@ -1850,13 +1876,13 @@ describe('saving over rules someone else saved meanwhile', () => {
    * The same journey, with the rules of the new head answered by `atNewHead`: edit, be refused
    * because someone else moved the head, refresh. (The re-review's probes R10b and R10c.)
    */
-  async function refreshedWith(atNewHead: () => Reply | Promise<Reply>) {
+  async function refreshedWith(atNewHead: (body: Json) => Reply | Promise<Reply>) {
     const holder: { next: string } = { next: '' };
     const own = service({
       [RULES]: (body) =>
         holder.next !== '' && revisionAsked(body, HEAD) === holder.next
-          ? atNewHead()
-          : ok(savedRules),
+          ? atNewHead(body)
+          : ok(rulesAnswer(savedRules, body)),
     });
     await openRules();
     await setPrefix('mine-');
@@ -1876,9 +1902,9 @@ describe('saving over rules someone else saved meanwhile', () => {
   it('offers no save while the rules of the version shown are still being read, and then the replacing one', async () => {
     const gate: { release: () => void } = { release: () => {} };
     const own = await refreshedWith(
-      () =>
+      (body) =>
         new Promise<Reply>((resolve) => {
-          gate.release = () => resolve(ok(theirs));
+          gate.release = () => resolve(ok(rulesAnswer(theirs, body)));
         }),
     );
     // The rules on screen are the ones read before: saving over rules never shown is not offered.
@@ -1907,8 +1933,8 @@ describe('saving over rules someone else saved meanwhile', () => {
 
   it('offers no save when the rules of the version shown cannot be read: the failure has its retry', async () => {
     let failing = true;
-    const own = await refreshedWith(() =>
-      failing ? refuse(500, 'internal', 'the rules file broke') : ok(theirs),
+    const own = await refreshedWith((body) =>
+      failing ? refuse(500, 'internal', 'the rules file broke') : ok(rulesAnswer(theirs, body)),
     );
     const alert = await screen.findByRole('alert', {}, { timeout: 4_000 });
     expect(alert.textContent).toContain('Reading the naming rules');
@@ -2090,7 +2116,8 @@ describe('the rules on screen when the version shown changes', () => {
   it('keeps the form, and focus in it, when the rules cannot be read at the new head, and says which rules these are', async () => {
     let failing = false;
     const own = service({
-      [RULES]: () => (failing ? refuse(500, 'internal', 'the store broke') : ok(savedRules)),
+      [RULES]: (body) =>
+        failing ? refuse(500, 'internal', 'the store broke') : ok(rulesAnswer(savedRules, body)),
     });
     await openRules();
     failing = true;
@@ -2197,7 +2224,7 @@ describe('the naming rules and the workspace’s own pages', () => {
     const { router } = renderAt(`/w/${WS}/attention`);
     await waitFor(() => expect(page('Attention')).not.toBeNull());
     await userEvent.click(button('Naming rules'));
-    await within(panel()).findByRole('textbox', { name: /^prefix/ });
+    await within(panel()).findByRole('textbox', { name: /^Prefix/ });
     // Behind the rules, not gone: hidden from everyone, still the page the address names.
     expect(page('Attention')).toBeNull();
     expect(screen.getByRole('heading', { name: 'Attention', level: 2, hidden: true })).toBeTruthy();
@@ -2231,7 +2258,7 @@ describe('the naming rules and the workspace’s own pages', () => {
     renderAt(`/w/${WS}/import`);
     await waitFor(() => expect(page('Import files')).not.toBeNull());
     await userEvent.click(button('Naming rules'));
-    await within(panel()).findByRole('textbox', { name: /^prefix/ });
+    await within(panel()).findByRole('textbox', { name: /^Prefix/ });
     expect(page('Import files')).toBeNull();
     await userEvent.click(link('Import'));
     expect(rulesPanel()).toBeNull();
@@ -2246,7 +2273,7 @@ describe('the naming rules and the workspace’s own pages', () => {
     await userEvent.click(link('Import'));
     await waitFor(() => expect(page('Import files')).not.toBeNull());
     await userEvent.click(button('Naming rules'));
-    await within(panel()).findByRole('textbox', { name: /^prefix/ });
+    await within(panel()).findByRole('textbox', { name: /^Prefix/ });
     await setPrefix('unsaved-');
     const documents = link('Documents');
     await userEvent.click(documents);
@@ -2299,7 +2326,7 @@ describe('the naming rules and the workspace’s own pages', () => {
     await waitFor(() => expect(router.state.location.search).toMatchObject({ q: 'review' }));
     await settle();
     await userEvent.click(button('Naming rules'));
-    await within(panel()).findByRole('textbox', { name: /^prefix/ });
+    await within(panel()).findByRole('textbox', { name: /^Prefix/ });
     // The same place, written two ways: the search put `q` last, the link puts it first.
     const documents = link('Documents');
     const written = documents.getAttribute('href') ?? '';
@@ -2322,7 +2349,7 @@ describe('the naming rules and the workspace’s own pages', () => {
     service();
     const { router } = renderAt(`/w/${WS}/i/${NOTE}?rev=${HEAD}&q=meeting`);
     await userEvent.click(await screen.findByRole('button', { name: 'Naming rules' }));
-    await within(panel()).findByRole('textbox', { name: /^prefix/ });
+    await within(panel()).findByRole('textbox', { name: /^Prefix/ });
     await setPrefix('unsaved-');
     const documents = link('Documents');
     expect(documents.getAttribute('href')).not.toBe(router.state.location.href);

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use git2::{Oid, Repository};
 use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::conventions::NamingRules;
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::history::{BlameResponse, DiffResponse, LogResponse};
 use okf_jawn_contract::identity::{
     Digest, ItemId, MutationId, ProposalId, Revision, WorkspacePath,
@@ -66,6 +66,10 @@ struct Write {
     message: String,
     edits: Vec<TreeEdit>,
 }
+
+/// The refusal of a candidate whose proposal's reference another write already set: it is about
+/// no base, so it carries no `StaleBase`.
+const CANDIDATE_TAKEN: &str = "this proposal already has a candidate from another write";
 
 impl GitVersions {
     pub(crate) const fn new(repositories: Repositories, records: Db, blobs: LocalBlobs) -> Self {
@@ -300,7 +304,7 @@ impl VersionStore for GitVersions {
                     return Ok((replay, named_by(&repository, found, named)?));
                 }
                 if current != expected {
-                    return Err(moved_head());
+                    return Err(moved_head(&repository));
                 }
                 let mutation_id = changes.mutation_id;
                 let write = Write {
@@ -367,7 +371,7 @@ impl VersionStore for GitVersions {
         proposal_id: ProposalId,
         changes: CandidateChanges,
         check: Arc<dyn CandidateCheck>,
-    ) -> PortFuture<'a, Revision> {
+    ) -> PortFuture<'a, Committed> {
         let named = card_objects(&changes.edits);
         let records = self.records.clone();
         let candidate = self.blocking(scope, move |repositories, scope| {
@@ -382,32 +386,37 @@ impl VersionStore for GitVersions {
                     if find_trailer(&repository, retained, base, changes.mutation_id)?
                         == Some(retained)
                     {
-                        return Ok((
-                            revision_of(retained)?,
-                            named_by(&repository, retained, named)?,
-                        ));
+                        let replay =
+                            warnings::replayed(&records, scope, changes.mutation_id, retained)?;
+                        return Ok((replay, named_by(&repository, retained, named)?));
                     }
-                    return Err(ApiError::new(
-                        ErrorCode::Conflict,
-                        "this proposal already has a candidate from another write",
-                    ));
+                    return Err(ApiError::new(ErrorCode::Conflict, CANDIDATE_TAKEN));
                 }
+                let mutation_id = changes.mutation_id;
                 let write = Write {
-                    mutation_id: changes.mutation_id,
+                    mutation_id,
                     base,
                     author: changes.author.clone(),
                     committer: changes.author,
                     message: changes.message,
                     edits: changes.edits,
                 };
-                let (commit, _) =
+                let (commit, given) =
                     stage_and_commit(repositories, scope, &repository, write, &*check)?;
+                // Kept before the reference names the candidate, as a commit's are, so a
+                // repeat answers them.
+                warnings::keep(&records, scope, mutation_id, commit, &given)?;
                 move_reference(&repository, &name, commit, None)?;
                 sync_directories(
                     &repository,
                     &["refs", "refs/okf-jawn", "refs/okf-jawn/proposals"],
                 )?;
-                Ok((revision_of(commit)?, named))
+                let committed = Committed {
+                    revision: revision_of(commit)?,
+                    replayed: false,
+                    warnings: given,
+                };
+                Ok((committed, named))
             })
         });
         Box::pin(self.guarded(scope, candidate))
@@ -592,7 +601,7 @@ fn promote(
         return warnings::replayed(records, scope, promotion.mutation_id, found);
     }
     if current != expected {
-        return Err(moved_head());
+        return Err(moved_head(repository));
     }
     let retained = reference_target(repository, &proposal_reference(promotion.proposal_id))?;
     let candidate = oid(&promotion.candidate)?;
@@ -636,7 +645,12 @@ fn promote(
     })
 }
 
-/// Point `name` at `commit`, only if it still points at `current` (or does not exist).
+/// Point `name` at `commit`, only if it still points at `current`; with no `current`, only if
+/// it does not exist yet.
+///
+/// A lost compare-and-set of the head (`current` given) means the head is not the expected one:
+/// `moved_head`, with `StaleBase`. A candidate's reference that another write set meanwhile
+/// (no `current`) is about no base: a plain `Conflict` (`CANDIDATE_TAKEN`).
 fn move_reference(
     repository: &Repository,
     name: &str,
@@ -650,22 +664,31 @@ fn move_reference(
         None => repository.reference(name, commit, false, "okf-jawn candidate"),
     };
     moved.map(|_| ()).map_err(|error| {
-        if matches!(
+        if !matches!(
             error.code(),
             git2::ErrorCode::Modified | git2::ErrorCode::Exists
         ) {
-            moved_head()
-        } else {
-            git(&error)
+            return git(&error);
+        }
+        match current {
+            Some(_) => moved_head(repository),
+            None => ApiError::new(ErrorCode::Conflict, CANDIDATE_TAKEN),
         }
     })
 }
 
-fn moved_head() -> ApiError {
-    ApiError::new(
-        ErrorCode::Conflict,
-        "the workspace head moved since the change was prepared",
-    )
+/// The refusal of a write whose expected head is not the head: `Conflict` with
+/// `ErrorDetail::StaleBase` naming the head it was compared with; the caller, which knows the
+/// request, names its field. A head that cannot be read is answered as that read's error.
+fn moved_head(repository: &Repository) -> ApiError {
+    match head(repository).and_then(revision_of) {
+        Ok(head) => ApiError::new(
+            ErrorCode::Conflict,
+            "the workspace head moved since the change was prepared",
+        )
+        .with_detail(ErrorDetail::StaleBase { head }),
+        Err(error) => error,
+    }
 }
 
 /// The commit an `expected_head` names. One the repository does not hold (stale after a
@@ -675,7 +698,7 @@ fn held_head(repository: &Repository, expected: &Revision) -> Result<Oid, ApiErr
     let id = oid(expected)?;
     match repository.find_commit(id) {
         Ok(_) => Ok(id),
-        Err(error) if error.code() == git2::ErrorCode::NotFound => Err(moved_head()),
+        Err(error) if error.code() == git2::ErrorCode::NotFound => Err(moved_head(repository)),
         Err(error) => Err(git(&error)),
     }
 }

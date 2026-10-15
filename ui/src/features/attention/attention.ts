@@ -111,6 +111,7 @@ export const ATTENTION_KIND: Record<AttentionKind, string> = {
   instruction_like: 'Text that reads like instructions to an AI tool',
   invalidated: 'Refers to content that was removed',
   unparseable_header: 'A header that could not be read',
+  uploads_waiting: 'Uploaded files waiting to be imported',
 };
 
 /** A warning's kind in words; a kind this build does not know is said to be unknown, by its name. */

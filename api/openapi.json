@@ -125,7 +125,7 @@
             "description": "Typed context for conflict, replay, and in-progress outcomes."
           },
           "field": {
-            "description": "Input field needing correction.",
+            "description": "Input field needing correction. A JSON Pointer into the request (`/base_revision`,\n`/changes/2/body`).",
             "type": [
               "string",
               "null"
@@ -180,7 +180,7 @@
       },
       "ArchiveWorkspaceRequest": {
         "additionalProperties": false,
-        "description": "Archive the workspace without deleting retained content.\n\nWhile a workspace is archived, an operation that would change its content or open work on\nit (a commit, a draft, a proposal, an upload, an import or redigest) is refused as\n`conflict`; reads, export, backup, `unarchive_workspace` and purge are allowed.",
+        "description": "Archive the workspace without deleting retained content.\n\nWhile a workspace is archived, only the operations of `operations::ALLOWED_WHILE_ARCHIVED`\nrun on it: every operation that is not a mutation, and a repeated archive, unarchive,\nexport, backup, purge, cancelling a job and rebuilding the index. Any other is refused as\n`conflict` with `ErrorDetail::WorkspaceArchived`. The archive itself is refused with\n`conflict` while an import, redigest or restore job of the workspace is queued or running,\nand no such job is accepted for an archived workspace, so no content-changing job runs in\none. A direct write admitted just before the archive lands completes.",
         "properties": {
           "base_revision": {
             "$ref": "#/components/schemas/Revision",
@@ -293,6 +293,17 @@
             "$ref": "#/components/schemas/OperationName",
             "description": "Suggested existing operation, never executable code."
           },
+          "item": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ItemSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The item at the response's `revision`; absent when the observation is about no one\nitem or the item was purged."
+          },
           "item_id": {
             "anyOf": [
               {
@@ -311,6 +322,17 @@
           "message": {
             "description": "Concrete explanation.",
             "type": "string"
+          },
+          "selection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Selection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The place inside the item the observation is about, in the form `read_item` takes;\nabsent when it is about the whole item."
           }
         },
         "required": [
@@ -377,6 +399,11 @@
             "const": "unparseable_header",
             "description": "An imported file's header does not parse; its bytes are kept and nothing is blocked.\nAction `get_item`.",
             "type": "string"
+          },
+          {
+            "const": "uploads_waiting",
+            "description": "Uploads that are complete and not imported, with their count and total size in the\nmessage; one row a workspace when any exist. Action `list_uploads`.",
+            "type": "string"
           }
         ]
       },
@@ -391,6 +418,22 @@
         },
         "required": [
           "idempotency_key"
+        ],
+        "type": "object"
+      },
+      "BackupReport": {
+        "additionalProperties": false,
+        "description": "What a workspace backup did.",
+        "properties": {
+          "rows_left_out": {
+            "description": "Rows left out of the archive because they named a managed backup or a written history.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rows_left_out"
         ],
         "type": "object"
       },
@@ -661,9 +704,20 @@
             "description": "Create a note or View with retained properties.",
             "properties": {
               "body": {
-                "description": "Body, at most 8 MiB in UTF-8.",
-                "maxLength": 8388608,
-                "type": "string"
+                "description": "Body. At most 8388608 bytes in UTF-8: a character takes one to four.",
+                "type": "string",
+                "x-max-utf8-bytes": 8388608
+              },
+              "item_kind": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ItemKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The new item's rendering role. Absent means a note; `source` is refused: a source\ncomes only from an import."
               },
               "kind": {
                 "const": "create",
@@ -697,9 +751,9 @@
             "description": "Replace authored content with preconditions.",
             "properties": {
               "body": {
-                "description": "Body, at most 8 MiB in UTF-8.",
-                "maxLength": 8388608,
-                "type": "string"
+                "description": "Body. At most 8388608 bytes in UTF-8: a character takes one to four.",
+                "type": "string",
+                "x-max-utf8-bytes": 8388608
               },
               "item_id": {
                 "$ref": "#/components/schemas/ItemId",
@@ -790,9 +844,9 @@
                 "type": "string"
               },
               "markdown": {
-                "description": "The complete proposed text, Markdown, at most 8 MiB in UTF-8.",
-                "maxLength": 8388608,
-                "type": "string"
+                "description": "The complete proposed text, Markdown.\nAt most 8388608 bytes in UTF-8: a character takes one to four.",
+                "type": "string",
+                "x-max-utf8-bytes": 8388608
               },
               "pages": {
                 "description": "Pages the text covers, as the agent claims; empty for the whole.",
@@ -962,16 +1016,19 @@
           {
             "const": "reject",
             "description": "Require an explicit decision.",
+            "title": "Ask for a decision",
             "type": "string"
           },
           {
             "const": "suffix",
             "description": "Add a deterministic suffix.",
+            "title": "Add a number",
             "type": "string"
           },
           {
             "const": "keep_existing",
             "description": "Keep the original name and report the collision.",
+            "title": "Keep the existing name",
             "type": "string"
           }
         ]
@@ -1032,6 +1089,17 @@
               }
             ],
             "description": "The purge that invalidated the comment's `source`, whose stored path was scrubbed."
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceReference"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The line or range under discussion, resolved when the comment was added."
           },
           "text": {
             "description": "Discussion text.",
@@ -1566,9 +1634,9 @@
             "description": "Exact revision on which this change is based; stale writes conflict."
           },
           "corrected_markdown": {
-            "description": "Corrected text kept separate from generated text, at most 8 MiB in UTF-8.",
-            "maxLength": 8388608,
-            "type": "string"
+            "description": "Corrected text kept separate from generated text.\nAt most 8388608 bytes in UTF-8: a character takes one to four.",
+            "type": "string",
+            "x-max-utf8-bytes": 8388608
           },
           "digest": {
             "$ref": "#/components/schemas/Digest",
@@ -1706,9 +1774,9 @@
             "description": "Exact revision on which this change is based; stale writes conflict."
           },
           "body": {
-            "description": "Markdown content, at most 8 MiB in UTF-8.",
-            "maxLength": 8388608,
-            "type": "string"
+            "description": "Markdown content. At most 8388608 bytes in UTF-8: a character takes one to four.",
+            "type": "string",
+            "x-max-utf8-bytes": 8388608
           },
           "idempotency_key": {
             "$ref": "#/components/schemas/IdempotencyKey",
@@ -1813,19 +1881,21 @@
       },
       "CreateUploadRequest": {
         "additionalProperties": false,
-        "description": "Register immutable upload intent before streaming bytes.",
+        "description": "Register immutable upload intent before streaming bytes.\n\n`filename` and `relative_path` are bounded in UTF-8 bytes (`MAX_UPLOAD_FILENAME_BYTES`,\n`MAX_UPLOAD_RELATIVE_PATH_BYTES`): the schema states each bound as `x-max-utf8-bytes`, never as\na `maxLength` in characters, and `check_rules` counts the bytes and refuses a longer name as\n`too_large` on its field. A `filename` that gives no workspace path for its source card\n(`conventions::source_card_name`, then `WorkspacePath::from_supplied`) is refused as\n`invalid_input` on `/filename` when the slot is opened; an import that later places the\ncard in a folder where the path cannot be written still refuses the job.",
         "properties": {
           "filename": {
-            "description": "Original filename, preserved.",
-            "type": "string"
+            "description": "Original filename, preserved. At most 1024 bytes in UTF-8: a character takes one to four.",
+            "type": "string",
+            "x-max-utf8-bytes": 1024
           },
           "idempotency_key": {
             "$ref": "#/components/schemas/IdempotencyKey",
             "description": "Retry identity."
           },
           "relative_path": {
-            "description": "Supplied folder context.",
-            "type": "string"
+            "description": "Supplied folder context, preserved.\nAt most 4096 bytes in UTF-8: a character takes one to four.",
+            "type": "string",
+            "x-max-utf8-bytes": 4096
           },
           "sha256": {
             "anyOf": [
@@ -1839,7 +1909,7 @@
             "description": "Expected content hash if caller knows it."
           },
           "size": {
-            "description": "Expected decimal byte count.",
+            "description": "Expected decimal byte count. A size over `limits.upload_bytes` is refused as\n`too_large` on `/size` when the slot is opened.",
             "type": "string"
           },
           "workspace_id": {
@@ -1877,6 +1947,39 @@
           "name",
           "description",
           "idempotency_key"
+        ],
+        "type": "object"
+      },
+      "CreatedItem": {
+        "additionalProperties": false,
+        "description": "A created item, with the receipt of its commit and the findings of the commit's check.\n\nA creation answered before this type existed is kept in the mutation ledger as the\n`ItemDocument` alone; a repeat of it answers that document here with no findings and no\nreceipt (`CreatedItem::from_stored`), since the build that answered it recorded none.",
+        "properties": {
+          "item": {
+            "$ref": "#/components/schemas/ItemDocument",
+            "description": "The item as committed."
+          },
+          "receipt_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReceiptId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Durable application operation receipt; absent only on the repeat of a creation answered\nbefore its receipt was recorded."
+          },
+          "warnings": {
+            "description": "Non-fatal issues recorded during the operation.",
+            "items": {
+              "$ref": "#/components/schemas/Warning"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "item",
+          "warnings"
         ],
         "type": "object"
       },
@@ -1988,21 +2091,25 @@
           {
             "const": "ymd",
             "description": "Year, month, day.",
+            "title": "Year, month, day",
             "type": "string"
           },
           {
             "const": "mdy",
             "description": "Month, day, year.",
+            "title": "Month, day, year",
             "type": "string"
           },
           {
             "const": "dmy",
             "description": "Day, month, year.",
+            "title": "Day, month, year",
             "type": "string"
           },
           {
             "const": "reject_ambiguous",
             "description": "Require unambiguous dates or a human choice.",
+            "title": "Ask when unclear",
             "type": "string"
           }
         ]
@@ -2123,6 +2230,35 @@
         },
         "required": [
           "permissions"
+        ],
+        "type": "object"
+      },
+      "DeleteFolderRequest": {
+        "additionalProperties": false,
+        "description": "Delete a folder, with everything in it, in one committed change.\n\nArchived items in the folder are deleted with it and are counted. A draft of a deleted item\nis kept as a deleted item's draft is. A folder changed since `base_revision` is a `conflict`\nwith `ErrorDetail::StaleBase` on `/base_revision`; a folder that does not exist is\n`not_found`.",
+        "properties": {
+          "base_revision": {
+            "$ref": "#/components/schemas/Revision",
+            "description": "Exact revision on which this change is based; a folder changed since conflicts."
+          },
+          "folder": {
+            "$ref": "#/components/schemas/WorkspacePath",
+            "description": "The folder to delete."
+          },
+          "idempotency_key": {
+            "$ref": "#/components/schemas/IdempotencyKey",
+            "description": "Retry identity."
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/WorkspaceId",
+            "description": "Workspace whose permissions and storage scope apply."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "base_revision",
+          "folder",
+          "idempotency_key"
         ],
         "type": "object"
       },
@@ -2277,6 +2413,30 @@
         ],
         "type": "object"
       },
+      "DiscardUploadRequest": {
+        "additionalProperties": false,
+        "description": "Remove an upload slot and its bytes.\n\nRefused with `conflict` when a job has consumed the upload or a queued or running job names\nit. A repeat under the same key answers the response first given.",
+        "properties": {
+          "idempotency_key": {
+            "$ref": "#/components/schemas/IdempotencyKey",
+            "description": "Retry identity."
+          },
+          "upload_id": {
+            "$ref": "#/components/schemas/UploadId",
+            "description": "Upload to remove."
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/WorkspaceId",
+            "description": "Workspace whose permissions and storage scope apply."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "upload_id",
+          "idempotency_key"
+        ],
+        "type": "object"
+      },
       "DownloadArtifact": {
         "additionalProperties": false,
         "description": "An authorized export or backup artifact with integrity metadata.",
@@ -2321,7 +2481,7 @@
           },
           "content_digest": {
             "$ref": "#/components/schemas/Digest",
-            "description": "Digest of the drafted body and properties."
+            "description": "Digest of the drafted body and every property but the server-owned header, `aliases`\nincluded, keys sorted. Unlike `ItemDocument::content_digest`, any edit changes it, one to\n`aliases` alone included: it tells whether a draft is still the content a Snapshot\ncommitted."
           },
           "editor": {
             "description": "Server-established subject who owns this draft.",
@@ -2404,6 +2564,31 @@
           "draft",
           "body",
           "properties"
+        ],
+        "type": "object"
+      },
+      "DraftRow": {
+        "additionalProperties": false,
+        "description": "One draft and its item.",
+        "properties": {
+          "draft": {
+            "$ref": "#/components/schemas/Draft",
+            "description": "Draft metadata."
+          },
+          "item": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ItemSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The item as it is at `revision`; absent when the item does not exist there."
+          }
+        },
+        "required": [
+          "draft"
         ],
         "type": "object"
       },
@@ -2628,12 +2813,81 @@
               "purge_id"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "An upload's received bytes do not match what was announced for it: their length, or\ntheir SHA-256. The code is `conflict`, and nothing was retained.",
+            "properties": {
+              "digest_matches": {
+                "description": "Whether the received bytes have the digest asked for; absent when the length\nalready differs, so the digest was not compared.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "expected_bytes": {
+                "description": "The byte count announced when the slot was opened, as a decimal string.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "upload_mismatch",
+                "type": "string"
+              },
+              "received_bytes": {
+                "description": "The byte count the slot holds, as a decimal string.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "expected_bytes",
+              "received_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The request's base revision (or expected head) is not the workspace's head; `field`\nnames that request field. The code is `conflict`.",
+            "properties": {
+              "head": {
+                "$ref": "#/components/schemas/Revision",
+                "description": "The head the request was compared with."
+              },
+              "kind": {
+                "const": "stale_base",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "head"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The workspace is archived, and this operation is not one an archived workspace allows\n(`operations::ALLOWED_WHILE_ARCHIVED`). The code is `conflict`.",
+            "properties": {
+              "archived_at": {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When the workspace was archived."
+              },
+              "kind": {
+                "const": "workspace_archived",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "archived_at"
+            ],
+            "type": "object"
           }
         ]
       },
       "Event": {
         "additionalProperties": false,
-        "description": "A resumable change notification, not canonical content.\n\nA tenant-level event (a sign-in, a connector issued or revoked, a refusal outside a\nworkspace) has no `workspace_id`. Security events carry their `actor`.",
+        "description": "A resumable change notification, not canonical content.\n\nA tenant-level event (a sign-in or a refused one, a connector issued or revoked, a refusal\noutside a workspace) has no `workspace_id`. Security events (`EventKind::is_security`) carry\ntheir `actor`, except a `sign_in_refused` event before a subject was established.",
         "properties": {
           "actor": {
             "anyOf": [
@@ -2660,6 +2914,15 @@
               }
             ],
             "description": "Affected connector."
+          },
+          "count": {
+            "description": "How many occurrences this one event stands for; absent means one. A `sign_in_refused`\nevent past its source's allowance counts that source's refusals of the minute, and a\n`permission_denied` event may count the same way when the server bounds its flood.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "id": {
             "description": "Opaque monotonic event cursor.",
@@ -2701,6 +2964,17 @@
               }
             ],
             "description": "The refused operation of a `permission_denied` event."
+          },
+          "proposal_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProposalId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Affected proposal."
           },
           "revision": {
             "anyOf": [
@@ -2802,6 +3076,11 @@
             "type": "string"
           },
           {
+            "const": "sign_in_refused",
+            "description": "A sign-in was refused (tenant-level). It carries `at`, and `actor` only when a subject\nwas established.\n\nEach refusal from one source is recorded as its own event up to an allowance a minute;\npast it, the refusals of that source in that minute are recorded as one event with their\n`count`, written at the end of that minute or when the server stops. So every refusal is\ncounted, and what one source can write is bounded. The source and the allowance are the\nserver's. A refusal before any tenant is known (a hosted callback that names no\norganization) belongs to no tenant's log: the server's ingress limit and its diagnostics\ncount it.",
+            "type": "string"
+          },
+          {
             "const": "permission_denied",
             "description": "An authenticated request was refused for lack of a grant or by its route.",
             "type": "string"
@@ -2872,16 +3151,19 @@
           {
             "const": "preserve",
             "description": "Leave the extension unchanged.",
+            "title": "Keep",
             "type": "string"
           },
           {
             "const": "lowercase",
             "description": "Lower-case the extension.",
+            "title": "Lower case",
             "type": "string"
           },
           {
             "const": "strip",
             "description": "Drop the extension from the normalized note path (never from originals).",
+            "title": "Remove",
             "type": "string"
           }
         ]
@@ -3272,6 +3554,40 @@
           }
         ]
       },
+      "FolderResult": {
+        "additionalProperties": false,
+        "description": "The commit a folder move or delete made.",
+        "properties": {
+          "items": {
+            "description": "Items moved or deleted, archived ones included.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "receipt_id": {
+            "$ref": "#/components/schemas/ReceiptId",
+            "description": "Durable application operation receipt."
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision",
+            "description": "New committed workspace revision."
+          },
+          "warnings": {
+            "description": "Non-fatal issues recorded during the operation.",
+            "items": {
+              "$ref": "#/components/schemas/Warning"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "revision",
+          "receipt_id",
+          "warnings",
+          "items"
+        ],
+        "type": "object"
+      },
       "GetAttentionRequest": {
         "additionalProperties": false,
         "description": "Read workspace diagnostics at an explicit revision.",
@@ -3649,6 +3965,42 @@
         ],
         "type": "object"
       },
+      "GetRulesResponse": {
+        "additionalProperties": false,
+        "description": "The naming rules at one revision, or the stored file when it cannot be read as rules.\n\nNever `internal` for a file a person or an import wrote: a file this build cannot read is\nanswered as `unreadable`, so a person can repair it in the YAML editor and save typed rules\nwith `set_rules`, which replaces the file whatever it held.",
+        "properties": {
+          "revision": {
+            "$ref": "#/components/schemas/Revision",
+            "description": "The revision the rules were read at."
+          },
+          "rules": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NamingRules"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The rules; absent when no rules were saved at `revision`, and when the stored file\ncannot be read as this build's rules (then `unreadable` is present)."
+          },
+          "unreadable": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UnreadableRules"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The stored file and what was wrong with it; present exactly when a file is stored at\n`revision` and it cannot be read as this build's rules."
+          }
+        },
+        "required": [
+          "revision"
+        ],
+        "type": "object"
+      },
       "GetSourcesRequest": {
         "additionalProperties": false,
         "description": "Retrieve sources and provenance for one item.",
@@ -3724,6 +4076,25 @@
         },
         "required": [
           "job_id"
+        ],
+        "type": "object"
+      },
+      "GetUploadRequest": {
+        "additionalProperties": false,
+        "description": "Read one upload slot as it now stands.",
+        "properties": {
+          "upload_id": {
+            "$ref": "#/components/schemas/UploadId",
+            "description": "Upload identity."
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/WorkspaceId",
+            "description": "Workspace whose permissions and storage scope apply."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "upload_id"
         ],
         "type": "object"
       },
@@ -3830,7 +4201,7 @@
           },
           "content_digest": {
             "$ref": "#/components/schemas/Digest",
-            "description": "SHA-256 of the item's body and properties without the server-owned header, keys sorted.\nIt is the value a confirmation and a review cite, so a client never computes it; the\nserver computes it with `okf_jawn_core::portable::item_content_digest`."
+            "description": "SHA-256 of the item's body and properties without the server-owned header and without the\n`aliases` property, keys sorted: a rename that records the old path in `aliases` does not\nchange it, so it keeps a review's coverage. It is the value a confirmation and a review\ncite, so a client never computes it; the server computes it with\n`okf_jawn_core::portable::item_content_digest`."
           },
           "draft": {
             "anyOf": [
@@ -3996,7 +4367,7 @@
       },
       "Job": {
         "additionalProperties": false,
-        "description": "Durable work status; acknowledgement is not a claim of completion.\n\n`workspace_id` is present exactly for a workspace job kind and absent exactly for a tenant\njob kind (`JobKind::is_tenant`); `check` enforces it.",
+        "description": "Durable work status; acknowledgement is not a claim of completion.\n\n`workspace_id` is present exactly for a workspace job kind and absent exactly for a tenant\njob kind (`JobKind::is_tenant`); `check` enforces it. The store writes the job's instants\nand `retryable` as its state changes; a job accepted before a field existed reads it as\nabsent.",
         "properties": {
           "artifact": {
             "anyOf": [
@@ -4015,6 +4386,28 @@
             "minimum": 0,
             "type": "integer"
           },
+          "backup": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BackupReport"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What a completed workspace backup left out of its archive."
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the job was accepted; absent on a job accepted before this field existed."
+          },
           "error": {
             "anyOf": [
               {
@@ -4024,7 +4417,18 @@
                 "type": "null"
               }
             ],
-            "description": "Last failure."
+            "description": "The refusal as the job's handler gave it; `field` is a JSON Pointer into the request\nthat started the job."
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the job reached a terminal state; cleared when a retry queues it again."
           },
           "id": {
             "$ref": "#/components/schemas/JobId",
@@ -4059,6 +4463,13 @@
             ],
             "description": "What a completed restore did."
           },
+          "retryable": {
+            "description": "Whether `retry_job` will accept the job: present when it failed under a build that\nrecords this field, and absent in every other state. A job that failed before this field\nexisted has none; `retry_job` still decides for it.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "revision": {
             "anyOf": [
               {
@@ -4069,6 +4480,17 @@
               }
             ],
             "description": "Committed result revision."
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the current attempt was claimed; absent while the job waits, and cleared when a\nretry queues it again."
           },
           "state": {
             "$ref": "#/components/schemas/JobState",
@@ -4184,7 +4606,7 @@
           },
           {
             "const": "failed",
-            "description": "Failure retained with retry information.",
+            "description": "Failure retained; `retryable` says whether `retry_job` accepts it.",
             "type": "string"
           },
           {
@@ -4200,34 +4622,68 @@
           {
             "const": "preserve",
             "description": "Preserve case.",
+            "title": "Keep as written",
             "type": "string"
           },
           {
             "const": "lower",
             "description": "Lower case.",
+            "title": "Lower case",
             "type": "string"
           },
           {
             "const": "upper",
             "description": "Upper case.",
+            "title": "Upper case",
             "type": "string"
           },
           {
             "const": "title",
             "description": "Title case.",
+            "title": "Title case",
             "type": "string"
           },
           {
             "const": "snake",
             "description": "Snake case.",
+            "title": "Snake case",
             "type": "string"
           },
           {
             "const": "kebab",
             "description": "Kebab case.",
+            "title": "Kebab case",
             "type": "string"
           }
         ]
+      },
+      "Limits": {
+        "additionalProperties": false,
+        "description": "The limits a deployment applies to what a client sends.",
+        "properties": {
+          "item_text_bytes": {
+            "description": "The most UTF-8 bytes of one item's text in a write (`item::MAX_ITEM_TEXT_BYTES`).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "request_body_bytes": {
+            "description": "The most bytes of one JSON request body (`transport::MAX_REQUEST_BODY_BYTES`).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "upload_bytes": {
+            "description": "The most bytes of one upload, as a decimal string (a 64-bit value); `create_upload`\nrefuses a larger `size` as `too_large` on `/size` when the slot is opened.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "upload_bytes",
+          "request_body_bytes",
+          "item_text_bytes"
+        ],
+        "type": "object"
       },
       "Link": {
         "additionalProperties": false,
@@ -4291,6 +4747,54 @@
           }
         ]
       },
+      "ListCommentsRequest": {
+        "additionalProperties": false,
+        "description": "Read a proposal's discussion, oldest first.",
+        "properties": {
+          "page": {
+            "$ref": "#/components/schemas/PageRequest",
+            "description": "Bounded pagination with an opaque cursor."
+          },
+          "proposal_id": {
+            "$ref": "#/components/schemas/ProposalId",
+            "description": "Suggestion whose discussion is read."
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/WorkspaceId",
+            "description": "Workspace whose permissions and storage scope apply."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "proposal_id",
+          "page"
+        ],
+        "type": "object"
+      },
+      "ListCommentsResponse": {
+        "additionalProperties": false,
+        "description": "A page of a proposal's comments, oldest first.\n\nA comment whose `source` lies in a workspace the reader may not read is returned with\n`source` left out.",
+        "properties": {
+          "items": {
+            "description": "Comments.",
+            "items": {
+              "$ref": "#/components/schemas/Comment"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "description": "Continuation cursor.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
       "ListConnectorsRequest": {
         "additionalProperties": false,
         "description": "List the installation's connector credentials.",
@@ -4343,12 +4847,12 @@
       },
       "ListDraftsResponse": {
         "additionalProperties": false,
-        "description": "The caller's drafts, without other editors' drafts.",
+        "description": "The caller's drafts, without other editors' drafts, each with its item's summary.",
         "properties": {
           "items": {
-            "description": "Draft metadata.",
+            "description": "The drafts, most recently saved first.",
             "items": {
-              "$ref": "#/components/schemas/Draft"
+              "$ref": "#/components/schemas/DraftRow"
             },
             "type": "array"
           },
@@ -4358,9 +4862,14 @@
               "string",
               "null"
             ]
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision",
+            "description": "The head at which the items were read."
           }
         },
         "required": [
+          "revision",
           "items"
         ],
         "type": "object"
@@ -4703,6 +5212,60 @@
         ],
         "type": "object"
       },
+      "ListUploadsRequest": {
+        "additionalProperties": false,
+        "description": "List a workspace's upload slots, newest first.",
+        "properties": {
+          "page": {
+            "$ref": "#/components/schemas/PageRequest",
+            "description": "Bounded pagination with an opaque cursor."
+          },
+          "state": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UploadListState"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only the uploads in this state; absent lists every upload."
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/WorkspaceId",
+            "description": "Workspace whose permissions and storage scope apply."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "page"
+        ],
+        "type": "object"
+      },
+      "ListUploadsResponse": {
+        "additionalProperties": false,
+        "description": "A bounded list of upload slots, newest first.",
+        "properties": {
+          "items": {
+            "description": "Upload slots.",
+            "items": {
+              "$ref": "#/components/schemas/Upload"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "description": "Continuation cursor.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
       "ListWorkspacesRequest": {
         "additionalProperties": false,
         "description": "List only workspaces visible to the authenticated principal.",
@@ -4886,6 +5449,40 @@
         ],
         "type": "object"
       },
+      "MoveFolderRequest": {
+        "additionalProperties": false,
+        "description": "Move a folder, with everything in it, in one committed change.\n\nArchived items in the folder move with it and are counted. A draft of a moved item stays\nwith its item. Every moved item's links are rewritten as `move_item` does, and the rewritten\nfiles are told to the check. A folder changed since `base_revision` is a `conflict` with\n`ErrorDetail::StaleBase` on `/base_revision`.",
+        "properties": {
+          "base_revision": {
+            "$ref": "#/components/schemas/Revision",
+            "description": "Exact revision on which this change is based; a folder changed since conflicts."
+          },
+          "destination": {
+            "$ref": "#/components/schemas/WorkspacePath",
+            "description": "Its new relative path."
+          },
+          "folder": {
+            "$ref": "#/components/schemas/WorkspacePath",
+            "description": "The folder to move."
+          },
+          "idempotency_key": {
+            "$ref": "#/components/schemas/IdempotencyKey",
+            "description": "Retry identity."
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/WorkspaceId",
+            "description": "Workspace whose permissions and storage scope apply."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "base_revision",
+          "folder",
+          "destination",
+          "idempotency_key"
+        ],
+        "type": "object"
+      },
       "MoveItemRequest": {
         "additionalProperties": false,
         "description": "Move an item and rewrite internal references in one versioned operation.",
@@ -4952,32 +5549,104 @@
         ],
         "type": "object"
       },
+      "NameSelection": {
+        "description": "Which items a preview covers.\n\nArchived items are never renamed: whichever selection is made, they are counted in the\nplan's `archived_left_out`.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The items named; at least one, or the request is `invalid_input` on\n`/selection/item_ids`.",
+            "properties": {
+              "item_ids": {
+                "description": "Selected items.",
+                "items": {
+                  "$ref": "#/components/schemas/ItemId"
+                },
+                "minItems": 1,
+                "type": "array"
+              },
+              "kind": {
+                "const": "items",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "item_ids"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The items of one folder.",
+            "properties": {
+              "folder": {
+                "$ref": "#/components/schemas/WorkspacePath",
+                "description": "The folder."
+              },
+              "kind": {
+                "const": "folder",
+                "type": "string"
+              },
+              "recursive": {
+                "description": "Also the items of every folder under it.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "kind",
+              "folder",
+              "recursive"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Every item of the workspace.",
+            "properties": {
+              "kind": {
+                "const": "workspace",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "NamingRule": {
         "additionalProperties": false,
         "description": "A typed rule scoped by glob and optional OKF type.",
         "properties": {
           "alias_preservation": {
             "description": "When true, preserve existing path aliases while renaming the primary path.",
+            "title": "Keep old paths as aliases",
             "type": "boolean"
           },
           "case": {
             "$ref": "#/components/schemas/LetterCase",
-            "description": "Case transformation."
+            "description": "Case transformation.",
+            "title": "Letter case"
           },
           "collision": {
             "$ref": "#/components/schemas/CollisionPolicy",
-            "description": "Collision behavior."
+            "description": "Collision behavior.",
+            "title": "When names collide"
           },
           "date_format": {
             "description": "Explicit output format.",
+            "title": "Date format",
             "type": "string"
           },
           "date_order": {
             "$ref": "#/components/schemas/DateOrder",
-            "description": "Declared incoming date convention."
+            "description": "Declared incoming date convention.",
+            "title": "Date order"
           },
           "destination": {
             "description": "Relative destination template.",
+            "title": "Destination folder",
             "type": [
               "string",
               "null"
@@ -4985,26 +5654,32 @@
           },
           "extension_policy": {
             "$ref": "#/components/schemas/ExtensionPolicy",
-            "description": "How the filename extension is transformed on normalized notes."
+            "description": "How the filename extension is transformed on normalized notes.",
+            "title": "File extension"
           },
           "glob": {
             "description": "Match against the supplied relative path.",
+            "title": "Applies to paths",
             "type": "string"
           },
           "prefix": {
             "description": "Optional literal prefix.",
+            "title": "Prefix",
             "type": "string"
           },
           "separator": {
             "description": "Word separator.",
+            "title": "Word separator",
             "type": "string"
           },
           "strip_version_suffix": {
             "description": "Remove filename suffixes only from normalized notes, never originals.",
+            "title": "Remove version suffixes",
             "type": "boolean"
           },
           "suffix": {
             "description": "Optional literal suffix applied to the normalized base name.",
+            "title": "Suffix",
             "type": [
               "string",
               "null"
@@ -5012,6 +5687,7 @@
           },
           "type_name": {
             "description": "Optional OKF type selector.",
+            "title": "Applies to type",
             "type": [
               "string",
               "null"
@@ -5041,12 +5717,14 @@
             "items": {
               "$ref": "#/components/schemas/NamingRule"
             },
+            "title": "Rules",
             "type": "array"
           },
           "schema_version": {
             "description": "Format version; this release emits 1.",
             "format": "uint32",
             "minimum": 0,
+            "title": "Format version",
             "type": "integer"
           }
         },
@@ -5251,6 +5929,16 @@
             "type": "string"
           },
           {
+            "const": "move_folder",
+            "description": "The `move_folder` operation.",
+            "type": "string"
+          },
+          {
+            "const": "delete_folder",
+            "description": "The `delete_folder` operation.",
+            "type": "string"
+          },
+          {
             "const": "list_types",
             "description": "The `list_types` operation.",
             "type": "string"
@@ -5351,6 +6039,11 @@
             "type": "string"
           },
           {
+            "const": "list_comments",
+            "description": "The `list_comments` operation.",
+            "type": "string"
+          },
+          {
             "const": "create_confirmation",
             "description": "The `create_confirmation` operation.",
             "type": "string"
@@ -5373,6 +6066,21 @@
           {
             "const": "complete_upload",
             "description": "The `complete_upload` operation.",
+            "type": "string"
+          },
+          {
+            "const": "get_upload",
+            "description": "The `get_upload` operation.",
+            "type": "string"
+          },
+          {
+            "const": "list_uploads",
+            "description": "The `list_uploads` operation.",
+            "type": "string"
+          },
+          {
+            "const": "discard_upload",
+            "description": "The `discard_upload` operation.",
             "type": "string"
           },
           {
@@ -5845,22 +6553,19 @@
       },
       "PreviewNamesRequest": {
         "additionalProperties": false,
-        "description": "Calculate a rename plan with no persistent mutation.",
+        "description": "Calculate a rename plan with no persistent mutation.\n\nA plan too large for one request body is applied folder by folder: `apply_names` refuses an\nover-large body as every request does (`transport::MAX_REQUEST_BODY_BYTES`).",
         "properties": {
           "at": {
             "$ref": "#/components/schemas/At",
             "description": "Requested revision selector; latest is resolved once before reading."
           },
-          "item_ids": {
-            "description": "Selected items.",
-            "items": {
-              "$ref": "#/components/schemas/ItemId"
-            },
-            "type": "array"
-          },
           "rules": {
             "$ref": "#/components/schemas/NamingRules",
             "description": "Candidate rules, not necessarily saved."
+          },
+          "selection": {
+            "$ref": "#/components/schemas/NameSelection",
+            "description": "The items to preview."
           },
           "workspace_id": {
             "$ref": "#/components/schemas/WorkspaceId",
@@ -5870,7 +6575,7 @@
         "required": [
           "workspace_id",
           "at",
-          "item_ids",
+          "selection",
           "rules"
         ],
         "type": "object"
@@ -5978,6 +6683,13 @@
           "title": {
             "description": "Human-readable reason.",
             "type": "string"
+          },
+          "warnings": {
+            "description": "Findings of the check that ran when the candidate was written.",
+            "items": {
+              "$ref": "#/components/schemas/Warning"
+            },
+            "type": "array"
           },
           "workspace_id": {
             "$ref": "#/components/schemas/WorkspaceId",
@@ -6254,7 +6966,7 @@
           },
           {
             "const": "failed",
-            "description": "Stopped; repeating the request resumes it.",
+            "description": "Set, with `error`, when the purge's job failed and will not run again by itself;\nrepeating the request resumes it.",
             "type": "string"
           }
         ]
@@ -6714,11 +7426,23 @@
       },
       "RenamePlan": {
         "additionalProperties": false,
-        "description": "A preview bound to source state and exact conventions.",
+        "description": "A preview bound to source state and exact conventions.\n\nThe counts are for the person reading the preview; `apply_names` does not check them.",
         "properties": {
+          "archived_left_out": {
+            "description": "Archived items the selection holds; they are never renamed.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "base_revision": {
             "$ref": "#/components/schemas/Revision",
             "description": "Workspace revision inspected."
+          },
+          "considered": {
+            "description": "Items the selection holds that are not archived.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           },
           "duplicate_observations": {
             "description": "Duplicate path observations recorded during preview.",
@@ -6728,7 +7452,7 @@
             "type": "array"
           },
           "entries": {
-            "description": "Proposed changes.",
+            "description": "Proposed changes: only the items whose path would change.",
             "items": {
               "$ref": "#/components/schemas/RenameEntry"
             },
@@ -6737,6 +7461,12 @@
           "rules_digest": {
             "$ref": "#/components/schemas/Digest",
             "description": "Digest of the exact canonical rules."
+          },
+          "unchanged": {
+            "description": "Considered items whose path would not change; they are not in `entries`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           },
           "warnings": {
             "description": "Plan-level warnings.",
@@ -6751,7 +7481,10 @@
           "rules_digest",
           "entries",
           "duplicate_observations",
-          "warnings"
+          "warnings",
+          "considered",
+          "unchanged",
+          "archived_left_out"
         ],
         "type": "object"
       },
@@ -6858,6 +7591,15 @@
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
+          },
+          "rows_left_out": {
+            "description": "Rows the archive's own backup left out; they were not restored.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -6914,7 +7656,7 @@
       },
       "RestoreWorkspaceRequest": {
         "additionalProperties": false,
-        "description": "Fill a blank workspace of this installation from an uploaded workspace archive.\n\nThe restore keeps item ids, rewrites View bindings to this workspace, gives each draft\nwhose editor is a validated subject with `write` here back to that editor, and keeps the\nothers in the archive, unassigned and counted. An archive of this tenant whose workspace\nstill exists, or has a purge record, is refused: purged content never comes back through\nan import. The upload is consumed when the restore completes.",
+        "description": "Fill a blank workspace of this installation from an uploaded workspace archive.\n\nThe restore keeps item ids, rewrites View bindings to this workspace, gives each draft\nwhose editor is a validated subject with `write` here back to that editor, and keeps the\nothers in the archive, unassigned and counted. An archive of this tenant whose workspace\nstill exists, or has a purge record, is refused: purged content never comes back through\nan import. The upload is consumed when the restore starts, before the archive is applied. A\nrestore cancelled before that leaves the upload usable; one that fails after it leaves the\nupload consumed by its job, and only a retry of that job can use it.",
         "properties": {
           "idempotency_key": {
             "$ref": "#/components/schemas/IdempotencyKey",
@@ -7104,9 +7846,9 @@
             "description": "Revision the editor saw; equal to the current head to rebase after resolving a conflict."
           },
           "body": {
-            "description": "Drafted Markdown body, at most 8 MiB in UTF-8.",
-            "maxLength": 8388608,
-            "type": "string"
+            "description": "Drafted Markdown body. At most 8388608 bytes in UTF-8: a character takes one to four.",
+            "type": "string",
+            "x-max-utf8-bytes": 8388608
           },
           "idempotency_key": {
             "$ref": "#/components/schemas/IdempotencyKey",
@@ -7377,8 +8119,12 @@
         "description": "Current identity and capability summary without credentials.",
         "properties": {
           "csrf_required": {
-            "description": "Browser writes require a same-origin anti-CSRF token: the double-submit pair published\nas the `csrfCookie` and `csrfHeader` security schemes.",
+            "description": "Browser writes require a same-origin anti-CSRF token: the double-submit pair published\nas the `csrfCookie` (or, over https, `csrfCookieHttps`) and `csrfHeader` security\nschemes.",
             "type": "boolean"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/Limits",
+            "description": "The limits this deployment applies, so a client can check before it sends."
           },
           "principal": {
             "$ref": "#/components/schemas/Principal",
@@ -7387,7 +8133,8 @@
         },
         "required": [
           "principal",
-          "csrf_required"
+          "csrf_required",
+          "limits"
         ],
         "type": "object"
       },
@@ -7770,7 +8517,7 @@
       },
       "StartImportRequest": {
         "additionalProperties": false,
-        "description": "Convert finalized uploads into source cards in the user-selected folder.",
+        "description": "Convert finalized uploads into source cards in the user-selected folder.\n\n`upload_ids` holds between one and `MAX_IMPORT_UPLOADS` uploads (`check_rules`): a longer\nlist is `too_large` on `/upload_ids`, an empty one `invalid_input` on `/upload_ids`, and an\nupload listed twice `invalid_input` on `/upload_ids/<index of the second>`.",
         "properties": {
           "apply_naming_rules": {
             "description": "Apply the explicit workspace conventions after preview acceptance.",
@@ -7778,7 +8525,7 @@
           },
           "base_revision": {
             "$ref": "#/components/schemas/Revision",
-            "description": "Exact revision on which this change is based; stale writes conflict."
+            "description": "The revision the import was prepared against; card names are chosen there. It must be\na revision of the workspace. A head that moved since does not refuse the import. A card\npath taken since fails the job, which is not retried."
           },
           "destination": {
             "description": "Relative destination folder; empty for root.",
@@ -7800,10 +8547,12 @@
             "description": "Converter settings; absent means the deployment's defaults, resolved into the job at\nacceptance so a retry converts with the same settings."
           },
           "upload_ids": {
-            "description": "Completed upload slots.",
+            "description": "Completed upload slots, each listed once.",
             "items": {
               "$ref": "#/components/schemas/UploadId"
             },
+            "maxItems": 5000,
+            "minItems": 1,
             "type": "array"
           },
           "workspace_id": {
@@ -8002,6 +8751,28 @@
           }
         ]
       },
+      "UnreadableRules": {
+        "additionalProperties": false,
+        "description": "A stored rules file this build cannot read as rules.",
+        "properties": {
+          "problems": {
+            "description": "What was wrong; a `schema_version` this build does not know is one such problem.",
+            "items": {
+              "$ref": "#/components/schemas/Warning"
+            },
+            "type": "array"
+          },
+          "text": {
+            "description": "The file's text as stored, at most `item::MAX_ITEM_TEXT_BYTES`; a longer file is\n`too_large`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "problems"
+        ],
+        "type": "object"
+      },
       "UnresolvedReason": {
         "description": "Why a location is not known; one variant per reason the producing rule states.",
         "oneOf": [
@@ -8190,11 +8961,40 @@
       },
       "Upload": {
         "additionalProperties": false,
-        "description": "An authenticated upload slot for a specific source occurrence.",
+        "description": "An authenticated upload slot for a specific source occurrence.\n\nA slot stays until it is discarded, imported or its workspace is purged; nothing expires,\nand a completed upload is never removed by the service on its own.",
         "properties": {
           "complete": {
             "description": "Whether expected bytes and digest have been verified.",
             "type": "boolean"
+          },
+          "consumed_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The job that took this upload."
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the slot was opened."
+          },
+          "filename": {
+            "description": "Original filename, as supplied.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "id": {
             "$ref": "#/components/schemas/UploadId",
@@ -8203,6 +9003,20 @@
           "received_bytes": {
             "description": "Durably retained byte count.",
             "type": "string"
+          },
+          "relative_path": {
+            "description": "Supplied folder context, as supplied.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size": {
+            "description": "The announced byte count, as a decimal string.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "upload_path": {
             "description": "Same-origin binary PUT target.",
@@ -8226,6 +9040,26 @@
         "description": "Identity of one authenticated source upload occurrence.",
         "format": "uuid",
         "type": "string"
+      },
+      "UploadListState": {
+        "description": "Which uploads of a workspace to list.",
+        "oneOf": [
+          {
+            "const": "incomplete",
+            "description": "Not yet complete: bytes are still to come, or the slot is not finished.",
+            "type": "string"
+          },
+          {
+            "const": "waiting",
+            "description": "Complete and not consumed: waiting to be imported or discarded.",
+            "type": "string"
+          },
+          {
+            "const": "consumed",
+            "description": "Taken by a job as its input.",
+            "type": "string"
+          }
+        ]
       },
       "ViewBinding": {
         "additionalProperties": false,
@@ -8424,10 +9258,11 @@
         "type": "string"
       },
       "WorkspacePath": {
-        "maxLength": 4096,
+        "description": "A relative path inside one workspace, in Unicode NFC, with `/` between segments. At most 4096 bytes in UTF-8: a character takes one to four.",
         "minLength": 1,
         "pattern": "^[^/\\\\:<>\"|?*\\x00-\\x1f]+(/[^/\\\\:<>\"|?*\\x00-\\x1f]+)*$",
-        "type": "string"
+        "type": "string",
+        "x-max-utf8-bytes": 4096
       }
     },
     "securitySchemes": {
@@ -8437,19 +9272,31 @@
         "type": "http"
       },
       "browserSession": {
-        "description": "Local-owner or WorkOS browser session. A cookie-authenticated request that is not a GET also carries the csrfCookie and csrfHeader pair.",
+        "description": "Local-owner browser session of a service whose public origin is plain http on loopback. A cookie-authenticated request that is not a GET also carries the csrfCookie and csrfHeader pair. The server reads only the session cookie of its own scheme.",
         "in": "cookie",
         "name": "okf-session",
         "type": "apiKey"
       },
+      "browserSessionHttps": {
+        "description": "Browser session (local owner or WorkOS) of a service whose public origin is https: always Secure, Path=/ and no Domain, so a sibling host or another port cannot set it. A cookie-authenticated request that is not a GET also carries the csrfCookieHttps and csrfHeader pair. The server reads only the session cookie of its own scheme.",
+        "in": "cookie",
+        "name": "__Host-okf-session",
+        "type": "apiKey"
+      },
       "csrfCookie": {
-        "description": "Anti-CSRF token the server sets at sign-in beside the session cookie: not HttpOnly, SameSite=Strict, Secure under HTTPS. Double-submit rule: every cookie-authenticated mutation sends its value in the csrfHeader header, in addition to the server's Origin and Sec-Fetch-Site check. Every canonical operation is a POST, so every route that is not a GET asks for the pair.",
+        "description": "Anti-CSRF token the server sets at sign-in beside the session cookie of a service whose public origin is plain http on loopback: not HttpOnly, SameSite=Strict, Path=/. Double-submit rule: every cookie-authenticated mutation sends its value in the csrfHeader header, in addition to the server's Origin and Sec-Fetch-Site check. Every canonical operation is a POST, so every route that is not a GET asks for the pair. A page reads only the anti-CSRF cookie of its own scheme.",
         "in": "cookie",
         "name": "okf-csrf",
         "type": "apiKey"
       },
+      "csrfCookieHttps": {
+        "description": "The csrfCookie of a service whose public origin is https: always Secure, Path=/ and no Domain, so a sibling host or another port cannot set a second one. Over https a page reads this name only; a cookie named as csrfCookie is not its own.",
+        "in": "cookie",
+        "name": "__Host-okf-csrf",
+        "type": "apiKey"
+      },
       "csrfHeader": {
-        "description": "The csrfCookie value, sent back on every cookie-authenticated request that is not a GET; a missing header, or one that differs from the cookie, is refused.",
+        "description": "The anti-CSRF cookie's value (csrfCookie, or csrfCookieHttps over https), sent back on every cookie-authenticated request that is not a GET; a missing header, or one that differs from the cookie, is refused.",
         "in": "header",
         "name": "x-okf-csrf",
         "type": "apiKey"
@@ -8521,6 +9368,9 @@
           },
           {
             "browserSession": []
+          },
+          {
+            "browserSessionHttps": []
           }
         ],
         "summary": "download_tenant_artifact",
@@ -8663,10 +9513,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": "attention",
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Attention",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -8809,10 +9663,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Rebuild search",
         "x-permission": "admin",
+        "x-starts-job": "rebuild_index",
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -8955,10 +9813,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Apply",
         "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": true,
           "idempotentHint": false,
@@ -8971,7 +9833,7 @@
     },
     "/api/conventions/get-rules": {
       "post": {
-        "description": "Read the same naming conventions used by the form, YAML editor, and import process.",
+        "description": "Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with `set_rules`.",
         "operationId": "get_rules",
         "requestBody": {
           "content": {
@@ -8988,7 +9850,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/NamingRules"
+                  "$ref": "#/components/schemas/GetRulesResponse"
                 }
               }
             },
@@ -9099,19 +9961,23 @@
         "tags": [
           "conventions"
         ],
-        "x-agent-alias": "",
-        "x-agent-tool": false,
+        "x-agent-alias": "rules",
+        "x-agent-tool": true,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
-        "x-mcp-tool": false,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
+        "x-mcp-tool": true,
         "x-operator-label": "Conventions",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "x-tool-visibility": "",
+        "x-tool-visibility": "model",
         "x-ui-resource": null
       }
     },
@@ -9247,10 +10113,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Preview",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -9393,10 +10263,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Save conventions",
         "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -9539,10 +10413,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Tool results returned",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -9555,7 +10433,7 @@
     },
     "/api/events/list-events": {
       "post": {
-        "description": "Read resumable notifications without treating them as authoritative document content.",
+        "description": "Read resumable notifications without treating them as authoritative document content. A workspace's security events are returned only to a caller holding `admin` on it, checked on every call; a page may therefore hold fewer rows than asked, or none, and still carry a cursor.",
         "operationId": "list_events",
         "requestBody": {
           "content": {
@@ -9685,10 +10563,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Activity",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -9831,10 +10713,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Security activity",
         "x-permission": "admin",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -9977,10 +10863,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Health",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -10123,10 +11013,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Readiness",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -10269,10 +11163,14 @@
         ],
         "x-agent-alias": "blame",
         "x-agent-tool": true,
+        "x-allowed-while-archived": true,
         "x-cli-alias": "who",
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": true,
         "x-operator-label": "Who",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -10415,10 +11313,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": "snapshot",
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Snapshot",
         "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -10561,10 +11463,14 @@
         ],
         "x-agent-alias": "diff",
         "x-agent-tool": true,
+        "x-allowed-while-archived": true,
         "x-cli-alias": "changes",
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": true,
         "x-operator-label": "Changes",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -10707,10 +11613,14 @@
         ],
         "x-agent-alias": "log",
         "x-agent-tool": true,
+        "x-allowed-while-archived": true,
         "x-cli-alias": "timeline",
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": true,
         "x-operator-label": "Timeline",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -10853,10 +11763,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": "rewind",
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Rewind",
         "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": true,
           "idempotentHint": false,
@@ -10869,7 +11783,7 @@
     },
     "/api/imports/cancel-job": {
       "post": {
-        "description": "Cancel work while retaining completed uploads and recorded state.",
+        "description": "Cancel work while retaining completed uploads and recorded state. Needs the permission of the operation that started the job, and a human session where that operation needs one.",
         "operationId": "cancel_job",
         "requestBody": {
           "content": {
@@ -10999,10 +11913,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Cancel",
         "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -11145,10 +12063,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Finish upload",
         "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -11291,10 +12213,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Correct text",
         "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -11307,7 +12233,7 @@
     },
     "/api/imports/create-upload": {
       "post": {
-        "description": "Register a source occurrence before authenticated binary upload.",
+        "description": "Register a source occurrence before authenticated binary upload. A repeat under the same key answers the response first given; read the slot as it now stands with `get_upload`.",
         "operationId": "create_upload",
         "requestBody": {
           "content": {
@@ -11437,12 +12363,166 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Add files",
         "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "x-tool-visibility": "",
+        "x-ui-resource": null
+      }
+    },
+    "/api/imports/discard-upload": {
+      "post": {
+        "description": "Remove an upload slot and its bytes. Refused with conflict when a job has consumed the upload or a queued or running job names it.",
+        "operationId": "discard_upload",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DiscardUploadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Upload"
+                }
+              }
+            },
+            "description": "Successful operation result"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          }
+        },
+        "summary": "Discard upload",
+        "tags": [
+          "imports"
+        ],
+        "x-agent-alias": "",
+        "x-agent-tool": false,
+        "x-allowed-while-archived": false,
+        "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
+        "x-mcp-tool": false,
+        "x-operator-label": "Discard upload",
+        "x-permission": "write",
+        "x-starts-job": null,
+        "x-tool-annotations": {
+          "destructiveHint": true,
           "idempotentHint": false,
           "openWorldHint": false,
           "readOnlyHint": false
@@ -11583,10 +12663,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Progress",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -11729,10 +12813,164 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Progress",
         "x-permission": "admin",
+        "x-starts-job": null,
+        "x-tool-annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "x-tool-visibility": "",
+        "x-ui-resource": null
+      }
+    },
+    "/api/imports/get-upload": {
+      "post": {
+        "description": "Read one upload slot as it now stands: the bytes it holds, whether it is complete and which job took it. Needs write: a slot's file name is the uploader's business until it is imported.",
+        "operationId": "get_upload",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GetUploadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Upload"
+                }
+              }
+            },
+            "description": "Successful operation result"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          }
+        },
+        "summary": "Upload",
+        "tags": [
+          "imports"
+        ],
+        "x-agent-alias": "",
+        "x-agent-tool": false,
+        "x-allowed-while-archived": true,
+        "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
+        "x-mcp-tool": false,
+        "x-operator-label": "Upload",
+        "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -11875,10 +13113,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Jobs",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -12021,10 +13263,164 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Installation jobs",
         "x-permission": "admin",
+        "x-starts-job": null,
+        "x-tool-annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "x-tool-visibility": "",
+        "x-ui-resource": null
+      }
+    },
+    "/api/imports/list-uploads": {
+      "post": {
+        "description": "List the workspace's upload slots, newest first, optionally only those incomplete, waiting (complete and not imported) or consumed. Nothing expires: a slot stays until it is discarded, imported or its workspace is purged.",
+        "operationId": "list_uploads",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ListUploadsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListUploadsResponse"
+                }
+              }
+            },
+            "description": "Successful operation result"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          }
+        },
+        "summary": "Uploads",
+        "tags": [
+          "imports"
+        ],
+        "x-agent-alias": "",
+        "x-agent-tool": false,
+        "x-allowed-while-archived": true,
+        "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
+        "x-mcp-tool": false,
+        "x-operator-label": "Uploads",
+        "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -12167,10 +13563,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Reconvert",
         "x-permission": "write",
+        "x-starts-job": "redigest",
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -12183,7 +13583,7 @@
     },
     "/api/imports/retry-job": {
       "post": {
-        "description": "Retry the same durable work identity without duplicating completed effects.",
+        "description": "Retry the same durable work identity without duplicating completed effects. Needs the permission of the operation that started the job, and a human session where that operation needs one.",
         "operationId": "retry_job",
         "requestBody": {
           "content": {
@@ -12313,10 +13713,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Retry",
         "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -12459,10 +13863,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": "import",
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Import",
         "x-permission": "write",
+        "x-starts-job": "import",
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -12605,10 +14013,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "New folder",
         "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -12638,7 +14050,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ItemDocument"
+                  "$ref": "#/components/schemas/CreatedItem"
                 }
               }
             },
@@ -12751,12 +14163,166 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "New note",
         "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "x-tool-visibility": "",
+        "x-ui-resource": null
+      }
+    },
+    "/api/items/delete-folder": {
+      "post": {
+        "description": "Remove a folder with everything in it, archived items included, in one committed change while retaining historical objects; a draft of a deleted item is kept as a deleted item's draft is, and a folder that does not exist is not found.",
+        "operationId": "delete_folder",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteFolderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FolderResult"
+                }
+              }
+            },
+            "description": "Successful operation result"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          }
+        },
+        "summary": "Delete folder",
+        "tags": [
+          "items"
+        ],
+        "x-agent-alias": "",
+        "x-agent-tool": false,
+        "x-allowed-while-archived": false,
+        "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
+        "x-mcp-tool": false,
+        "x-operator-label": "Delete folder",
+        "x-permission": "write",
+        "x-starts-job": null,
+        "x-tool-annotations": {
+          "destructiveHint": true,
           "idempotentHint": false,
           "openWorldHint": false,
           "readOnlyHint": false
@@ -12897,10 +14463,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Remove",
         "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": true,
           "idempotentHint": false,
@@ -13043,10 +14613,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Discard draft",
         "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": true,
           "idempotentHint": false,
@@ -13189,10 +14763,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Properties",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -13335,10 +14913,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Drafts",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -13481,10 +15063,14 @@
         ],
         "x-agent-alias": "ls",
         "x-agent-tool": true,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": true,
         "x-operator-label": "Browse",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -13492,6 +15078,156 @@
           "readOnlyHint": true
         },
         "x-tool-visibility": "model",
+        "x-ui-resource": null
+      }
+    },
+    "/api/items/move-folder": {
+      "post": {
+        "description": "Move a folder with everything in it, archived items included, and rewrite every moved item's links in one committed change; a draft of a moved item stays with its item, and a folder changed since the base revision conflicts.",
+        "operationId": "move_folder",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MoveFolderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FolderResult"
+                }
+              }
+            },
+            "description": "Successful operation result"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          }
+        },
+        "summary": "Move folder",
+        "tags": [
+          "items"
+        ],
+        "x-agent-alias": "",
+        "x-agent-tool": false,
+        "x-allowed-while-archived": false,
+        "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
+        "x-mcp-tool": false,
+        "x-operator-label": "Move folder",
+        "x-permission": "write",
+        "x-starts-job": null,
+        "x-tool-annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "x-tool-visibility": "",
         "x-ui-resource": null
       }
     },
@@ -13627,10 +15363,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Move",
         "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -13773,10 +15513,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": true,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Purge",
         "x-permission": "admin",
+        "x-starts-job": "purge_item",
         "x-tool-annotations": {
           "destructiveHint": true,
           "idempotentHint": false,
@@ -13919,10 +15663,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Save",
         "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -14065,10 +15813,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Archive",
         "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -14211,10 +15963,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": "approve",
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Approve",
         "x-permission": "approve",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -14357,10 +16113,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Comment",
         "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -14503,10 +16263,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": "decline",
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Decline",
         "x-permission": "approve",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -14649,10 +16413,164 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Open proposal",
         "x-permission": "read",
+        "x-starts-job": null,
+        "x-tool-annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "x-tool-visibility": "",
+        "x-ui-resource": null
+      }
+    },
+    "/api/proposals/list-comments": {
+      "post": {
+        "description": "Read a proposal's comments, oldest first. A comment whose source lies in a workspace the reader may not read is returned without its source.",
+        "operationId": "list_comments",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ListCommentsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListCommentsResponse"
+                }
+              }
+            },
+            "description": "Successful operation result"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          }
+        },
+        "summary": "Discussion",
+        "tags": [
+          "proposals"
+        ],
+        "x-agent-alias": "",
+        "x-agent-tool": false,
+        "x-allowed-while-archived": true,
+        "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
+        "x-mcp-tool": false,
+        "x-operator-label": "Discussion",
+        "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -14795,10 +16713,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Proposals",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -14941,10 +16863,14 @@
         ],
         "x-agent-alias": "propose",
         "x-agent-tool": true,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": true,
         "x-operator-label": "Propose",
         "x-permission": "propose",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -15087,10 +17013,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Open sandboxed",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -15233,10 +17163,14 @@
         ],
         "x-agent-alias": "read_object",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": true,
         "x-operator-label": "Original",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -15379,10 +17313,14 @@
         ],
         "x-agent-alias": "sources",
         "x-agent-tool": true,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": true,
         "x-operator-label": "Sources",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -15525,10 +17463,14 @@
         ],
         "x-agent-alias": "show",
         "x-agent-tool": true,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": true,
         "x-operator-label": "Read",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -15671,10 +17613,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Confirm",
         "x-permission": "review",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -15817,10 +17763,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": "verify",
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Verify",
         "x-permission": "review",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -15963,10 +17913,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Reviews",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -16007,6 +17961,9 @@
           },
           {
             "browserSession": []
+          },
+          {
+            "browserSessionHttps": []
           }
         ],
         "summary": "get_form_schema",
@@ -16149,10 +18106,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Graph",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -16295,10 +18256,14 @@
         ],
         "x-agent-alias": "links",
         "x-agent-tool": true,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": true,
         "x-operator-label": "Links",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -16441,10 +18406,14 @@
         ],
         "x-agent-alias": "grep",
         "x-agent-tool": true,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": true,
         "x-operator-label": "Search",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -16587,10 +18556,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": true,
         "x-mcp-tool": false,
         "x-operator-label": "Connect an agent",
         "x-permission": "admin",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -16733,10 +18706,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Account",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -16879,10 +18856,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": true,
         "x-mcp-tool": false,
         "x-operator-label": "Connected agents",
         "x-permission": "admin",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -17025,10 +19006,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": true,
         "x-mcp-tool": false,
         "x-operator-label": "Disconnect",
         "x-permission": "admin",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": true,
           "idempotentHint": false,
@@ -17171,10 +19156,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Types",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -17317,10 +19306,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Save type",
         "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -17463,10 +19456,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Export visual",
         "x-permission": "write",
+        "x-starts-job": "export_view",
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -17609,10 +19606,14 @@
         ],
         "x-agent-alias": "catalog",
         "x-agent-tool": true,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": true,
         "x-operator-label": "Components",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -17755,10 +19756,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Open visual",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -17901,10 +19906,14 @@
         ],
         "x-agent-alias": "present",
         "x-agent-tool": true,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": true,
         "x-operator-label": "Present",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -18047,10 +20056,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Refresh",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -18193,10 +20206,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Archive",
         "x-permission": "admin",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -18339,10 +20356,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": true,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Back up installation",
         "x-permission": "admin",
+        "x-starts-job": "backup_installation",
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -18485,10 +20506,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": true,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Backup",
         "x-permission": "admin",
+        "x-starts-job": "backup_workspace",
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -18631,10 +20656,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "New workspace",
         "x-permission": "admin",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -18777,10 +20806,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": "export",
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Export",
         "x-permission": "write",
+        "x-starts-job": "export_workspace",
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -18923,10 +20956,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Purge status",
         "x-permission": "admin",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -19069,10 +21106,14 @@
         ],
         "x-agent-alias": "workspaces",
         "x-agent-tool": true,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": true,
         "x-operator-label": "Workspaces",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -19215,10 +21256,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Open",
         "x-permission": "read",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -19231,7 +21276,7 @@
     },
     "/api/workspaces/purge-workspace": {
       "post": {
-        "description": "Permanently remove a workspace's originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge.",
+        "description": "Permanently remove a workspace's originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request returns the purge: an unfinished one resumed, a completed one as it is.",
         "operationId": "purge_workspace",
         "requestBody": {
           "content": {
@@ -19361,10 +21406,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": true,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Purge",
         "x-permission": "admin",
+        "x-starts-job": "purge_workspace",
         "x-tool-annotations": {
           "destructiveHint": true,
           "idempotentHint": false,
@@ -19507,10 +21556,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": true,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Restore",
         "x-permission": "admin",
+        "x-starts-job": "restore_workspace",
         "x-tool-annotations": {
           "destructiveHint": true,
           "idempotentHint": false,
@@ -19653,10 +21706,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Unarchive",
         "x-permission": "admin",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -19799,10 +21856,14 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
+        "x-allowed-while-archived": false,
         "x-cli-alias": null,
+        "x-human-session-only": false,
+        "x-local-owner-only": false,
         "x-mcp-tool": false,
         "x-operator-label": "Properties",
         "x-permission": "write",
+        "x-starts-job": null,
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -19853,6 +21914,9 @@
           },
           {
             "browserSession": []
+          },
+          {
+            "browserSessionHttps": []
           }
         ],
         "summary": "download_artifact",
@@ -19865,7 +21929,7 @@
     },
     "/api/workspaces/{workspace_id}/events": {
       "get": {
-        "description": "Resume workspace notifications with Last-Event-ID; notifications are projections, not canonical content.",
+        "description": "Resume workspace notifications with Last-Event-ID; notifications are projections, not canonical content. A workspace's security events are returned only to a caller holding `admin` on it, checked on every call; a page may therefore hold fewer rows than asked, or none, and still carry a cursor.",
         "operationId": "stream_events",
         "parameters": [
           {
@@ -19886,7 +21950,7 @@
                 }
               }
             },
-            "description": "Resume workspace notifications with Last-Event-ID; notifications are projections, not canonical content."
+            "description": "Resume workspace notifications with Last-Event-ID; notifications are projections, not canonical content. A workspace's security events are returned only to a caller holding `admin` on it, checked on every call; a page may therefore hold fewer rows than asked, or none, and still carry a cursor."
           }
         },
         "security": [
@@ -19895,6 +21959,9 @@
           },
           {
             "browserSession": []
+          },
+          {
+            "browserSessionHttps": []
           }
         ],
         "summary": "stream_events",
@@ -19961,6 +22028,9 @@
           },
           {
             "browserSession": []
+          },
+          {
+            "browserSessionHttps": []
           }
         ],
         "summary": "download_object",
@@ -20195,6 +22265,9 @@
           },
           {
             "browserSession": []
+          },
+          {
+            "browserSessionHttps": []
           }
         ],
         "summary": "mcp_events",
@@ -20266,6 +22339,9 @@
           },
           {
             "browserSession": []
+          },
+          {
+            "browserSessionHttps": []
           }
         ],
         "summary": "serve_sandbox_representation",
@@ -20284,6 +22360,11 @@
     {
       "browserSession": [],
       "csrfCookie": [],
+      "csrfHeader": []
+    },
+    {
+      "browserSessionHttps": [],
+      "csrfCookieHttps": [],
       "csrfHeader": []
     }
   ]

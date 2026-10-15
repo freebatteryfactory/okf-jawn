@@ -29,7 +29,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use okf_jawn_contract::access::Principal;
 use okf_jawn_contract::common::{MutationResult, PageRequest};
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::events::{EventKind, Receipt, ReceiptAudience};
 use okf_jawn_contract::identity::{
     At, ItemId, MutationId, ReceiptId, Revision, Timestamp, WorkspacePath,
@@ -250,15 +250,17 @@ pub(super) async fn check_named(
 ///
 /// # Errors
 /// Returns the purge check's refusal of the base, the store's refusal (`Conflict` for a moved
-/// head, the check's refusal of the candidate, a path collision, a header change), or any
-/// later port error.
+/// head, with `ErrorDetail::StaleBase` and the request's `/base_revision` named; the check's
+/// refusal of the candidate, a path collision, a header change), or any later port error.
 pub(super) async fn commit(
     service: &ApplicationService,
     context: &OperationContext,
     write: Write,
 ) -> Result<Committed, ApiError> {
     let item = write.item;
-    let committed = store_commit(service, context, write).await?;
+    let committed = store_commit(service, context, write)
+        .await
+        .map_err(on_the_base)?;
     announce(
         service,
         workspace_scope(context)?,
@@ -268,6 +270,17 @@ pub(super) async fn commit(
     )
     .await?;
     Ok(committed)
+}
+
+/// Name the request's `/base_revision` on the store's refusal of a base that is not the head
+/// (`ErrorDetail::StaleBase`); every request this module commits names its base so. The store
+/// names no field on that refusal (`VersionStore::commit`): the field is the caller's to name.
+fn on_the_base(error: ApiError) -> ApiError {
+    if matches!(error.detail.as_deref(), Some(ErrorDetail::StaleBase { .. })) {
+        error.with_field("/base_revision")
+    } else {
+        error
+    }
 }
 
 /// Commit one write in the store only, without indexing or announcing it: the step whose
@@ -346,6 +359,8 @@ pub(super) async fn announce(
                 connector_id: None,
                 actor: None,
                 operation: None,
+                proposal_id: None,
+                count: None,
             },
         )
         .await?;

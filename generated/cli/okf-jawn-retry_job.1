@@ -2,11 +2,11 @@
 .el .ds Aq '
 .TH okf-jawn-retry_job 1  "retry_job " 
 .SH NAME
-okf\-jawn\-retry_job \- Retry the same durable work identity without duplicating completed effects.
+okf\-jawn\-retry_job \- Retry the same durable work identity without duplicating completed effects. Needs the permission of the operation that started the job, and a human session where that operation needs one.
 .SH SYNOPSIS
 \fBokf\-jawn retry_job\fR [\fB\-\-json\fR] [\fB\-\-server\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
-Retry the same durable work identity without duplicating completed effects.
+Retry the same durable work identity without duplicating completed effects. Needs the permission of the operation that started the job, and a human session where that operation needs one.
 .SH OPTIONS
 .TP
 \fB\-\-json\fR \fI<JSON>\fR [default: {}]

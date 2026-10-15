@@ -51,10 +51,12 @@ impl EventLog for SqliteEvents {
                 connector_id: event.connector_id,
                 actor: event.actor,
                 operation: event.operation,
+                proposal_id: event.proposal_id,
+                count: event.count,
             };
             let replay_key = mutation_id
                 .map(|mutation| {
-                    let content = serde_json::json!({
+                    let mut content = serde_json::json!({
                         "workspace_id": record.workspace_id,
                         "kind": record.kind,
                         "revision": record.revision,
@@ -64,6 +66,16 @@ impl EventLog for SqliteEvents {
                         "actor": record.actor,
                         "operation": record.operation,
                     });
+                    // Named only when present, so an event that names neither keeps the replay
+                    // key an earlier build gave it, and a resumed attempt appends no duplicate.
+                    if let Some(fields) = content.as_object_mut() {
+                        if let Some(proposal) = record.proposal_id {
+                            fields.insert("proposal_id".to_owned(), serde_json::json!(proposal));
+                        }
+                        if let Some(count) = record.count {
+                            fields.insert("count".to_owned(), serde_json::json!(count));
+                        }
+                    }
                     format!("{}/{content}", mutation.0)
                 })
                 .map(|key| format!("{tenant}/{key}"));

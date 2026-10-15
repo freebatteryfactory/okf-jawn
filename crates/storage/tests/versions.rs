@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::common::Warning;
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::{ItemId, MutationId, Revision, TenantId, WorkspacePath};
 use okf_jawn_contract::item::{ItemKind, ItemStatus};
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
@@ -58,6 +58,13 @@ struct NamingStagedFile;
 struct Interloper {
     repository: std::path::PathBuf,
     moved_to: std::sync::Mutex<Option<git2::Oid>>,
+}
+
+/// A check that, while a candidate is staged, sets the candidate's proposal reference to the head
+/// as another write of the same proposal would (another handle on the same repository).
+struct SetsTheReference {
+    repository: std::path::PathBuf,
+    reference: String,
 }
 
 /// A check that accepts every candidate with the warnings it was made with, and counts its runs.
@@ -136,6 +143,22 @@ impl CandidateCheck for Interloper {
         if let Ok(mut slot) = self.moved_to.lock() {
             *slot = Some(moved);
         }
+        Ok(Vec::new())
+    }
+}
+
+impl CandidateCheck for SetsTheReference {
+    fn check(
+        &self,
+        _root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
+        let fault = |error: git2::Error| ApiError::new(ErrorCode::Internal, error.to_string());
+        let repository = git2::Repository::open_bare(&self.repository).map_err(fault)?;
+        let head = repository.refname_to_id("refs/heads/main").map_err(fault)?;
+        repository
+            .reference(&self.reference, head, false, "another write")
+            .map_err(fault)?;
         Ok(Vec::new())
     }
 }
@@ -446,6 +469,13 @@ async fn mutation_crash_reconcile_commit_carries_the_trailer_and_a_moved_head_co
             .await,
     )?;
     assert_eq!(error.code, ErrorCode::Conflict);
+    // Ruling 5: the refusal names the head the expected one was compared with.
+    assert_eq!(
+        error.detail.as_deref(),
+        Some(&ErrorDetail::StaleBase {
+            head: versions.head(&scope).await?
+        })
+    );
     assert!(
         staging_is_empty(&storage)?,
         "staging is removed after every call"
@@ -813,7 +843,7 @@ async fn find_commit_since_a_revision_the_repository_never_held_is_not_found() -
 #[tokio::test]
 async fn an_expected_head_the_repository_never_held_conflicts() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let (storage, scope, _) = workspace(directory.path()).await?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
     let versions = storage.versions();
     let unknown = Revision::try_from("ab".repeat(20))?;
     let error = err_of(
@@ -826,6 +856,13 @@ async fn an_expected_head_the_repository_never_held_conflicts() -> TestResult {
             .await,
     )?;
     assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    // Review N5: a head the repository never held is not the head (`held_head`), so the
+    // refusal names the head as a moved head's does, and leaves the field to the caller.
+    let stale = ErrorDetail::StaleBase {
+        head: initial.clone(),
+    };
+    assert_eq!(error.detail.as_deref(), Some(&stale));
+    assert_eq!(error.field, None);
     let promoted = err_of(
         versions
             .promote_candidate(
@@ -842,6 +879,8 @@ async fn an_expected_head_the_repository_never_held_conflicts() -> TestResult {
             .await,
     )?;
     assert_eq!(promoted.code, ErrorCode::Conflict, "{}", promoted.message);
+    assert_eq!(promoted.detail.as_deref(), Some(&stale));
+    assert_eq!(promoted.field, None);
     Ok(())
 }
 
@@ -1053,6 +1092,54 @@ async fn items_are_shown_listed_moved_with_their_links_and_archived() -> TestRes
     history_follows_the_move(&storage.versions(), &scope, &first, &moved).await
 }
 
+/// Ruling 19: a candidate is answered with its check's findings, kept with it, so a repeat of
+/// the mutation answers the same findings (`replayed`) and runs no check.
+#[tokio::test]
+async fn a_candidate_answers_its_checks_findings_and_a_repeat_the_same() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let finding = Warning {
+        code: "missing_description".to_owned(),
+        message: "proposed.md has no description".to_owned(),
+        location: Some("proposed.md".to_owned()),
+    };
+    let check = Arc::new(Warns {
+        warnings: vec![finding.clone()],
+        runs: AtomicUsize::new(0),
+    });
+    let changes = CandidateChanges {
+        mutation_id: uuid!(53)?,
+        base: initial,
+        author: person("agent"),
+        message: "Propose a note".to_owned(),
+        edits: vec![note(uuid!(12)?, "proposed.md", "Proposed.")?],
+    };
+    let first = versions
+        .create_candidate(&scope, uuid!(54)?, changes.clone(), check.clone())
+        .await?;
+    assert!(!first.replayed);
+    assert_eq!(
+        serde_json::to_value(&first.warnings)?,
+        serde_json::to_value([&finding])?
+    );
+    let again = versions
+        .create_candidate(&scope, uuid!(54)?, changes, check.clone())
+        .await?;
+    assert!(again.replayed);
+    assert_eq!(again.revision, first.revision);
+    assert_eq!(
+        serde_json::to_value(&again.warnings)?,
+        serde_json::to_value([&finding])?
+    );
+    assert_eq!(
+        check.runs.load(Ordering::SeqCst),
+        1,
+        "a repeat runs no check"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_candidate_is_retained_off_the_head_and_promoted_exactly() -> TestResult {
     let directory = tempfile::tempdir()?;
@@ -1073,7 +1160,8 @@ async fn a_candidate_is_retained_off_the_head_and_promoted_exactly() -> TestResu
             candidate_changes.clone(),
             Arc::new(Counting::default()),
         )
-        .await?;
+        .await?
+        .revision;
     assert_eq!(
         versions.head(&scope).await?,
         initial,
@@ -1086,7 +1174,8 @@ async fn a_candidate_is_retained_off_the_head_and_promoted_exactly() -> TestResu
             candidate_changes,
             Arc::new(Counting::default()),
         )
-        .await?;
+        .await?
+        .revision;
     assert_eq!(again, candidate);
     let promotion = Promotion {
         mutation_id: uuid!(52)?,
@@ -1136,6 +1225,53 @@ async fn a_candidate_is_retained_off_the_head_and_promoted_exactly() -> TestResu
         ErrorCode::Conflict,
         "the head moved since the confirmation"
     );
+    // Review N5: the refusal names the head the expected one was compared with.
+    assert_eq!(
+        stale.detail.as_deref(),
+        Some(&ErrorDetail::StaleBase {
+            head: accepted.revision
+        })
+    );
+    assert_eq!(stale.field, None);
+    Ok(())
+}
+
+/// Review N5: a candidate whose proposal's reference another write set while it was staged is
+/// refused with a plain `Conflict`: the refusal is about no base, so it carries no `StaleBase`.
+#[tokio::test]
+async fn a_candidate_whose_reference_another_write_set_meanwhile_is_a_plain_conflict() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let proposal: okf_jawn_contract::identity::ProposalId = uuid!(60)?;
+    let check = Arc::new(SetsTheReference {
+        repository: repository_path(directory.path(), &scope),
+        reference: format!("refs/okf-jawn/proposals/{}", proposal.0),
+    });
+    let refused = err_of(
+        storage
+            .versions()
+            .create_candidate(
+                &scope,
+                proposal,
+                CandidateChanges {
+                    mutation_id: uuid!(61)?,
+                    base: initial.clone(),
+                    author: person("agent"),
+                    message: "Propose a note".to_owned(),
+                    edits: vec![note(uuid!(12)?, "proposed.md", "Proposed.")?],
+                },
+                check,
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Conflict, "{}", refused.message);
+    assert_eq!(
+        refused.message,
+        "this proposal already has a candidate from another write"
+    );
+    assert_eq!(refused.detail, None);
+    assert_eq!(storage.versions().head(&scope).await?, initial);
     Ok(())
 }
 
@@ -1346,7 +1482,8 @@ async fn history_is_a_bundle_of_the_accepted_line_that_stock_git_clones() -> Tes
             },
             Arc::new(Counting::default()),
         )
-        .await?;
+        .await?
+        .revision;
     let off_line = err_of(versions.write_history(&scope, &candidate, uuid!(60)?).await)?;
     assert_eq!(
         off_line.code,
@@ -1573,6 +1710,64 @@ async fn the_catalog_creates_once_lists_updates_and_archives() -> TestResult {
     Ok(())
 }
 
+/// Ruling 5: a workspace update or archive whose expected head is not the head is refused with
+/// `StaleBase` naming the head, leaves the field to the caller, and changes nothing.
+#[tokio::test]
+async fn a_workspace_update_or_archive_on_a_moved_head_names_the_head() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let moved = storage
+        .versions()
+        .commit(
+            &scope,
+            changes(20, &initial, vec![note(uuid!(10)?, "a.md", "A")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let catalog = storage.catalog();
+    let updated = err_of(
+        catalog
+            .update(
+                &scope,
+                uuid!(2)?,
+                WorkspaceUpdate {
+                    expected_head: initial.clone(),
+                    name: "Renamed".to_owned(),
+                    description: "New".to_owned(),
+                    author: person("ana"),
+                },
+            )
+            .await,
+    )?;
+    let archived = err_of(
+        catalog
+            .archive(
+                &scope,
+                uuid!(3)?,
+                WorkspaceArchive {
+                    expected_head: initial,
+                    author: person("ana"),
+                },
+            )
+            .await,
+    )?;
+    for error in [&updated, &archived] {
+        assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+        assert_eq!(
+            error.detail.as_deref(),
+            Some(&ErrorDetail::StaleBase {
+                head: moved.clone()
+            })
+        );
+        assert_eq!(error.field, None, "the caller names its request's field");
+    }
+    let shown = catalog.open(&scope).await?;
+    assert_eq!(shown.name, "Research");
+    assert!(shown.archived_at.is_none());
+    Ok(())
+}
+
 /// Commit `message` with mutation `mutation`'s trailer on top of the head straight into the
 /// workspace repository, its committer time `age_seconds` before now, and return it.
 fn commit_aged(
@@ -1684,7 +1879,8 @@ async fn find_commit_with_no_base_never_reads_a_proposal_candidate() -> TestResu
             },
             Arc::new(Counting::default()),
         )
-        .await?;
+        .await?
+        .revision;
     assert_eq!(
         found(versions.find_commit(&scope, uuid!(51)?, None).await?),
         None,
@@ -1782,7 +1978,8 @@ async fn find_commit_with_no_base_never_follows_a_merge_into_a_candidate() -> Te
             },
             Arc::new(Counting::default()),
         )
-        .await?;
+        .await?
+        .revision;
     let head = versions
         .commit(
             &scope,
@@ -2719,7 +2916,8 @@ async fn a_promotion_whose_answer_cannot_be_kept_does_not_land() -> TestResult {
             },
             Arc::new(Counting::default()),
         )
-        .await?;
+        .await?
+        .revision;
     rusqlite::Connection::open(storage.data().records_path())?
         .execute_batch("DROP TABLE commit_warnings;")?;
     let refused = err_of(

@@ -17,7 +17,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Archive the workspace without deleting retained content.\n\nWhile a workspace is archived, an operation that would change its content or open work on\nit (a commit, a draft, a proposal, an upload, an import or redigest) is refused as\n`conflict`; reads, export, backup, `unarchive_workspace` and purge are allowed.",
+  "description": "Archive the workspace without deleting retained content.\n\nWhile a workspace is archived, only the operations of `operations::ALLOWED_WHILE_ARCHIVED`\nrun on it: every operation that is not a mutation, and a repeated archive, unarchive,\nexport, backup, purge, cancelling a job and rebuilding the index. Any other is refused as\n`conflict` with `ErrorDetail::WorkspaceArchived`. The archive itself is refused with\n`conflict` while an import, redigest or restore job of the workspace is queued or running,\nand no such job is accepted for an archived workspace, so no content-changing job runs in\none. A direct write admitted just before the archive lands completes.",
   "properties": {
     "base_revision": {
       "$ref": "#/$defs/Revision",

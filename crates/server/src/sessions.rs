@@ -58,7 +58,8 @@ pub struct SessionParts {
     pub events: Arc<dyn EventLog>,
     /// Where cookie secrets come from.
     pub secrets: Arc<dyn SecretSource>,
-    /// How the cookies are written.
+    /// How the cookies are written: `Identity::cookie_policy` of the identity middleware the
+    /// routes are served behind, so they write the cookie names it reads.
     pub policy: CookiePolicy,
     /// The deployment's entry path.
     pub entry: SessionEntry,
@@ -123,7 +124,7 @@ impl Sessions {
         let parts = &self.inner.parts;
         let secret = parts.secrets.secret()?;
         let session_id = session_id_of(&secret);
-        let lifetime = time::Duration::try_from(parts.policy.lifetime)
+        let lifetime = time::Duration::try_from(parts.policy.lifetime())
             .map_err(|_| ApiError::new(ErrorCode::Internal, "The session lifetime is too long"))?;
         let expires = OffsetDateTime::now_utc()
             .checked_add(lifetime)
@@ -185,6 +186,8 @@ pub async fn record_sign_in(events: &dyn EventLog, principal: &Principal) -> Res
             client_id: principal.client_id.clone(),
         }),
         operation: None,
+        proposal_id: None,
+        count: None,
     };
     events.append(&scope, None, event).await.map(|_| ())
 }
@@ -335,7 +338,7 @@ async fn logout(
     let outcome = async {
         parts.credentials.revoke_session(&session_id).await?;
         let mut headers = private_headers();
-        for cookie in cleared_cookies(parts.policy.secure)? {
+        for cookie in cleared_cookies(parts.policy.scheme())? {
             headers.append(SET_COOKIE, cookie);
         }
         Ok::<_, ApiError>((StatusCode::OK, headers, Json(Empty {})).into_response())

@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-discard_upload 1  "discard_upload " 
+.SH NAME
+okf\-jawn\-discard_upload \- Remove an upload slot and its bytes. Refused with conflict when a job has consumed the upload or a queued or running job names it.
+.SH SYNOPSIS
+\fBokf\-jawn discard_upload\fR [\fB\-\-json\fR] [\fB\-\-server\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Remove an upload slot and its bytes. Refused with conflict when a job has consumed the upload or a queued or running job names it.
+.SH OPTIONS
+.TP
+\fB\-\-json\fR \fI<JSON>\fR [default: {}]
+The operation\*(Aqs JSON input: inline, @file, or \- for standard input
+.TP
+\fB\-\-server\fR \fI<URL>\fR [default: http://127.0.0.1:7711]
+The service address: HTTPS, or HTTP for a loopback address
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

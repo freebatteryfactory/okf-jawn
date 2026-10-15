@@ -257,7 +257,7 @@
         },
         "content_digest": {
           "$ref": "#/$defs/Digest",
-          "description": "Digest of the drafted body and properties."
+          "description": "Digest of the drafted body and every property but the server-owned header, `aliases`\nincluded, keys sorted. Unlike `ItemDocument::content_digest`, any edit changes it, one to\n`aliases` alone included: it tells whether a draft is still the content a Snapshot\ncommitted."
         },
         "editor": {
           "description": "Server-established subject who owns this draft.",
@@ -619,6 +619,58 @@
         }
       ]
     },
+    "ItemDocument": {
+      "additionalProperties": false,
+      "description": "Editable Markdown and preserved frontmatter extension properties.",
+      "properties": {
+        "body": {
+          "description": "Markdown body, preserving source locators.",
+          "type": "string"
+        },
+        "content_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "SHA-256 of the item's body and properties without the server-owned header and without the\n`aliases` property, keys sorted: a rename that records the old path in `aliases` does not\nchange it, so it keeps a review's coverage. It is the value a confirmation and a review\ncite, so a client never computes it; the server computes it with\n`okf_jawn_core::portable::item_content_digest`."
+        },
+        "draft": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DraftContent"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The caller's own uncommitted draft; never another editor's, and never on agent routes."
+        },
+        "properties": {
+          "additionalProperties": true,
+          "description": "All user and OKF properties; unknown extension values are retained. The server-owned\napplication header appears under `APP_HEADER_KEY`.",
+          "type": "object"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceAppearance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Source occurrence metadata when applicable."
+        },
+        "summary": {
+          "$ref": "#/$defs/ItemSummary",
+          "description": "Identity and navigation metadata."
+        }
+      },
+      "required": [
+        "summary",
+        "body",
+        "properties",
+        "content_digest"
+      ],
+      "type": "object"
+    },
     "ItemId": {
       "description": "Stable item identity independent of its current relative path.",
       "format": "uuid",
@@ -881,6 +933,11 @@
       "format": "uuid",
       "type": "string"
     },
+    "ReceiptId": {
+      "description": "Identity of a durable application operation record.",
+      "format": "uuid",
+      "type": "string"
+    },
     "Revision": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
       "type": "string"
@@ -1060,63 +1117,71 @@
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$",
       "type": "string"
     },
+    "Warning": {
+      "additionalProperties": false,
+      "description": "A diagnostic that does not silently discard usable input.",
+      "properties": {
+        "code": {
+          "description": "Stable diagnostic identifier.",
+          "type": "string"
+        },
+        "location": {
+          "description": "Page, cell, path, or field locator.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "Human-readable explanation.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
     "WorkspacePath": {
-      "maxLength": 4096,
+      "description": "A relative path inside one workspace, in Unicode NFC, with `/` between segments. At most 4096 bytes in UTF-8: a character takes one to four.",
       "minLength": 1,
       "pattern": "^[^/\\\\:<>\"|?*\\x00-\\x1f]+(/[^/\\\\:<>\"|?*\\x00-\\x1f]+)*$",
-      "type": "string"
+      "type": "string",
+      "x-max-utf8-bytes": 4096
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Editable Markdown and preserved frontmatter extension properties.",
+  "description": "A created item, with the receipt of its commit and the findings of the commit's check.\n\nA creation answered before this type existed is kept in the mutation ledger as the\n`ItemDocument` alone; a repeat of it answers that document here with no findings and no\nreceipt (`CreatedItem::from_stored`), since the build that answered it recorded none.",
   "properties": {
-    "body": {
-      "description": "Markdown body, preserving source locators.",
-      "type": "string"
+    "item": {
+      "$ref": "#/$defs/ItemDocument",
+      "description": "The item as committed."
     },
-    "content_digest": {
-      "$ref": "#/$defs/Digest",
-      "description": "SHA-256 of the item's body and properties without the server-owned header, keys sorted.\nIt is the value a confirmation and a review cite, so a client never computes it; the\nserver computes it with `okf_jawn_core::portable::item_content_digest`."
-    },
-    "draft": {
+    "receipt_id": {
       "anyOf": [
         {
-          "$ref": "#/$defs/DraftContent"
+          "$ref": "#/$defs/ReceiptId"
         },
         {
           "type": "null"
         }
       ],
-      "description": "The caller's own uncommitted draft; never another editor's, and never on agent routes."
+      "description": "Durable application operation receipt; absent only on the repeat of a creation answered\nbefore its receipt was recorded."
     },
-    "properties": {
-      "additionalProperties": true,
-      "description": "All user and OKF properties; unknown extension values are retained. The server-owned\napplication header appears under `APP_HEADER_KEY`.",
-      "type": "object"
-    },
-    "source": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/SourceAppearance"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "description": "Source occurrence metadata when applicable."
-    },
-    "summary": {
-      "$ref": "#/$defs/ItemSummary",
-      "description": "Identity and navigation metadata."
+    "warnings": {
+      "description": "Non-fatal issues recorded during the operation.",
+      "items": {
+        "$ref": "#/$defs/Warning"
+      },
+      "type": "array"
     }
   },
   "required": [
-    "summary",
-    "body",
-    "properties",
-    "content_digest"
+    "item",
+    "warnings"
   ],
-  "title": "ItemDocument",
+  "title": "CreatedItem",
   "type": "object"
 }

@@ -2,11 +2,11 @@
 //! records, derived objects, reviews and receipts.
 #![cfg(feature = "runtime")]
 
-use okf_jawn_contract::error::ErrorCode;
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::{Digest, Revision, TenantId};
 use okf_jawn_contract::import::JobState;
 use okf_jawn_contract::purge::{PurgeState, PurgeTarget};
-use okf_jawn_contract::workspace::ArtifactKind;
+use okf_jawn_contract::workspace::{ArtifactKind, BackupReport};
 use okf_jawn_core::jobs::{
     DerivedKind, DerivedObject, JobCompletion, JobScope, JobSpec, NewArtifact, NewJob, NewPurge,
     RecordStore,
@@ -78,6 +78,7 @@ fn completion(lease: okf_jawn_core::jobs::JobLease) -> JobCompletion {
         item_ids: Vec::new(),
         artifact: None,
         restore: None,
+        backup: None,
         outputs: Vec::new(),
         warnings: Vec::new(),
     }
@@ -223,7 +224,11 @@ async fn a_lapsed_claim_neither_renews_nor_fails_its_job() -> TestResult {
     );
     let failed = err_of(
         records
-            .fail_job(claimed.lease.clone(), "stalled".to_owned(), false)
+            .fail_job(
+                claimed.lease.clone(),
+                ApiError::new(ErrorCode::Internal, "stalled"),
+                false,
+            )
             .await,
     )?;
     assert_eq!(
@@ -280,18 +285,27 @@ async fn a_failed_job_is_retried_once_per_mutation_and_only_when_retryable() -> 
         .await?;
     let claimed = some(records.claim_job(job.id).await?, "a claim")?;
     let failed = records
-        .fail_job(claimed.lease, "the index file was busy".to_owned(), true)
+        .fail_job(
+            claimed.lease,
+            ApiError::new(ErrorCode::Unavailable, "the index file was busy"),
+            true,
+        )
         .await?;
     assert_eq!(failed.state, JobState::Failed);
     assert_eq!(
         some(failed.error, "the failure")?.code,
         ErrorCode::Unavailable
     );
+    assert_eq!(failed.retryable, Some(true));
     let queued = records.retry_job(&scope, uuid!(9)?, job.id).await?;
     assert_eq!(queued.state, JobState::Queued);
     let claimed = some(records.claim_job(job.id).await?, "the second claim")?;
     records
-        .fail_job(claimed.lease, "broken".to_owned(), false)
+        .fail_job(
+            claimed.lease,
+            ApiError::new(ErrorCode::Internal, "broken"),
+            false,
+        )
         .await?;
     // Repeating the first retry request does not queue the job a second time.
     let repeated = records.retry_job(&scope, uuid!(9)?, job.id).await?;
@@ -302,6 +316,89 @@ async fn a_failed_job_is_retried_once_per_mutation_and_only_when_retryable() -> 
         ErrorCode::Conflict,
         "a non-retryable failure is not retried"
     );
+    Ok(())
+}
+
+/// A job's failure is stored as its handler gave it, and its instants and retry flag follow
+/// its state: created when accepted, started at each claim, finished when it succeeds, fails
+/// or is cancelled, `retryable` exactly while it is failed, and a retry or a released lease
+/// clearing what a waiting job does not have.
+#[tokio::test]
+async fn a_jobs_failure_instants_and_retry_flag_follow_its_state() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let records = storage.records();
+    let scope = workspace_scope()?;
+    let created = records
+        .create_job(&scope, new_job(5, JobSpec::RebuildIndex)?)
+        .await?;
+    let accepted = some(created.created_at.clone(), "created_at")?;
+    assert!(created.started_at.is_none() && created.finished_at.is_none());
+    assert!(created.retryable.is_none());
+    let claimed = some(records.claim_job(created.id).await?, "a claim")?;
+    let started = some(claimed.job.started_at.clone(), "started_at")?;
+    assert!(started >= accepted);
+    assert!(claimed.job.finished_at.is_none());
+    // The refusal is kept as given: code, message, field and detail.
+    let head = Revision::try_from("c".repeat(40))?;
+    let refusal = ApiError::new(ErrorCode::Conflict, "the card path is taken")
+        .with_field("/upload_ids/1")
+        .with_detail(ErrorDetail::StaleBase { head });
+    let failed = records
+        .fail_job(claimed.lease, refusal.clone(), true)
+        .await?;
+    let stored = records.get_job(&scope, created.id).await?;
+    for job in [&failed, &stored] {
+        assert_eq!(job.state, JobState::Failed);
+        let error = some(job.error.clone(), "the failure")?;
+        assert_eq!(
+            serde_json::to_value(&error)?,
+            serde_json::to_value(&refusal)?
+        );
+        assert_eq!(job.retryable, Some(true));
+        assert!(some(job.finished_at.clone(), "finished_at")? >= started);
+        assert_eq!(job.created_at.as_ref(), Some(&accepted));
+    }
+    // A retry queues it again: no start, no finish, no retry flag; acceptance kept.
+    let queued = records.retry_job(&scope, uuid!(9)?, created.id).await?;
+    assert_eq!(queued.state, JobState::Queued);
+    assert!(queued.started_at.is_none() && queued.finished_at.is_none());
+    assert!(queued.retryable.is_none() && queued.error.is_none());
+    assert_eq!(queued.created_at.as_ref(), Some(&accepted));
+    let claimed = some(records.claim_job(created.id).await?, "the second claim")?;
+    assert!(claimed.job.started_at.is_some());
+    let report = BackupReport { rows_left_out: 2 };
+    let done = records
+        .complete_job(JobCompletion {
+            backup: Some(report.clone()),
+            ..completion(claimed.lease)
+        })
+        .await?;
+    assert_eq!(done.state, JobState::Succeeded);
+    assert!(done.finished_at.is_some() && done.retryable.is_none());
+    // The completion's report is kept on the job.
+    assert_eq!(done.backup.as_ref(), Some(&report));
+    let stored = records.get_job(&scope, created.id).await?;
+    assert_eq!(stored.finished_at, done.finished_at);
+    assert_eq!(stored.backup, Some(report));
+    // A released lease returns the job to waiting without its start.
+    let lapsed = records
+        .create_job(&scope, new_job(6, JobSpec::RebuildIndex)?)
+        .await?;
+    let claimed = some(records.claim_job(lapsed.id).await?, "a claim")?;
+    assert!(claimed.job.started_at.is_some());
+    expire_job_leases(&storage)?;
+    assert_eq!(records.expire_leases().await?, 1);
+    let waiting = records.get_job(&scope, lapsed.id).await?;
+    assert_eq!(waiting.state, JobState::Queued);
+    assert!(waiting.started_at.is_none(), "{:?}", waiting.started_at);
+    // A cancelled job is finished, and carries no retry flag: only a failure does (review N4).
+    let cancelled = records.cancel_job(&scope, uuid!(10)?, lapsed.id).await?;
+    assert_eq!(cancelled.state, JobState::Cancelled);
+    assert!(cancelled.finished_at.is_some());
+    assert!(cancelled.retryable.is_none(), "{:?}", cancelled.retryable);
+    let stored = records.get_job(&scope, lapsed.id).await?;
+    assert!(stored.retryable.is_none(), "{:?}", stored.retryable);
     Ok(())
 }
 

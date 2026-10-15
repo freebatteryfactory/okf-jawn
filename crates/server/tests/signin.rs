@@ -12,21 +12,25 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::response::Response;
-use okf_jawn_contract::access::AccessRoute;
+use okf_jawn_contract::access::{
+    AccessRoute, CSRF_COOKIE, CSRF_COOKIE_HTTPS, CSRF_HEADER, SESSION_COOKIE, SESSION_COOKIE_HTTPS,
+};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::EventKind;
 use okf_jawn_contract::identity::TenantId;
 use okf_jawn_core::credentials::CredentialStore;
 use okf_jawn_core::ports::PortFuture;
-use okf_jawn_server::cookies::CookiePolicy;
+use okf_jawn_server::cookies::CrateCookies;
 use okf_jawn_server::hosted::{HostedLogin, HostedUser, LoginStart};
-use okf_jawn_server::identity::session_id_of;
+use okf_jawn_server::identity::{
+    BearerAuth, ConnectIdentity, Identity, IdentityPorts, csrf_token_of, session_id_of,
+};
 use okf_jawn_server::local::SecretSource;
 use okf_jawn_server::sessions::{SessionEntry, SessionParts, Sessions, routes};
 use tower::ServiceExt;
 
 use check::{TestResult, some};
-use support::{HOST, LocalApp};
+use support::{HOST, LocalApp, OneToken};
 
 /// An identity provider that begins one fixed sign-in and exchanges its code once, only with
 /// the verifier of the sign-in it began. It counts every exchange it is asked for.
@@ -55,6 +59,8 @@ const OTHER_VERIFIER: &str = "verifier.of-a_sign-in~another-browser-began-02";
 const CODE: &str = "code-1";
 const SESSION_SECRET: &str = "hosted-session-secret";
 const LOGIN_COOKIE: &str = "__Host-okf-login";
+/// The service's own origin, served over https as a hosted deployment is.
+const HTTPS_ORIGIN: &str = "https://127.0.0.1:7711";
 
 impl HostedLogin for Provider {
     fn begin(&self) -> Result<LoginStart, ApiError> {
@@ -94,22 +100,43 @@ impl SecretSource for Fixed {
 }
 
 impl Hosted {
+    /// A hosted service over https: one identity middleware for that origin, whose cookie
+    /// policy the session routes write by (review N3).
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let base = LocalApp::new()?;
         let provider = Arc::new(Provider::default());
+        // Hosted: browser sessions of route `BrowserSession`, bearer tokens from WorkOS Connect
+        // (none is presented here).
+        let identity = Identity::new(
+            BearerAuth::Hosted {
+                connect: Arc::new(OneToken {
+                    token: "no request presents this token".to_owned(),
+                    identity: ConnectIdentity {
+                        subject: "user_01".to_owned(),
+                        organization_id: "org_01".to_owned(),
+                        client_id: "client_01".to_owned(),
+                        expires_at: u64::MAX,
+                    },
+                }),
+                resource_metadata: format!("{HTTPS_ORIGIN}/.well-known/oauth-protected-resource"),
+            },
+            IdentityPorts {
+                credentials: base.credentials.clone(),
+                events: base.ports.events.clone(),
+                cookies: Arc::new(CrateCookies),
+            },
+            vec![HTTPS_ORIGIN.to_owned()],
+        );
         let sessions = Sessions::new(SessionParts {
             credentials: base.credentials.clone(),
             events: base.ports.events.clone(),
             secrets: Arc::new(Fixed),
-            policy: CookiePolicy {
-                secure: true,
-                lifetime: Duration::from_secs(3600),
-            },
+            policy: identity.cookie_policy(Duration::from_secs(3600)),
             entry: SessionEntry::Hosted {
                 login: provider.clone(),
             },
         });
-        let app = base.service(routes(sessions), Vec::new(), None)?;
+        let app = base.service_behind(identity, routes(sessions), Vec::new(), None)?;
         Ok(Self {
             app,
             base,
@@ -226,7 +253,10 @@ async fn assert_no_sign_in(hosted: &Hosted, response: &Response) -> TestResult {
             .and_then(|v| v.to_str().ok()),
         Some("no-referrer")
     );
-    assert_eq!(set_cookies(response, "okf-session"), Vec::<String>::new());
+    assert_eq!(
+        set_cookies(response, SESSION_COOKIE_HTTPS),
+        Vec::<String>::new()
+    );
     assert!(!hosted.signed_in().await?);
     Ok(())
 }
@@ -263,7 +293,10 @@ async fn beginning_a_sign_in_hands_the_browser_its_cookie_with_each_attribute() 
         ]
     );
     // Beginning a sign-in opens no session and exchanges nothing.
-    assert_eq!(set_cookies(&begun, "okf-session"), Vec::<String>::new());
+    assert_eq!(
+        set_cookies(&begun, SESSION_COOKIE_HTTPS),
+        Vec::<String>::new()
+    );
     assert_eq!(hosted.exchanges(), 0);
     Ok(())
 }
@@ -276,7 +309,10 @@ async fn the_browser_that_began_a_sign_in_completes_it_and_its_cookie_is_cleared
         .await?;
     assert_eq!(response.status(), StatusCode::FOUND);
     assert_login_cookie_cleared(&response)?;
-    let session = set_cookies(&response, "okf-session");
+    // Over https the session cookie is `__Host-okf-session` (ruling 17), and no `okf-session`
+    // is set beside it.
+    assert_eq!(set_cookies(&response, SESSION_COOKIE), Vec::<String>::new());
+    let session = set_cookies(&response, SESSION_COOKIE_HTTPS);
     let session = some(session.first(), "the session cookie")?;
     assert_eq!(
         attributes(session),
@@ -288,7 +324,10 @@ async fn the_browser_that_began_a_sign_in_completes_it_and_its_cookie_is_cleared
             "Secure"
         ]
     );
-    let csrf = set_cookies(&response, "okf-csrf");
+    // Over https the anti-CSRF cookie is `__Host-okf-csrf` (review N13), and no `okf-csrf` is
+    // set beside it.
+    assert_eq!(set_cookies(&response, CSRF_COOKIE), Vec::<String>::new());
+    let csrf = set_cookies(&response, CSRF_COOKIE_HTTPS);
     let csrf = some(csrf.first(), "the anti-CSRF cookie")?;
     assert_eq!(
         attributes(csrf),
@@ -319,6 +358,113 @@ async fn the_browser_that_began_a_sign_in_completes_it_and_its_cookie_is_cleared
         .filter(|(_, event)| event.kind == EventKind::SignedIn)
         .count();
     assert_eq!(signed_in, 1);
+    Ok(())
+}
+
+/// The value of the cookie `name` that `response` sets.
+fn set_value(response: &Response, name: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let cookies = set_cookies(response, name);
+    let cookie = some(cookies.first(), "the cookie")?;
+    let pair = some(cookie.split("; ").next(), "its name and value")?;
+    Ok(some(pair.strip_prefix(&format!("{name}=")), "its value")?.to_owned())
+}
+
+/// A same-origin request over https carrying `cookie` and the anti-CSRF header `csrf`.
+fn https_post(path: &str, cookie: &str, csrf: &str) -> Result<Request<Body>, axum::http::Error> {
+    Request::post(path)
+        .header("host", HOST)
+        .header("origin", HTTPS_ORIGIN)
+        .header("sec-fetch-site", "same-origin")
+        .header("content-type", "application/json")
+        .header("cookie", cookie)
+        .header(CSRF_HEADER, csrf)
+        .body(Body::from("{}"))
+}
+
+/// Review N3: the name the server writes at a hosted sign-in over https is the name it reads.
+/// The browser sends back the `__Host-okf-session` it was given with the `__Host-okf-csrf`
+/// token, and the request is the signed-in person's; the same secret under the plain name is
+/// not read.
+#[tokio::test]
+async fn a_session_signed_in_over_https_is_read_back_from_the_cookie_it_set() -> TestResult {
+    let hosted = Hosted::new()?;
+    let signed_in = hosted
+        .callback(STATE, CODE, Some(&pending(STATE, VERIFIER)))
+        .await?;
+    assert_eq!(signed_in.status(), StatusCode::FOUND);
+    let secret = set_value(&signed_in, SESSION_COOKIE_HTTPS)?;
+    let token = set_value(&signed_in, CSRF_COOKIE_HTTPS)?;
+    assert_eq!(token, csrf_token_of(&secret));
+    let cookie = format!("{SESSION_COOKIE_HTTPS}={secret}");
+    hosted
+        .app
+        .clone()
+        .oneshot(https_post("/api/session/get-session", &cookie, &token)?)
+        .await?;
+    let seen = hosted.base.counting.contexts("get_session")?;
+    let context = some(seen.first(), "the signed-in request")?;
+    assert_eq!(context.principal.subject, "user_01");
+    assert_eq!(context.principal.route, AccessRoute::BrowserSession);
+    let plain = format!("{SESSION_COOKIE}={secret}");
+    let refused = hosted
+        .app
+        .clone()
+        .oneshot(https_post("/api/session/get-session", &plain, &token)?)
+        .await?;
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(hosted.base.counting.call_count("get_session")?, 1);
+    Ok(())
+}
+
+/// Review N10: a logout over https clears `__Host-okf-session` and `__Host-okf-csrf`, with the
+/// attributes they were set with and expired, and clears no plain-named cookie.
+#[tokio::test]
+async fn a_logout_over_https_clears_the_host_cookies_it_set() -> TestResult {
+    let hosted = Hosted::new()?;
+    let signed_in = hosted
+        .callback(STATE, CODE, Some(&pending(STATE, VERIFIER)))
+        .await?;
+    let secret = set_value(&signed_in, SESSION_COOKIE_HTTPS)?;
+    let token = set_value(&signed_in, CSRF_COOKIE_HTTPS)?;
+    let cookie = format!("{SESSION_COOKIE_HTTPS}={secret}");
+    let response = hosted
+        .app
+        .clone()
+        .oneshot(https_post("/auth/logout", &cookie, &token)?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!hosted.signed_in().await?, "the session is revoked");
+    for (name, expected) in [
+        (
+            SESSION_COOKIE_HTTPS,
+            vec![
+                "HttpOnly",
+                "Max-Age=0",
+                "Path=/",
+                "SameSite=Strict",
+                "Secure",
+            ],
+        ),
+        (
+            CSRF_COOKIE_HTTPS,
+            vec!["Max-Age=0", "Path=/", "SameSite=Strict", "Secure"],
+        ),
+    ] {
+        let cleared = set_cookies(&response, name);
+        assert_eq!(cleared.len(), 1, "{name}: {cleared:?}");
+        let cleared = some(cleared.first(), "the clearing cookie")?;
+        assert!(cleared.starts_with(&format!("{name}=;")), "{cleared}");
+        let mut attributes = attributes(cleared);
+        attributes.retain(|attribute| !attribute.starts_with("Expires="));
+        assert_eq!(attributes, expected, "{cleared}");
+    }
+    for plain in [SESSION_COOKIE, CSRF_COOKIE] {
+        assert_eq!(
+            set_cookies(&response, plain),
+            Vec::<String>::new(),
+            "{plain}"
+        );
+    }
     Ok(())
 }
 
@@ -456,7 +602,10 @@ async fn the_same_callback_sent_twice_signs_in_once() -> TestResult {
     let replay = hosted.callback(STATE, CODE, Some(&cookie)).await?;
     assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
     assert_login_cookie_cleared(&replay)?;
-    assert_eq!(set_cookies(&replay, "okf-session"), Vec::<String>::new());
+    assert_eq!(
+        set_cookies(&replay, SESSION_COOKIE_HTTPS),
+        Vec::<String>::new()
+    );
     assert_eq!(hosted.exchanges(), 2);
     Ok(())
 }
@@ -493,7 +642,10 @@ async fn a_matching_callback_clears_the_cookie_when_the_provider_or_the_store_fa
     let response = hosted.callback(STATE, CODE, Some(&cookie)).await?;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_login_cookie_cleared(&response)?;
-    assert_eq!(set_cookies(&response, "okf-session"), Vec::<String>::new());
+    assert_eq!(
+        set_cookies(&response, SESSION_COOKIE_HTTPS),
+        Vec::<String>::new()
+    );
     assert_eq!(hosted.exchanges(), 1);
     // The provider answers, and the store cannot take the session.
     let hosted = Hosted::new()?;
@@ -501,7 +653,10 @@ async fn a_matching_callback_clears_the_cookie_when_the_provider_or_the_store_fa
     let response = hosted.callback(STATE, CODE, Some(&cookie)).await?;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_login_cookie_cleared(&response)?;
-    assert_eq!(set_cookies(&response, "okf-session"), Vec::<String>::new());
+    assert_eq!(
+        set_cookies(&response, SESSION_COOKIE_HTTPS),
+        Vec::<String>::new()
+    );
     assert_eq!(hosted.exchanges(), 1);
     hosted.base.credentials.set_down(false);
     assert!(!hosted.signed_in().await?);

@@ -99,19 +99,32 @@
       "type": "object"
     },
     "WorkspacePath": {
-      "maxLength": 4096,
+      "description": "A relative path inside one workspace, in Unicode NFC, with `/` between segments. At most 4096 bytes in UTF-8: a character takes one to four.",
       "minLength": 1,
       "pattern": "^[^/\\\\:<>\"|?*\\x00-\\x1f]+(/[^/\\\\:<>\"|?*\\x00-\\x1f]+)*$",
-      "type": "string"
+      "type": "string",
+      "x-max-utf8-bytes": 4096
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "A preview bound to source state and exact conventions.",
+  "description": "A preview bound to source state and exact conventions.\n\nThe counts are for the person reading the preview; `apply_names` does not check them.",
   "properties": {
+    "archived_left_out": {
+      "description": "Archived items the selection holds; they are never renamed.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
     "base_revision": {
       "$ref": "#/$defs/Revision",
       "description": "Workspace revision inspected."
+    },
+    "considered": {
+      "description": "Items the selection holds that are not archived.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
     },
     "duplicate_observations": {
       "description": "Duplicate path observations recorded during preview.",
@@ -121,7 +134,7 @@
       "type": "array"
     },
     "entries": {
-      "description": "Proposed changes.",
+      "description": "Proposed changes: only the items whose path would change.",
       "items": {
         "$ref": "#/$defs/RenameEntry"
       },
@@ -130,6 +143,12 @@
     "rules_digest": {
       "$ref": "#/$defs/Digest",
       "description": "Digest of the exact canonical rules."
+    },
+    "unchanged": {
+      "description": "Considered items whose path would not change; they are not in `entries`.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
     },
     "warnings": {
       "description": "Plan-level warnings.",
@@ -144,7 +163,10 @@
     "rules_digest",
     "entries",
     "duplicate_observations",
-    "warnings"
+    "warnings",
+    "considered",
+    "unchanged",
+    "archived_left_out"
   ],
   "title": "RenamePlan",
   "type": "object"

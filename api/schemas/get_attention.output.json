@@ -8,6 +8,17 @@
           "$ref": "#/$defs/OperationName",
           "description": "Suggested existing operation, never executable code."
         },
+        "item": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ItemSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The item at the response's `revision`; absent when the observation is about no one\nitem or the item was purged."
+        },
         "item_id": {
           "anyOf": [
             {
@@ -26,6 +37,17 @@
         "message": {
           "description": "Concrete explanation.",
           "type": "string"
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Selection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The place inside the item the observation is about, in the form `read_item` takes;\nabsent when it is about the whole item."
         }
       },
       "required": [
@@ -92,13 +114,284 @@
           "const": "unparseable_header",
           "description": "An imported file's header does not parse; its bytes are kept and nothing is blocked.\nAction `get_item`.",
           "type": "string"
+        },
+        {
+          "const": "uploads_waiting",
+          "description": "Uploads that are complete and not imported, with their count and total size in the\nmessage; one row a workspace when any exist. Action `list_uploads`.",
+          "type": "string"
         }
       ]
+    },
+    "BoundingBox": {
+      "additionalProperties": false,
+      "description": "Docling's bounding box, copied as the converter gave it (rounded to two decimals).",
+      "properties": {
+        "b": {
+          "description": "Bottom edge.",
+          "format": "double",
+          "type": "number"
+        },
+        "coord_origin": {
+          "$ref": "#/$defs/CoordOrigin",
+          "description": "Corner `t` and `b` are measured from."
+        },
+        "l": {
+          "description": "Left edge.",
+          "format": "double",
+          "type": "number"
+        },
+        "r": {
+          "description": "Right edge.",
+          "format": "double",
+          "type": "number"
+        },
+        "t": {
+          "description": "Top edge.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "l",
+        "t",
+        "r",
+        "b",
+        "coord_origin"
+      ],
+      "type": "object"
+    },
+    "CellRange": {
+      "additionalProperties": false,
+      "description": "A one-based inclusive rectangular spreadsheet selection; the XLSX source locator.",
+      "properties": {
+        "column_end": {
+          "description": "Last column, inclusive.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "column_start": {
+          "description": "First column, inclusive, starting at one.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "row_end": {
+          "description": "Last row, inclusive.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "row_start": {
+          "description": "First row, inclusive, starting at one.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sheet": {
+          "description": "Exact sheet name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sheet",
+        "row_start",
+        "row_end",
+        "column_start",
+        "column_end"
+      ],
+      "type": "object"
+    },
+    "CoordOrigin": {
+      "description": "Docling's `coord_origin`: which corner `t` and `b` are measured from.",
+      "oneOf": [
+        {
+          "const": "top_left",
+          "description": "Docling `TOPLEFT`.",
+          "type": "string"
+        },
+        {
+          "const": "bottom_left",
+          "description": "Docling `BOTTOMLEFT`.",
+          "type": "string"
+        }
+      ]
+    },
+    "ExtractionStatus": {
+      "description": "The converter's verdict on one source, as a listing and a filter use it.",
+      "oneOf": [
+        {
+          "const": "pending",
+          "description": "Accepted; no conversion has finished.",
+          "type": "string"
+        },
+        {
+          "const": "completed",
+          "description": "Every page, or the whole non-paginated document, was converted.",
+          "type": "string"
+        },
+        {
+          "const": "partial",
+          "description": "A document was produced but part of the source is missing from it.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The converter produced no document; the bytes are retained.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported",
+          "description": "No converter exists for this format; the bytes are retained.",
+          "type": "string"
+        }
+      ]
+    },
+    "ExtractionSummary": {
+      "additionalProperties": false,
+      "description": "What a listing shows about one source.",
+      "properties": {
+        "corrected": {
+          "description": "A human correction is shown over that text.",
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/ExtractionStatus",
+          "description": "The converter's verdict."
+        },
+        "text_origin": {
+          "$ref": "#/$defs/TextOrigin",
+          "description": "Whose text is shown."
+        }
+      },
+      "required": [
+        "status",
+        "text_origin",
+        "corrected"
+      ],
+      "type": "object"
     },
     "ItemId": {
       "description": "Stable item identity independent of its current relative path.",
       "format": "uuid",
       "type": "string"
+    },
+    "ItemKind": {
+      "description": "Built-in presentation roles; user-defined OKF type names remain unrestricted.",
+      "oneOf": [
+        {
+          "const": "note",
+          "description": "Human or agent-authored Markdown knowledge.",
+          "type": "string"
+        },
+        {
+          "const": "source",
+          "description": "An appearance of immutable source bytes.",
+          "type": "string"
+        },
+        {
+          "const": "view",
+          "description": "A source-bound declarative visual artifact.",
+          "type": "string"
+        }
+      ]
+    },
+    "ItemStatus": {
+      "description": "OKF's `status` word of an item, distinct from business approval and from archiving.\n\nAn absent OKF `status` reads `stable`. `other` is a producer's value outside the three,\nkept exactly as written in the file's `status` property; it cannot be set through\n`set_lifecycle`.",
+      "oneOf": [
+        {
+          "const": "draft",
+          "description": "Work in progress.",
+          "type": "string"
+        },
+        {
+          "const": "stable",
+          "description": "Current and usable content.",
+          "type": "string"
+        },
+        {
+          "const": "deprecated",
+          "description": "Retained, superseded content; still searchable.",
+          "type": "string"
+        },
+        {
+          "const": "other",
+          "description": "A status word outside the three, preserved in the file.",
+          "type": "string"
+        }
+      ]
+    },
+    "ItemSummary": {
+      "additionalProperties": false,
+      "description": "A navigable item description bound to a resolved workspace revision.",
+      "properties": {
+        "archived": {
+          "description": "Hidden from ordinary current listings; reversible and keeps history.",
+          "type": "boolean"
+        },
+        "description": {
+          "description": "One-line navigation summary.",
+          "type": "string"
+        },
+        "extraction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExtractionSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The converter's verdict and whose text is shown; present exactly when `kind` is `source`."
+        },
+        "id": {
+          "$ref": "#/$defs/ItemId",
+          "description": "Stable identity."
+        },
+        "kind": {
+          "$ref": "#/$defs/ItemKind",
+          "description": "Built-in rendering role."
+        },
+        "media_type": {
+          "description": "Original MIME type if there is a source object.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "$ref": "#/$defs/WorkspacePath",
+          "description": "Current relative OKF path."
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Resolved revision for this summary."
+        },
+        "status": {
+          "$ref": "#/$defs/ItemStatus",
+          "description": "OKF status word."
+        },
+        "title": {
+          "description": "Human-readable title.",
+          "type": "string"
+        },
+        "type_name": {
+          "description": "User-selected OKF type; not a closed enum.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "path",
+        "title",
+        "description",
+        "type_name",
+        "kind",
+        "revision",
+        "status",
+        "archived"
+      ],
+      "type": "object"
     },
     "OperationName": {
       "description": "Closed set of canonical operation identifiers, serialized as the `snake_case` id.",
@@ -219,6 +512,16 @@
           "type": "string"
         },
         {
+          "const": "move_folder",
+          "description": "The `move_folder` operation.",
+          "type": "string"
+        },
+        {
+          "const": "delete_folder",
+          "description": "The `delete_folder` operation.",
+          "type": "string"
+        },
+        {
           "const": "list_types",
           "description": "The `list_types` operation.",
           "type": "string"
@@ -319,6 +622,11 @@
           "type": "string"
         },
         {
+          "const": "list_comments",
+          "description": "The `list_comments` operation.",
+          "type": "string"
+        },
+        {
           "const": "create_confirmation",
           "description": "The `create_confirmation` operation.",
           "type": "string"
@@ -341,6 +649,21 @@
         {
           "const": "complete_upload",
           "description": "The `complete_upload` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_upload",
+          "description": "The `get_upload` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_uploads",
+          "description": "The `list_uploads` operation.",
+          "type": "string"
+        },
+        {
+          "const": "discard_upload",
+          "description": "The `discard_upload` operation.",
           "type": "string"
         },
         {
@@ -490,9 +813,243 @@
         }
       ]
     },
+    "PageRange": {
+      "additionalProperties": false,
+      "description": "A one-based inclusive document page range.",
+      "properties": {
+        "end": {
+          "description": "Last page.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "start": {
+          "description": "First page.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "PageRegion": {
+      "additionalProperties": false,
+      "description": "A box on one page, slide or image of the original.",
+      "properties": {
+        "bbox": {
+          "$ref": "#/$defs/BoundingBox",
+          "description": "The box."
+        },
+        "page_no": {
+          "description": "One-based page or slide number.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "page_size": {
+          "$ref": "#/$defs/PageSize",
+          "description": "The page's extent, so the box can be drawn over a page image on its own."
+        }
+      },
+      "required": [
+        "page_no",
+        "bbox",
+        "page_size"
+      ],
+      "type": "object"
+    },
+    "PageSize": {
+      "additionalProperties": false,
+      "description": "Extent of the page the box lies on, in the box's own unit (PDF points, image pixels, PPTX\nEMU). A reader draws the box over a page image by the ratio of the two, so it needs no unit.",
+      "properties": {
+        "height": {
+          "description": "Page height.",
+          "format": "double",
+          "type": "number"
+        },
+        "width": {
+          "description": "Page width.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "width",
+        "height"
+      ],
+      "type": "object"
+    },
     "Revision": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
       "type": "string"
+    },
+    "Selection": {
+      "description": "Explicit bounded source selection.\n\n`PartialEq` only: a `region` holds coordinates as `f64`.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The complete source, subject to a visible response budget.",
+          "properties": {
+            "kind": {
+              "const": "all",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Inclusive line range.",
+          "properties": {
+            "kind": {
+              "const": "lines",
+              "type": "string"
+            },
+            "range": {
+              "$ref": "#/$defs/TextRange",
+              "description": "Range."
+            }
+          },
+          "required": [
+            "kind",
+            "range"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Inclusive page range.",
+          "properties": {
+            "kind": {
+              "const": "pages",
+              "type": "string"
+            },
+            "range": {
+              "$ref": "#/$defs/PageRange",
+              "description": "Range."
+            }
+          },
+          "required": [
+            "kind",
+            "range"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Rectangular sheet range.",
+          "properties": {
+            "kind": {
+              "const": "cells",
+              "type": "string"
+            },
+            "range": {
+              "$ref": "#/$defs/CellRange",
+              "description": "Range."
+            }
+          },
+          "required": [
+            "kind",
+            "range"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An unambiguous heading identifier.",
+          "properties": {
+            "heading": {
+              "description": "Heading.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "section",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "heading"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A box on one page: the extracted items whose location lies inside it; the `pages` view\nreturns that page's image.",
+          "properties": {
+            "kind": {
+              "const": "region",
+              "type": "string"
+            },
+            "region": {
+              "$ref": "#/$defs/PageRegion",
+              "description": "Region."
+            }
+          },
+          "required": [
+            "kind",
+            "region"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TextOrigin": {
+      "description": "Whose text a source card shows and search indexes.",
+      "oneOf": [
+        {
+          "const": "converter",
+          "description": "The converter's extraction.",
+          "type": "string"
+        },
+        {
+          "const": "supplied_by_agent",
+          "description": "Text an agent proposed and a person accepted.",
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "No text: pending, failed or unsupported, with nothing supplied.",
+          "type": "string"
+        }
+      ]
+    },
+    "TextRange": {
+      "additionalProperties": false,
+      "description": "A one-based inclusive line range.",
+      "properties": {
+        "end": {
+          "description": "Last line, at least start.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "start": {
+          "description": "First line, starting at one.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "WorkspacePath": {
+      "description": "A relative path inside one workspace, in Unicode NFC, with `/` between segments. At most 4096 bytes in UTF-8: a character takes one to four.",
+      "minLength": 1,
+      "pattern": "^[^/\\\\:<>\"|?*\\x00-\\x1f]+(/[^/\\\\:<>\"|?*\\x00-\\x1f]+)*$",
+      "type": "string",
+      "x-max-utf8-bytes": 4096
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

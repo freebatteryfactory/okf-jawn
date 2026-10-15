@@ -17,7 +17,6 @@ use okf_jawn_contract::identity::{MutationId, TenantId, Timestamp};
 use okf_jawn_core::credentials::{CredentialStore, SessionRecord};
 use okf_jawn_core::events::{EventLog, EventQuery, EventScope, NewEvent};
 use okf_jawn_core::ports::PortFuture;
-use okf_jawn_server::cookies::CookiePolicy;
 use okf_jawn_server::identity::{csrf_token_of, session_id_of};
 use okf_jawn_server::local::{LaunchTokens, SecretSource};
 use okf_jawn_server::sessions::{SessionEntry, SessionParts, Sessions, routes};
@@ -93,8 +92,10 @@ impl Local {
     /// The service whose sign-ins are recorded in `events` (the fixture log when `None`).
     fn with_events(events: Option<Arc<dyn EventLog>>) -> Result<Self, Box<dyn std::error::Error>> {
         let base = LocalApp::new()?;
-        base.counting
-            .set_response("list_drafts", json!({ "items": [] }))?;
+        base.counting.set_response(
+            "list_drafts",
+            json!({ "revision": "a".repeat(40), "items": [] }),
+        )?;
         let tokens = Arc::new(LaunchTokens::new());
         // One secret more than one sign-in needs, so a second sign-in would show.
         let secrets = Arc::new(Sequence(Mutex::new(vec![
@@ -103,18 +104,17 @@ impl Local {
             "launch-token",
         ])));
         let token = tokens.issue(secrets.as_ref())?;
+        // One identity middleware: the session routes write the cookie names it reads.
+        let identity = base.identity();
         let sessions = Sessions::new(SessionParts {
             credentials: base.credentials.clone(),
             events: events.unwrap_or_else(|| base.ports.events.clone()),
             secrets,
-            policy: CookiePolicy {
-                secure: false,
-                lifetime: Duration::from_secs(3600),
-            },
+            policy: identity.cookie_policy(Duration::from_secs(3600)),
             entry: SessionEntry::Local { tokens },
         });
         let extra = routes(sessions).merge(okf_jawn_server::schemas::routes());
-        let app = base.service(extra, Vec::new(), None)?;
+        let app = base.service_behind(identity, extra, Vec::new(), None)?;
         Ok(Self { app, base, token })
     }
 
@@ -190,6 +190,12 @@ async fn the_launch_token_opens_a_strict_http_only_session_and_records_the_sign_
         "the session cookie",
     )?;
     assert!(session.starts_with(&format!("okf-session={SESSION_SECRET};")));
+    // On loopback http the session cookie is `okf-session` (ruling 17): no `__Host-` cookie, which
+    // a browser would refuse without `Secure`.
+    assert!(
+        !cookies.iter().any(|c| c.starts_with("__Host-okf-session=")),
+        "{cookies:?}"
+    );
     assert!(session.contains("HttpOnly"));
     assert!(session.contains("SameSite=Strict"));
     assert!(session.contains("Path=/"));
@@ -443,7 +449,13 @@ async fn logout_clears_both_cookies_on_the_path_they_were_set_on() -> TestResult
         assert!(attributes.contains(&"Max-Age=0"), "{cleared}");
         assert!(attributes.contains(&"SameSite=Strict"), "{cleared}");
         assert_eq!(attributes.contains(&"HttpOnly"), http_only, "{cleared}");
+        assert!(!attributes.contains(&"Secure"), "not over http: {cleared}");
     }
+    // On loopback http only the plain names are cleared (review N10).
+    assert!(
+        !cookies.iter().any(|c| c.starts_with("__Host-")),
+        "{cookies:?}"
+    );
     Ok(())
 }
 

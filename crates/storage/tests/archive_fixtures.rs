@@ -439,7 +439,8 @@ async fn seed_history(directory: &Path) -> Fallible<Seeded> {
             },
             Arc::new(Accept),
         )
-        .await?;
+        .await?
+        .revision;
     let marked = "Content of the second workspace.";
     let elsewhere = vec![note(15, "notes/elsewhere.md", marked)?];
     commit(&storage, &second, 7, &second_head, "Seed", elsewhere).await?;
@@ -562,6 +563,7 @@ async fn seed_job(seeded: &Seeded) -> TestResult {
             item_ids: Vec::new(),
             artifact: Some(artifact.id),
             restore: None,
+            backup: None,
             outputs: vec![export.digest],
             warnings: Vec::new(),
         })
@@ -611,6 +613,8 @@ async fn seed_review(seeded: &Seeded) -> TestResult {
         connector_id: None,
         actor: None,
         operation: None,
+        proposal_id: None,
+        count: None,
     };
     storage
         .events()
@@ -687,6 +691,8 @@ async fn seed_installation(seeded: &Seeded) -> TestResult {
         connector_id: None,
         actor: None,
         operation: None,
+        proposal_id: None,
+        count: None,
     };
     storage
         .events()
@@ -715,7 +721,8 @@ async fn take_archives(seeded: &Seeded, target: &Path) -> Fallible<(PathBuf, Pat
     std::fs::create_dir_all(target)?;
     let archive = backups
         .write_workspace_archive(&seeded.workspace, uuid!(70)?)
-        .await?;
+        .await?
+        .object;
     let stored = storage
         .data()
         .objects_path()

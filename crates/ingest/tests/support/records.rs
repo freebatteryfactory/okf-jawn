@@ -152,6 +152,8 @@ impl EventLog for FakeEvents {
                         connector_id: event.connector_id,
                         actor: event.actor,
                         operation: event.operation,
+                        proposal_id: event.proposal_id,
+                        count: event.count,
                     })
                 });
         Box::pin(async move { appended })
@@ -185,6 +187,11 @@ impl FakeRecords {
             item_ids: Vec::new(),
             artifact: None,
             restore: None,
+            backup: None,
+            created_at: None,
+            started_at: None,
+            finished_at: None,
+            retryable: None,
         };
         self.lock()?.insert(
             id,
@@ -426,6 +433,7 @@ impl RecordStore for FakeRecords {
             entry.job.revision.clone_from(&completion.revision);
             entry.job.item_ids.clone_from(&completion.item_ids);
             entry.job.restore.clone_from(&completion.restore);
+            entry.job.backup.clone_from(&completion.backup);
             entry.lease = None;
             entry.completions.push(completion);
             entry.job.clone()
@@ -433,12 +441,13 @@ impl RecordStore for FakeRecords {
         Box::pin(async move { done })
     }
 
-    fn fail_job(&self, lease: JobLease, message: String, retryable: bool) -> PortFuture<'_, Job> {
+    fn fail_job(&self, lease: JobLease, error: ApiError, retryable: bool) -> PortFuture<'_, Job> {
         let failed = self.running_with_lease(&lease, |entry| {
             entry.job.state = JobState::Failed;
-            entry.job.error = Some(ApiError::new(ErrorCode::Internal, message.clone()));
+            entry.failures.push((error.message.clone(), retryable));
+            entry.job.error = Some(error.clone());
+            entry.job.retryable = Some(retryable);
             entry.lease = None;
-            entry.failures.push((message, retryable));
             entry.job.clone()
         });
         Box::pin(async move { failed })
@@ -734,6 +743,8 @@ mod tests {
             connector_id: None,
             actor: None,
             operation: None,
+            proposal_id: None,
+            count: None,
         };
         // The second `imported` append; an append of another kind is not counted.
         events.fail_on(EventKind::Imported, 2)?;

@@ -19,7 +19,7 @@ use okf_jawn_contract::review::{ImportedClaim, Review, ReviewCoverage};
 use okf_jawn_contract::source::SourceReference;
 use okf_jawn_core::conformance::OkfConformance;
 use okf_jawn_core::portable::{
-    ImportCheck, VERIFIED_KEY, claim_coverage, coverage_at, exported_verified,
+    ImportCheck, VERIFIED_KEY, claim_coverage, coverage_at, draft_digest, exported_verified,
     imported_verification, item_content_digest, lint_imported,
 };
 use okf_jawn_core::storage::CandidateCheck;
@@ -374,6 +374,75 @@ fn the_reviewed_content_digest_ignores_the_header_and_key_order() -> TestResult 
         json!({ "type": "Decision", "extra": { "b": 1, "a": 2 } }),
     )?;
     assert_ne!(item_content_digest(&retyped)?, digest_of_base);
+    Ok(())
+}
+
+/// A rename records the old path in `aliases`; the review fingerprint leaves that property out,
+/// so a pure rename keeps a review current, while any other property still counts.
+#[test]
+fn the_reviewed_content_digest_leaves_out_aliases_and_nothing_else() -> TestResult {
+    let base = document("# Plan\n", json!({ "type": "Note", "status": "stable" }))?;
+    let digest_of_base = item_content_digest(&base)?;
+    let renamed = document(
+        "# Plan\n",
+        json!({ "type": "Note", "status": "stable", "aliases": ["notes/old-plan.md"] }),
+    )?;
+    assert_eq!(item_content_digest(&renamed)?, digest_of_base);
+    let renamed_twice = document(
+        "# Plan\n",
+        json!({
+            "type": "Note",
+            "status": "stable",
+            "aliases": ["notes/old-plan.md", "plans/plan.md"],
+        }),
+    )?;
+    assert_eq!(item_content_digest(&renamed_twice)?, digest_of_base);
+    let tagged = document(
+        "# Plan\n",
+        json!({ "type": "Note", "status": "stable", "tags": ["notes/old-plan.md"] }),
+    )?;
+    assert_ne!(item_content_digest(&tagged)?, digest_of_base);
+    let deprecated = document(
+        "# Plan\n",
+        json!({ "type": "Note", "status": "deprecated", "aliases": ["notes/old-plan.md"] }),
+    )?;
+    assert_ne!(item_content_digest(&deprecated)?, digest_of_base);
+    Ok(())
+}
+
+/// Review N1: a draft is compared by its whole content. `draft_digest` keeps `aliases`, which
+/// the review fingerprint leaves out, and like it ignores the application header and key order;
+/// it is the digest of a body and a property map whether they come from a draft or an item.
+#[test]
+fn the_draft_digest_covers_aliases_and_ignores_the_header() -> TestResult {
+    let base = document("# Plan\n", json!({ "type": "Note", "status": "stable" }))?;
+    let digest_of_base = draft_digest(&base.body, &base.properties)?;
+    let renamed = document(
+        "# Plan\n",
+        json!({ "type": "Note", "status": "stable", "aliases": ["notes/old-plan.md"] }),
+    )?;
+    assert_ne!(
+        draft_digest(&renamed.body, &renamed.properties)?,
+        digest_of_base,
+        "an alias alone is a change of the draft"
+    );
+    assert_eq!(
+        item_content_digest(&renamed)?,
+        item_content_digest(&base)?,
+        "and not of the review fingerprint"
+    );
+    let headed = document(
+        "# Plan\n",
+        json!({
+            "status": "stable",
+            "type": "Note",
+            APP_HEADER_KEY: { "item_id": Uuid::from_u128(10), "archived": true },
+        }),
+    )?;
+    assert_eq!(
+        draft_digest(&headed.body, &headed.properties)?,
+        digest_of_base
+    );
     Ok(())
 }
 

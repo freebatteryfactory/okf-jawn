@@ -235,6 +235,7 @@ impl Harness {
                     text: request.text,
                     created_at,
                     invalidated_by: None,
+                    source: request.source,
                 },
             )
             .await

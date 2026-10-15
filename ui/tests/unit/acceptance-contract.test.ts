@@ -148,20 +148,24 @@ function standIn(
         return workspace();
       case 'create_item':
         return {
-          summary: {
-            id: itemId,
-            path: 'case.md',
-            title: 'Case',
-            description: 'A case',
-            type_name: 'Note',
-            kind: 'note',
-            revision: sha('a'),
-            status: 'stable',
-            archived: false,
+          item: {
+            summary: {
+              id: itemId,
+              path: 'case.md',
+              title: 'Case',
+              description: 'A case',
+              type_name: 'Note',
+              kind: 'note',
+              revision: sha('a'),
+              status: 'stable',
+              archived: false,
+            },
+            body: body.body,
+            properties: body.properties,
+            content_digest: STAND_IN_CONTENT_DIGEST,
           },
-          body: body.body,
-          properties: body.properties,
-          content_digest: STAND_IN_CONTENT_DIGEST,
+          receipt_id: randomUUID(),
+          warnings: [],
         };
       case 'read_item':
         return {

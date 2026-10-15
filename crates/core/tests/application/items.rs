@@ -609,13 +609,45 @@ async fn create_item_commits_a_note_on_its_base_and_returns_it_as_committed() ->
         .versions
         .put_document(&revision('b')?, committed.clone())?;
     let caller = alice(OperationName::CreateItem, Some(id))?;
-    let document = world
+    // The staged tree the commit's check reads holds the new note without a heading.
+    let bare = note(
+        1,
+        &revision('b')?,
+        "notes/new.md",
+        "No heading.\n",
+        json!({ "type": "Note" }),
+    )?;
+    world
+        .versions
+        .stage()
+        .write("notes/new.md", &file_text(&bare))?;
+    let created = world
         .service
         .create_item(
             &caller,
             create_request(ItemKind::Note, json!({ "type": "Note" }))?,
         )
         .await?;
+    // Ruling 27: the item with its commit's receipt and the findings of the commit's check.
+    let receipts = world.records.receipts()?;
+    let (under, receipt) = some(receipts.first(), "the create's receipt")?;
+    assert_eq!(*under, Some(id));
+    assert_eq!(Some(receipt.id), created.receipt_id);
+    assert_eq!(receipt.operation_id, OperationName::CreateItem);
+    assert!(
+        created.warnings.iter().any(|warning| {
+            warning.code.starts_with("okf_lint")
+                && warning.location.as_deref() == Some("notes/new.md")
+        }),
+        "{:?}",
+        created.warnings
+    );
+    let kept = world.versions.kept_warnings(id)?;
+    assert_eq!(
+        serde_json::to_value(&created.warnings)?,
+        serde_json::to_value(&kept)?
+    );
+    let document = &created.item;
     assert_eq!(document.summary.id, item_id);
     assert_eq!(document.content_digest, served_digest(&committed)?);
     let commits = world.versions.commits()?;
@@ -813,6 +845,14 @@ async fn a_write_on_a_moved_head_conflicts_and_one_on_a_purged_base_is_refused()
             .await,
     )?;
     assert_eq!(conflict.code, ErrorCode::Conflict);
+    // Ruling 5: the moved head is named, and so is the request field it was compared with.
+    assert_eq!(conflict.field.as_deref(), Some("/base_revision"));
+    assert_eq!(
+        conflict.detail.as_deref(),
+        Some(&ErrorDetail::StaleBase {
+            head: revision('c')?
+        })
+    );
     world.records.put_mapping(
         revision('a')?,
         RevisionMapping {

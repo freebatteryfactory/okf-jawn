@@ -13,18 +13,22 @@ pub enum Change {
         path: crate::identity::WorkspacePath,
         #[doc = "Type name."]
         type_name: String,
-        #[doc = "Body, at most 8 MiB in UTF-8."]
-        #[schemars(length(max = crate::item::MAX_ITEM_TEXT_BYTES))]
+        #[doc = "Body. At most 8388608 bytes in UTF-8: a character takes one to four."]
+        #[schemars(extend("x-max-utf8-bytes" = crate::item::MAX_ITEM_TEXT_BYTES))]
         body: String,
         #[doc = "Properties."]
         properties: std::collections::BTreeMap<String, serde_json::Value>,
+        #[doc = "The new item's rendering role. Absent means a note; `source` is refused: a source"]
+        #[doc = "comes only from an import."]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item_kind: Option<crate::item::ItemKind>,
     },
     /// Replace authored content with preconditions.
     Edit {
         #[doc = "Item id."]
         item_id: crate::identity::ItemId,
-        #[doc = "Body, at most 8 MiB in UTF-8."]
-        #[schemars(length(max = crate::item::MAX_ITEM_TEXT_BYTES))]
+        #[doc = "Body. At most 8388608 bytes in UTF-8: a character takes one to four."]
+        #[schemars(extend("x-max-utf8-bytes" = crate::item::MAX_ITEM_TEXT_BYTES))]
         body: String,
         #[doc = "Properties."]
         properties: std::collections::BTreeMap<String, serde_json::Value>,
@@ -51,8 +55,9 @@ pub enum Change {
         #[doc = "Pages the text covers, as the agent claims; empty for the whole."]
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pages: Vec<crate::common::PageRange>,
-        #[doc = "The complete proposed text, Markdown, at most 8 MiB in UTF-8."]
-        #[schemars(length(max = crate::item::MAX_ITEM_TEXT_BYTES))]
+        #[doc = "The complete proposed text, Markdown."]
+        #[doc = "At most 8388608 bytes in UTF-8: a character takes one to four."]
+        #[schemars(extend("x-max-utf8-bytes" = crate::item::MAX_ITEM_TEXT_BYTES))]
         markdown: String,
     },
 }
@@ -114,6 +119,9 @@ pub struct Proposal {
     pub client_id: Option<String>,
     /// Creation time.
     pub created_at: crate::identity::Timestamp,
+    /// Findings of the check that ran when the candidate was written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<crate::common::Warning>,
 }
 
 /// Suggest changes without changing the accepted workspace.
@@ -232,6 +240,35 @@ pub struct Comment {
     /// The purge that invalidated the comment's `source`, whose stored path was scrubbed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invalidated_by: Option<crate::identity::PurgeId>,
+    /// The line or range under discussion, resolved when the comment was added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::source::SourceReference>,
+}
+
+/// Read a proposal's discussion, oldest first.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListCommentsRequest {
+    /// Workspace whose permissions and storage scope apply.
+    pub workspace_id: crate::identity::WorkspaceId,
+    /// Suggestion whose discussion is read.
+    pub proposal_id: crate::identity::ProposalId,
+    /// Bounded pagination with an opaque cursor.
+    pub page: crate::common::PageRequest,
+}
+
+/// A page of a proposal's comments, oldest first.
+///
+/// A comment whose `source` lies in a workspace the reader may not read is returned with
+/// `source` left out.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListCommentsResponse {
+    /// Comments.
+    pub items: Vec<Comment>,
+    /// Continuation cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 impl Change {
@@ -251,6 +288,41 @@ impl Change {
                 crate::item::check_item_text(markdown, &format!("{pointer}/markdown"))
             }
             Self::Move { .. } | Self::Archive { .. } => Ok(()),
+        }
+    }
+
+    /// The rendering role a `create` change gives its new item: the `item_kind` it names, a note
+    /// when it names none. `None` for every other change, which creates no item.
+    #[must_use]
+    pub fn created_kind(&self) -> Option<crate::item::ItemKind> {
+        match self {
+            Self::Create { item_kind, .. } => {
+                Some(item_kind.clone().unwrap_or(crate::item::ItemKind::Note))
+            }
+            Self::Edit { .. }
+            | Self::Move { .. }
+            | Self::Archive { .. }
+            | Self::SupplyExtraction { .. } => None,
+        }
+    }
+
+    /// Refuse a `create` change that names the `source` role: a source comes only from an import.
+    ///
+    /// `pointer` is this change's JSON Pointer inside its request, such as `/changes/0`.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` on `<pointer>/item_kind` when a `create` change names `source`.
+    pub fn check_kind(&self, pointer: &str) -> Result<(), crate::error::ApiError> {
+        match self {
+            Self::Create {
+                item_kind: Some(crate::item::ItemKind::Source),
+                ..
+            } => Err(crate::error::ApiError::new(
+                crate::error::ErrorCode::InvalidInput,
+                "a proposal cannot create a source: a source comes only from an import",
+            )
+            .with_field(format!("{pointer}/item_kind"))),
+            _ => Ok(()),
         }
     }
 }

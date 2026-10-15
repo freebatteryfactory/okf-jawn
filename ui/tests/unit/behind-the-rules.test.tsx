@@ -20,7 +20,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import namingSchema from '../../../api/forms/naming-rules.schema.json';
 import { resetDraftSessions } from '../../src/features/drafts/saving';
 import { resetUploads } from '../../src/features/imports/uploading';
-import { type Handler, mockApi, ok } from './support/api';
+import { type Handler, mockApi, ok, rulesAnswer } from './support/api';
 import { findTextBox, textIn, typeInto } from './support/editor';
 import { fileOf, uploadService } from './support/imports';
 import { mockTransfers } from './support/transfers';
@@ -65,7 +65,7 @@ function setup(overrides: Record<string, Handler> = {}) {
       [OPEN]: () => ok(writableWorkspace),
       ...service.handlers,
       [SCHEMA]: () => ok(namingSchema),
-      [RULES]: () => ok(savedRules),
+      [RULES]: (body) => ok(rulesAnswer(savedRules, body)),
       ...overrides,
     }),
   );
@@ -78,14 +78,14 @@ const button = (name: string | RegExp) => screen.getByRole('button', { name });
 const link = (name: string | RegExp) => screen.getByRole('link', { name });
 const panel = () => screen.getByRole('region', { name: 'Naming rules' });
 const rulesPanel = () => screen.queryByRole('region', { name: 'Naming rules' });
-const prefix = () => within(panel()).getByRole('textbox', { name: /^prefix/ });
+const prefix = () => within(panel()).getByRole('textbox', { name: /^Prefix/ });
 const question = () =>
   screen.queryByRole('group', { name: 'Leave the naming rules without saving?' });
 const settle = () => act(() => new Promise((resolve) => setTimeout(resolve, 50)));
 
 async function openRules() {
   await userEvent.click(button('Naming rules'));
-  await within(panel()).findByRole('textbox', { name: /^prefix/ });
+  await within(panel()).findByRole('textbox', { name: /^Prefix/ });
 }
 
 /** Choose `files` in the picker that the button `name` opens. */

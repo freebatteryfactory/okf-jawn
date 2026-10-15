@@ -10,7 +10,9 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use axum::response::Response;
 use axum::{Extension, Router};
-use okf_jawn_contract::access::{AccessRoute, CSRF_HEADER, Permission, Principal};
+use okf_jawn_contract::access::{
+    AccessRoute, CSRF_HEADER, Permission, Principal, SESSION_COOKIE, SESSION_COOKIE_HTTPS,
+};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{TenantId, Timestamp};
 use okf_jawn_core::credentials::{CredentialStore, SessionRecord, secret_hash};
@@ -78,7 +80,10 @@ impl Harness {
             .insert(workspace(WORKSPACE)?, fixtures::all_permissions());
         let counting = Arc::new(CountingApplication::new());
         counting.set_response("list_items", listing())?;
-        counting.set_response("list_drafts", json!({ "items": [] }))?;
+        counting.set_response(
+            "list_drafts",
+            json!({ "revision": "a".repeat(40), "items": [] }),
+        )?;
         Ok(Self {
             counting,
             credentials: Arc::new(FakeCredentials::default()),
@@ -515,6 +520,65 @@ fn cookie_request(secret: &str) -> Result<Request<Body>, axum::http::Error> {
         .header("cookie", format!("okf-session={secret}"))
         .header(CSRF_HEADER, csrf_token_of(secret))
         .body(Body::from(list_drafts_body().to_string()))
+}
+
+/// A draft listing sent with the owner's session secret under the cookie `name`.
+fn named_cookie_request(name: &str, secret: &str) -> Result<Request<Body>, axum::http::Error> {
+    Request::post(LIST_DRAFTS)
+        .header("host", HOST)
+        .header("content-type", "application/json")
+        .header("cookie", format!("{name}={secret}"))
+        .header(CSRF_HEADER, csrf_token_of(secret))
+        .body(Body::from(list_drafts_body().to_string()))
+}
+
+/// Ruling 17: the server reads only the session cookie of its public origin's scheme. Over
+/// https that is `__Host-okf-session`, and an `okf-session` cookie a sibling host could set is
+/// not read; on plain http it is `okf-session`, and a `__Host-okf-session` cookie is not read.
+#[tokio::test]
+async fn only_the_session_cookie_of_the_origins_scheme_is_read() -> TestResult {
+    let harness = Harness::new()?;
+    harness.owner_session("session-secret", FAR_FUTURE)?;
+    let https = harness.serve(
+        Identity::new(
+            BearerAuth::Local,
+            harness.ports(),
+            vec![format!("https://{HOST}")],
+        ),
+        Router::new(),
+    )?;
+    let http = harness.service(BearerAuth::Local)?;
+    let mixed = harness.serve(
+        Identity::new(
+            BearerAuth::Local,
+            harness.ports(),
+            vec![format!("https://{HOST}"), format!("http://{HOST}")],
+        ),
+        Router::new(),
+    )?;
+    let none = harness.serve(
+        Identity::new(BearerAuth::Local, harness.ports(), Vec::new()),
+        Router::new(),
+    )?;
+    for (app, name, status) in [
+        (&https, SESSION_COOKIE_HTTPS, StatusCode::OK),
+        (&https, SESSION_COOKIE, StatusCode::UNAUTHORIZED),
+        (&http, SESSION_COOKIE, StatusCode::OK),
+        (&http, SESSION_COOKIE_HTTPS, StatusCode::UNAUTHORIZED),
+        // An origin that is not https: the browser would not send a `__Host-` cookie there.
+        (&mixed, SESSION_COOKIE, StatusCode::OK),
+        (&mixed, SESSION_COOKIE_HTTPS, StatusCode::UNAUTHORIZED),
+        (&none, SESSION_COOKIE, StatusCode::OK),
+        (&none, SESSION_COOKIE_HTTPS, StatusCode::UNAUTHORIZED),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(named_cookie_request(name, "session-secret")?)
+            .await?;
+        assert_eq!(response.status(), status, "{name}");
+    }
+    assert_eq!(harness.counting.call_count("list_drafts")?, 4);
+    Ok(())
 }
 
 #[tokio::test]

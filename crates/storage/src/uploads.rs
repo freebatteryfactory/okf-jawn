@@ -19,17 +19,20 @@ use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::{Digest, JobId, MutationId, UploadId};
+use okf_jawn_contract::import::UploadListState;
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{ByteReader, ObjectInfo, StorageScope};
-use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
+use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadRecord, UploadStore};
 use rusqlite::{Connection, OptionalExtension, params};
 use tokio::io::AsyncReadExt as _;
 
 use crate::blobs::{LocalBlobs, file_reader};
 use crate::data::io_error;
-use crate::db::{Db, conflict, json, not_found, scope_key, sql, to_i64, to_u64};
+use crate::db::{
+    Db, conflict, cursor, json, not_found, page_limit, paged, scope_key, sql, to_i64, to_u64,
+};
 use crate::purge::guard;
 use crate::puts;
 use crate::seam;
@@ -269,22 +272,25 @@ impl SqliteUploads {
             if object.digest == sha256 {
                 return Ok(record);
             }
-            return Err(conflict("this upload was completed with another digest"));
+            return Err(conflict("this upload was completed with another digest")
+                .with_detail(mismatch(&record, Some(false))));
         }
         if record.received_bytes != record.expected_size {
             return Err(conflict(format!(
                 "received {} bytes of the {} announced",
                 record.received_bytes, record.expected_size
-            )));
+            ))
+            .with_detail(mismatch(&record, None)));
         }
         if record
             .expected_sha256
             .as_ref()
             .is_some_and(|announced| *announced != sha256)
         {
-            return Err(conflict(
-                "the digest differs from the one announced for this upload",
-            ));
+            return Err(
+                conflict("the digest differs from the one announced for this upload")
+                    .with_detail(mismatch(&record, Some(false))),
+            );
         }
         let part = self.part(upload);
         let body = if record.expected_size == 0 {
@@ -295,10 +301,19 @@ impl SqliteUploads {
         // Pinned until this write ends, and recorded as a pending put until the upload's record
         // names the object; a failed record write leaves the pending put, so a purge of the
         // workspace deletes the bytes.
+        // The store refuses bytes whose digest is not `sha256` with `Conflict`, retaining nothing:
+        // every byte was received, and the digest does not match.
         let (object, pinned) = self
             .blobs
             .put_pinned(scope, body, record.expected_size, Some(sha256))
-            .await?;
+            .await
+            .map_err(|error| {
+                if error.code == ErrorCode::Conflict && error.detail.is_none() {
+                    error.with_detail(mismatch(&record, Some(false)))
+                } else {
+                    error
+                }
+            })?;
         let (tenant, workspace) = scope_key(scope);
         let stored = self
             .db
@@ -393,6 +408,55 @@ impl UploadStore for SqliteUploads {
         upload: UploadId,
     ) -> PortFuture<'a, UploadRecord> {
         Box::pin(self.look(scope, upload))
+    }
+
+    fn list<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        query: UploadQuery,
+    ) -> PortFuture<'a, UploadPage> {
+        let (tenant, workspace) = scope_key(scope);
+        Box::pin(self.db.call(move |connection| {
+            let after = cursor(query.page.cursor.as_deref())?;
+            let limit = page_limit(query.page.limit);
+            // Newest first by the row's insertion order; the cursor is the last row's `rowid`.
+            let state = match query.state {
+                None => "1",
+                Some(UploadListState::Incomplete) => "object_digest IS NULL",
+                Some(UploadListState::Waiting) => {
+                    "object_digest IS NOT NULL AND consumed_by IS NULL"
+                }
+                Some(UploadListState::Consumed) => "consumed_by IS NOT NULL",
+            };
+            let rows: Vec<(i64, String)> = {
+                let mut statement = connection
+                    .prepare(&format!(
+                        "SELECT rowid, upload_id FROM uploads
+                         WHERE tenant_id = ?1 AND workspace_id = ?2 AND (?3 IS NULL OR rowid < ?3)
+                             AND {state}
+                         ORDER BY rowid DESC LIMIT ?4"
+                    ))
+                    .map_err(|error| sql(&error))?;
+                statement
+                    .query_map(
+                        params![tenant, workspace, after, limit.saturating_add(1)],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(|error| sql(&error))?
+                    .collect::<Result<_, _>>()
+                    .map_err(|error| sql(&error))?
+            };
+            let (ids, next_cursor) = paged(rows, limit);
+            let mut items = Vec::with_capacity(ids.len());
+            for id in ids {
+                let upload: UploadId = from_text!(id.as_str())?;
+                items.push(
+                    read(connection, &tenant, &workspace, upload)?
+                        .ok_or_else(|| not_found("upload"))?,
+                );
+            }
+            Ok(UploadPage { items, next_cursor })
+        }))
     }
 
     fn put_content<'a>(
@@ -596,4 +660,15 @@ fn append_file(from: &std::path::Path, to: &std::path::Path) -> Result<(), ApiEr
     target
         .sync_all()
         .map_err(|error| io_error("sync", to, &error))
+}
+
+/// The typed detail of a completion refused because the upload's bytes do not match what was
+/// announced: both lengths, and whether the digest matched (`None` when the length already
+/// differs, so the digest was not compared).
+fn mismatch(record: &UploadRecord, digest_matches: Option<bool>) -> ErrorDetail {
+    ErrorDetail::UploadMismatch {
+        expected_bytes: record.expected_size.to_string(),
+        received_bytes: record.received_bytes.to_string(),
+        digest_matches,
+    }
 }

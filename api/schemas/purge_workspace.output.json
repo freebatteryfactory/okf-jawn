@@ -20,7 +20,7 @@
           "description": "Typed context for conflict, replay, and in-progress outcomes."
         },
         "field": {
-          "description": "Input field needing correction.",
+          "description": "Input field needing correction. A JSON Pointer into the request (`/base_revision`,\n`/changes/2/body`).",
           "type": [
             "string",
             "null"
@@ -275,6 +275,75 @@
             "purge_id"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An upload's received bytes do not match what was announced for it: their length, or\ntheir SHA-256. The code is `conflict`, and nothing was retained.",
+          "properties": {
+            "digest_matches": {
+              "description": "Whether the received bytes have the digest asked for; absent when the length\nalready differs, so the digest was not compared.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "expected_bytes": {
+              "description": "The byte count announced when the slot was opened, as a decimal string.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "upload_mismatch",
+              "type": "string"
+            },
+            "received_bytes": {
+              "description": "The byte count the slot holds, as a decimal string.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "expected_bytes",
+            "received_bytes"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The request's base revision (or expected head) is not the workspace's head; `field`\nnames that request field. The code is `conflict`.",
+          "properties": {
+            "head": {
+              "$ref": "#/$defs/Revision",
+              "description": "The head the request was compared with."
+            },
+            "kind": {
+              "const": "stale_base",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "head"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The workspace is archived, and this operation is not one an archived workspace allows\n(`operations::ALLOWED_WHILE_ARCHIVED`). The code is `conflict`.",
+          "properties": {
+            "archived_at": {
+              "$ref": "#/$defs/Timestamp",
+              "description": "When the workspace was archived."
+            },
+            "kind": {
+              "const": "workspace_archived",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "archived_at"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -475,6 +544,16 @@
           "type": "string"
         },
         {
+          "const": "move_folder",
+          "description": "The `move_folder` operation.",
+          "type": "string"
+        },
+        {
+          "const": "delete_folder",
+          "description": "The `delete_folder` operation.",
+          "type": "string"
+        },
+        {
           "const": "list_types",
           "description": "The `list_types` operation.",
           "type": "string"
@@ -575,6 +654,11 @@
           "type": "string"
         },
         {
+          "const": "list_comments",
+          "description": "The `list_comments` operation.",
+          "type": "string"
+        },
+        {
           "const": "create_confirmation",
           "description": "The `create_confirmation` operation.",
           "type": "string"
@@ -597,6 +681,21 @@
         {
           "const": "complete_upload",
           "description": "The `complete_upload` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_upload",
+          "description": "The `get_upload` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_uploads",
+          "description": "The `list_uploads` operation.",
+          "type": "string"
+        },
+        {
+          "const": "discard_upload",
+          "description": "The `discard_upload` operation.",
           "type": "string"
         },
         {
@@ -853,7 +952,7 @@
         },
         {
           "const": "failed",
-          "description": "Stopped; repeating the request resumes it.",
+          "description": "Set, with `error`, when the purge's job failed and will not run again by itself;\nrepeating the request resumes it.",
           "type": "string"
         }
       ]

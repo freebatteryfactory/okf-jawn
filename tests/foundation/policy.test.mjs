@@ -12,7 +12,7 @@ const tools=JSON.parse(await readFile(join(root,'api/mcp-tools.json'),'utf8')).t
 const byId=new Map(operations.map(o=>[o.id,o]));
 const exposed=operations.filter(o=>o.alias);
 // Owner decision: a model tool whose name is not in this list needs a new decision, not a new row.
-const approvedModelTools=['ls','grep','show','log','diff','blame','sources','links','propose','catalog','present','workspaces'];
+const approvedModelTools=['ls','grep','show','log','diff','blame','sources','links','propose','catalog','present','workspaces','rules'];
 const humanOnly=['approve','review','admin'];
 
 test('complete operation surface has unique canonical identifiers and paths',()=>{

@@ -169,7 +169,7 @@ impl VersionStore for FakeVersions {
         _proposal_id: ProposalId,
         _changes: CandidateChanges,
         _check: Arc<dyn CandidateCheck>,
-    ) -> PortFuture<'a, Revision> {
+    ) -> PortFuture<'a, Committed> {
         unused()
     }
     fn promote_candidate<'a>(
@@ -362,7 +362,7 @@ impl RecordStore for FakeRecords {
     fn fail_job(
         &self,
         _lease: JobLease,
-        _message: String,
+        _error: ApiError,
         _retryable: bool,
     ) -> PortFuture<'_, Job> {
         unused()
