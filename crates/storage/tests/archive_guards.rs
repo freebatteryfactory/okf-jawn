@@ -284,6 +284,10 @@ async fn a_repeated_job_mutation_is_refused_too_once_the_workspace_is_archived()
     Ok(())
 }
 
+/// A smoke test: whichever side the scheduler lets win a round, exactly one of the two is
+/// refused, and the winner is what the store holds. It does not show that both orders occur
+/// (one side may win every round); each order is driven explicitly, with its outcome, by the
+/// crate's unit tests of the catalog (`catalog::tests`, an archive first and an insert first).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_archive_and_an_import_racing_end_with_exactly_one_refused() -> TestResult {
     let directory = tempfile::tempdir()?;
