@@ -698,5 +698,180 @@ async fn reviews_and_write_receipts_are_unique_on_their_mutation() -> TestResult
     Ok(())
 }
 
+/// Whether the job's row is sealed, read from its column.
+fn sealed(storage: &Storage, job: okf_jawn_contract::identity::JobId) -> Fallible<bool> {
+    let connection = Connection::open(storage.data().records_path())?;
+    Ok(connection.query_row(
+        "SELECT sealed FROM jobs WHERE job_id = ?1",
+        [job.0.to_string()],
+        |row| row.get(0),
+    )?)
+}
+
+/// How many cancellations and retries were recorded.
+fn controls(storage: &Storage) -> Fallible<i64> {
+    let connection = Connection::open(storage.data().records_path())?;
+    Ok(connection.query_row("SELECT count(*) FROM job_controls", [], |row| row.get(0))?)
+}
+
+/// R-I11: a cancellation before the seal takes effect, and the seal then returns the job as
+/// it is, cancelled and unsealed, so its handler stops.
+#[tokio::test]
+async fn a_job_cancelled_before_its_seal_stays_cancelled_and_unsealed() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let records = storage.records();
+    let scope = workspace_scope()?;
+    let job = records
+        .create_job(&scope, new_job(5, JobSpec::RebuildIndex)?)
+        .await?;
+    let claimed = some(records.claim_job(job.id).await?, "a claim")?;
+    let cancelled = records.cancel_job(&scope, uuid!(9)?, job.id).await?;
+    assert_eq!(cancelled.state, JobState::Cancelled);
+    let seen = records.seal(&claimed.lease).await?;
+    assert_eq!(seen.state, JobState::Cancelled);
+    assert!(!sealed(&storage, job.id)?);
+    Ok(())
+}
+
+/// R-I11: once a running job sealed itself, its cancellation is refused with `Conflict`,
+/// recording nothing, while it runs and once its lease lapsed and it is queued again; it keeps
+/// its seal through the reclaim and completes. Sealing again changes nothing.
+#[tokio::test]
+async fn a_sealed_job_refuses_its_cancellation_until_it_finishes() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let records = storage.records();
+    let scope = workspace_scope()?;
+    let job = records
+        .create_job(&scope, new_job(5, JobSpec::RebuildIndex)?)
+        .await?;
+    let claimed = some(records.claim_job(job.id).await?, "a claim")?;
+    assert!(!sealed(&storage, job.id)?, "a claim alone does not seal");
+    assert_eq!(records.seal(&claimed.lease).await?.state, JobState::Running);
+    assert_eq!(records.seal(&claimed.lease).await?.state, JobState::Running);
+    assert!(sealed(&storage, job.id)?);
+    let refused = err_of(records.cancel_job(&scope, uuid!(9)?, job.id).await)?;
+    assert_eq!(refused.code, ErrorCode::Conflict);
+    assert!(
+        refused.message.contains("point of no return"),
+        "{}",
+        refused.message
+    );
+    assert_eq!(
+        controls(&storage)?,
+        0,
+        "a refused cancellation records nothing"
+    );
+    assert_eq!(
+        records.update_progress(&claimed.lease, 30).await?.state,
+        JobState::Running,
+        "the heartbeat still sees it running"
+    );
+    // Its attempt dies: the lease lapses and the job is queued again, still sealed.
+    expire_job_leases(&storage)?;
+    assert_eq!(records.expire_leases().await?, 1);
+    let queued = err_of(records.cancel_job(&scope, uuid!(10)?, job.id).await)?;
+    assert_eq!(queued.code, ErrorCode::Conflict, "{}", queued.message);
+    assert!(queued.message.contains("point of no return"));
+    let again = some(records.claim_job(job.id).await?, "the reclaim")?;
+    assert!(sealed(&storage, job.id)?);
+    let done = records.complete_job(completion(again.lease)).await?;
+    assert_eq!(done.state, JobState::Succeeded);
+    // Finished: refused as any finished job is.
+    let finished = err_of(records.cancel_job(&scope, uuid!(11)?, job.id).await)?;
+    assert!(
+        finished.message.contains("cannot be cancelled"),
+        "{}",
+        finished.message
+    );
+    Ok(())
+}
+
+/// R-I11: a sealed job that failed and is retried keeps its seal: its next attempt resumes the
+/// same work, and its cancellation is still refused.
+#[tokio::test]
+async fn a_retried_sealed_job_is_still_sealed() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let records = storage.records();
+    let scope = workspace_scope()?;
+    let job = records
+        .create_job(&scope, new_job(5, JobSpec::RebuildIndex)?)
+        .await?;
+    let claimed = some(records.claim_job(job.id).await?, "a claim")?;
+    records.seal(&claimed.lease).await?;
+    records
+        .fail_job(
+            claimed.lease,
+            ApiError::new(ErrorCode::Unavailable, "the disk was busy"),
+            true,
+        )
+        .await?;
+    assert_eq!(
+        records.retry_job(&scope, uuid!(9)?, job.id).await?.state,
+        JobState::Queued
+    );
+    let refused = err_of(records.cancel_job(&scope, uuid!(10)?, job.id).await)?;
+    assert!(refused.message.contains("point of no return"));
+    Ok(())
+}
+
+/// Only the job's current, unexpired claim of a running job seals it: a lapsed claim and a
+/// superseded token are refused with `Conflict`, and nothing is sealed.
+#[tokio::test]
+async fn only_the_current_unexpired_claim_seals_a_job() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let records = storage.records();
+    let scope = workspace_scope()?;
+    let job = records
+        .create_job(&scope, new_job(5, JobSpec::RebuildIndex)?)
+        .await?;
+    let first = some(records.claim_job(job.id).await?, "a claim")?;
+    expire_job_leases(&storage)?;
+    let lapsed = err_of(records.seal(&first.lease).await)?;
+    assert_eq!(lapsed.code, ErrorCode::Conflict);
+    assert!(!sealed(&storage, job.id)?);
+    assert_eq!(records.expire_leases().await?, 1);
+    let second = some(records.claim_job(job.id).await?, "the reclaim")?;
+    let superseded = err_of(records.seal(&first.lease).await)?;
+    assert_eq!(superseded.code, ErrorCode::Conflict);
+    assert!(!sealed(&storage, job.id)?);
+    records.seal(&second.lease).await?;
+    assert!(sealed(&storage, job.id)?);
+    Ok(())
+}
+
+/// Records schema 4 adds the seal: a records database at schema 3 is backed up and then
+/// migrated, and every job it held is unsealed (before this step nothing sealed a job).
+#[tokio::test]
+async fn a_records_database_at_schema_3_migrates_its_jobs_unsealed_after_a_backup() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let job = {
+        let storage = Storage::open(directory.path())?;
+        let job = storage
+            .records()
+            .create_job(&workspace_scope()?, new_job(5, JobSpec::RebuildIndex)?)
+            .await?;
+        job.id
+    };
+    let records = directory.path().join("records.sqlite");
+    Connection::open(&records)?
+        .execute_batch("ALTER TABLE jobs DROP COLUMN sealed; PRAGMA user_version = 3;")?;
+    let storage = Storage::open(directory.path())?;
+    assert!(!sealed(&storage, job)?);
+    let backups: Vec<String> = std::fs::read_dir(storage.data().pre_migration_path())?
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("records-v3-"))
+        .collect();
+    assert_eq!(backups.len(), 1, "{backups:?}");
+    let version: i64 =
+        Connection::open(&records)?.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    assert_eq!(version, 4);
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;

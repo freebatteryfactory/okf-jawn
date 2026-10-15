@@ -1299,11 +1299,86 @@ mod job_handler {
         Ok(())
     }
 
+    /// R-I11: a cancellation asked for once a restore sealed itself, while `restore_import`
+    /// runs, is refused with `Conflict` (the store's seal), so nothing marks the job cancelled
+    /// and it completes with its report. Before the seal, this cancellation took effect and the
+    /// store then refused the completion of a restore that had been applied.
     #[tokio::test]
-    async fn a_restore_cancelled_once_it_applies_is_not_stopped_and_the_store_refuses_its_completion()
-    -> TestResult {
+    async fn a_restore_cannot_be_cancelled_once_it_sealed_and_completes() -> TestResult {
         let world = heartbeat_world()?;
         let id = restore_job(&world, 121)?;
+        let upload_id = match &world.records.entry(id)?.created.spec {
+            JobSpec::RestoreWorkspace { upload_id, .. } => *upload_id,
+            _ => return Err("a restore was expected".into()),
+        };
+        let records = Arc::clone(&world.records);
+        let answers = Arc::new(Mutex::new(Vec::new()));
+        let kept = Arc::clone(&answers);
+        let scope = workspace_scope()?;
+        let cancel =
+            serde_json::from_value::<MutationId>(json!("00000000-0000-0000-0000-000000000921"))?;
+        *world.backups.restore_hold.lock().map_err(|_| "poisoned")? = Some(Arc::new(move || {
+            let records = Arc::clone(&records);
+            let kept = Arc::clone(&kept);
+            let scope = scope.clone();
+            Box::pin(async move {
+                let answer = records.cancel_job(&scope, cancel, id).await;
+                if let Ok(mut kept) = kept.lock() {
+                    kept.push(answer.map(|job| job.state).map_err(|error| error.code));
+                }
+                // Long enough for several renewals.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            })
+        }));
+        assert!(run(&world, id).await?);
+        assert_eq!(
+            answers.lock().map_err(|_| "poisoned")?.clone(),
+            [Err(ErrorCode::Conflict)],
+            "the cancellation was refused"
+        );
+        assert!(world.records.entry(id)?.sealed);
+        assert_completed_under(&world, id, 1)?;
+        assert_eq!(world.uploads.consumed()?, [(upload_id, id)]);
+        assert_eq!(
+            world.backups.restored.lock().map_err(|_| "poisoned")?.len(),
+            1
+        );
+        let changed = events_of(&world, &EventKind::Changed)?;
+        assert_eq!(changed.len(), 1);
+        Ok(())
+    }
+
+    /// R-I11: a cancellation the store takes between the consume and the seal (a cancel
+    /// landing after the restore's last renewal) wins: the seal answers the job cancelled, and
+    /// the restore stops before `restore_import`, restoring nothing. Its upload stays consumed
+    /// by it (contract ruling 23).
+    #[tokio::test]
+    async fn a_restore_cancelled_just_before_its_seal_restores_nothing() -> TestResult {
+        let world = world()?;
+        let id = restore_job(&world, 127)?;
+        world.records.cancel_before_seal(id)?;
+        assert!(run(&world, id).await?);
+        assert_stopped(&world, id)?;
+        assert!(!world.records.entry(id)?.sealed);
+        assert_eq!(
+            world.backups.restored.lock().map_err(|_| "poisoned")?.len(),
+            0,
+            "stopped before restore_import"
+        );
+        assert!(world.versions.written()?.is_empty());
+        assert_eq!(world.uploads.consumed()?.len(), 1);
+        Ok(())
+    }
+
+    /// R-I11: a sealed restore whose attempt dies (its lease lapses while `restore_import`
+    /// runs, so neither its completion nor its failure can be written) is queued again, still
+    /// sealed, so its cancellation stays refused; the next attempt resumes it and completes,
+    /// its upload consumed by it once and the restore's commit written once.
+    #[tokio::test]
+    async fn a_sealed_restore_whose_lease_lapsed_resumes_and_consumes_its_upload_once() -> TestResult
+    {
+        let world = heartbeat_world()?;
+        let id = restore_job(&world, 128)?;
         let upload_id = match &world.records.entry(id)?.created.spec {
             JobSpec::RestoreWorkspace { upload_id, .. } => *upload_id,
             _ => return Err("a restore was expected".into()),
@@ -1312,43 +1387,43 @@ mod job_handler {
         *world.backups.restore_hold.lock().map_err(|_| "poisoned")? = Some(Arc::new(move || {
             let records = Arc::clone(&records);
             Box::pin(async move {
-                let _cancelled = records.cancel(id);
-                // Long enough for several renewals to see the cancellation.
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                let _lapsed = records.expire_running();
+                tokio::time::sleep(Duration::from_millis(50)).await;
             })
         }));
-        // The handler does not stop for the cancellation: it goes on to write its completion,
-        // which the store refuses because someone cancelled the running job (as storage's
-        // `complete` does). Making `cancel_job` refuse a job past this point is request R-I11.
-        let refused = tokio::time::timeout(Duration::from_secs(20), run(&world, id)).await?;
-        let error = err_of(refused)?;
-        assert!(error.to_string().contains("not running"), "{error}");
-        // The upload was consumed before the restore applied, and the restore ran to its end.
-        assert_eq!(world.uploads.consumed()?, [(upload_id, id)]);
+        let died = err_of(run(&world, id).await)?;
+        assert!(died.to_string().contains("lease"), "{died}");
+        *world.backups.restore_hold.lock().map_err(|_| "poisoned")? = None;
+        assert_eq!(world.records.expire_leases().await?, 1);
+        let queued = world.records.entry(id)?;
+        assert_eq!(queued.job.state, JobState::Queued);
+        assert!(queued.sealed, "the seal stays with the job");
+        let refused = err_of(
+            world
+                .records
+                .cancel_job(&workspace_scope()?, queued.created.mutation_id, id)
+                .await,
+        )?;
+        assert_eq!(refused.code, ErrorCode::Conflict);
+        assert!(run(&world, id).await?);
+        assert_completed_under(&world, id, 2)?;
         assert_eq!(
-            world.backups.restored.lock().map_err(|_| "poisoned")?.len(),
-            1
+            world.uploads.consumed()?,
+            [(upload_id, id)],
+            "consumed once"
         );
-        let mutation = world.records.entry(id)?.created.mutation_id;
-        let restored = some(
+        assert_eq!(world.uploads.singles()?.len(), 2, "asked by each attempt");
+        let mutation = queued.created.mutation_id;
+        assert_eq!(
             world
                 .versions
                 .written()?
-                .into_iter()
-                .find(|(changes, _)| changes.mutation_id == mutation),
-            "the restore's commit",
-        )?
-        .1;
-        // Its revision was indexed and announced.
-        assert_eq!(world.search.indexed()?, std::slice::from_ref(&restored));
-        let changed = events_of(&world, &EventKind::Changed)?;
-        assert_eq!(changed.len(), 1);
-        assert_eq!(
-            some(changed.first(), "the changed event")?.2.revision,
-            Some(restored)
+                .iter()
+                .filter(|(changes, _)| changes.mutation_id == mutation)
+                .count(),
+            1,
+            "the restore's commit is written once"
         );
-        // The record stays as the cancel left it: no completion was written, nor a failure.
-        assert_stopped(&world, id)?;
         Ok(())
     }
 

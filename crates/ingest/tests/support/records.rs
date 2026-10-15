@@ -7,13 +7,22 @@
 //! - progress, completion and failure need the current, unexpired claim;
 //! - completion and failure also need the job to be running, as storage's `complete` and
 //!   `fail_job` refuse a row another writer cancelled (`lost_claim`);
+//! - `seal` needs the current, unexpired claim of a running job, returns a cancelled job as it
+//!   is, unsealed, and seals for the job's life (a lapsed lease queued again keeps it);
+//! - `cancel_job` is unique on its mutation id (a repeated id returns the job as it stands),
+//!   refuses a sealed queued or running job with `Conflict` and records nothing then, cancels a
+//!   queued or running one (keeping the claim's token, so the handler learns it from its next
+//!   `update_progress`), and refuses a finished one with `Conflict`;
+//! - `list_jobs` lists one scope's jobs, newest first, paged from the offset its decimal cursor
+//!   names (a test may make the pages small, `page_jobs`, as several pages of a long listing);
 //! - `expire_leases` returns expired claims to the queue;
 //! - `pending_jobs` lists unfinished jobs;
 //! - `record_artifact` is unique on the mutation id.
 //!
 //! Time does not pass by itself: `expire_running` marks every live claim expired, as a lease
-//! lapsing would. Purge, review, receipt and derived-object records are not modelled; those
-//! methods answer `NotImplemented`, so a test that reaches one fails loudly.
+//! lapsing would. Purge records are kept as given (`get_purge`, `update_purge`); review,
+//! receipt and derived-object records are not modelled; those methods answer
+//! `NotImplemented`, so a test that reaches one fails loudly.
 //!
 //! `FakeEvents` encodes the `EventLog::append` doc: with a mutation identity, an identical
 //! notification already appended under it in the same log is not appended again; without one,
@@ -55,6 +64,10 @@ pub struct Entry {
     pub completions: Vec<JobCompletion>,
     /// Failures written: message and retry eligibility.
     pub failures: Vec<(String, bool)>,
+    /// Sealed past its point of no return (`seal`).
+    pub sealed: bool,
+    /// Its place among the jobs inserted: a later job is newer.
+    pub order: usize,
 }
 
 /// The ledger.
@@ -66,8 +79,19 @@ pub struct FakeRecords {
     renewals: std::sync::atomic::AtomicUsize,
     /// A job cancelled the moment it is claimed, as a cancel landing right after the claim.
     cancel_on_claim: Mutex<Option<JobId>>,
+    /// A job cancelled just before its next seal is applied, as a cancel the store took
+    /// between the handler's last renewal and its seal.
+    cancel_on_seal: Mutex<Option<JobId>>,
     /// Jobs of a workspace a purge is recorded for: their claim is refused with `Conflict`.
     purged: Mutex<Vec<JobId>>,
+    /// Each cancellation that took effect: its mutation and the job it cancelled.
+    cancels: Mutex<Vec<(MutationId, JobId)>>,
+    /// Every `cancel_job` call, refused or not: its mutation and job.
+    cancel_calls: Mutex<Vec<(MutationId, JobId)>>,
+    /// The most jobs one page of `list_jobs` holds, when a test makes listings long.
+    list_page: Mutex<Option<usize>>,
+    /// Jobs inserted so far, for their order.
+    inserted: std::sync::atomic::AtomicUsize,
 }
 
 /// One notification as the fake log keeps it: its log, its mutation identity and the event.
@@ -193,7 +217,15 @@ impl FakeRecords {
             finished_at: None,
             retryable: None,
         };
-        self.lock()?.insert(
+        let mut entries = self.lock()?;
+        // Inserted again, the job keeps its place: it is the same job, queued afresh.
+        let order = match entries.get(&id) {
+            Some(entry) => entry.order,
+            None => self
+                .inserted
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        };
+        entries.insert(
             id,
             Entry {
                 job,
@@ -202,8 +234,48 @@ impl FakeRecords {
                 lease: None,
                 completions: Vec::new(),
                 failures: Vec::new(),
+                sealed: false,
+                order,
             },
         );
+        Ok(())
+    }
+
+    /// Make every page of `list_jobs` hold at most `size` jobs, as a long listing comes in
+    /// several pages.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn page_jobs(&self, size: usize) -> Result<(), ApiError> {
+        *self.list_page.lock().map_err(|_| poisoned())? = Some(size);
+        Ok(())
+    }
+
+    /// Each cancellation that took effect, in order: its mutation and the job.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn cancels(&self) -> Result<Vec<(MutationId, JobId)>, ApiError> {
+        Ok(self.cancels.lock().map_err(|_| poisoned())?.clone())
+    }
+
+    /// Every `cancel_job` call, refused or not, in order: its mutation and the job.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn cancel_calls(&self) -> Result<Vec<(MutationId, JobId)>, ApiError> {
+        Ok(self.cancel_calls.lock().map_err(|_| poisoned())?.clone())
+    }
+
+    /// End a running job as succeeded, as its own attempt completing would.
+    ///
+    /// # Errors
+    /// Returns `NotFound` for an unknown job.
+    pub fn finish(&self, id: JobId) -> Result<(), ApiError> {
+        let mut entries = self.lock()?;
+        let entry = entries.get_mut(&id).ok_or_else(not_found)?;
+        entry.job.state = JobState::Succeeded;
+        entry.lease = None;
         Ok(())
     }
 
@@ -295,6 +367,16 @@ impl FakeRecords {
         Ok(())
     }
 
+    /// Cancel `id` just before its next seal is applied, as a cancellation the store took
+    /// first would.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn cancel_before_seal(&self, id: JobId) -> Result<(), ApiError> {
+        *self.cancel_on_seal.lock().map_err(|_| poisoned())? = Some(id);
+        Ok(())
+    }
+
     /// Record a purge of `id`'s workspace: from now on its claim is refused with `Conflict`
     /// naming the purge and the job is left as it is, as storage's `claim_job` does.
     ///
@@ -313,6 +395,43 @@ impl FakeRecords {
     pub fn cancel(&self, id: JobId) -> Result<(), ApiError> {
         self.lock()?.get_mut(&id).ok_or_else(not_found)?.job.state = JobState::Cancelled;
         Ok(())
+    }
+
+    /// `cancel_job`, as its port doc states it (quoted there).
+    fn cancel_entry(
+        &self,
+        scope: &JobScope,
+        mutation_id: MutationId,
+        job: JobId,
+    ) -> Result<Job, ApiError> {
+        self.cancel_calls
+            .lock()
+            .map_err(|_| poisoned())?
+            .push((mutation_id, job));
+        let mut entries = self.lock()?;
+        let entry = entries
+            .get_mut(&job)
+            .filter(|entry| entry.scope == *scope)
+            .ok_or_else(not_found)?;
+        let mut cancels = self.cancels.lock().map_err(|_| poisoned())?;
+        if cancels.iter().any(|(mutation, _)| *mutation == mutation_id) {
+            return Ok(entry.job.clone());
+        }
+        match entry.job.state {
+            JobState::Queued | JobState::Running if entry.sealed => Err(ApiError::new(
+                ErrorCode::Conflict,
+                "this job has passed its point of no return; it runs to its end",
+            )),
+            JobState::Queued | JobState::Running => {
+                entry.job.state = JobState::Cancelled;
+                cancels.push((mutation_id, job));
+                Ok(entry.job.clone())
+            }
+            JobState::Succeeded | JobState::Failed | JobState::Cancelled => Err(ApiError::new(
+                ErrorCode::Conflict,
+                "a finished job cannot be cancelled",
+            )),
+        }
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<JobId, Entry>>, ApiError> {
@@ -361,12 +480,43 @@ impl RecordStore for FakeRecords {
         Box::pin(async move { found })
     }
 
+    // "List durable jobs of one scope, newest first, with bounded pagination."
     fn list_jobs<'a>(
         &'a self,
-        _scope: &'a JobScope,
-        _page: Page,
+        scope: &'a JobScope,
+        page: Page,
     ) -> PortFuture<'a, ListJobsResponse> {
-        unmodelled("list_jobs")
+        let listed = self.lock().and_then(|entries| {
+            let mut jobs: Vec<&Entry> = entries
+                .values()
+                .filter(|entry| entry.scope == *scope)
+                .collect();
+            jobs.sort_by_key(|entry| std::cmp::Reverse(entry.order));
+            let from = match page.cursor.as_deref() {
+                Some(cursor) => cursor.parse::<usize>().map_err(|_| {
+                    ApiError::new(ErrorCode::InvalidInput, "the cursor is not one we issued")
+                })?,
+                None => 0,
+            };
+            let limit = usize::from(page.limit.clamp(1, 500));
+            let size = self
+                .list_page
+                .lock()
+                .map_err(|_| poisoned())?
+                .map_or(limit, |small| small.min(limit));
+            let items: Vec<Job> = jobs
+                .iter()
+                .skip(from)
+                .take(size)
+                .map(|entry| entry.job.clone())
+                .collect();
+            let next = from.saturating_add(items.len());
+            Ok(ListJobsResponse {
+                next_cursor: (next < jobs.len()).then(|| next.to_string()),
+                items,
+            })
+        });
+        Box::pin(async move { listed })
     }
 
     fn claim_job(&self, job: JobId) -> PortFuture<'_, Option<ClaimedJob>> {
@@ -453,13 +603,47 @@ impl RecordStore for FakeRecords {
         Box::pin(async move { failed })
     }
 
+    // "Refuses with `Conflict`, sealing nothing, when `lease` is not the job's current,
+    // unexpired claim of a running job." "A job already cancelled is returned as it is, not
+    // sealed." "Sealing again changes nothing."
+    fn seal<'a>(&'a self, lease: &'a JobLease) -> PortFuture<'a, Job> {
+        let cancel = self
+            .cancel_on_seal
+            .lock()
+            .is_ok_and(|mut cancel| cancel.take_if(|id| *id == lease.job_id).is_some());
+        if cancel
+            && let Ok(mut entries) = self.lock()
+            && let Some(entry) = entries.get_mut(&lease.job_id)
+        {
+            entry.job.state = JobState::Cancelled;
+        }
+        let sealed = self
+            .with_lease(lease, |entry| match entry.job.state {
+                JobState::Cancelled => Ok(entry.job.clone()),
+                JobState::Running => {
+                    entry.sealed = true;
+                    Ok(entry.job.clone())
+                }
+                JobState::Queued | JobState::Succeeded | JobState::Failed => Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "the lease is not the current claim of a running job",
+                )),
+            })
+            .and_then(|sealed| sealed);
+        Box::pin(async move { sealed })
+    }
+
+    // "Unique on `mutation_id`: a repeated id makes no second transition and returns the job
+    // row as it stands. Refuses with `Conflict` (...), writing nothing, a queued or running job
+    // that sealed itself."
     fn cancel_job<'a>(
         &'a self,
-        _scope: &'a JobScope,
-        _mutation_id: MutationId,
-        _job: JobId,
+        scope: &'a JobScope,
+        mutation_id: MutationId,
+        job: JobId,
     ) -> PortFuture<'a, Job> {
-        unmodelled("cancel_job")
+        let cancelled = self.cancel_entry(scope, mutation_id, job);
+        Box::pin(async move { cancelled })
     }
 
     fn retry_job<'a>(
@@ -727,6 +911,12 @@ mod tests {
         records.cancel_when_claimed(id)?;
         assert_eq!(records.entry(id)?.job.progress, 40);
         records.purge_workspace_of(id)?;
+        records.page_jobs(1)?;
+        assert_eq!(records.cancels()?, Vec::new());
+        assert_eq!(records.cancel_calls()?, Vec::new());
+        records.finish(id)?;
+        assert_eq!(records.entry(id)?.job.state, JobState::Succeeded);
+        records.cancel_before_seal(id)?;
         Ok(())
     }
 

@@ -15,8 +15,9 @@
 //! is never dropped when the job is found cancelled: storage's write is one transaction that
 //! must not be abandoned mid-call, so the cancellation is observed after it returns, and the job
 //! then stops without a completion. A purge's own record still states what the purge removed.
-//! A restore is the exception: once `restore_import` is called the cancellation is no longer
-//! honoured, and the job goes on to its completion (`restore`).
+//! A restore is the exception: it seals itself before it calls `restore_import`
+//! (`RecordStore::seal`), from which point the store refuses to cancel it, and it goes on to
+//! its completion (`restore`).
 //!
 //! What a job commits is announced as core's `announce` does for a request (core
 //! `application::shared::commit`): every revision an ingest job lands (each import commit, the
@@ -361,18 +362,21 @@ impl IngestHandler {
     /// The editors were read from `AccessControl` when the request was accepted; the handler
     /// passes them on and never consults `AccessControl` itself.
     ///
-    /// The order is fixed (fix-5 ruling 1, superseding the Stage 1b design's "consumed when the
-    /// restore completes"): the job checks for a cancellation, then consumes the archive's
-    /// upload under this job, then calls `restore_import`. A cancellation seen before the
-    /// consume stops the job, consuming and restoring nothing. An upload another job consumed
-    /// refuses the job for good, and so does a consumption the store refuses because a purge
-    /// names the workspace (`UploadStore::consume`): both are `Conflict`, and a retry would
-    /// meet the same refusal. From the moment `restore_import` is called a cancellation is
-    /// no longer honoured: the job indexes and announces the revision and writes its completion
-    /// with the restore report. Storage's `cancel_job` can still mark a running job cancelled
-    /// meanwhile, and the store then refuses that completion; making `cancel_job` refuse a job
-    /// past this point is request R-I11 (a point-of-no-return call on `RecordStore`), owed with
-    /// core M1.4.
+    /// The order is fixed (fix-5 ruling 1 and contract ruling 23: the upload is consumed when
+    /// the restore starts): the job checks for a cancellation, then consumes the archive's
+    /// upload under this job, then seals itself past its point of no return
+    /// (`RecordStore::seal`, request R-I11), then calls `restore_import`. A cancellation seen
+    /// before the consume stops the job, consuming and restoring nothing. An upload another job
+    /// consumed refuses the job for good, and so does a consumption the store refuses because a
+    /// purge names the workspace (`UploadStore::consume`): both are `Conflict`, and a retry
+    /// would meet the same refusal. A cancellation the store took between the consume and the
+    /// seal stops the job before `restore_import`, its upload consumed by it. From the seal on
+    /// the store refuses to cancel the job, so nothing can mark it cancelled while
+    /// `restore_import` runs: the job indexes and announces the revision and writes its
+    /// completion with the restore report. A sealed attempt that dies is resumed by the next
+    /// claim (its lease lapses and the job is queued again, still sealed): the consume is
+    /// already this job's and changes nothing, the seal is already set, and `restore_import`
+    /// and the commit it writes are idempotent on the job's mutation.
     ///
     /// The completion records the revision the restore wrote (review N9): the commit carrying
     /// the job's mutation, which `restore_import` is idempotent on, and not whatever head stands
@@ -405,8 +409,14 @@ impl IngestHandler {
             }
             Err(error) => return Err(error),
         }
-        // Under the heartbeat, never dropped, and past the point of no return: a cancellation
-        // seen while it runs is not honoured.
+        // The point of no return: from the seal on the store refuses to cancel the job. A
+        // cancellation that landed first leaves the job unsealed, and it stops here, restoring
+        // nothing (its upload stays consumed by this job, as one that fails after the consume).
+        if ports.records.seal(&claimed.lease).await?.state == JobState::Cancelled {
+            return Ok(Done::stopped());
+        }
+        // Under the heartbeat and never dropped; sealed, so no cancellation can land while it
+        // runs.
         let report = match renewing(
             ports,
             attempt,

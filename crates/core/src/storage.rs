@@ -787,11 +787,14 @@ pub trait WorkspaceCatalog: Send + Sync {
 ///   refuses to create, retry or claim a job of the workspace (`RecordStore::create_job`,
 ///   `retry_job`, `claim_job`, each with `Conflict` naming the purge; a refused claim leaves
 ///   the job as it is, for the caller to cancel), but it cannot stop a job that already runs.
-///   A workspace archive and a written history check the refusal before and again under the
+///   A job past its point of no return (a restore that sealed itself, `RecordStore::seal`)
+///   refuses its cancellation: the drain waits for it to finish instead. A workspace archive
+///   and a written history check the refusal before and again under the
 ///   workspace's lock, and store their files as workspace-scoped puts: a pending put is
 ///   recorded before the bytes are retained, and their record lands it, so a stop before the
 ///   record leaves bytes the objects step deletes. An import copies its rows without the
-///   refusal.
+///   refusal; it runs only in a sealed restore, which the drain waits for. Ingest's purge job
+///   handler is this caller.
 ///
 /// What storage guarantees on its own, from the moment the purge is recorded and after the
 /// purge completes:
@@ -809,7 +812,7 @@ pub trait WorkspaceCatalog: Send + Sync {
 ///   for its plan, so each either is in the plan or is refused. Every content-bearing write a
 ///   conversion makes is among these: its object puts, its commits, its derived objects and its
 ///   job completion. Events are not refused: an event carries identities only. Job
-///   cancellation is never refused.
+///   cancellation is never refused because of the purge (only a sealed job's, by its seal).
 /// - A workspace-scoped object put (`BlobStore::put`, an upload completion, an import) pins
 ///   the object for as long as the write runs and then, in one transaction, checks the refusal
 ///   again and records a durable pending put, before it retains the object. Apart from the

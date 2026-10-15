@@ -5,7 +5,9 @@
 //! followed by a read of the row that holds that id, so the unique column, not a lookup, makes
 //! a repeated id a no-op that returns the prior row. A job's wire `Job` is kept as JSON with its
 //! state, scope and lease in columns; the specification and initiator are kept exactly as
-//! written and handed back unchanged on every claim. The job lease is `JOB_LEASE_SECONDS`.
+//! written and handed back unchanged on every claim. The job lease is `JOB_LEASE_SECONDS`. A
+//! job its running claim sealed (`seal`, the `sealed` column of records schema 4) refuses its
+//! cancellation, in the cancellation's own transaction, while it is queued or running.
 
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::events::Receipt;
@@ -214,6 +216,32 @@ impl RecordStore for SqliteRecords {
                 params![i64::from(retryable)],
                 "retryable = ?3, lease_expires_ms = NULL",
             )?;
+            Ok(job)
+        }))
+    }
+
+    fn seal<'a>(&'a self, lease: &'a JobLease) -> PortFuture<'a, Job> {
+        let lease = lease.clone();
+        Box::pin(self.db.transaction(move |transaction| {
+            let row = leased_row(transaction, lease.job_id)?;
+            if row.token.as_deref() != Some(lease.token.as_str()) {
+                return Err(lost_claim());
+            }
+            let job = decode_job(&row.record)?;
+            // Cancelled first: the cancellation took effect, so the job is not sealed and its
+            // handler stops (the order between the two is this transaction's).
+            if job.state == JobState::Cancelled {
+                return Ok(job);
+            }
+            if job.state != JobState::Running || !row.live() {
+                return Err(lost_claim());
+            }
+            transaction
+                .execute(
+                    "UPDATE jobs SET sealed = 1 WHERE job_id = ?1",
+                    [lease.job_id.0.to_string()],
+                )
+                .map_err(|error| sql(&error))?;
             Ok(job)
         }))
     }
@@ -813,11 +841,12 @@ fn control(
     {
         guard::refuse(transaction, &tenant, workspace)?;
     }
-    let record: String = transaction
+    let (record, sealed): (String, bool) = transaction
         .query_row(
-            "SELECT record FROM jobs WHERE job_id = ?1 AND tenant_id = ?2 AND workspace_id IS ?3",
+            "SELECT record, sealed FROM jobs
+             WHERE job_id = ?1 AND tenant_id = ?2 AND workspace_id IS ?3",
             params![job_id.0.to_string(), tenant, workspace],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(|error| sql(&error))?
@@ -834,6 +863,10 @@ fn control(
         return Ok(job);
     }
     match (action, &job.state) {
+        // The refusal is returned, so this transaction, the control row with it, is undone.
+        ("cancel", JobState::Queued | JobState::Running) if sealed => Err(conflict(
+            "this job has passed its point of no return; it runs to its end",
+        )),
         ("cancel", JobState::Queued | JobState::Running) => {
             job.state = JobState::Cancelled;
             job.finished_at = Some(seam::now()?);

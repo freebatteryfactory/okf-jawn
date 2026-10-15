@@ -1621,6 +1621,9 @@ impl RecordStore for FakeRecords {
     ) -> PortFuture<'_, Job> {
         unused()
     }
+    fn seal<'a>(&'a self, _lease: &'a JobLease) -> PortFuture<'a, Job> {
+        unused()
+    }
     fn cancel_job<'a>(
         &'a self,
         _scope: &'a JobScope,

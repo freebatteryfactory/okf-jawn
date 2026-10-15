@@ -317,11 +317,28 @@ pub trait RecordStore: Send + Sync {
     /// whether `retry_job` queues the job again; the code never says it. `field` is a JSON
     /// Pointer into the request that started the job.
     fn fail_job(&self, lease: JobLease, error: ApiError, retryable: bool) -> PortFuture<'_, Job>;
+    /// Mark the job the current claim runs as past its point of no return, and return the job
+    /// as it stands.
+    ///
+    /// From then on `cancel_job` refuses the job while it is unfinished, so its handler goes on
+    /// to its completion: a restore seals immediately before `Backups::restore_import`, whose
+    /// import cannot be undone midway. A job already cancelled is returned as it is, not sealed,
+    /// and its handler stops: the seal and a cancellation are ordered by the store, and only
+    /// the first of them takes effect. Sealing again changes nothing. The seal stays with the
+    /// job: once its lease lapses and the job is queued again (`expire_leases`), or a failed
+    /// sealed job is retried, it is still sealed, because the attempt that runs it next resumes
+    /// the same work. The wire `Job` does not show it.
+    ///
+    /// Refuses with `Conflict`, sealing nothing, when `lease` is not the job's current,
+    /// unexpired claim of a running job.
+    fn seal<'a>(&'a self, lease: &'a JobLease) -> PortFuture<'a, Job>;
     /// Cancel pending or running work while retaining recorded state.
     ///
     /// Unique on `mutation_id`: a repeated id makes no second transition and returns the job
-    /// row as it stands. Never refused because of a recorded purge: cancelling is the purge's
-    /// own drain.
+    /// row as it stands. Refuses with `Conflict` ("this job has passed its point of no
+    /// return"), writing nothing, a queued or running job that sealed itself (`seal`): its
+    /// work cannot be undone midway, so it runs to its end. Never refused because of a recorded
+    /// purge: cancelling is the purge's own drain, which waits for a sealed job instead.
     fn cancel_job<'a>(
         &'a self,
         scope: &'a JobScope,

@@ -915,8 +915,10 @@ async fn purge_reaches_a_schema_2_copy_that_has_no_table_of_kept_warnings() -> T
         .join("backups")
         .join("pre-migration")
         .join("records-v2-1.sqlite");
-    rusqlite::Connection::open(&copy)?
-        .execute_batch("DROP TABLE commit_warnings; PRAGMA user_version = 2;")?;
+    rusqlite::Connection::open(&copy)?.execute_batch(
+        "DROP TABLE commit_warnings; ALTER TABLE jobs DROP COLUMN sealed;
+             PRAGMA user_version = 2;",
+    )?;
     assert!(
         marked_files(directory.path())?.contains(&copy.display().to_string()),
         "the copy holds the marker before the purge"
@@ -1176,12 +1178,13 @@ async fn completed_row(
     Ok(())
 }
 
-/// Put a records database back as records schema 1 left it: without the tables schemas 2 and 3 add,
-/// without the ledger's workspace column, and with the events table as it was before event keys.
+/// Put a records database back as records schema 1 left it: without the tables schemas 2 and 3
+/// add and the job column schema 4 adds, without the ledger's workspace column, and with the
+/// events table as it was before event keys.
 fn as_records_schema_1(records: &Path) -> TestResult {
     let connection = rusqlite::Connection::open(records)?;
     connection.execute_batch(
-        "DROP TABLE commit_warnings;
+        "ALTER TABLE jobs DROP COLUMN sealed; DROP TABLE commit_warnings;
          DROP TABLE purge_progress; DROP TABLE backup_archives; DROP TABLE restores;
          DROP TABLE pending_puts; DROP TABLE replacement_restores;
          DROP INDEX mutations_by_workspace; ALTER TABLE mutations DROP COLUMN workspace_id;
