@@ -47,9 +47,10 @@
 //! 3. The candidate is promoted onto `expected_head`. The store's stale refusal, a `conflict`
 //!    with `StaleBase { head }` (the head moved, or the candidate was not drafted on the head,
 //!    which by contract ruling 5 is a stale base too), makes the proposal `conflict` (it needs
-//!    reconciliation) and answers `conflict` with that `StaleBase`: on `/expected_head` when the
-//!    head is not the request's `expected_head`, and with no field when it is, because then the
-//!    request named the head and the proposal is what is stale. Any other refusal, the store's
+//!    reconciliation; a compare-and-set from `open`), appends a `proposal_updated` event naming
+//!    it, and answers `conflict` with that `StaleBase`: on `/expected_head` when the head is not
+//!    the request's `expected_head`, and with no field when it is, because then the request
+//!    named the head and the proposal is what is stale. Any other refusal, the store's
 //!    plain `conflict` of a candidate reference that is not the proposal's included, leaves the
 //!    status as it was and is answered as given.
 //! 4. The status becomes `accepted`, a compare-and-set from `open`.
@@ -62,7 +63,12 @@
 //! A resumed attempt first asks whether this mutation's promotion already landed
 //! (`VersionStore::find_commit` after the proposal's base, on which a promotion sits): when it
 //! did, steps 1 to 3 are behind it (the confirmation was consumed before it), so the attempt runs
-//! steps 4 to 7 again, whatever the confirmation's expiry is by then. Known limit: between a
+//! steps 4 to 7 again, whatever the confirmation's expiry is by then. A resumed attempt that
+//! finds the proposal `conflict` asks the store to write that mark again under its mutation,
+//! which the store takes as a retry only from the mutation that wrote it: then this attempt's
+//! first one marked it, so the attempt appends its event and answers its stale refusal again,
+//! naming the head as it is now; otherwise the proposal is refused as any `conflict` one is.
+//! Known limit: between a
 //! promotion that landed and step 4, another person may decline the proposal, which is still
 //! `open`; the retry then answers the compare-and-set's `conflict`, and the accepted content
 //! stays on the line under a proposal shown as declined.
@@ -295,12 +301,12 @@ pub(super) async fn accept_proposal(
         ProposalStatus::Open => {}
         ProposalStatus::Accepted => return Err(conflict("this proposal was already accepted")),
         ProposalStatus::Declined => return Err(conflict("this proposal was declined")),
-        ProposalStatus::Conflict => {
-            return Err(conflict(
-                "this proposal needs reconciliation: it was drafted on a base that is no longer \
-                 the head",
-            ));
+        ProposalStatus::Conflict if context.attempt == Attempt::Resumed => {
+            return Err(
+                stale_again(service, &scope, mutation, proposal, &request.expected_head).await,
+            );
         }
+        ProposalStatus::Conflict => return Err(needs_reconciliation()),
     }
     if request.proposal_revision != proposal.proposal_revision {
         return Err(
@@ -667,10 +673,11 @@ async fn accepted(
     })
 }
 
-/// The answer to a stale acceptance, after the proposal is marked `conflict`: `Conflict` with
+/// The answer to a stale acceptance, after the proposal is marked `conflict` and a
+/// `proposal_updated` event naming it is appended under the mutation: `Conflict` with
 /// `StaleBase { head }`, on `/expected_head` when `head` is not the request's `expected_head`
 /// (the head moved) and with no field when it is (the candidate was not drafted on the head the
-/// request named); or the error of marking it, when that fails.
+/// request named); or the error of marking it or of the event, when one fails.
 async fn stale(
     service: &ApplicationService,
     scope: &StorageScope,
@@ -692,10 +699,52 @@ async fn stale(
             ProposalStatus::Open,
         )
         .await;
-    match marked {
-        Ok(_) => stale_refusal(expected_head, head),
+    let marked = match marked {
+        Ok(marked) => marked,
+        Err(error) => return error,
+    };
+    match proposal_updated(service, scope, mutation, marked.id).await {
+        Ok(()) => stale_refusal(expected_head, head),
         Err(error) => error,
     }
+}
+
+/// A resumed acceptance of a proposal in `conflict`: when this mutation's first attempt marked it
+/// (the store takes the same mark under the same mutation as a retry), the attempt appends its
+/// `proposal_updated` event and answers its stale refusal again, naming the head as it is now;
+/// when another mutation marked it, the refusal of any proposal in `conflict`; or the error of a
+/// port, when one fails.
+async fn stale_again(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    mutation: MutationId,
+    proposal: Proposal,
+    expected_head: &Revision,
+) -> ApiError {
+    let ports = service.ports();
+    let marked = ports
+        .proposals
+        .update(scope, mutation, proposal, ProposalStatus::Open)
+        .await;
+    let marked = match marked {
+        Ok(marked) => marked,
+        Err(error) if error.code == ErrorCode::Conflict => return needs_reconciliation(),
+        Err(error) => return error,
+    };
+    if let Err(error) = proposal_updated(service, scope, mutation, marked.id).await {
+        return error;
+    }
+    match ports.versions.head(scope).await {
+        Ok(head) => stale_refusal(expected_head, head),
+        Err(error) => error,
+    }
+}
+
+/// The refusal of a proposal in `conflict`: it is terminal, and reconciliation is a new proposal.
+fn needs_reconciliation() -> ApiError {
+    conflict(
+        "this proposal needs reconciliation: it was drafted on a base that is no longer the head",
+    )
 }
 
 /// `Conflict` with `StaleBase { head }`: on `/expected_head` when `head` is not the request's

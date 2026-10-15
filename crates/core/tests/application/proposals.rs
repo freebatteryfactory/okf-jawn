@@ -1101,6 +1101,123 @@ async fn a_candidate_drafted_on_an_earlier_head_makes_the_proposal_conflict() ->
     Ok(())
 }
 
+/// Review probe P4, up to the racing acceptance: the first acceptance's promotion landed and its
+/// status change failed, so the proposal is still `open`; the store refuses a second acceptance
+/// with the head the first moved, the proposal is marked `conflict`, and the mark is announced
+/// with a `proposal_updated` event under the second acceptance's mutation (review N1).
+async fn racing_acceptance(world: &ProposalWorld) -> Built<(Proposal, Confirmation)> {
+    let (proposal, confirmation) = opened_and_confirmed(world).await?;
+    let racing = confirm(world, &proposal, 601).await?;
+    fail_at(world, Step::Status)?;
+    err_of(
+        world
+            .service
+            .accept_proposal(
+                &accepting(ACCEPTING)?,
+                accept_request(&proposal, &confirmation, 'a')?,
+            )
+            .await,
+    )?;
+    assert_eq!(status(world, proposal.id)?, ProposalStatus::Open);
+    let error = err_of(
+        world
+            .service
+            .accept_proposal(
+                &accepting(ACCEPTING.saturating_add(1))?,
+                accept_request(&proposal, &racing, 'a')?,
+            )
+            .await,
+    )?;
+    // The head moved under the second acceptance: `d`, the first one's promotion.
+    assert_stale(&error, &revision('d')?, Some("/expected_head"));
+    assert_eq!(status(world, proposal.id)?, ProposalStatus::Conflict);
+    Ok((proposal, confirmation))
+}
+
+#[tokio::test]
+async fn a_stale_acceptance_announces_the_conflict_it_marks() -> TestResult {
+    let world = proposal_world()?;
+    let (proposal, _) = racing_acceptance(&world).await?;
+    assert_eq!(
+        proposal_events(&world, proposal.id)?,
+        [
+            Some(mutation(OPENED)),
+            Some(mutation(ACCEPTING.saturating_add(1)))
+        ]
+    );
+    Ok(())
+}
+
+/// A stale acceptance whose event failed after it marked the proposal `conflict` is finished by
+/// its retry: the store takes the same mark under the same mutation as a retry, so the event is
+/// appended once and the stale refusal answered again; nothing is consumed or promoted again.
+/// Another mutation's attempt on that proposal is refused as any `conflict` one is.
+#[tokio::test]
+async fn a_resumed_stale_acceptance_announces_its_mark_after_a_failure_at_the_event() -> TestResult
+{
+    let world = proposal_world()?;
+    let (proposal, confirmation) = opened_and_confirmed(&world).await?;
+    world.world.versions.set_head(revision('e')?)?;
+    world.events.fail_next(EventKind::ProposalUpdated)?;
+    let error = err_of(
+        world
+            .service
+            .accept_proposal(
+                &accepting(ACCEPTING)?,
+                accept_request(&proposal, &confirmation, 'a')?,
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Unavailable, "{error}");
+    assert_eq!(status(&world, proposal.id)?, ProposalStatus::Conflict);
+    assert_eq!(
+        proposal_events(&world, proposal.id)?,
+        [Some(mutation(OPENED))]
+    );
+    let consumes = world.confirmations.consumes();
+    for _ in 0..2 {
+        let error = err_of(
+            world
+                .service
+                .accept_proposal(
+                    &resumed(accepting(ACCEPTING)?),
+                    accept_request(&proposal, &confirmation, 'a')?,
+                )
+                .await,
+        )?;
+        assert_stale(&error, &revision('e')?, Some("/expected_head"));
+    }
+    assert_eq!(
+        proposal_events(&world, proposal.id)?,
+        [Some(mutation(OPENED)), Some(mutation(ACCEPTING))]
+    );
+    assert_eq!(
+        world.confirmations.consumes(),
+        consumes,
+        "not consumed again"
+    );
+    assert_eq!(world.versions.attempts()?.len(), 1, "not promoted again");
+    assert_eq!(world.proposals.writes()?, [ProposalStatus::Conflict]);
+    // A resumed attempt of a mutation that did not mark it gets the plain refusal.
+    let error = err_of(
+        world
+            .service
+            .accept_proposal(
+                &resumed(accepting(ACCEPTING.saturating_add(1))?),
+                accept_request(&proposal, &confirmation, 'a')?,
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    assert_eq!(error.detail, None, "{error}");
+    assert_eq!(error.field, None, "{error}");
+    assert_eq!(
+        proposal_events(&world, proposal.id)?,
+        [Some(mutation(OPENED)), Some(mutation(ACCEPTING))]
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_plain_conflict_of_the_promotion_leaves_the_proposal_open() -> TestResult {
     let world = proposal_world()?;
