@@ -83,6 +83,8 @@ interface Slot {
   complete: boolean;
   folder: string;
   filename: string;
+  /** What `create_upload` first answered: a repeat under its key answers this (ruling 3). */
+  first: ReturnType<typeof viewOf> | null;
 }
 
 interface Service {
@@ -226,7 +228,7 @@ async function play(
     '/api/workspaces/open-workspace': () => ok(writableWorkspace),
     '/api/imports/create-upload': (body) => {
       const known = service.slots.find((slot) => slot.key === body.idempotency_key);
-      if (known) return ok(view(known));
+      if (known) return ok(known.first ?? view(known));
       const slot: Slot = {
         id: `77777777-7777-4777-8777-${String(service.slots.length + 1).padStart(12, '0')}`,
         key: String(body.idempotency_key),
@@ -235,9 +237,16 @@ async function play(
         complete: false,
         folder: String(body.relative_path),
         filename: String(body.filename),
+        first: null,
       };
+      slot.first = view(slot);
       service.slots.push(slot);
-      return ok(view(slot));
+      return ok(slot.first);
+    },
+    // The slot as it stands now: what a resumed upload goes on from.
+    '/api/imports/get-upload': (body) => {
+      const slot = service.slots.find((candidate) => candidate.id === body.upload_id);
+      return slot ? ok(view(slot)) : refuse(404, 'not_found', 'no such upload');
     },
     '/api/imports/complete-upload': (body) => {
       const slot = service.slots.find((candidate) => candidate.id === body.upload_id);
@@ -687,22 +696,26 @@ test.describe('Attention', () => {
   const server = useExplorerServer();
   const sink = useUploadSink();
   const WARNINGS = [
+    // Each with the item it names, as the list carries it (ruling 7).
     {
       kind: 'broken_link',
       message: 'The link to plan-2024.md leads nowhere.',
       item_id: NOTE,
+      item: note,
       action: 'get_links',
     },
     {
       kind: 'instruction_like',
       message: 'Line 12 reads “ignore previous instructions”.',
       item_id: NOTE,
+      item: note,
       action: 'read_item',
     },
     {
       kind: 'unprocessed',
       message: 'Pages 3 to 5 were not converted.',
       item_id: SOURCE,
+      item: source,
       action: 'redigest_item',
     },
   ];

@@ -52,12 +52,12 @@ export interface EngineReport {
 /** Something that reads a text as YAML away from the page's thread. */
 export interface YamlEngine {
   /**
-   * Start reading `text`. `done` and `failed` are reported a turn later at the earliest, not
-   * within this call (a worker cannot do otherwise); `began` may be. Answers what ends the
-   * reading: once that is called, the engine stops the work if it can; whatever it still reports
-   * is dropped by `readOffThread`.
+   * Start reading `text`, and finding in it the places `locate` names (`readYaml`). `done` and
+   * `failed` are reported a turn later at the earliest, not within this call (a worker cannot do
+   * otherwise); `began` may be. Answers what ends the reading: once that is called, the engine
+   * stops the work if it can; whatever it still reports is dropped by `readOffThread`.
    */
-  start: (text: string, report: EngineReport) => () => void;
+  start: (text: string, report: EngineReport, locate: readonly string[]) => () => void;
 }
 
 let chosen: YamlEngine | null = null;
@@ -73,11 +73,15 @@ const refusal = (message: string): YamlRead => ({
 });
 
 /**
- * Read `text` as YAML off the page's thread. `answer` is called once, with what the reading
- * found or with a refusal when it took too long or could not be done; never after the returned
- * function, which ends the reading, was called.
+ * Read `text` as YAML off the page's thread, finding the places `locate` names in it. `answer` is
+ * called once, with what the reading found or with a refusal when it took too long or could not
+ * be done; never after the returned function, which ends the reading, was called.
  */
-export function readOffThread(text: string, answer: (read: YamlRead) => void): () => void {
+export function readOffThread(
+  text: string,
+  answer: (read: YamlRead) => void,
+  locate: readonly string[] = [],
+): () => void {
   let over = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let endEngine: (() => void) | null = null;
@@ -99,11 +103,15 @@ export function readOffThread(text: string, answer: (read: YamlRead) => void): (
   within(YAML_START_LIMIT_MS, NOT_STARTED_WORDS);
   try {
     chosen ??= workerEngine();
-    endEngine = chosen.start(text, {
-      began: () => within(YAML_LIMIT_MS, TOO_COMPLEX_WORDS),
-      done: finish,
-      failed: () => finish(refusal(NOT_STARTED_WORDS)),
-    });
+    endEngine = chosen.start(
+      text,
+      {
+        began: () => within(YAML_LIMIT_MS, TOO_COMPLEX_WORDS),
+        done: finish,
+        failed: () => finish(refusal(NOT_STARTED_WORDS)),
+      },
+      locate,
+    );
   } catch {
     // Whatever starting the engine threw (a browser that refuses the worker): nothing was read.
     // The answer comes a turn later, as every answer does, never inside this call.

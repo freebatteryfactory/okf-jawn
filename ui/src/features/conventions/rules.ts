@@ -3,15 +3,15 @@
  * they would rename, and applying a preview.
  *
  * The rules are read at the head the workspace shows (`get_rules` at that revision), so they are
- * the rules of the version on screen and are read afresh under a new head. The schema the form is
+ * the rules of the version on screen and are read afresh under a new head. A version holds rules,
+ * none at all, or a stored file this build cannot read as rules (`StoredRules`); the last is
+ * shown with its text and its problems for repair, never as "no rules". The schema the form is
  * built from is the service's own (`get_form_schema`, name `naming-rules`).
  *
- * A preview writes nothing. `preview_names` takes the items to look at by id, so the items of the
- * chosen folder and of every folder under it are listed first, page by page, at the same
- * revision: one `list_items` request for each 200 entries of each folder (a workspace of 10,000
- * items in 100 folders is about 150 requests, one after another). Pages already listed for the
- * tree are reused. A folder that fails to list fails the preview: a preview of some of the items
- * is not shown as a preview of all of them.
+ * A preview writes nothing. `preview_names` takes a selection (ruling 10): the whole workspace, or
+ * a folder with every folder under it. The service reads the items itself, in one request, and
+ * answers how many it considered, how many would keep their names, and how many archived items it
+ * left out (archived items are never renamed); the plan's entries are the renames alone.
  *
  * Applying sends back exactly the plan the service answered and the rules it was previewed with;
  * the service checks both again (the plan's base revision and the digest of the rules). The
@@ -33,33 +33,95 @@ import {
 import { applyNames, previewNames, setRules } from '../../api/generated/sdk.gen';
 import type {
   GetRulesResponse,
-  ListItemsResponse,
+  NameSelection,
   NamingRules,
   RenamePlan,
   Revision,
+  Warning,
 } from '../../api/generated/types.gen';
 import { listedDraft } from '../drafts/drafts-list';
 import { type DraftAfterChange, draftLeftBehind, followOwnChange } from '../drafts/saving';
 import { sessionKey, useDraftSessions } from '../drafts/sessions';
-import { listingPageOptions } from '../explorer/folder-listing';
 import { adoptHeadFrom, checkHeadsAgain, type HeadChange } from '../explorer/head';
 import type { Attempt } from '../tree/changes';
 
 /** The name of the naming rules' schema among the service's form schemas. */
 export const RULES_SCHEMA = 'naming-rules';
 
+/** The rules a workspace with none saved starts from: none at all, in this build's format. */
+export const NO_RULES: NamingRules = { schema_version: 1, rules: [] };
+
 /**
- * The saved rules at the revision the workspace shows. `get_rules` answers them inside its
- * answer, beside the revision read and a stored file that cannot be read as rules; this page
- * reads the rules alone, and has none when the answer holds none.
+ * What a version holds as its naming rules (`get_rules`, ruling 11): rules; no rules saved at
+ * all; or a stored file that cannot be read as this build's rules, with its text and what is
+ * wrong with it. A file that cannot be read is never taken for "no rules": the page shows it, so
+ * that the person can repair it.
  */
+export type StoredRules =
+  | { kind: 'rules'; rules: NamingRules }
+  | { kind: 'none' }
+  | { kind: 'unreadable'; text: string; problems: Warning[] };
+
+/**
+ * The answer of `get_rules` as what the version holds. A stored file that cannot be read wins
+ * over rules beside it (the contract never sends both): such rules are not what the file says.
+ * Defined once, so the query's selection is not run again at every drawing.
+ */
+export function storedRulesOf(answer: GetRulesResponse): StoredRules {
+  if (answer.unreadable !== undefined && answer.unreadable !== null) {
+    return { kind: 'unreadable', ...answer.unreadable };
+  }
+  if (answer.rules !== undefined && answer.rules !== null) {
+    return { kind: 'rules', rules: answer.rules };
+  }
+  return { kind: 'none' };
+}
+
+/** The rules edits start from in what a version holds; none for a file that cannot be read. */
+export function startingRules(stored: StoredRules): NamingRules | undefined {
+  if (stored.kind === 'rules') return stored.rules;
+  return stored.kind === 'none' ? NO_RULES : undefined;
+}
+
+/** Whether two versions hold the same rules: rules in any key order, or the same stored text. */
+export function sameStored(a: StoredRules, b: StoredRules): boolean {
+  if (a.kind === 'rules' && b.kind === 'rules') return sameRules(a.rules, b.rules);
+  if (a.kind === 'unreadable' && b.kind === 'unreadable') return a.text === b.text;
+  return a.kind === b.kind;
+}
+
+/** What the version the workspace shows holds as its naming rules. */
 export function rulesOptions(workspaceId: string, head: Revision) {
   return queryOptions({
     ...getRulesOptions({
       body: { workspace_id: workspaceId, at: { kind: 'revision', revision: head } },
     }),
-    select: (answer: GetRulesResponse): NamingRules | undefined => answer.rules ?? undefined,
+    select: storedRulesOf,
   });
+}
+
+/**
+ * Where a problem the service found in a stored rules file is (its `location`): a line and a
+ * column ("line 2, column 7", as the YAML reader gives one); a JSON Pointer into the file
+ * (`/rules/0/glob`), which the page places at a line and column by reading the text; the whole
+ * file (no location); or other words, shown as they are.
+ */
+export type ProblemPlace =
+  | { kind: 'line'; line: number; column: number }
+  | { kind: 'pointer'; pointer: string }
+  | { kind: 'file' }
+  | { kind: 'words'; words: string };
+
+export function problemPlace(location: string | null | undefined): ProblemPlace {
+  if (location === undefined || location === null || location.trim() === '') {
+    return { kind: 'file' };
+  }
+  const at = /^\s*line (\d+)(?:,\s*column (\d+))?\s*$/i.exec(location);
+  if (at !== null) {
+    return { kind: 'line', line: Number(at[1] ?? '1'), column: Number(at[2] ?? '1') };
+  }
+  if (location.startsWith('/')) return { kind: 'pointer', pointer: location };
+  return { kind: 'words', words: location };
 }
 
 /** The schema the rules form is built from; it does not change while the page is open. */
@@ -131,72 +193,37 @@ export async function saveRules(
   return { revision: data.revision, previousHead, itemIds: [], adopted };
 }
 
-/**
- * The ids of every item in `folder` ('' is the whole workspace) and in the folders under it, as
- * listed at `revision`. Rejects with what a listing threw.
- */
-export async function itemsUnder(
-  client: QueryClient,
-  workspaceId: string,
-  revision: Revision,
-  folder: string,
-): Promise<string[]> {
-  const ids: string[] = [];
-  const waiting = [folder];
-  for (let next = waiting.pop(); next !== undefined; next = waiting.pop()) {
-    let cursor: string | null = null;
-    do {
-      const page: ListItemsResponse = await client.fetchQuery({
-        ...listingPageOptions(workspaceId, revision, next, cursor),
-        staleTime: Number.POSITIVE_INFINITY,
-      });
-      for (const item of page.items) ids.push(item.id);
-      waiting.push(...page.folders);
-      cursor = page.next_cursor ?? null;
-    } while (cursor !== null);
-  }
-  return ids;
-}
-
 /** A preview as the person saw it: the plan, and what it was made of. */
 export interface Preview {
   plan: RenamePlan;
   /** The rules it was previewed with: an apply sends these, not what the editor holds later. */
   rules: NamingRules;
-  /** The folder whose items were looked at; '' is the whole workspace. */
+  /** The folder whose items, and those of every folder under it, were looked at; '' is all. */
   folder: string;
-  /** How many items were looked at. */
-  looked: number;
 }
 
-/** Thrown by a preview of a folder that holds no item: nothing is asked of `preview_names`. */
-export class NothingToPreview extends Error {
-  constructor() {
-    super('There is no item to preview');
-    this.name = 'NothingToPreview';
-  }
+/** What a preview of `folder` asks for: the whole workspace, or the folder and those under it. */
+export function selectionOf(folder: string): NameSelection {
+  return folder === '' ? { kind: 'workspace' } : { kind: 'folder', folder, recursive: true };
 }
 
 /** What these rules would rename among the items of `folder`, at `revision`. Writes nothing. */
 export async function previewRenames(
-  client: QueryClient,
   workspaceId: string,
   revision: Revision,
   rules: NamingRules,
   folder: string,
 ): Promise<Preview> {
-  const itemIds = await itemsUnder(client, workspaceId, revision, folder);
-  if (itemIds.length === 0) throw new NothingToPreview();
   const { data } = await previewNames({
     body: {
       workspace_id: workspaceId,
       at: { kind: 'revision', revision },
-      selection: { kind: 'items', item_ids: itemIds },
+      selection: selectionOf(folder),
       rules,
     },
     throwOnError: true,
   });
-  return { plan: data, rules, folder, looked: itemIds.length };
+  return { plan: data, rules, folder };
 }
 
 /**

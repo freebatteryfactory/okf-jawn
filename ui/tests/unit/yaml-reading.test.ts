@@ -54,6 +54,25 @@ describe('reading YAML off the page’s thread', () => {
     expect(answers).toHaveLength(1);
   });
 
+  it('hands the engine the places asked for, and answers where they stand', () => {
+    const held = heldEngine();
+    setYamlEngine(held.engine);
+    const answers: YamlRead[] = [];
+    readOffThread('a:\n  b: 1\n', (read) => answers.push(read), ['/a/b']);
+    const reading = held.readings.at(0);
+    expect(reading?.locate).toEqual(['/a/b']);
+    reading?.began();
+    reading?.done();
+    expect(answers).toEqual([
+      {
+        ok: true,
+        value: { a: { b: 1 } },
+        warnings: [],
+        places: { '/a/b': { line: 2, column: 6 } },
+      },
+    ]);
+  });
+
   it('ends a reading that takes longer than the limit, and says that the text is too complex', () => {
     // The page's own limit: one second.
     expect(YAML_LIMIT_MS).toBe(1_000);

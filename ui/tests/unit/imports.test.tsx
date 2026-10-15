@@ -13,7 +13,7 @@ import {
 } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CSRF_COOKIE, CSRF_HEADER } from '../../src/app/api-client';
-import { MAX_FILE_BYTES, useUploads } from '../../src/features/imports/upload-list';
+import { boundOver, MAX_FILE_BYTES, useUploads } from '../../src/features/imports/upload-list';
 import { resetUploads, UPLOADS_AT_ONCE } from '../../src/features/imports/uploading';
 import { fail, type Handler, mockApi, ok } from './support/api';
 import {
@@ -41,6 +41,7 @@ import {
 } from './support/workspace';
 
 const OPEN = '/api/workspaces/open-workspace';
+const SESSION = '/api/session/get-session';
 const WORKSPACES = '/api/workspaces/list-workspaces';
 const TOKEN = '0123456789abcdef0123456789abcdef';
 
@@ -424,6 +425,94 @@ describe('choosing files', () => {
     expect(api.callsTo(CREATE)).toEqual([]);
   });
 
+  describe('the most the service takes of one file (limits.upload_bytes)', () => {
+    const session = (uploadBytes: string) => () =>
+      ok({
+        csrf_required: false,
+        principal: { subject: 'ada', tenant_id: 'local', route: 'local_owner' },
+        limits: { upload_bytes: uploadBytes, request_body_bytes: 1_048_576, item_text_bytes: 8 },
+      });
+
+    it('refuses a file over it before anything is sent, says the limit, and takes one at it', async () => {
+      const { api } = setup(uploadService(), { [SESSION]: session('3') });
+      await openImport();
+      await waitFor(() => expect(api.callsTo(SESSION)).toHaveLength(1));
+      choose('Choose files…', [fileOf('at.txt', 'abc'), fileOf('over.txt', 'abcd')]);
+      await waitFor(() =>
+        expect(rowOf('over.txt').textContent).toContain(
+          'Too large: the service takes files of up to 3 bytes. It will not be sent.',
+        ),
+      );
+      expect(rowOf('at.txt').textContent).toContain('Not sent yet.');
+      upload();
+      await uploaded('at.txt');
+      expect(api.callsTo(CREATE).map((body) => body.filename)).toEqual(['at.txt']);
+      expect(rowOf('over.txt').textContent).toContain('Too large');
+      expect(api.violations).toEqual([]);
+    });
+
+    it('says the smaller of the two bounds a file is over: the page’s, or the service’s', () => {
+      const MiB = 1024 * 1024;
+      expect(boundOver(600 * MiB, 100 * MiB)).toEqual({ bytes: 100 * MiB, whose: 'service' });
+      expect(boundOver(600 * MiB, 1024 * MiB)).toEqual({ bytes: MAX_FILE_BYTES, whose: 'page' });
+      expect(boundOver(MAX_FILE_BYTES + 1, null)).toEqual({ bytes: MAX_FILE_BYTES, whose: 'page' });
+      expect(boundOver(4, 3)).toEqual({ bytes: 3, whose: 'service' });
+      expect(boundOver(3, 3)).toBeNull();
+      expect(boundOver(MAX_FILE_BYTES, null)).toBeNull();
+    });
+
+    it('applies it, once read, to the files listed before it was known', async () => {
+      let answer: (() => void) | null = null;
+      setup(uploadService(), {
+        [SESSION]: () =>
+          new Promise((resolve) => {
+            answer = () => resolve(session('3')());
+          }),
+      });
+      await openImport();
+      choose('Choose files…', [fileOf('over.txt', 'abcd')]);
+      expect(rowOf('over.txt').textContent).toContain('Not sent yet.');
+      act(() => answer?.());
+      await waitFor(() =>
+        expect(rowOf('over.txt').textContent).toContain(
+          'Too large: the service takes files of up to 3 bytes.',
+        ),
+      );
+    });
+
+    it('waits for the limit when Upload is pressed before it is read, and sends nothing over it', async () => {
+      let answer: (() => void) | null = null;
+      const { api } = setup(uploadService(), {
+        [SESSION]: () =>
+          new Promise((resolve) => {
+            answer = () => resolve(session('3')());
+          }),
+      });
+      await openImport();
+      choose('Choose files…', [fileOf('over.txt', 'abcd')]);
+      expect(rowOf('over.txt').textContent).toContain('Not sent yet.');
+      // Upload waits for the limit: nothing is sent before it is known.
+      fireEvent.click(screen.getByRole('button', { name: 'Upload 1 file' }));
+      expect(api.callsTo(CREATE)).toEqual([]);
+      act(() => answer?.());
+      await waitFor(() =>
+        expect(rowOf('over.txt').textContent).toContain(
+          'Too large: the service takes files of up to 3 bytes.',
+        ),
+      );
+      expect(api.callsTo(CREATE)).toEqual([]);
+    });
+
+    it('leaves the limit to the service when the session cannot be read', async () => {
+      const { api } = setup();
+      await openImport();
+      choose('Choose files…', [fileOf('a.txt', 'abc')]);
+      upload();
+      await uploaded('a.txt');
+      expect(api.callsTo(CREATE)).toHaveLength(1);
+    });
+  });
+
   it('offers nothing to a person who may only read', async () => {
     mockApi(explorerHandlers({ [OPEN]: () => ok(workspace) }));
     await openImport();
@@ -685,9 +774,9 @@ describe('uploading', () => {
     choose('Choose files…', [fileOf('a.txt', 'abc')]);
     upload();
     await notUploaded('a.txt');
-    // The service's record of the slot is behind the bytes it kept: asked again, it says it holds
+    // The service's record of the slot is behind the bytes it kept: read again, it says it holds
     // none (the real store brings the record up to date on other calls, not on this one).
-    service.script.create.push(async (_body, usual) => {
+    service.script.get.push(async (_body, usual) => {
       const reply = await usual();
       return ok({ ...(reply.body as object), received_bytes: '0' });
     });
@@ -703,7 +792,7 @@ describe('uploading', () => {
     expect(row.textContent).not.toContain('Remove it from the list');
     // The slot it leaves holds bytes, and the row says they stay.
     expect(row.textContent).toContain(
-      'What was sent of it before stays with the service until it expires: this page has no way to remove it.',
+      'What was sent of it before stays with the service: it is listed under “Uploads the service holds”, where you can discard it.',
     );
     fireEvent.click(within(row).getByRole('button', { name: 'Send it again' }));
     await uploaded('a.txt');
@@ -716,6 +805,31 @@ describe('uploading', () => {
     expect(rowOf('a.txt').textContent).toContain(
       'What was sent of it before stays with the service',
     );
+  });
+
+  it('says what the slot holds against what was announced when the finish names a mismatch', async () => {
+    const service = uploadService();
+    service.script.complete.push(() => ({
+      status: 409,
+      body: {
+        code: 'conflict',
+        message: 'the upload does not match',
+        detail: { kind: 'upload_mismatch', expected_bytes: '3', received_bytes: '2' },
+      },
+    }));
+    setup(service);
+    await openImport();
+    choose('Choose files…', [fileOf('a.txt', 'abc')]);
+    upload();
+    await notUploaded('a.txt');
+    const row = rowOf('a.txt');
+    expect(row.textContent).toContain(
+      'Uploading a.txt: What the service holds does not match this file.',
+    );
+    expect(row.textContent).toContain(
+      'It was announced with 3 bytes and holds 2. Send it again: the file goes into a new upload.',
+    );
+    expect(within(row).getByRole('button', { name: 'Send it again' })).toBeDefined();
   });
 
   it('reads too large as too large when it is the slot, asked again, that is refused', async () => {
@@ -773,7 +887,7 @@ describe('uploading', () => {
     await notUploaded('a.txt');
     await uploaded('b.txt');
     expect(rowOf('a.txt').textContent).toContain(
-      'What was sent of it before stays with the service until it expires: this page has no way to remove it.',
+      'What was sent of it before stays with the service: it is listed under “Uploads the service holds”, where you can discard it.',
     );
     // A file whose one slot was verified left nothing behind.
     expect(rowOf('b.txt').textContent).not.toContain('stays with the service');
@@ -797,14 +911,14 @@ describe('uploading', () => {
     // Under way: its request is aborted, and what had gone is the service's.
     fireEvent.click(screen.getByRole('button', { name: 'Remove under-way.txt' }));
     const said = screen.getByText(
-      '“under-way.txt” was removed from the list. What was already sent of it stays with the service until it expires: this page has no way to remove it.',
+      '“under-way.txt” was removed from the list. What was already sent of it stays with the service: it is listed under “Uploads the service holds”, where you can discard it.',
     );
     expect(said.getAttribute('role')).toBe('status');
     // Uploaded and not imported: its slot is the service's too.
     fireEvent.click(screen.getByRole('button', { name: 'Remove done.txt' }));
     expect(
       screen.getByText(
-        '“done.txt” was removed from the list. What was already sent of it stays with the service until it expires: this page has no way to remove it.',
+        '“done.txt” was removed from the list. What was already sent of it stays with the service: it is listed under “Uploads the service holds”, where you can discard it.',
       ),
     ).toBeDefined();
   });
@@ -949,7 +1063,7 @@ describe('uploading', () => {
     expect(service.slots.map((slot) => slot.complete)).toEqual([false, true]);
     // The slot that holds "ab" stays where it is, and the row says so.
     expect(rowOf('a.txt').textContent).toContain(
-      'What was sent of it before stays with the service until it expires',
+      'What was sent of it before stays with the service: it is listed',
     );
   });
 

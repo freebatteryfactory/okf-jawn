@@ -6,11 +6,11 @@
  * - (`tidyPath`, in `files.ts`, comes first: a backslash is a path separator.)
  * - `pathProblem`: a path the page does not send. A `..` step, a path that starts at a root (a
  *   leading separator), a path that names a disk drive ("C:"), and a control character (a line
- *   break among them) are each a problem; so is a name or a folder longer than the generated
- *   request schema of `create_upload` allows. That schema states the contract's bounds in UTF-8
- *   bytes (`x-max-utf8-bytes`), which the generated zod schema does not carry, so nothing is
- *   found too long here today and the service refuses a longer name; counting the bytes on the
- *   page is UI part 2's.
+ *   break among them) are each a problem; so is a name or a folder longer than `create_upload`
+ *   takes (rulings 6 and 34). Those bounds are in bytes of UTF-8 (`x-max-utf8-bytes` in the
+ *   request schema: `MAX_FILENAME_BYTES`, `MAX_FOLDER_BYTES`), so the bytes are counted
+ *   (`TextEncoder`), never the characters: a letter with an accent takes two bytes, many others
+ *   three or four. A unit test holds the two numbers to the schema.
  * - `collisionKey`: two paths with the same key would be the same place for a person: they are the
  *   same, or differ only in capital and small letters, or only in how an accented letter is
  *   composed (a Mac names files decomposed). The upload list holds back both (`upload-list.ts`).
@@ -21,8 +21,6 @@
  *   Persian, Arabic and Indic words are shown as marks too: a name is listed here to be checked
  *   before it is sent, not to be read as prose. What is sent is the name itself, never this text.
  */
-import type { z } from 'zod';
-import { zCreateUploadRequest } from '../../api/generated/zod.gen';
 import { type NamedPath, pathOf } from './files';
 
 export type PathProblem =
@@ -32,31 +30,31 @@ export type PathProblem =
   | { kind: 'control' }
   | { kind: 'too-long'; part: 'name' | 'folder'; max: number };
 
-/** The length each part of a path may have, as schemas: by default the generated request's own. */
+/** The most bytes of UTF-8 of an upload's `filename` (`MAX_UPLOAD_FILENAME_BYTES`). */
+export const MAX_FILENAME_BYTES = 1024;
+
+/** The most bytes of UTF-8 of an upload's `relative_path` (`MAX_UPLOAD_RELATIVE_PATH_BYTES`). */
+export const MAX_FOLDER_BYTES = 4096;
+
+/** The most bytes each part of a path may have: by default the contract's. */
 export interface PathLimits {
-  filename: z.ZodType;
-  folder: z.ZodType;
+  filename: number;
+  folder: number;
 }
 
-const WIRE_LIMITS: PathLimits = {
-  filename: zCreateUploadRequest.shape.filename,
-  folder: zCreateUploadRequest.shape.relative_path,
-};
+const WIRE_LIMITS: PathLimits = { filename: MAX_FILENAME_BYTES, folder: MAX_FOLDER_BYTES };
+
+const encoder = new TextEncoder();
+
+/** The length of `value` in bytes of UTF-8, as the service counts it. */
+export function utf8Bytes(value: string): number {
+  return encoder.encode(value).length;
+}
 
 /** A control character: C0, delete, or C1. */
 function isControl(char: string): boolean {
   const code = char.codePointAt(0) ?? 0;
   return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
-}
-
-/** The largest length the schema allows, when the value is over it; null when it is not. */
-function overLength(schema: z.ZodType, value: string): number | null {
-  const checked = schema.safeParse(value);
-  if (checked.success) return null;
-  for (const issue of checked.error.issues) {
-    if (issue.code === 'too_big' && typeof issue.maximum === 'number') return issue.maximum;
-  }
-  return null;
 }
 
 /** What the page can see is wrong with a path; null when it sees nothing. The first found is said. */
@@ -70,10 +68,12 @@ export function pathProblem(
   const steps = path.split('/');
   if (/^[A-Za-z]:$/.test(steps.at(0) ?? '')) return { kind: 'drive' };
   if (steps.includes('..')) return { kind: 'parent' };
-  const nameMax = overLength(limits.filename, named.filename);
-  if (nameMax !== null) return { kind: 'too-long', part: 'name', max: nameMax };
-  const folderMax = overLength(limits.folder, named.folder);
-  if (folderMax !== null) return { kind: 'too-long', part: 'folder', max: folderMax };
+  if (utf8Bytes(named.filename) > limits.filename) {
+    return { kind: 'too-long', part: 'name', max: limits.filename };
+  }
+  if (utf8Bytes(named.folder) > limits.folder) {
+    return { kind: 'too-long', part: 'folder', max: limits.folder };
+  }
   return null;
 }
 
@@ -89,7 +89,7 @@ export function describeProblem(problem: PathProblem): string {
     case 'control':
       return 'its name holds a control character, such as a line break.';
     case 'too-long':
-      return `its ${problem.part === 'name' ? 'name' : 'folder path'} is longer than the service accepts (${problem.max} characters at most).`;
+      return `its ${problem.part === 'name' ? 'name' : 'folder path'} is too long: the service takes at most ${problem.max.toLocaleString('en')} bytes of text, and a letter with an accent takes two, many other characters three or four.`;
   }
 }
 
