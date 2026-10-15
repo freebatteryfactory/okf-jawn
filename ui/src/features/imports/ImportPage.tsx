@@ -25,10 +25,12 @@
  * that is not drawn itself shown as a mark of its code point (`shownName`), so a right-to-left
  * override cannot make a name read as another; what is sent is the name itself.
  *
- * What stays with the service. The client cannot remove an upload from the service. So a file
- * whose upload was left for a new one says, on its row, that the earlier one stays with the
- * service until it expires; and removing a file some of which was sent says the same in the
- * list's status.
+ * What stays with the service. Nothing expires: an upload stays with the service until it is
+ * imported or discarded. A file whose upload was left for a new one says, on its row, that the
+ * earlier one stays with the service; removing a file some of which was sent says the same in the
+ * list's status. Both are listed under "Uploads the service holds" (`WaitingUploads.tsx`), where
+ * they can be discarded, and where an upload this page did not make (one finished before the page
+ * was opened) can be included in the import.
  *
  * Uploading starts when the person asks. Each file shows how it stands, in words: its own percent
  * while it is sent, and "uploaded" only once the service has verified its length and hash. A file
@@ -72,6 +74,7 @@ import {
 } from './upload-list';
 import { uploadWords } from './upload-words';
 import { removeUpload, retryUpload, uploadChosen } from './uploading';
+import { WaitingUploads } from './WaitingUploads';
 
 export interface ImportPageProps {
   workspaceId: string;
@@ -220,6 +223,19 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
   });
 
   const colliding = collisions(entries);
+  // The uploads this page's list holds: not listed again among those the service holds.
+  const own = new Set(
+    entries.flatMap((entry) => [entry.slotId, entry.uploadId].filter((id) => id !== null)),
+  );
+  // The uploads the service holds that the person included in the next import.
+  const [included, setIncluded] = useState<ReadonlySet<string>>(new Set());
+  const include = (uploadId: string, chosen: boolean) =>
+    setIncluded((now) => {
+      const next = new Set(now);
+      if (chosen) next.add(uploadId);
+      else next.delete(uploadId);
+      return next;
+    });
   const toUpload = toBeSent(entries).length;
 
   if (!canWrite) {
@@ -309,7 +325,7 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
                 const path = shownName(pathOf(entry));
                 if (removeUpload(entry.id).leftWithService) {
                   setChoiceNote(
-                    `“${path}” was removed from the list. What was already sent of it stays with the service until it expires: this page has no way to remove it.`,
+                    `“${path}” was removed from the list. What was already sent of it stays with the service: it is listed under “Uploads the service holds”, where you can discard it.`,
                   );
                 }
               }}
@@ -332,7 +348,16 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
       <p role="status" className="meta">
         {describeUploads(entries)}
       </p>
-      <ImportStart workspaceId={workspaceId} head={head} entries={entries} />
+      <WaitingUploads workspaceId={workspaceId} own={own} included={included} onInclude={include} />
+      <ImportStart
+        workspaceId={workspaceId}
+        head={head}
+        entries={entries}
+        included={[...included]}
+        onStarted={(taken) =>
+          setIncluded((now) => new Set([...now].filter((uploadId) => !taken.includes(uploadId))))
+        }
+      />
       <StartedJobs workspaceId={workspaceId} canWrite={canWrite} />
     </section>
   );
@@ -435,8 +460,8 @@ function UploadRow({
       {entry.leftBehind > 0 && (
         <span className="upload-state">
           {' '}
-          What was sent of it before stays with the service until it expires: this page has no way
-          to remove it.
+          What was sent of it before stays with the service: it is listed under “Uploads the service
+          holds”, where you can discard it.
         </span>
       )}{' '}
       {entry.state === 'sending' && (

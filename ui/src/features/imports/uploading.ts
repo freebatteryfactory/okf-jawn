@@ -17,8 +17,9 @@
  *    for other content, so this try opens a new one.
  * 2. `create_upload` announces the name, the folder, the length (a decimal count) and the hash,
  *    under the entry's slot key. It is asked at the start of every try: a repeat under the same key
- *    opens nothing and answers the slot the service already holds, with the bytes it holds
- *    (`received_bytes`).
+ *    opens nothing and answers the slot as it was first answered (ruling 3). So when an earlier
+ *    try sent the slot bytes, the slot is then read as it stands now (`get_upload`): the bytes it
+ *    holds (`received_bytes`) are what the rest is sent from.
  * 3. `upload_content` sends the bytes the slot lacks: the whole reading into a fresh slot, the
  *    rest of it into one that holds a part (the service appends). It is skipped when the slot holds
  *    them all. The answer must say that the slot now holds exactly the file's length.
@@ -37,15 +38,17 @@
  * said it lacks (the service's record of a slot can be behind the bytes it kept). That is not a
  * file too large for the service, and it is not worded as one.
  *
- * What stays with the service. The client has no operation that lists or removes a slot, so a slot
- * that was sent bytes and is then left (for a new slot, or because its file was removed from the
- * list) stays there with those bytes until the service lets it expire. The page says so, in one
- * line: on the file's row when its slot was left for a new one (`leftBehind`), and in the list's
- * status when the file is removed (`removeUpload` answers whether anything is left). For the same
- * reason a slot is opened only when its file's turn comes, never for the whole list up front, so a
- * file removed before its turn leaves nothing behind. Removing a file under way aborts its
- * requests. Limit: a slot that was opened and sent no byte is not mentioned; and a removal that
- * aborts `create_upload` in flight cannot know whether the service opened the slot.
+ * What stays with the service. A slot that was sent bytes and is then left (for a new slot, or
+ * because its file was removed from the list) stays there with those bytes: nothing expires (owner
+ * decision of 2026-10-14). The import page lists the slots the service holds (`list_uploads`), and
+ * the person can discard one there (`discard_upload`, `WaitingUploads.tsx`). The page says so, in
+ * one line: on the file's row when its slot was left for a new one (`leftBehind`), and in the
+ * list's status when the file is removed (`removeUpload` answers whether anything is left). A slot
+ * is opened only when its file's turn comes, never for the whole list up front, so a file removed
+ * before its turn leaves nothing behind. Removing a file under way aborts its requests. Limit: a
+ * slot that was opened and sent no byte is not mentioned on the row (it is listed with the others);
+ * and a removal that aborts `create_upload` in flight cannot know whether the service opened the
+ * slot.
  *
  * Progress is written to the list when the whole-percent value changes, not at every report of
  * the browser, so a large list is not redrawn many times a second.
@@ -59,7 +62,12 @@
  * page holds at most about `HELD_BYTES_AT_ONCE` plus the length of the file being hashed: 1 GiB
  * for the largest file alone, and no more than that for any list.
  */
-import { completeUpload, createUpload, uploadContent } from '../../api/generated/sdk.gen';
+import {
+  completeUpload,
+  createUpload,
+  getUpload,
+  uploadContent,
+} from '../../api/generated/sdk.gen';
 import { bytesSender } from '../../app/upload-transport';
 import { classifyFailure } from '../errors/failure';
 import { type FileReading, readForUpload } from './hash';
@@ -209,7 +217,7 @@ async function run(id: string): Promise<void> {
     });
 
     step = 'slot';
-    const { data: slot } = await createUpload({
+    const { data: opened } = await createUpload({
       body: {
         workspace_id: workspaceId,
         filename: entry.filename,
@@ -221,6 +229,18 @@ async function run(id: string): Promise<void> {
       signal,
       throwOnError: true,
     });
+    // A repeat under the same key answers the slot as it was first answered (ruling 3): when an
+    // earlier try sent it bytes, what it holds now is read from the slot itself.
+    const slot = resumed
+      ? (
+          await getUpload({
+            body: { workspace_id: workspaceId, upload_id: opened.id },
+            signal,
+            throwOnError: true,
+          })
+        ).data
+      : opened;
+    uploads().change(id, { slotId: slot.id });
     const held = bytesIn(slot.received_bytes);
     if (held === null) throw new SlotUnusable(slot.received_bytes);
 
@@ -279,6 +299,7 @@ async function run(id: string): Promise<void> {
             slotKey: crypto.randomUUID(),
             finishKey: crypto.randomUUID(),
             sha256: null,
+            slotId: null,
             slotBegan: false,
             // A slot that was sent bytes stays with the service when it is left for a new one.
             leftBehind: leftBehind + (began ? 1 : 0),
@@ -332,7 +353,7 @@ export function retryUpload(id: string): Promise<void> {
 
 /**
  * Take a file off the list; one under way has its requests aborted. Answers whether bytes of it
- * were sent to a slot that now stays with the service: the client cannot remove it.
+ * were sent to a slot that now stays with the service, listed with the uploads it holds.
  */
 export function removeUpload(id: string): { leftWithService: boolean } {
   const leftWithService = entryOf(id)?.slotBegan === true;

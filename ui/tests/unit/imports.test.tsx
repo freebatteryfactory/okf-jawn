@@ -685,9 +685,9 @@ describe('uploading', () => {
     choose('Choose files…', [fileOf('a.txt', 'abc')]);
     upload();
     await notUploaded('a.txt');
-    // The service's record of the slot is behind the bytes it kept: asked again, it says it holds
+    // The service's record of the slot is behind the bytes it kept: read again, it says it holds
     // none (the real store brings the record up to date on other calls, not on this one).
-    service.script.create.push(async (_body, usual) => {
+    service.script.get.push(async (_body, usual) => {
       const reply = await usual();
       return ok({ ...(reply.body as object), received_bytes: '0' });
     });
@@ -703,7 +703,7 @@ describe('uploading', () => {
     expect(row.textContent).not.toContain('Remove it from the list');
     // The slot it leaves holds bytes, and the row says they stay.
     expect(row.textContent).toContain(
-      'What was sent of it before stays with the service until it expires: this page has no way to remove it.',
+      'What was sent of it before stays with the service: it is listed under “Uploads the service holds”, where you can discard it.',
     );
     fireEvent.click(within(row).getByRole('button', { name: 'Send it again' }));
     await uploaded('a.txt');
@@ -773,7 +773,7 @@ describe('uploading', () => {
     await notUploaded('a.txt');
     await uploaded('b.txt');
     expect(rowOf('a.txt').textContent).toContain(
-      'What was sent of it before stays with the service until it expires: this page has no way to remove it.',
+      'What was sent of it before stays with the service: it is listed under “Uploads the service holds”, where you can discard it.',
     );
     // A file whose one slot was verified left nothing behind.
     expect(rowOf('b.txt').textContent).not.toContain('stays with the service');
@@ -797,14 +797,14 @@ describe('uploading', () => {
     // Under way: its request is aborted, and what had gone is the service's.
     fireEvent.click(screen.getByRole('button', { name: 'Remove under-way.txt' }));
     const said = screen.getByText(
-      '“under-way.txt” was removed from the list. What was already sent of it stays with the service until it expires: this page has no way to remove it.',
+      '“under-way.txt” was removed from the list. What was already sent of it stays with the service: it is listed under “Uploads the service holds”, where you can discard it.',
     );
     expect(said.getAttribute('role')).toBe('status');
     // Uploaded and not imported: its slot is the service's too.
     fireEvent.click(screen.getByRole('button', { name: 'Remove done.txt' }));
     expect(
       screen.getByText(
-        '“done.txt” was removed from the list. What was already sent of it stays with the service until it expires: this page has no way to remove it.',
+        '“done.txt” was removed from the list. What was already sent of it stays with the service: it is listed under “Uploads the service holds”, where you can discard it.',
       ),
     ).toBeDefined();
   });
@@ -949,7 +949,7 @@ describe('uploading', () => {
     expect(service.slots.map((slot) => slot.complete)).toEqual([false, true]);
     // The slot that holds "ab" stays where it is, and the row says so.
     expect(rowOf('a.txt').textContent).toContain(
-      'What was sent of it before stays with the service until it expires',
+      'What was sent of it before stays with the service: it is listed',
     );
   });
 

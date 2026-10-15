@@ -95,6 +95,8 @@ export interface UploadEntry extends NamedPath {
   finishKey: string;
   /** The file's hash, once read; announced with the slot and sent again to finish it. */
   sha256: string | null;
+  /** The slot the service opened for the current try, once it answered; null before. */
+  slotId: string | null;
   /** The slot, once the service has verified the whole file. */
   uploadId: string | null;
 }
@@ -182,6 +184,7 @@ const fresh = () => ({
   slotKey: crypto.randomUUID(),
   finishKey: crypto.randomUUID(),
   sha256: null,
+  slotId: null,
   uploadId: null,
 });
 

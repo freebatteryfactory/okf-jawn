@@ -12,8 +12,14 @@ import {
   within,
 } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import startImportSchema from '../../../api/schemas/start_import.input.json';
 import type { Job } from '../../src/api/generated/types.gen';
-import { importAttempt, importBase } from '../../src/features/imports/import-start';
+import {
+  type ImportAttempt,
+  importAttempt,
+  importBase,
+  MAX_IMPORT_UPLOADS,
+} from '../../src/features/imports/import-start';
 import { resetUploads } from '../../src/features/imports/uploading';
 import { JOBS_POLL_MS, JOBS_SAFETY_POLL_MS } from '../../src/features/jobs/jobs';
 import { fail, type Handler, mockApi, ok } from './support/api';
@@ -134,12 +140,12 @@ const jobRow = () => {
 };
 
 describe('the identity of a start_import request', () => {
-  const last = {
-    key: 'the-first-key',
-    uploadIds: ['u1', 'u2'],
+  const last: ImportAttempt = {
+    parts: [{ key: 'the-first-key', uploadIds: ['u1', 'u2'], job: null }],
     destination: 'notes',
     baseRevision: HEAD,
   };
+  const keyOf = (attempt: ImportAttempt) => attempt.parts.at(0)?.key ?? '';
 
   it('is the one before while the request names the same uploads, folder and base', () => {
     expect(importAttempt(last, ['u1', 'u2'], 'notes', HEAD)).toBe(last);
@@ -154,13 +160,28 @@ describe('the identity of a start_import request', () => {
     ['the same uploads in another order', ['u2', 'u1'], 'notes', HEAD],
   ])('is a new one, under a new key, for %s', (_what, uploadIds, destination, baseRevision) => {
     const next = importAttempt(last, uploadIds, destination, baseRevision);
-    expect(next.key).not.toBe(last.key);
-    expect(next.key).toMatch(/^[0-9a-f-]{36}$/);
-    expect(next).toMatchObject({ uploadIds, destination, baseRevision });
+    expect(keyOf(next)).not.toBe(keyOf(last));
+    expect(keyOf(next)).toMatch(/^[0-9a-f-]{36}$/);
+    expect(next).toMatchObject({ parts: [{ uploadIds, job: null }], destination, baseRevision });
   });
 
   it('is a new one when nothing was asked before', () => {
-    expect(importAttempt(null, ['u1'], '', HEAD).key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(keyOf(importAttempt(null, ['u1'], '', HEAD))).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it(`names at most ${MAX_IMPORT_UPLOADS} uploads in one request, the contract's bound: more go in parts, in order, each under its key`, () => {
+    expect(startImportSchema.properties.upload_ids.maxItems).toBe(MAX_IMPORT_UPLOADS);
+    const ids = (n: number) => Array.from({ length: n }, (_, at) => `u${at}`);
+    expect(importAttempt(null, ids(MAX_IMPORT_UPLOADS), '', HEAD).parts).toHaveLength(1);
+    const split = importAttempt(null, ids(MAX_IMPORT_UPLOADS + 1), '', HEAD);
+    expect(split.parts.map((part) => part.uploadIds.length)).toEqual([MAX_IMPORT_UPLOADS, 1]);
+    expect(split.parts.flatMap((part) => part.uploadIds)).toEqual(ids(MAX_IMPORT_UPLOADS + 1));
+    expect(new Set(split.parts.map((part) => part.key)).size).toBe(2);
+    expect(
+      importAttempt(null, ids(2 * MAX_IMPORT_UPLOADS + 1), '', HEAD).parts.map(
+        (part) => part.uploadIds.length,
+      ),
+    ).toEqual([MAX_IMPORT_UPLOADS, MAX_IMPORT_UPLOADS, 1]);
   });
 });
 
@@ -569,35 +590,12 @@ describe('starting the import', () => {
     expect(api.callsTo(JOBS)).toHaveLength(2);
   });
 
-  it('says to refresh when the answer says the base is stale, with no retry of its own', async () => {
-    const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {
-      // The answer names the request's base as what it is about.
-      [START]: () => ({
-        status: 409,
-        body: { code: 'conflict', message: 'the workspace head moved', field: 'base_revision' },
-      }),
-    });
-    fireEvent.click(importButton());
-    await eventually(() =>
-      screen.getByText(
-        'Starting the import: The workspace has changed since the version this import was based on.',
-      ),
-    );
-    expect(
-      screen.getByText(
-        'Press Refresh in the workspace’s bar to see the workspace as it is now, then start the import again.',
-      ),
-    ).toBeDefined();
-    expect(screen.getByText(/The service said:/).textContent).toContain('the workspace head moved');
-    expect(screen.queryByText(/This changed since it was loaded/)).toBeNull();
-    expect(screen.queryByRole('button', { name: /Try again|Reload/ })).toBeNull();
-    expect(screen.queryByRole('heading', { name: 'Imports started here' })).toBeNull();
-    expect(api.callsTo(START)).toHaveLength(1);
-  });
-
+  // An import's base is stated by the contract (ruling 26): a head that moved does not refuse it.
+  // So no conflict is read as a stale base, whatever field it names.
   it.each([
     ['names no field', {}],
-    ['is about another field', { field: 'upload_ids' }],
+    ['is about another field', { field: '/upload_ids' }],
+    ['names the base revision', { field: '/base_revision' }],
   ])(
     'names no stale base for a conflict that %s: the general words, and the service’s own',
     async (_what, about) => {
