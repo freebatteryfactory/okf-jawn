@@ -503,7 +503,6 @@ const TYPE_FIELDS: ReadonlySet<string> = new Set(['/type_name']);
 /** The fields each form draws: a refusal at one of them is shown there, not in the notice. */
 const NOTE_FIELDS: ReadonlySet<string> = new Set([...PATH_FIELDS, ...TITLE_FIELDS, ...TYPE_FIELDS]);
 
-/** The words of a refusal the service made about `fields`; null when it made none about them. */
 /**
  * Keyboard focus to the field a refusal names (its `field` is a JSON Pointer into the request,
  * ruling 5), once, when the refusal arrives: the person reads its words there and changes the
@@ -535,6 +534,7 @@ function useFocusRefused<T>(
   }, [field]);
 }
 
+/** The words of a refusal the service made about `fields`; null when it made none about them. */
 function refusedAt<T>(change: Change<T>, fields: ReadonlySet<string>): string | null {
   return change.refused !== null && fields.has(change.refused.field)
     ? `The service refused this: ${change.refused.message}`
