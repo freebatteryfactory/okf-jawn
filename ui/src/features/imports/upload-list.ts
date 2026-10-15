@@ -8,7 +8,10 @@
  * service's; what is kept of it here is the identity needed to finish it and to start the import
  * (`uploadId`), and the keys under which its requests are repeated.
  *
- * A file larger than `MAX_FILE_BYTES` is listed as too large and is never read or sent. A file of
+ * A file larger than `MAX_FILE_BYTES` (the page's own bound), or than the most the service takes
+ * (`limits.upload_bytes` of `get_session`, ruling 4), is listed as too large, with the bound it is
+ * over, and is never read or sent. The service's limit is applied when it is known: to a file as it
+ * is listed, and to the files still only listed when it is read later (`applyLimit`). A file of
  * a dropped folder that the browser named and could not hand over is listed by its path as not
  * readable: there is no File for it, so nothing of it can be read or sent. A file whose path the
  * page can see is wrong (`paths.ts`: a `..` step, a root, a drive, a control character, a length
@@ -33,11 +36,12 @@ import { collisionKey, type PathProblem, pathProblem } from './paths';
  * the whole content as one buffer (`hash.ts`), so a file is held in memory while it is uploaded:
  * its length, and about twice that while it is hashed. For this bound that is about 1 GiB at the
  * peak and 512 MiB while the file is sent (`hash.ts` and `uploading.ts` say what is held and what
- * bounds it across a list). The generated client states no bound (`CreateUploadRequest.size` is
- * any decimal count) and no operation reports the service's, so this bound is the page's own,
- * chosen and not measured: it is larger than any document the workspace is designed around, and
- * its peak is what a browser tab can be expected to hold on an ordinary computer, not what every
- * tab can. A file the service itself finds too large is refused there and shown as such.
+ * bounds it across a list). This bound is the page's own, for what a tab holds, chosen and not
+ * measured: it is larger than any document the workspace is designed around, and its peak is what
+ * a browser tab can be expected to hold on an ordinary computer, not what every tab can. The
+ * service's own bound is another (`limits.upload_bytes` of `get_session`; 512 MiB by default,
+ * `contract::import::DEFAULT_MAX_UPLOAD_BYTES`, and a deployment may set its own): a file over it is
+ * refused on the page when it is known (`boundOver`), and by the service when it is not.
  */
 export const MAX_FILE_BYTES = 512 * 1024 * 1024;
 
@@ -57,7 +61,7 @@ export type UploadState =
   /** The service verified its length and hash. */
   | 'uploaded'
   | 'failed'
-  /** Larger than `MAX_FILE_BYTES`: never read, never sent. */
+  /** Larger than a bound (`over` says which): never read, never sent. */
   | 'too-large'
   /** Named by a drop, and the browser could not hand it over: no File, so never read or sent. */
   | 'unreadable'
@@ -75,6 +79,8 @@ export interface UploadEntry extends NamedPath {
   state: UploadState;
   /** What is wrong with its path, for an `unacceptable` entry; null for every other. */
   problem: PathProblem | null;
+  /** The bound a `too-large` entry is over, and whose it is; null for every other. */
+  over: TooLarge | null;
   /** Bytes the service holds or the browser reports gone, for the progress shown. */
   sent: number;
   /**
@@ -95,8 +101,29 @@ export interface UploadEntry extends NamedPath {
   finishKey: string;
   /** The file's hash, once read; announced with the slot and sent again to finish it. */
   sha256: string | null;
+  /** The slot the service opened for the current try, once it answered; null before. */
+  slotId: string | null;
   /** The slot, once the service has verified the whole file. */
   uploadId: string | null;
+}
+
+/** The bound a file is over: the page's own (`MAX_FILE_BYTES`), or the most the service takes. */
+export interface TooLarge {
+  bytes: number;
+  whose: 'page' | 'service';
+}
+
+/**
+ * The bound a file of `size` bytes is over; null when it is within both. `limit` is the most the
+ * service takes, null while it is not known. The smaller bound is the one said.
+ */
+export function boundOver(size: number, limit: number | null): TooLarge | null {
+  if (limit !== null && limit < MAX_FILE_BYTES && size > limit) {
+    return { bytes: limit, whose: 'service' };
+  }
+  if (size > MAX_FILE_BYTES) return { bytes: MAX_FILE_BYTES, whose: 'page' };
+  if (limit !== null && size > limit) return { bytes: limit, whose: 'service' };
+  return null;
 }
 
 /** States in which requests of an entry are, or are about to be, in flight. */
@@ -156,7 +183,10 @@ interface UploadsState {
     workspaceId: string,
     chosen: readonly ChosenFile[],
     unreadable?: readonly NamedPath[],
+    limit?: number | null,
   ) => { added: number; repeated: number; unreadable: number };
+  /** The service takes at most `limit` bytes: a file still only listed and over it is too large. */
+  applyLimit: (limit: number) => void;
   change: (id: string, change: Partial<UploadEntry>) => void;
   remove: (ids: readonly string[]) => void;
   jobStarted: (workspaceId: string, jobId: string, shown: string) => void;
@@ -179,9 +209,11 @@ const fresh = () => ({
   slotBegan: false,
   leftBehind: 0,
   problem: null,
+  over: null,
   slotKey: crypto.randomUUID(),
   finishKey: crypto.randomUUID(),
   sha256: null,
+  slotId: null,
   uploadId: null,
 });
 
@@ -189,7 +221,7 @@ export const useUploads = create<UploadsState>()((set, get) => ({
   entries: [],
   started: {},
   startedUnder: {},
-  add: (workspaceId, chosen, unreadable = []) => {
+  add: (workspaceId, chosen, unreadable = [], limit = null) => {
     const entries = [...get().entries];
     let added = 0;
     for (const file of chosen) {
@@ -199,18 +231,15 @@ export const useUploads = create<UploadsState>()((set, get) => ({
       if (listed) continue;
       added += 1;
       const problem = pathProblem(file);
+      const over = problem === null ? boundOver(file.file.size, limit) : null;
       entries.push({
         ...fresh(),
         ...file,
         workspaceId,
         size: file.file.size,
         problem,
-        state:
-          problem !== null
-            ? 'unacceptable'
-            : file.file.size > MAX_FILE_BYTES
-              ? 'too-large'
-              : 'chosen',
+        over,
+        state: problem !== null ? 'unacceptable' : over !== null ? 'too-large' : 'chosen',
       });
     }
     let repeated = chosen.length - added;
@@ -232,6 +261,14 @@ export const useUploads = create<UploadsState>()((set, get) => ({
     set({ entries });
     return { added, repeated, unreadable: notReadable };
   },
+  applyLimit: (limit) =>
+    set((state) => ({
+      entries: state.entries.map((entry) => {
+        if (entry.state !== 'chosen') return entry;
+        const over = boundOver(entry.size, limit);
+        return over === null ? entry : { ...entry, state: 'too-large', over };
+      }),
+    })),
   change: (id, change) =>
     set((state) => ({
       entries: state.entries.map((entry) => (entry.id === id ? { ...entry, ...change } : entry)),

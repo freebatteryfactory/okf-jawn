@@ -20,11 +20,19 @@
  * no retry button and no status. Without the hook's result the notice is the alert alone, and
  * nothing follows focus out of it.
  *
+ * A failure whose detail names the head the request was compared with (`stale_base`) offers to show
+ * that version (`show-head`): the workspace then shows it, and the head checks run again. That needs
+ * the workspace (`workspaceId`); without it, the words say what happened and nothing is offered.
+ *
  * A caller may give the notice words of its own for a failure (`words`), with the action they
  * allow; the general words of `failure.ts` are used wherever it gives none. `said` is the same
  * thing under the name another package gave it, and is asked first; no caller passes both.
  */
+import { useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
+import { useState } from 'react';
+import type { Revision } from '../../api/generated/types.gen';
+import { adoptHead, checkHeadsAgain } from '../explorer/head';
 import { classifyFailure, type FailureMessage, messageFor } from './failure';
 import type { FailureRetry } from './retry';
 
@@ -100,6 +108,13 @@ export function FailureNotice({
           )}
         </span>
       ) : null}
+      {message.action.kind === 'show-head' && workspaceId !== undefined ? (
+        <ShowHead
+          workspaceId={workspaceId}
+          head={message.action.head}
+          label={message.action.label}
+        />
+      ) : null}
     </>
   );
   if (retry === undefined) {
@@ -137,5 +152,41 @@ export function FailureNotice({
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * Show the workspace at `head`, the version a refusal named. The button stays, and a polite line
+ * says what it did; nothing is sent again by itself.
+ */
+function ShowHead({
+  workspaceId,
+  head,
+  label,
+}: {
+  workspaceId: string;
+  head: Revision;
+  label: string;
+}) {
+  const client = useQueryClient();
+  const [shown, setShown] = useState(false);
+  return (
+    <p>
+      <button
+        type="button"
+        onClick={() => {
+          adoptHead(client, workspaceId, head);
+          checkHeadsAgain(client, workspaceId);
+          setShown(true);
+        }}
+      >
+        {label}
+      </button>{' '}
+      <span role="status">
+        {shown
+          ? `The workspace now shows revision ${head.slice(0, 10)}. Nothing was sent again.`
+          : ''}
+      </span>
+    </p>
   );
 }

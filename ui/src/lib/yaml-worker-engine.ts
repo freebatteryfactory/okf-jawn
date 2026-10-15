@@ -21,6 +21,12 @@
 import type { YamlRead } from './yaml';
 import type { EngineReport, YamlEngine } from './yaml-reading';
 
+/** What the page asks the worker: a text, and the places to find in it (`readYaml`). */
+export interface ToWorker {
+  text: string;
+  locate: readonly string[];
+}
+
 /** What the worker says: that it has started, or what it read. */
 type FromWorker = { ready: true } | { read: YamlRead };
 
@@ -33,7 +39,7 @@ export function workerEngine(): YamlEngine {
   /** A worker that has read a text and waits for the next. */
   let spare: Started | null = null;
   return {
-    start(text: string, report: EngineReport) {
+    start(text: string, report: EngineReport, locate: readonly string[]) {
       const mine: Started = spare ?? {
         worker: new Worker(new URL('./yaml.worker.ts', import.meta.url), { type: 'module' }),
         ready: false,
@@ -50,7 +56,8 @@ export function workerEngine(): YamlEngine {
       };
       const send = () => {
         report.began();
-        worker.postMessage(text);
+        const asked: ToWorker = { text, locate };
+        worker.postMessage(asked);
       };
       const end = () => {
         // A reading that answered left its worker as the spare: there is nothing to end.
