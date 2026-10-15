@@ -86,7 +86,9 @@ pub trait UploadStore: Send + Sync {
     -> PortFuture<'a, UploadRecord>;
     /// List the workspace's slots, the most recently opened first, in `query.state`, a page at a
     /// time; nothing expires, so every slot not discarded, imported away or purged is listed.
-    /// `InvalidInput` on `/page/cursor` for a cursor this listing did not answer.
+    /// `InvalidInput` on `/page/cursor` for a cursor that is not a position this store writes (a
+    /// slot's row position). A position another listing of the workspace answered, another
+    /// state's included, is not told apart: the page begins after it.
     fn list<'a>(
         &'a self,
         scope: &'a StorageScope,
