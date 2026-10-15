@@ -1,10 +1,10 @@
 /**
  * The screens contract batch 2 brought to the workspace, from the keyboard, in Chromium and
- * WebKit: a rules file that cannot be read, in the YAML view with its problems; the uploads the
- * service holds, and the question before one is discarded; a new note's commit with its warning
- * and receipt; jobs with their times and a failed one that cannot be tried again; Attention rows
- * with their place, and the uploads waiting. Each screen has zero axe violations, and a screenshot
- * for the owner under `.artifacts/ui/` (untracked).
+ * WebKit: a rules file that cannot be read, in the YAML view with its problems, repaired and
+ * saved; the uploads the service holds, and the question before one is discarded; a new note's
+ * commit with its warning and receipt; jobs with their times and a failed one that cannot be tried
+ * again; Attention rows with their place, and the uploads waiting. Each screen has zero axe
+ * violations, and a screenshot for the owner under `.artifacts/ui/` (untracked).
  */
 
 import { readFile } from 'node:fs/promises';
@@ -75,11 +75,46 @@ test.describe('the screens of contract batch 2', () => {
 
   test('a rules file that cannot be read, repaired in the YAML view', async ({ page }) => {
     const schema: unknown = JSON.parse(await readFile(schemaFile, 'utf8'));
+    // The revision the repair's save makes, and what it then holds: rules that can be read.
+    const repairedAt = 'c'.repeat(40);
+    const repairedText = brokenText
+      .replace('schema_version: 2', 'schema_version: 1')
+      .replace('notes/**x', 'notes/**');
+    const saved: Array<Record<string, unknown>> = [];
+    let head = HEAD;
     await routeApi(page, {
-      '/api/workspaces/open-workspace': () => ok(writableWorkspace),
+      '/api/workspaces/open-workspace': () => ok({ ...writableWorkspace, head }),
       '/api/schemas/naming-rules': () => ok(schema),
-      '/api/conventions/get-rules': () =>
-        ok({
+      '/api/conventions/set-rules': (body) => {
+        saved.push(body);
+        head = repairedAt;
+        return ok({ revision: repairedAt, receipt_id: RECEIPT, warnings: [] });
+      },
+      '/api/conventions/get-rules': (body) => {
+        const at = body.at as { revision?: string } | undefined;
+        if (at?.revision === repairedAt) {
+          return ok({
+            revision: repairedAt,
+            rules: {
+              schema_version: 1,
+              rules: [
+                {
+                  glob: 'notes/**',
+                  case: 'kebab',
+                  separator: '-',
+                  prefix: '',
+                  date_order: 'ymd',
+                  date_format: '',
+                  strip_version_suffix: true,
+                  extension_policy: 'preserve',
+                  alias_preservation: true,
+                  collision: 'reject',
+                },
+              ],
+            },
+          });
+        }
+        return ok({
           revision: HEAD,
           unreadable: {
             text: brokenText,
@@ -96,7 +131,8 @@ test.describe('the screens of contract batch 2', () => {
               },
             ],
           },
-        }),
+        });
+      },
     });
     await page.goto(`${server.origin()}/w/${WS}`);
     await press(page, 'Naming rules');
@@ -111,6 +147,24 @@ test.describe('the screens of contract batch 2', () => {
     await page.keyboard.press('Enter');
     expect(await focused(page)).toMatch(/^textbox:/);
     await expectVisibleFocus(page);
+
+    // The repair, as a paste over the whole text, then saved from the keyboard.
+    await page.keyboard.press('ControlOrMeta+A');
+    await page.keyboard.insertText(repairedText);
+    await expect(page.getByText('Your text differs from the saved file.')).toBeVisible();
+    await press(page, 'Save the rules');
+    await expect(page.locator('.rules-said')).toContainText('The rules are saved.');
+    expect(saved).toMatchObject([
+      { base_revision: HEAD, rules: { schema_version: 1, rules: [{ glob: 'notes/**' }] } },
+    ]);
+    // Read again at the revision the save made: rules, so the form is offered, and the notice that
+    // the file cannot be read is gone.
+    await expect(page.getByRole('tab', { name: 'Form' })).toBeVisible();
+    await expect(page.getByText('The saved rules file cannot be read.')).toHaveCount(0);
+    expect(await focused(page)).not.toBe('body');
+    await expectVisibleFocus(page);
+    await expectNoAxeViolations(page, 'a rules file repaired and saved');
+    await shot(page, '40b-rules-repaired');
   });
 
   test('the uploads the service holds, and the question before one is discarded', async ({
