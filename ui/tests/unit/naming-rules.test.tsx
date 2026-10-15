@@ -1092,6 +1092,53 @@ describe('what the version shown holds as its rules', () => {
     expect(own.api.violations).toEqual([]);
   });
 
+  it('shows a stored file longer than the YAML view reads, places no pointer in it, and saves nothing until it is shorter', async () => {
+    // Over MAX_YAML_CHARS (16,384): a long comment after the file's rules.
+    const longText = `${brokenText}# ${'x'.repeat(16_400)}\n`;
+    const long = new BrokenFile({
+      text: longText,
+      problems: [
+        {
+          code: 'rules_glob_invalid',
+          message: 'The pattern notes/**x is not a valid glob.',
+          location: '/rules/0/glob',
+        },
+        {
+          code: 'rules_yaml_invalid',
+          message: 'The case kebab is not known here.',
+          location: 'line 4, column 11',
+        },
+      ],
+    });
+    const { api } = service({}, long);
+    await openPanel();
+    const box = await findTextBox('The naming rules as YAML');
+    // Shown whole.
+    expect(textIn(box)).toBe(longText);
+    // Its reading has answered: the text is too long to be read, so the pointer has no place.
+    await turn();
+    await turn();
+    expect(panel().textContent).toContain(
+      'At /rules/0/glob: The pattern notes/**x is not a valid glob.',
+    );
+    // A place the service gave as a line and column needs no reading: it is listed and marked.
+    expect(panel().textContent).toContain('Line 4, column 11: The case kebab is not known here.');
+    expect(marked(box)).toEqual(['kebab']);
+    // An edit is refused as too long, and nothing is saved.
+    await typeYaml(box, `${longText}# more\n`);
+    expect(panel().textContent).toContain('and at most 16384 are read here');
+    await userEvent.click(button('Save the rules'));
+    expect(api.callsTo(SET)).toEqual([]);
+    // Shortened, it is read, and saved.
+    await typeYaml(
+      box,
+      brokenText.replace('schema_version: 2', 'schema_version: 1').replace('**x', '**'),
+    );
+    await userEvent.click(button('Save the rules'));
+    await waitFor(() => expect(said()).toContain('The rules are saved.'));
+    expect(api.callsTo(SET).map((body) => body.rules)).toEqual([repaired]);
+  });
+
   it('counts the person’s text as an edit of the file before leaving, and the file’s own text as none', async () => {
     service({}, broken);
     await openPanel();
