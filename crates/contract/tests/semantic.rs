@@ -1100,9 +1100,15 @@ fn workspace_paths_refuse_a_segment_windows_cannot_store() -> Result<(), Box<dyn
     let over = format!("{}\u{1f600}", "a".repeat(254));
     assert_eq!(over.chars().count(), 255);
     assert!(path(over).is_err(), "255 characters, 256 units");
-    // Every segment, not only the last.
+    // Every segment, the first, a later one and the last (review N7).
     assert!(path(format!("{}/b.md", "a".repeat(256))).is_err());
+    assert!(path(format!("b/{}", "a".repeat(256))).is_err(), "the last");
+    assert!(
+        path(format!("b/{}/c.md", "a".repeat(256))).is_err(),
+        "a middle one"
+    );
     assert!(path(format!("{}/{}", "a".repeat(255), "b".repeat(255))).is_ok());
+    assert!(path(format!("b/{}/c.md", "a".repeat(255))).is_ok());
     // A supplied name is measured after NFC: 255 decomposed `e\u{301}` are 255 units once
     // composed, and one more is refused, never shortened.
     let composed = WorkspacePath::from_supplied(&"e\u{301}".repeat(255))?;

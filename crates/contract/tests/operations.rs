@@ -481,4 +481,34 @@ fn operation_info_states_the_job_it_starts_and_its_lists() -> Result<(), Box<dyn
     Ok(())
 }
 
+/// The job kind declared after `kind`, `None` after the last: an exhaustive match, so a kind
+/// added to `JobKind` does not compile here until it is placed in the declaration order.
+const fn declared_after(kind: JobKind) -> Option<JobKind> {
+    match kind {
+        JobKind::Import => Some(JobKind::Redigest),
+        JobKind::Redigest => Some(JobKind::ExportWorkspace),
+        JobKind::ExportWorkspace => Some(JobKind::BackupWorkspace),
+        JobKind::BackupWorkspace => Some(JobKind::RestoreWorkspace),
+        JobKind::RestoreWorkspace => Some(JobKind::RebuildIndex),
+        JobKind::RebuildIndex => Some(JobKind::ExportView),
+        JobKind::ExportView => Some(JobKind::BackupInstallation),
+        JobKind::BackupInstallation => Some(JobKind::PurgeWorkspace),
+        JobKind::PurgeWorkspace => Some(JobKind::PurgeItem),
+        JobKind::PurgeItem => None,
+    }
+}
+
+/// Review N9: `JobKind::ALL` holds every kind, each once, in declaration order. The kinds are
+/// walked from the first through `declared_after`, which names every kind by an exhaustive match,
+/// so the list is checked against the enum itself, not against its own length.
+#[test]
+fn job_kind_all_holds_every_kind_in_declaration_order() {
+    let mut every = vec![JobKind::Import];
+    while let Some(next) = every.last().copied().and_then(declared_after) {
+        assert!(!every.contains(&next), "{next:?} is walked twice");
+        every.push(next);
+    }
+    assert_eq!(every.as_slice(), JobKind::ALL);
+}
+
 okf_jawn_contract::for_each_operation!(schema_names);
