@@ -1363,10 +1363,12 @@ mod job_handler {
         Ok(())
     }
 
-    /// R-I11: a cancellation the store takes between the consume and the seal (a cancel
-    /// landing after the restore's last renewal) wins: the seal answers the job cancelled, and
-    /// the restore stops before `restore_import`, restoring nothing. Its upload stays consumed
-    /// by it (contract ruling 23).
+    /// R-I11 and ruling F2 (core M1.4b fix round 1): the restore seals before it consumes its
+    /// upload, so a cancellation the store takes just before the seal wins: the seal answers the
+    /// job cancelled, and the restore stops before it consumes anything, restoring nothing. Its
+    /// upload is not asked for and stays usable (contract ruling 23's first case). Under the old
+    /// order (consume, then seal) the upload stayed consumed by the cancelled job, which no
+    /// retry could use.
     #[tokio::test]
     async fn a_restore_cancelled_just_before_its_seal_restores_nothing() -> TestResult {
         let world = world()?;
@@ -1381,7 +1383,36 @@ mod job_handler {
             "stopped before restore_import"
         );
         assert!(world.versions.written()?.is_empty());
-        assert_eq!(world.uploads.consumed()?.len(), 1);
+        assert_eq!(world.uploads.singles()?, Vec::new(), "not asked for");
+        assert_eq!(
+            world.uploads.consumed()?,
+            Vec::new(),
+            "the upload stays usable"
+        );
+        Ok(())
+    }
+
+    /// Ruling F2: a consume that fails after the seal fails the job, which stays sealed (a
+    /// sealed job may fail; only its cancellation is refused). Here a purge recorded meanwhile
+    /// refuses the consumption: the sealed job is refused for good, restores nothing, and its
+    /// upload stays unmarked.
+    #[tokio::test]
+    async fn a_restore_whose_consume_is_refused_after_its_seal_fails_sealed() -> TestResult {
+        let world = world()?;
+        let id = restore_job(&world, 129)?;
+        purge_names_the_workspace(&world)?;
+        assert!(run(&world, id).await?);
+        assert_refused_by_the_purge(&world, id)?;
+        assert!(
+            world.records.entry(id)?.sealed,
+            "sealed before the consume, and failed sealed"
+        );
+        assert_eq!(world.uploads.consumed()?, Vec::new());
+        assert_eq!(
+            world.backups.restored.lock().map_err(|_| "poisoned")?.len(),
+            0
+        );
+        assert!(world.versions.written()?.is_empty());
         Ok(())
     }
 

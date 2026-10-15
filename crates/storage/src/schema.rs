@@ -413,8 +413,8 @@ CREATE TABLE commit_warnings (
 /// Records schema, version 4: whether a job has passed its point of no return
 /// (`RecordStore::seal`, request R-I11).
 ///
-/// `sealed` is 1 once the job's running claim sealed it (a restore, immediately before its
-/// import) and stays 1 for the job's life: `cancel_job` refuses a sealed job that is queued or
+/// `sealed` is 1 once the job's running claim sealed it (a restore, before it consumes its
+/// upload and imports) and stays 1 for the job's life: `cancel_job` refuses a sealed job that is queued or
 /// running. Every job written before this step is unsealed, which is what it was: before this
 /// step nothing sealed a job, and a cancellation was never refused. The column travels with the
 /// job's row, so a workspace archive written now carries it, and an archive from before this

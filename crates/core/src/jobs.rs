@@ -321,10 +321,12 @@ pub trait RecordStore: Send + Sync {
     /// as it stands.
     ///
     /// From then on `cancel_job` refuses the job while it is unfinished, so its handler goes on
-    /// to its completion: a restore seals immediately before `Backups::restore_import`, whose
-    /// import cannot be undone midway. A job already cancelled is returned as it is, not sealed,
-    /// and its handler stops: the seal and a cancellation are ordered by the store, and only
-    /// the first of them takes effect. Sealing again changes nothing. The seal stays with the
+    /// to its completion: a restore seals before it consumes its upload (`UploadStore::consume`)
+    /// and calls `Backups::restore_import`, whose import cannot be undone midway, so a
+    /// cancellation lands before the consume or not at all. A sealed job may still fail
+    /// (`fail_job`); only its cancellation is refused. A job already cancelled is returned as it
+    /// is, not sealed, and its handler stops: the seal and a cancellation are ordered by the
+    /// store, and only the first of them takes effect. Sealing again changes nothing. The seal stays with the
     /// job: once its lease lapses and the job is queued again (`expire_leases`), or a failed
     /// sealed job is retried, it is still sealed, because the attempt that runs it next resumes
     /// the same work. The wire `Job` does not show it.

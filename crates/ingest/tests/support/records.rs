@@ -80,8 +80,7 @@ pub struct FakeRecords {
     renewals: std::sync::atomic::AtomicUsize,
     /// A job cancelled the moment it is claimed, as a cancel landing right after the claim.
     cancel_on_claim: Mutex<Option<JobId>>,
-    /// A job cancelled just before its next seal is applied, as a cancel the store took
-    /// between the handler's last renewal and its seal.
+    /// A job cancelled just before its next seal is applied, as a cancel the store took first.
     cancel_on_seal: Mutex<Option<JobId>>,
     /// Jobs of a workspace a purge is recorded for: their claim is refused with `Conflict`.
     purged: Mutex<Vec<JobId>>,
