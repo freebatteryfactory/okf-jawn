@@ -7,7 +7,9 @@
 //! to count bytes.
 
 use check::{TestResult, err_of, some};
-use okf_jawn_contract::access::{CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE, SESSION_COOKIE_HTTPS};
+use okf_jawn_contract::access::{
+    CSRF_COOKIE, CSRF_COOKIE_HTTPS, CSRF_HEADER, SESSION_COOKIE, SESSION_COOKIE_HTTPS,
+};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{
     LOCAL_TENANT_ID, MAX_WORKSPACE_PATH_BYTES, TenantId, WorkspacePath,
@@ -127,11 +129,20 @@ fn the_csrf_double_submit_names_are_pinned() {
         Some(SESSION_COOKIE),
         "one session cookie under two names"
     );
+    // Review N13: the anti-CSRF cookie follows ruling 17 as the session cookie does.
+    assert_eq!(
+        CSRF_COOKIE_HTTPS, "__Host-okf-csrf",
+        "https: the __Host- prefix needs Secure, Path=/ and no Domain"
+    );
+    assert_eq!(
+        CSRF_COOKIE_HTTPS.strip_prefix("__Host-"),
+        Some(CSRF_COOKIE),
+        "one anti-CSRF cookie under two names"
+    );
     for session in [SESSION_COOKIE, SESSION_COOKIE_HTTPS] {
-        assert_ne!(
-            CSRF_COOKIE, session,
-            "the CSRF cookie is not the session cookie"
-        );
+        for csrf in [CSRF_COOKIE, CSRF_COOKIE_HTTPS] {
+            assert_ne!(csrf, session, "the CSRF cookie is not the session cookie");
+        }
     }
     assert!(
         CSRF_HEADER

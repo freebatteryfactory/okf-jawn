@@ -79,7 +79,8 @@ pub struct SessionResponse {
     /// Authenticated caller.
     pub principal: Principal,
     /// Browser writes require a same-origin anti-CSRF token: the double-submit pair published
-    /// as the `csrfCookie` and `csrfHeader` security schemes.
+    /// as the `csrfCookie` (or, over https, `csrfCookieHttps`) and `csrfHeader` security
+    /// schemes.
     pub csrf_required: bool,
     /// The limits this deployment applies, so a client can check before it sends.
     pub limits: Limits,
@@ -181,18 +182,30 @@ pub struct ResourceMetadata {
     pub bearer_methods_supported: Vec<String>,
 }
 
-/// The anti-CSRF cookie of a browser session (`SessionResponse::csrf_required`).
+/// The anti-CSRF cookie of a browser session (`SessionResponse::csrf_required`) of a service
+/// whose public origin is plain `http` on loopback; [`CSRF_COOKIE_HTTPS`] over `https`.
 ///
-/// The server sets it at sign-in beside the session cookie: not `HttpOnly`, so the workspace UI
-/// can read it, `SameSite=Strict`, and `Secure` under HTTPS. Double-submit rule: every
-/// cookie-authenticated mutation sends [`CSRF_HEADER`] with a value equal to this cookie's, in
-/// addition to the server's `Origin` and `Sec-Fetch-Site` check. At the HTTP layer a mutation
-/// is any method but GET, HEAD and OPTIONS, and every canonical operation is a POST, so the
-/// published API asks for the pair on every route that is not a GET.
+/// The server sets it at sign-in beside the session cookie, named by the same scheme as the
+/// session cookie: not `HttpOnly`, so the workspace UI can read it, `SameSite=Strict` and
+/// `Path=/`. Double-submit rule: every cookie-authenticated mutation sends [`CSRF_HEADER`] with
+/// a value equal to this cookie's, in addition to the server's `Origin` and `Sec-Fetch-Site`
+/// check. At the HTTP layer a mutation is any method but GET, HEAD and OPTIONS, and every
+/// canonical operation is a POST, so the published API asks for the pair on every route that
+/// is not a GET. A page reads only the name of its own scheme.
 pub const CSRF_COOKIE: &str = "okf-csrf";
 
-/// The request header that echoes [`CSRF_COOKIE`]'s value on a cookie-authenticated mutation;
-/// a missing header, or one that differs from the cookie, is refused.
+/// The anti-CSRF cookie of a service whose public origin is `https`, as
+/// [`SESSION_COOKIE_HTTPS`] is its session cookie.
+///
+/// Its `__Host-` prefix makes a browser accept it only when it is `Secure`, with `Path=/` and no
+/// `Domain`, so a sibling subdomain or another port cannot plant a second cookie of the name,
+/// which would leave the page two values and every write refused. Over `https` a page reads
+/// this name only; a cookie named [`CSRF_COOKIE`] there is not its own.
+pub const CSRF_COOKIE_HTTPS: &str = "__Host-okf-csrf";
+
+/// The request header that echoes the anti-CSRF cookie's value ([`CSRF_COOKIE`], or
+/// [`CSRF_COOKIE_HTTPS`] over `https`) on a cookie-authenticated mutation; a missing header, or
+/// one that differs from the session's token, is refused.
 pub const CSRF_HEADER: &str = "x-okf-csrf";
 
 /// The browser session cookie of a service whose public origin is plain `http` on loopback,

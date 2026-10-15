@@ -310,9 +310,24 @@ impl LocalApp {
         cors_origins: Vec<String>,
         ui_dir: Option<PathBuf>,
     ) -> Result<Router, ApiError> {
+        self.service_behind(self.identity(), extra, cors_origins, ui_dir)
+    }
+
+    /// The service with `extra` routes behind `identity`, the one middleware state its session
+    /// routes, if any, were given their cookie policy by (`Identity::cookie_policy`).
+    ///
+    /// # Errors
+    /// Returns the composition's refusal.
+    pub fn service_behind(
+        &self,
+        identity: Identity,
+        extra: Router,
+        cors_origins: Vec<String>,
+        ui_dir: Option<PathBuf>,
+    ) -> Result<Router, ApiError> {
         service(ServiceParts {
             bound: self.bound(),
-            identity: self.identity(),
+            identity,
             hosts: vec![HOST.to_owned()],
             hosted: None,
             cors_origins,

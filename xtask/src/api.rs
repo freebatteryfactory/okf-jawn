@@ -9,7 +9,8 @@ use std::error::Error;
 use std::path::Path;
 
 use okf_jawn_contract::access::{
-    CSRF_COOKIE, CSRF_HEADER, Permission, ResourceMetadata, SESSION_COOKIE, SESSION_COOKIE_HTTPS,
+    CSRF_COOKIE, CSRF_COOKIE_HTTPS, CSRF_HEADER, Permission, ResourceMetadata, SESSION_COOKIE,
+    SESSION_COOKIE_HTTPS,
 };
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::health::HealthResponse;
@@ -207,19 +208,25 @@ fn openapi_document(
                     "type": "apiKey",
                     "in": "cookie",
                     "name": SESSION_COOKIE_HTTPS,
-                    "description": "Browser session (local owner or WorkOS) of a service whose public origin is https: always Secure, Path=/ and no Domain, so a sibling host or another port cannot set it. A cookie-authenticated request that is not a GET also carries the csrfCookie and csrfHeader pair. The server reads only the session cookie of its own scheme."
+                    "description": "Browser session (local owner or WorkOS) of a service whose public origin is https: always Secure, Path=/ and no Domain, so a sibling host or another port cannot set it. A cookie-authenticated request that is not a GET also carries the csrfCookieHttps and csrfHeader pair. The server reads only the session cookie of its own scheme."
                 },
                 "csrfCookie": {
                     "type": "apiKey",
                     "in": "cookie",
                     "name": CSRF_COOKIE,
-                    "description": "Anti-CSRF token the server sets at sign-in beside the session cookie: not HttpOnly, SameSite=Strict, Secure under HTTPS. Double-submit rule: every cookie-authenticated mutation sends its value in the csrfHeader header, in addition to the server's Origin and Sec-Fetch-Site check. Every canonical operation is a POST, so every route that is not a GET asks for the pair."
+                    "description": "Anti-CSRF token the server sets at sign-in beside the session cookie of a service whose public origin is plain http on loopback: not HttpOnly, SameSite=Strict, Path=/. Double-submit rule: every cookie-authenticated mutation sends its value in the csrfHeader header, in addition to the server's Origin and Sec-Fetch-Site check. Every canonical operation is a POST, so every route that is not a GET asks for the pair. A page reads only the anti-CSRF cookie of its own scheme."
+                },
+                "csrfCookieHttps": {
+                    "type": "apiKey",
+                    "in": "cookie",
+                    "name": CSRF_COOKIE_HTTPS,
+                    "description": "The csrfCookie of a service whose public origin is https: always Secure, Path=/ and no Domain, so a sibling host or another port cannot set a second one. Over https a page reads this name only; a cookie named as csrfCookie is not its own."
                 },
                 "csrfHeader": {
                     "type": "apiKey",
                     "in": "header",
                     "name": CSRF_HEADER,
-                    "description": "The csrfCookie value, sent back on every cookie-authenticated request that is not a GET; a missing header, or one that differs from the cookie, is refused."
+                    "description": "The anti-CSRF cookie's value (csrfCookie, or csrfCookieHttps over https), sent back on every cookie-authenticated request that is not a GET; a missing header, or one that differs from the cookie, is refused."
                 }
             }
         }
@@ -228,7 +235,8 @@ fn openapi_document(
 
 /// Who may call a route: a bearer token, or a browser session cookie of either scheme
 /// (`browserSession` on loopback http, `browserSessionHttps` over https), which on every route
-/// that is not a GET (`csrf`) comes with the double-submit CSRF pair.
+/// that is not a GET (`csrf`) comes with the double-submit CSRF pair of the same scheme
+/// (`csrfCookie` or `csrfCookieHttps`, with `csrfHeader`).
 ///
 /// The pair is one requirement object with each session, so OpenAPI reads it as all three
 /// together; GET routes are safe and need the session cookie alone.
@@ -237,7 +245,7 @@ fn security_requirement(csrf: bool) -> Value {
         json!([
             {"bearerAuth": []},
             {"browserSession": [], "csrfCookie": [], "csrfHeader": []},
-            {"browserSessionHttps": [], "csrfCookie": [], "csrfHeader": []}
+            {"browserSessionHttps": [], "csrfCookieHttps": [], "csrfHeader": []}
         ])
     } else {
         json!([{"bearerAuth": []}, {"browserSession": []}, {"browserSessionHttps": []}])
@@ -562,7 +570,7 @@ mod tests {
     use std::path::Path;
 
     use okf_jawn_contract::access::{
-        CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE, SESSION_COOKIE_HTTPS,
+        CSRF_COOKIE, CSRF_COOKIE_HTTPS, CSRF_HEADER, SESSION_COOKIE, SESSION_COOKIE_HTTPS,
     };
     use okf_jawn_contract::metadata::{OperationName, operations};
     use schemars::JsonSchema;
@@ -808,6 +816,7 @@ mod tests {
             .ok_or("securitySchemes")?;
         for (scheme, location, name) in [
             ("csrfCookie", "cookie", CSRF_COOKIE),
+            ("csrfCookieHttps", "cookie", CSRF_COOKIE_HTTPS),
             ("csrfHeader", "header", CSRF_HEADER),
             ("browserSession", "cookie", SESSION_COOKIE),
             ("browserSessionHttps", "cookie", SESSION_COOKIE_HTTPS),
@@ -828,7 +837,7 @@ mod tests {
         let paired = json!([
             {"bearerAuth": []},
             {"browserSession": [], "csrfCookie": [], "csrfHeader": []},
-            {"browserSessionHttps": [], "csrfCookie": [], "csrfHeader": []}
+            {"browserSessionHttps": [], "csrfCookieHttps": [], "csrfHeader": []}
         ]);
         let session = json!([
             {"bearerAuth": []},

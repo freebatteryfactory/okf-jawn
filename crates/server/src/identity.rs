@@ -51,7 +51,7 @@ use okf_jawn_core::credentials::{CredentialStore, secret_hash};
 use okf_jawn_core::events::{EventLog, EventScope, NewEvent};
 
 use crate::SessionId;
-use crate::cookies::session_cookie_name;
+use crate::cookies::{CookiePolicy, CookieScheme};
 use crate::errors::{error_response, retry_response};
 
 /// Verifies a WorkOS Connect access token: JWKS signature, issuer, audience and expiry.
@@ -173,8 +173,9 @@ struct Inner {
     ports: IdentityPorts,
     /// Origins a cookie request may come from: the service's own public origin.
     origins: Vec<String>,
-    /// The one session cookie name read: the `https` name when every origin is `https`.
-    session_cookie: &'static str,
+    /// The deployment's cookie names, decided once from `origins`: the session cookie is read by
+    /// it here, and the session routes write by it (`Identity::cookie_policy`).
+    cookies: CookieScheme,
     clock: Arc<dyn WallClock>,
 }
 
@@ -210,10 +211,12 @@ impl WallClock for SystemWallClock {
 
 impl Identity {
     /// The middleware state: bearer tokens resolved by `bearer`, sessions and connectors read
-    /// through `ports`, and cookie requests accepted only from `origins`. The session cookie read
-    /// is `__Host-okf-session` when every origin is `https`, and `okf-session` otherwise
-    /// (`cookies::session_cookie_name`). Session expiry is compared with the operating system's
-    /// clock.
+    /// through `ports`, and cookie requests accepted only from `origins`, the service's own
+    /// public origin. The cookie names are decided here, once, by that origin's scheme
+    /// (`cookies::CookieScheme`): the session cookie read is `__Host-okf-session` when every
+    /// origin is `https`, and `okf-session` otherwise, and the session routes are given the same
+    /// names to write (`Identity::cookie_policy`). Session expiry is compared with the operating
+    /// system's clock.
     #[must_use]
     pub fn new(bearer: BearerAuth, ports: IdentityPorts, origins: Vec<String>) -> Self {
         Self::with_clock(bearer, ports, origins, Arc::new(SystemWallClock))
@@ -227,17 +230,24 @@ impl Identity {
         origins: Vec<String>,
         clock: Arc<dyn WallClock>,
     ) -> Self {
-        let secure =
-            !origins.is_empty() && origins.iter().all(|origin| origin.starts_with("https://"));
+        let cookies = CookieScheme::of_origins(&origins);
         Self {
             inner: Arc::new(Inner {
                 bearer,
                 ports,
                 origins,
-                session_cookie: session_cookie_name(secure),
+                cookies,
                 clock,
             }),
         }
+    }
+
+    /// How the session routes behind this middleware write and clear their cookies: the cookie
+    /// names this middleware reads by, and sessions that last `lifetime`. It is the only way to
+    /// make a `CookiePolicy`, so the name written is always the name read.
+    #[must_use]
+    pub fn cookie_policy(&self, lifetime: std::time::Duration) -> CookiePolicy {
+        CookiePolicy::new(self.inner.cookies, lifetime)
     }
 
     /// Whether `credential` would authenticate a new request now: the session still stored, of
@@ -460,7 +470,7 @@ pub async fn identify(
         .inner
         .ports
         .cookies
-        .read(headers, identity.inner.session_cookie)
+        .read(headers, identity.inner.cookies.session_cookie())
     else {
         return next.run(request).await;
     };

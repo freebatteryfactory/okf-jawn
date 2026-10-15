@@ -12,7 +12,11 @@ import { z } from 'zod';
 import { getFormSchema, openWorkspace } from '../../src/api/generated/sdk.gen';
 import {
   CSRF_COOKIE,
+  CSRF_COOKIE_HTTPS,
   CSRF_HEADER,
+  csrfCookieName,
+  csrfHeaderFor,
+  csrfToken,
   REQUEST_TIMEOUT_MS,
   RequestStopped,
   RequestTimedOut,
@@ -57,13 +61,40 @@ describe('the CSRF names', () => {
     const published = z
       .object({
         components: z.object({
-          securitySchemes: z.object({ csrfCookie: scheme, csrfHeader: scheme }),
+          securitySchemes: z.object({
+            csrfCookie: scheme,
+            csrfCookieHttps: scheme,
+            csrfHeader: scheme,
+          }),
         }),
       })
       .parse(JSON.parse(readFileSync(OPENAPI, 'utf8')));
     const schemes = published.components.securitySchemes;
     expect(schemes.csrfCookie).toEqual({ in: 'cookie', name: CSRF_COOKIE });
+    expect(schemes.csrfCookieHttps).toEqual({ in: 'cookie', name: CSRF_COOKIE_HTTPS });
     expect(schemes.csrfHeader).toEqual({ in: 'header', name: CSRF_HEADER });
+  });
+
+  it('are read by the scheme of the page: the __Host- cookie over https, the plain one on http', () => {
+    expect(csrfCookieName('https:')).toBe(CSRF_COOKIE_HTTPS);
+    expect(csrfCookieName('http:')).toBe(CSRF_COOKIE);
+  });
+});
+
+describe('the CSRF cookie of the other scheme', () => {
+  it('is not read over https, where a sibling host could have set it', () => {
+    browserHolds(`${CSRF_COOKIE}=planted`);
+    expect(csrfToken('https:')).toBeNull();
+    browserHolds(`${CSRF_COOKIE}=planted; ${CSRF_COOKIE_HTTPS}=${TOKEN}`);
+    expect(csrfToken('https:')).toBe(TOKEN);
+  });
+
+  it('is not read on loopback http, where a __Host- cookie is never set', () => {
+    browserHolds(`${CSRF_COOKIE_HTTPS}=${TOKEN}`);
+    expect(csrfToken('http:')).toBeNull();
+    expect(csrfHeaderFor('POST', OPEN)).toBeNull();
+    browserHolds(`${CSRF_COOKIE_HTTPS}=other; ${CSRF_COOKIE}=${TOKEN}`);
+    expect(csrfToken('http:')).toBe(TOKEN);
   });
 });
 

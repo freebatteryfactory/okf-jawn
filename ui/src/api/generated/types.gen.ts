@@ -4542,7 +4542,8 @@ export type Selection = {
 export type SessionResponse = {
     /**
      * Browser writes require a same-origin anti-CSRF token: the double-submit pair published
-     * as the `csrfCookie` and `csrfHeader` security schemes.
+     * as the `csrfCookie` (or, over https, `csrfCookieHttps`) and `csrfHeader` security
+     * schemes.
      */
     csrf_required: boolean;
     /**
