@@ -398,10 +398,15 @@ fn candidate_check_reports_nothing_for_a_link_to_a_file_the_candidate_holds() ->
 #[test]
 fn candidate_check_reports_a_link_to_a_missing_file_at_the_note_that_holds_it() -> TestResult {
     let staged = Staged::new()?;
-    // Not the linked file: a folder of its name, and the same name in another folder.
+    // Not the linked file: a folder of its name, and the same name in another folder (`q.pdf`
+    // at the root for a link from `notes/`, `notes/y.png` for a link to the root's `y.png`).
     std::fs::create_dir_all(staged.0.join("notes/pics/p.png"))?;
     staged.write("q.pdf", "pdf")?;
-    staged.write("notes/a.md", &note_with("A", "![p](pics/p.png) [q](q.pdf)"))?;
+    staged.write("notes/y.png", "png")?;
+    staged.write(
+        "notes/a.md",
+        &note_with("A", "![p](pics/p.png) [q](q.pdf) ![y](../y.png)"),
+    )?;
     let a = WorkspacePath::try_from("notes/a.md".to_owned())?;
     for warnings in [
         OkfConformance.check(&staged.0, &[])?,
@@ -411,6 +416,10 @@ fn candidate_check_reports_a_link_to_a_missing_file_at_the_note_that_holds_it() 
         assert_eq!(
             missing_files(&warnings),
             [
+                (
+                    Some("notes/a.md".to_owned()),
+                    "link to a missing file: ../y.png".to_owned()
+                ),
                 (
                     Some("notes/a.md".to_owned()),
                     "link to a missing file: pics/p.png".to_owned()

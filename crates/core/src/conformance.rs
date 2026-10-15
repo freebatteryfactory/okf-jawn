@@ -214,14 +214,12 @@ fn conformance(root: &Path, bundle: &okf_core::Bundle) -> Result<Vec<Warning>, A
 }
 
 /// The concept that holds the link and the link's target, when `diagnostic` is okf-validator's
-/// broken-link info (V28, `validate.rs`: no file, the holding concept, and `BROKEN_LINK`
-/// followed by the raw target) about a target that is not a Markdown path. A Markdown path is
-/// one whose last segment, without its anchor, ends in `.md` or has no extension at all, as an
-/// OKF link to a concept is written; every other target names a file.
+/// broken-link info (V28, `validate.rs`: the holding concept, and `BROKEN_LINK` followed by
+/// the raw target; no other finding opens with that text) about a target that is not a
+/// Markdown path. A Markdown path is one whose last segment, without its anchor, ends in `.md`
+/// or has no extension at all, as an OKF link to a concept is written; every other target names
+/// a file.
 fn linked_file(diagnostic: &okf_validator::Diagnostic) -> Option<(&okf_core::ConceptId, &str)> {
-    if diagnostic.severity != Severity::Info || diagnostic.path.is_some() {
-        return None;
-    }
     let source = diagnostic.concept.as_ref()?;
     let target = diagnostic.message.strip_prefix(BROKEN_LINK)?;
     let without_anchor = target.split('#').next().unwrap_or_default();
