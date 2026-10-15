@@ -435,6 +435,41 @@ fn candidate_check_reports_a_link_to_a_missing_file_at_the_note_that_holds_it() 
     Ok(())
 }
 
+/// Review N5 (probe P6): a link to a file outside the candidate, written from the root with the
+/// file's absolute path (`/C:/...` on Windows), names nothing the candidate holds, even though
+/// that file exists: it is reported as a missing file. On Windows okf-core reads the target as
+/// the segments `C:`, `Users`, ..., and joining `C:/Users/...` onto the root would replace the
+/// root with the drive path, so without `holds_file`'s plain-segment guard the lookup would find
+/// the outside file and report nothing; the Windows run pins the guard. On Linux (CI) there is no
+/// drive prefix: the same link is read below the candidate's root, where no such file is, so
+/// there the test holds whether or not the guard is in place.
+#[test]
+fn candidate_check_never_finds_a_linked_file_outside_the_candidate() -> TestResult {
+    let outside = Staged::new()?;
+    outside.write("notes/secret.png", "png")?;
+    let file = outside.0.join("notes").join("secret.png");
+    assert!(file.is_file(), "the outside file exists");
+    let absolute = file.display().to_string().replace('\\', "/");
+    let target = format!("/{}", absolute.trim_start_matches('/'));
+    let staged = Staged::new()?;
+    staged.write("notes/a.md", &note_with("A", &format!("![s]({target})")))?;
+    let a = WorkspacePath::try_from("notes/a.md".to_owned())?;
+    for warnings in [
+        OkfConformance.check(&staged.0, &[])?,
+        EditCheck::new(std::slice::from_ref(&a), None).check(&staged.0, &[])?,
+    ] {
+        assert_eq!(
+            missing_files(&warnings),
+            [(
+                Some("notes/a.md".to_owned()),
+                format!("link to a missing file: {target}")
+            )],
+            "{warnings:?}"
+        );
+    }
+    Ok(())
+}
+
 /// A broken link to a note, written with `.md` (with an anchor too) or with no extension (in a
 /// folder whose name has a dot too), keeps the validator's broken-link info as it is, beside
 /// core's warning for a missing file in the same note; and the validator's other findings about a
