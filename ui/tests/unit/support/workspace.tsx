@@ -15,7 +15,7 @@ import { createQueryClient } from '../../../src/app/query-client';
 import { App, createAppRouter } from '../../../src/app/router';
 import { resetDraftSessions } from '../../../src/features/drafts/saving';
 import { emptyView, useExplorerStore } from '../../../src/features/explorer/store';
-import { draftsPage, type Handler, type Json, ok } from './api';
+import { draftsPage, type Handler, type Json, knowItems, ok } from './api';
 
 export const WS = '11111111-1111-4111-8111-111111111111';
 export const HEAD = 'a'.repeat(40);
@@ -80,6 +80,11 @@ export function summary(
 export const noteSummary = summary(NOTE, 'notes/meeting.md', 'Meeting notes', 'meeting-note');
 export const otherSummary = summary(OTHER, 'notes/plan.md', 'Plan', 'plan');
 export const sourceSummary = summary(SOURCE, 'report.pdf.md', 'Annual report', 'report', 'source');
+
+// A listing of drafts finds these items, unless a test says otherwise.
+knowItems((itemId) =>
+  [noteSummary, otherSummary, sourceSummary].find((item) => item.id === itemId),
+);
 
 export function listing(
   folders: string[],

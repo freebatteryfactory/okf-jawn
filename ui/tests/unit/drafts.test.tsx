@@ -1016,11 +1016,14 @@ describe('autosave', () => {
     const { box, queryClient } = await startEditing();
     const listed = () =>
       queryClient.getQueryData(draftsOptions(WS).queryKey)?.pages.flatMap((page) => page.items);
-    expect(listed()).toEqual([draftOf(NOTE, HEAD, NOW)]);
+    // Each row keeps the item's summary the listing gave beside the draft.
+    expect(listed()).toEqual([{ draft: draftOf(NOTE, HEAD, NOW), item: noteSummary }]);
     savedAt = LATER;
     typeInto(box, ' one');
     await pass(AUTOSAVE_DELAY_MS);
-    await eventually(() => expect(listed()).toEqual([draftOf(NOTE, HEAD, LATER)]));
+    await eventually(() =>
+      expect(listed()).toEqual([{ draft: draftOf(NOTE, HEAD, LATER), item: noteSummary }]),
+    );
     expect(api.callsTo(DRAFTS)).toHaveLength(1);
   });
 

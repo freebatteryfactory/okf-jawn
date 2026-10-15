@@ -4,19 +4,16 @@
  *
  * The list: the drafts the service holds (`list_drafts`, every page) and any text still only in
  * this page (typed and not saved yet, or whose save failed), each with how it stands. A row opens
- * its item. `list_drafts` answers item ids, so each row's item is read with `get_item` at the head
- * the workspace shows, for its title and its kind; until that answers, the row shows a short
- * identity.
+ * its item. Each listed draft comes with its item's summary as `list_drafts` read it (ruling 1):
+ * its title and its kind, at the head of that listing. Nothing here reads an item itself. Text only
+ * in this page is of an item this page edits as a Note (`DraftSession`), whose title is what this
+ * page already holds of it; until it holds one, the row shows a short identity.
  *
  * A draft of a Source or a View can only have been made elsewhere: this workspace edits Notes as
  * drafts. The service takes no such draft into a Snapshot, so its row says its kind and why, its
- * box is unticked and cannot be ticked, and it offers "Discard draft", which asks first. Until a
- * row's item has been read its kind is not known: the row says "checking…", is not ticked and is
- * not in the Snapshot or its count, so a Snapshot pressed then never includes a Source's or a
- * View's draft. When that read fails the row says so, with the failure and its retry
- * (`useRetry`), stays unticked, and offers "Discard draft" too: a draft whose item cannot be read
- * (it was deleted, say) can still be got rid of. A read that fails once the item was read takes
- * nothing off the row.
+ * box is unticked and cannot be ticked, and it offers "Discard draft", which asks first. A listed
+ * draft whose item the listing did not find (it was deleted, say) says so, is not ticked and is
+ * not in the Snapshot or its count, and offers "Discard draft" too, so it can still be got rid of.
  *
  * This panel asks for the list's further pages by itself, one after another, so the marks in the
  * tree and on the tabs cover every draft. A page that fails stops that, says so here and offers
@@ -42,8 +39,8 @@ import { keyed } from '../../lib/keys';
 import { itemOptions } from '../documents/DocumentView';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
-import { useDeleted, useExplorerStore } from '../explorer/store';
-import { draftsByItem, useDrafts } from './drafts-list';
+import { useDeleted } from '../explorer/store';
+import { rowsByItem, useDrafts } from './drafts-list';
 import { discardSession } from './saving';
 import {
   type DraftSession,
@@ -79,21 +76,37 @@ interface Row {
   session: DraftSession | null;
   /** The Snapshot that did not include it, until the person resolves it. */
   conflict: SnapshotConflict | null;
-  /** The item as `get_item` answers it at the head shown; undefined until it has. */
+  /**
+   * The item: as `list_drafts` read it beside the draft, or, for text only in this page, as this
+   * page holds it; undefined when neither tells.
+   */
   summary: ItemSummary | undefined;
-  /** That read, when it failed: what it threw, and the way to ask again. Null otherwise. */
-  unread: { error: unknown; again: () => Promise<unknown> } | null;
+  /** `list_drafts` read the item, and it was not there. */
+  missing: boolean;
 }
 
 /** The kinds of item that are not edited as a draft here, as the person is told. */
 const OTHER_KIND = { source: 'Source', view: 'View' } as const;
 
 /**
- * The draft is of a Source or a View: one made elsewhere, since this workspace edits only Notes
- * as drafts. The service takes no such draft into a Snapshot. Not known until the item is read.
+ * What kind of item the draft is of: as the listing read it; for text only in this page, a Note,
+ * unless a read of the item since said otherwise (`DraftSession.refused`). Not known for a draft
+ * whose item the listing did not find.
  */
-const otherKind = (row: Row) =>
-  row.summary === undefined || row.summary.kind === 'note' ? null : OTHER_KIND[row.summary.kind];
+function kindOf(row: Row): ItemSummary['kind'] | undefined {
+  if (row.summary !== undefined) return row.summary.kind;
+  if (row.draft === null && row.session !== null) return row.session.refused ?? 'note';
+  return undefined;
+}
+
+/**
+ * The draft is of a Source or a View: one made elsewhere, since this workspace edits only Notes
+ * as drafts. The service takes no such draft into a Snapshot.
+ */
+const otherKind = (row: Row) => {
+  const kind = kindOf(row);
+  return kind === undefined || kind === 'note' ? null : OTHER_KIND[kind];
+};
 
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
@@ -107,12 +120,12 @@ const savedDraft = (row: Row) => row.session?.confirmed?.draft ?? row.draft;
 const nothingSaved = (row: Row) =>
   row.session !== null && saveStateOf(row.session) === 'held-back' && savedDraft(row) === null;
 
-/** The row's item has not been read yet, so whether it is a Note is not known. */
-const kindUnknown = (row: Row) => row.summary === undefined;
+/** Whether the row's item is a Note is not known: the listing did not find the item. */
+const kindUnknown = (row: Row) => kindOf(row) === undefined;
 
 /**
- * The draft is offered for a Snapshot: its item has been read and is a Note, it has no open
- * conflict, and something of it is saved.
+ * The draft is offered for a Snapshot: its item is known to be a Note, it has no open conflict,
+ * and something of it is saved.
  */
 const offered = (row: Row) =>
   row.conflict === null && !nothingSaved(row) && !kindUnknown(row) && otherKind(row) === null;
@@ -143,47 +156,41 @@ export function DraftsPanel({
   }, [hasNextPage, isFetching, isError, fetchNextPage]);
 
   const conflictOf = (itemId: string) => conflicts[sessionKey(workspaceId, itemId)] ?? null;
-  const listed = draftsByItem(drafts.data?.pages);
-  const unread: Row[] = [...listed.values()].map((draft) => ({
+  const listed = rowsByItem(drafts.data?.pages);
+  const gathered: Row[] = [...listed.values()].map(({ draft, item }) => ({
     itemId: draft.item_id,
     draft,
     session: null,
     conflict: conflictOf(draft.item_id),
-    summary: undefined,
-    unread: null,
+    summary: item ?? undefined,
+    missing: item === null,
   }));
   for (const session of Object.values(sessions)) {
     if (session.workspaceId !== workspaceId) continue;
-    const row = unread.find((candidate) => candidate.itemId === session.itemId);
+    const row = gathered.find((candidate) => candidate.itemId === session.itemId);
     if (row !== undefined) row.session = session;
     else if (saveStateOf(session) !== 'unchanged') {
-      unread.push({
+      gathered.push({
         itemId: session.itemId,
         draft: null,
         session,
         conflict: conflictOf(session.itemId),
         summary: undefined,
-        unread: null,
+        missing: false,
       });
     }
   }
-  // Each row's item, read at the head shown: its title, and what kind of item it is. An item the
-  // person deleted in this page is not at that head, and is not asked for there.
-  const deletedHere = useExplorerStore((state) => state.deleted);
-  const items = useQueries({
-    queries: unread.map((row) => ({
+  // Text only in this page: its title is what this page already holds of the item at the head
+  // shown, from its pane. Nothing is asked for here.
+  const held = useQueries({
+    queries: gathered.map((row) => ({
       ...itemOptions(workspaceId, row.itemId, head),
-      enabled: deletedHere[`${workspaceId}/${row.itemId}`] === undefined,
+      enabled: false,
     })),
   });
-  const rows: Row[] = unread.map((row, index) => {
-    const read = items.at(index);
-    return {
-      ...row,
-      summary: read?.data?.summary,
-      unread: read?.isError === true ? { error: read.error, again: () => read.refetch() } : null,
-    };
-  });
+  const rows: Row[] = gathered.map((row, index) =>
+    row.draft === null ? { ...row, summary: held.at(index)?.data?.summary } : row,
+  );
 
   // The list failed with nothing listed, or with some listed: then those stay and the rest waits.
   const nothingListed = drafts.data === undefined;
@@ -284,7 +291,6 @@ export function DraftsPanel({
               index={index}
               held={heldRow}
               workspaceId={workspaceId}
-              head={head}
               row={row}
               selectable={canWrite}
               selected={offered(row) && !left.has(row.itemId)}
@@ -428,7 +434,6 @@ function DraftRow({
   index,
   held,
   workspaceId,
-  head,
   row,
   selectable,
   selected,
@@ -439,8 +444,6 @@ function DraftRow({
   index: number;
   held: HeldFocus;
   workspaceId: string;
-  /** The head the row’s item is read at. */
-  head: Revision;
   row: Row;
   selectable: boolean;
   selected: boolean;
@@ -460,19 +463,10 @@ function DraftRow({
   const kind = otherKind(row);
   const [, rowRef] = useWatchedPart<HTMLLIElement>(held);
   const openRef = useRef<HTMLButtonElement | null>(null);
-  // The row's own read, when it failed with nothing read: shown with its retry, which ends with
-  // keyboard focus on the row's item. A read that fails once the item was read changes nothing.
-  const unread = kindUnknown(row);
-  const readFailure = useRetry({
-    request: `${workspaceId}/${row.itemId}/${head}`,
-    failed: row.unread !== null,
-    error: row.unread?.error,
-    run: () => row.unread?.again() ?? Promise.resolve(),
-    loaded: () => openRef.current,
-  });
-  const notRead = unread && readFailure.shown;
-  // The discard is offered where the draft cannot be snapshotted from here. It leaves when the
-  // item is read after all and is a Note; keyboard focus that was in it goes to the row's item.
+  // The listing did not find the row's item (and this page did not delete it).
+  const notFound = deleted === undefined && row.missing && kindUnknown(row);
+  // The discard is offered where the draft cannot be snapshotted from here. It leaves when a later
+  // listing finds the item and it is a Note; keyboard focus that was in it goes to the row's item.
   const heldDiscard = useRef<HTMLElement | null>(null);
   const [, discardRef] = useWatchedPart<HTMLDivElement>(heldDiscard);
   useLayoutEffect(() => {
@@ -504,12 +498,10 @@ function DraftRow({
         {kind === null ? null : `${kind} · `}
         {deleted !== undefined ? (
           <>its item was deleted: open it to copy from the draft or discard it</>
-        ) : !unread ? (
-          <Standing row={row} />
-        ) : notRead ? (
-          <>not read</>
+        ) : notFound ? (
+          <>its item was not found</>
         ) : (
-          <>checking…</>
+          <Standing row={row} />
         )}
       </span>
       {kind !== null && (
@@ -518,21 +510,14 @@ function DraftRow({
           {selectable ? ' It can be discarded here.' : ''}
         </p>
       )}
-      {notRead && (
-        <>
-          <p className="meta">
-            This draft’s item could not be read, so it is not known whether it can be snapshotted.
-            {selectable ? ' It can be discarded here.' : ''}
-          </p>
-          <FailureNotice
-            context={`Reading ${name}`}
-            error={readFailure.error}
-            retry={readFailure}
-            workspaceId={workspaceId}
-          />
-        </>
+      {notFound && (
+        <p className="meta">
+          This draft’s item was not in the workspace when your drafts were listed, so it cannot be
+          snapshotted.
+          {selectable ? ' It can be discarded here.' : ''}
+        </p>
       )}
-      {selectable && (kind !== null || notRead) && (
+      {selectable && (kind !== null || notFound) && (
         <div ref={discardRef}>
           <RowDiscard
             workspaceId={workspaceId}
