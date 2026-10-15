@@ -343,10 +343,11 @@ impl WorkspacePath {
     }
 
     /// The key two paths collide on: the NFC value with every segment lower-cased by
-    /// locale-independent Unicode lowercasing. Two items may not hold paths with one key.
+    /// locale-independent Unicode lowercasing (`collision_key_of`, the one definition). Two
+    /// items may not hold paths with one key.
     #[must_use]
     pub fn collision_key(&self) -> String {
-        self.0.nfc().collect::<String>().to_lowercase()
+        collision_key_of(&self.0)
     }
 }
 impl Timestamp {
@@ -498,6 +499,17 @@ impl Display for IdentityError {
     }
 }
 impl std::error::Error for IdentityError {}
+
+/// The key `raw` collides on, for any string, a valid `WorkspacePath` or not: its NFC form, then
+/// every segment lower-cased by locale-independent Unicode lowercasing (`/` has no case, so the
+/// whole string is lower-cased at once). Nothing is validated. For a valid path it is exactly
+/// `WorkspacePath::collision_key`, so a store comparing a path it read outside the contract (a
+/// tree written by hand, a segment holding `?`) folds it as the contract does, never by
+/// lower-casing alone.
+#[must_use]
+pub fn collision_key_of(raw: &str) -> String {
+    raw.nfc().collect::<String>().to_lowercase()
+}
 
 fn is_lower_hex(value: &str) -> bool {
     value

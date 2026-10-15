@@ -10,6 +10,7 @@ use okf_jawn_contract::extraction::{
 use okf_jawn_contract::history::CommitRequest;
 use okf_jawn_contract::identity::{
     At, Digest, MAX_PATH_SEGMENT_UTF16_UNITS, Revision, Timestamp, WorkspaceId, WorkspacePath,
+    collision_key_of,
 };
 use okf_jawn_contract::import::{Job, JobKind, RedigestRequest, StartImportRequest};
 use okf_jawn_contract::item::{APP_HEADER_KEY, ItemStatus, ListItemsRequest};
@@ -1118,6 +1119,37 @@ fn collision_keys_fold_case_and_normalization() -> Result<(), Box<dyn Error>> {
     let first = WorkspacePath::try_from("a/b.md".to_owned())?;
     let second = WorkspacePath::try_from("a/c.md".to_owned())?;
     assert_ne!(first.collision_key(), second.collision_key());
+    Ok(())
+}
+
+/// Ruling 33: `collision_key_of` is the key of any string, a valid path or not, and the very key
+/// `WorkspacePath::collision_key` gives a valid one.
+#[test]
+fn the_collision_key_of_any_string_is_a_paths_collision_key() -> Result<(), Box<dyn Error>> {
+    // A decomposed spelling's key is its stored NFC path's key.
+    for valid in [
+        "Notes/R\u{e9}sum\u{e9}.md",
+        "Notes/Re\u{301}sume\u{301}.md",
+        "a/b.md",
+        "\u{130}stanbul/\u{3a3}.md",
+    ] {
+        let path = WorkspacePath::from_supplied(valid)?;
+        assert_eq!(collision_key_of(valid), path.collision_key(), "{valid}");
+    }
+    // Not paths: `?` is refused in a segment. Composed and decomposed spellings are one key.
+    let composed = "Inbox/caf\u{e9}?.md";
+    let decomposed = "Inbox/cafe\u{301}?.md";
+    assert!(WorkspacePath::try_from(composed.to_owned()).is_err());
+    assert_eq!(collision_key_of(composed), collision_key_of(decomposed));
+    // Letter case is folded too, and different names stay apart.
+    assert_eq!(
+        collision_key_of("Inbox/Plan?.md"),
+        collision_key_of("inbox/PLAN?.md")
+    );
+    assert_ne!(
+        collision_key_of("Inbox/a?.md"),
+        collision_key_of("Inbox/b?.md")
+    );
     Ok(())
 }
 
