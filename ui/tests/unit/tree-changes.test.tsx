@@ -288,6 +288,8 @@ function service(
   return {
     api,
     state,
+    /** A change of the service's own: the head moves to the revision it makes. */
+    commit,
     /** Someone else changes the workspace: the head moves to a revision this page has not seen. */
     moveHead: () => commit((tree) => tree),
     /** Someone else brings an item back, under its id. */
@@ -315,6 +317,12 @@ const deletedNotice = (container: HTMLElement) =>
     .getByText(/You deleted this item/)
     .closest('[role="note"]');
 const pane = () => screen.getByRole('region', { name: /^Documents/ });
+/** The tree bar with what it says under it. */
+const toolbarArea = () => {
+  const area = screen.getByRole('toolbar', { name: 'Change the folders' }).parentElement;
+  if (area === null) throw new Error('the tree bar stands alone');
+  return area;
+};
 const alertText = async () => (await screen.findByRole('alert')).textContent ?? '';
 const type = async (name: string, value: string) => {
   await userEvent.clear(field(name));
@@ -447,6 +455,101 @@ describe('a new note and a new folder', () => {
     expect(api.callsTo(OPEN)).toHaveLength(2); // the opening, and the check for a newer head
     expect(screen.getByText(/Created the note “Decisions” at notes\/Decisions.md/)).toBeTruthy();
     expect(api.violations).toEqual([]);
+  });
+
+  describe('what the commit of a new note answers beside it', () => {
+    const RECEIPTS = '/api/events/get-receipt';
+    const lint = {
+      code: 'okf_validator_warning',
+      message: 'The note has no description.',
+      location: 'notes/Decisions.md',
+    };
+    /** A service whose creation answers `extra` beside the item, in place of its own. */
+    function answering(extra: Json, overrides: Record<string, Handler> = {}) {
+      const made = service({
+        [CREATE]: (body) => {
+          const item = summary(NEW, text(body, 'path'), text(body, 'title'), 'note');
+          const revision = made.commit((tree) => ({ ...tree, items: [...tree.items, item] }));
+          return ok({ item: itemDocument({ ...item, revision }), warnings: [], ...extra });
+        },
+        ...overrides,
+      });
+      return made;
+    }
+    async function createDecisions() {
+      await openTree();
+      await userEvent.click(button('New note'));
+      await userEvent.type(field('Title'), 'Decisions');
+      await userEvent.keyboard('{Enter}');
+      // The new note opens, as every new note does.
+      await findTextBox('Text of Decisions');
+    }
+
+    it('says the check’s warnings, and names the receipt, which the person can read', async () => {
+      const { api } = answering(
+        { warnings: [lint], receipt_id: RECEIPT },
+        {
+          [RECEIPTS]: () =>
+            ok({
+              id: RECEIPT,
+              workspace_id: WS,
+              operation_id: 'create_item',
+              principal_subject: 'ada',
+              route: 'browser_session',
+              audience: 'human_display',
+              returned_at: '2026-01-02T08:15:00.000Z',
+              sources: [],
+            }),
+        },
+      );
+      await createDecisions();
+      const tree = toolbarArea();
+      expect(within(tree).getByRole('note').textContent).toBe(
+        'The note has no description. (notes/Decisions.md)',
+      );
+      expect(tree.textContent).toContain(`The service recorded this change as receipt ${RECEIPT}.`);
+      const show = within(tree).getByRole('button', { name: 'Show the receipt' });
+      expect(show.getAttribute('aria-expanded')).toBe('false');
+      expect(api.callsTo(RECEIPTS)).toEqual([]);
+      await userEvent.click(show);
+      expect(show.getAttribute('aria-expanded')).toBe('true');
+      expect(show.textContent).toBe('Hide the receipt');
+      expect(document.activeElement).toBe(show);
+      await within(tree).findByText('create_item');
+      expect(tree.textContent).toContain('Acted forada');
+      expect(tree.textContent).toContain('Througha signed-in browser');
+      expect(tree.textContent).toContain('Its content wasshown to a person');
+      expect(api.callsTo(RECEIPTS)).toEqual([{ workspace_id: WS, receipt_id: RECEIPT }]);
+      expect(api.violations).toEqual([]);
+    });
+
+    it('says that a repeated answer stored before receipts were recorded names none', async () => {
+      answering({});
+      await createDecisions();
+      const tree = toolbarArea();
+      expect(tree.textContent).toContain('it names no receipt');
+      expect(within(tree).queryByRole('button', { name: 'Show the receipt' })).toBeNull();
+      expect(within(tree).queryByRole('note')).toBeNull();
+    });
+
+    it('reads "not available in this build" when the receipt cannot be read in this build', async () => {
+      answering({ receipt_id: RECEIPT });
+      await createDecisions();
+      const tree = toolbarArea();
+      await userEvent.click(within(tree).getByRole('button', { name: 'Show the receipt' }));
+      expect(
+        await within(tree).findByText('Reading the receipt: Not available in this build.'),
+      ).toBeTruthy();
+    });
+
+    it('is said no more once something else is said', async () => {
+      answering({ warnings: [lint], receipt_id: RECEIPT });
+      await createDecisions();
+      expect(within(toolbarArea()).getByRole('note')).toBeTruthy();
+      await userEvent.click(button('New folder'));
+      expect(within(toolbarArea()).queryByRole('note')).toBeNull();
+      expect(toolbarArea().textContent).not.toContain('receipt');
+    });
   });
 
   it('checks the name before anything is sent, and says what is wrong at the field', async () => {

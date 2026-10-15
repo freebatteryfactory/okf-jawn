@@ -26,6 +26,7 @@ import {
   zDiscardDraftRequest,
   zDraft,
   zGetItemRequest,
+  zGetReceiptRequest,
   zGetRulesRequest,
   zGetRulesResponse,
   zGetSourcesRequest,
@@ -45,6 +46,7 @@ import {
   zPreviewNamesRequest,
   zReadItemRequest,
   zReadItemResponse,
+  zReceipt,
   zRenamePlan,
   zSaveDraftRequest,
   zSearchRequest,
@@ -96,6 +98,7 @@ export const CONTRACT: Record<string, { request: ZodType; response: ZodType }> =
   '/api/reads/read-item': { request: zReadItemRequest, response: zReadItemResponse },
   '/api/reads/get-sources': { request: zGetSourcesRequest, response: zGetSourcesResponse },
   '/api/search/search-items': { request: zSearchRequest, response: zSearchResponse },
+  '/api/events/get-receipt': { request: zGetReceiptRequest, response: zReceipt },
 };
 
 /**

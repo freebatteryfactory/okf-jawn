@@ -14,13 +14,17 @@
  * moment it takes the tree to list the new head, and then goes to the row of what was created or
  * moved, or to the entry now at the place of what was deleted (`TreeReveal`; the tree moves it
  * only while it is still on the bar). A new note opens in its editor, with focus in its text: the
- * next thing a person does with an empty note is write in it. A polite status says what was done.
+ * next thing a person does with an empty note is write in it. A polite status says what was done;
+ * under it, a new note's commit says its warnings and its receipt (`Committed`), until the next
+ * thing is said.
  */
 import { type RefObject, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ItemSummary } from '../../api/generated/types.gen';
 import type { DraftMark } from '../drafts/marks';
 import { useExplorerStore } from '../explorer/store';
 import { DeleteQuestion, MoveForm, NewEntryForm, useSaid } from './ChangeForms';
+import { Committed } from './Committed';
+import type { CreatedNote } from './changes';
 import { useWorkspaceChanges } from './context';
 
 /** The tree's current entry, as far as a change needs it. */
@@ -66,7 +70,15 @@ export function TreeActions({
   const { workspaceId, head } = useWorkspaceChanges();
   const revealInTree = useExplorerStore((state) => state.revealInTree);
   const requestEdit = useExplorerStore((state) => state.requestEdit);
-  const [said, say] = useSaid();
+  const [said, sayOnly] = useSaid();
+  // What the last new note's commit answered beside it: said under the status, until the next.
+  const [committed, setCommitted] = useState<Pick<CreatedNote, 'warnings' | 'receiptId'> | null>(
+    null,
+  );
+  const say: typeof sayOnly = (done, draft) => {
+    setCommitted(null);
+    sayOnly(done, draft);
+  };
   const buttons = useRef<Partial<Record<What, HTMLButtonElement | null>>>({});
   // Where focus goes in the commit that closes a form: a button of the bar, or the tree's row.
   const focusNext = useRef<What | 'row' | null>(null);
@@ -158,6 +170,13 @@ export function TreeActions({
       <p role="status" className="meta tree-said">
         {said}
       </p>
+      {committed !== null && (
+        <Committed
+          workspaceId={workspaceId}
+          warnings={committed.warnings}
+          receiptId={committed.receiptId}
+        />
+      )}
       {form !== null && (form.what === 'note' || form.what === 'folder') && (
         <NewEntryForm
           key={form.what}
@@ -168,6 +187,7 @@ export function TreeActions({
             if ('item' in created) {
               const name = created.item.title || created.item.path;
               say(`Created the note “${name}” at ${created.item.path}. It is open for writing.`);
+              setCommitted({ warnings: created.warnings, receiptId: created.receiptId });
               setCreated(created.item);
               close('note');
             } else {

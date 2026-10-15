@@ -14,7 +14,9 @@
  * search are keyed by revision, so the tree, the open panes and the search ask afresh under the
  * new head; nothing cached at an older revision is wrong, so nothing of it is touched. Beyond that:
  * - `create_item` answers the committed document, which is exactly what `get_item` answers at the
- *   revision it made, so it is kept as that answer and the new note opens without a request;
+ *   revision it made, so it is kept as that answer and the new note opens without a request; the
+ *   commit's warnings and its receipt come with it (`CreatedItem`, ruling 27) and are said with
+ *   the change (`Committed.tsx`);
  * - `delete_item` leaves the person's draft of the item with the service (a Snapshot of it then
  *   conflicts as deleted, and it can only be discarded), so the drafts list is not touched; the
  *   page remembers that the person deleted the item, to say so in its open tabs;
@@ -37,7 +39,7 @@ import {
   moveItem,
   setLifecycle,
 } from '../../api/generated/sdk.gen';
-import type { ItemSummary, Revision } from '../../api/generated/types.gen';
+import type { ItemSummary, ReceiptId, Revision, Warning } from '../../api/generated/types.gen';
 import { type DraftAfterChange, draftLeftBehind, followOwnChange } from '../drafts/saving';
 import { adoptHeadFrom, checkHeadsAgain, type HeadChange } from '../explorer/head';
 import { useExplorerStore } from '../explorer/store';
@@ -131,12 +133,20 @@ function changed(
 /** The text a new note starts with: its title as the first heading. */
 export const firstText = (title: string) => `# ${title}\n`;
 
-/** Create a note. Resolves with the head change and the note as committed. */
+/** A note created: the item as committed, the commit's warnings and its receipt. */
+export interface CreatedNote extends HeadChange {
+  item: ItemSummary;
+  warnings: Warning[];
+  /** Null on a repeat whose first answer was stored before its receipt was recorded. */
+  receiptId: ReceiptId | null;
+}
+
+/** Create a note. Resolves with the head change, the note as committed, and what else it said. */
 export async function createNote(
   client: QueryClient,
   workspaceId: string,
   attempt: Attempt<NewNote>,
-): Promise<HeadChange & { item: ItemSummary }> {
+): Promise<CreatedNote> {
   const { folder, name, title, typeName } = attempt.values;
   const { data } = await createItem({
     body: {
@@ -152,8 +162,8 @@ export async function createNote(
     },
     throwOnError: true,
   });
-  // The answer is the item as committed, with the receipt and the check's findings, which this
-  // page does not show yet.
+  // The answer is the item as committed (kept as `get_item`'s answer at the revision it made),
+  // with the check's warnings and the receipt, which the page says beside the change.
   const item = data.item.summary;
   client.setQueryData(
     getItemOptions({
@@ -165,7 +175,12 @@ export async function createNote(
     }).queryKey,
     data.item,
   );
-  return { ...changed(client, workspaceId, attempt.base, item.revision, [item.id]), item };
+  return {
+    ...changed(client, workspaceId, attempt.base, item.revision, [item.id]),
+    item,
+    warnings: data.warnings,
+    receiptId: data.receipt_id ?? null,
+  };
 }
 
 /** Create a folder (with the index the service keeps in it); its path is in NFC (`joinPath`). */

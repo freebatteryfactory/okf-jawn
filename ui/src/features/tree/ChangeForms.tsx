@@ -43,6 +43,7 @@ import { checkHeadsAgain, type HeadChange, headMoved } from '../explorer/head';
 import {
   type Attempt,
   attemptFor,
+  type CreatedNote,
   createNewFolder,
   createNote,
   DRAFT_AFTER,
@@ -471,7 +472,7 @@ export interface NewEntryFormProps {
   /** The folder the form starts in; '' is the top level. */
   folder: string;
   /** A note was created (`item`), or a folder (`folder`). */
-  onDone: (created: HeadChange & ({ item: ItemSummary } | { folder: string })) => void;
+  onDone: (created: CreatedNote | (HeadChange & { folder: string })) => void;
   onCancel: () => void;
 }
 
@@ -497,11 +498,7 @@ export function NewEntryForm({ kind, folder: startFolder, onDone, onCancel }: Ne
     enabled: kind === 'note',
   });
 
-  const note = useChange<NewNote, HeadChange & { item: ItemSummary }>(
-    createNote,
-    (result) => onDone(result),
-    submitRef,
-  );
+  const note = useChange<NewNote, CreatedNote>(createNote, (result) => onDone(result), submitRef);
   const made = useChange<{ folder: string }, HeadChange>(
     createNewFolder,
     (result, values) => onDone({ ...result, folder: values.folder }),
