@@ -22,7 +22,10 @@
 //!    identity `derive_purge_id` gives the mutation). From that moment storage refuses every
 //!    write to the workspace (`Purger`). The job is queued and the purge answered (202). A
 //!    purge of the same workspace recorded between steps 1 and 3 is answered by `create_purge`
-//!    instead of a second one, and resumed as in step 1.
+//!    instead of a second one, and resumed as in step 1. The base check and the record are not
+//!    one transaction: a commit that lands between them is not refused (the purge guard starts
+//!    with the record) and is removed with the rest; `base_revision` guards the person's
+//!    intent, not the content.
 //!
 //! Every step is idempotent on the request's mutation: the record is unique on its identity,
 //! the retry of a failed job is unique on the mutation, and a delivery may repeat. So a resumed

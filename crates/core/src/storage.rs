@@ -783,7 +783,11 @@ pub trait WorkspaceCatalog: Send + Sync {
 ///
 /// - Record the purge first (`RecordStore::create_purge`), and only then call the purger.
 /// - Before the first call, cancel every queued or running job of the target workspace and
-///   wait until none is running (the drain). From the moment the purge is recorded storage
+///   wait until none is running (the drain). Running is the store's state: a job the drain
+///   cancelled is `cancelled` at once, though its attempt may still be inside a storage call,
+///   and each write that attempt then makes to the workspace is one of those refused below; a
+///   sealed restore is never cancelled, so while its attempt runs, its import, which storage
+///   does not refuse, is waited for. From the moment the purge is recorded storage
 ///   refuses to create, retry or claim a job of the workspace (`RecordStore::create_job`,
 ///   `retry_job`, `claim_job`, each with `Conflict` naming the purge; a refused claim leaves
 ///   the job as it is, for the caller to cancel), but it cannot stop a job that already runs.

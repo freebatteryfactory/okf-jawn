@@ -173,12 +173,20 @@ pub(crate) enum Renewed<T> {
 pub const ARCHIVE_MEDIA_TYPE: &str = "application/zip";
 
 /// The longest a workspace purge waits for the workspace's jobs to stop running (the drain)
-/// before its attempt fails, to be resumed when the purge is asked for again: ten minutes,
-/// long enough for a running conversion's lease to expire. A job whose attempt died stays
-/// `running` until its lease lapses (five minutes, storage's job lease) and the runtime's next
-/// sweep, a third of a lease later, queues it again, where the purge's record keeps any worker
-/// from claiming it; a restore past its point of no return renews its lease and is waited for
-/// while it finishes. Storage's purge waits as long for the target's writes in flight.
+/// before its attempt fails, retryable, to be resumed when the purge is asked for again: ten
+/// minutes.
+///
+/// Only a sealed restore is ever waited for. The drain cancels every other queued or running
+/// job, which the store marks `cancelled` at once, and it decides by the store's state, so an
+/// unsealed job is never waited for, a conversion included. A sealed restore whose attempt is
+/// alive renews its lease and is waited for until it finishes; one that runs longer than the
+/// bound fails the purge's attempt. One whose attempt died stays `running` until its lease
+/// lapses (five minutes, storage's `JOB_LEASE_SECONDS`) and the runtime's next sweep queues it,
+/// where it is no longer waited for and the purge's record keeps any worker from claiming it:
+/// at most a lease plus one `RuntimeConfig::sweep_interval`. That fits the bound only while the
+/// sweep interval is shorter than a lease (the runtime recommends a third of one, so 400 s in
+/// all); the composition that sets `HandlerLimits::drain` sets the sweep interval too. Storage's
+/// purge waits as long for the target's writes in flight.
 pub const DRAIN_BOUND: Duration = Duration::from_secs(600);
 
 /// How many of the workspace's jobs one page of the drain's listing asks for.
