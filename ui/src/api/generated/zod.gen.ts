@@ -2682,6 +2682,7 @@ export const zRenamePlan = z.object({
     considered: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
     duplicate_observations: z.array(zDuplicateObservation),
     entries: z.array(zRenameEntry),
+    refused: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
     rules_digest: zDigest,
     unchanged: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
     warnings: z.array(zWarning)

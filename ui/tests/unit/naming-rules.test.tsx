@@ -201,6 +201,7 @@ function service(overrides: Record<string, Handler> = {}, rules: unknown = saved
         warnings: [{ code: 'note', message: 'Index files are not renamed.' }],
         considered: ids.length,
         unchanged: 0,
+        refused: 0,
         archived_left_out: 0,
       });
     },
@@ -275,6 +276,7 @@ describe('whether a preview may still be applied', () => {
     warnings: [],
     considered: 0,
     unchanged: 0,
+    refused: 0,
     archived_left_out: 0,
   };
   const preview: Preview = { plan, rules: savedRules, folder: '', looked: 3 };
@@ -579,6 +581,7 @@ describe('the naming rules', () => {
           warnings: [{ code: 'note', message: 'Index files are not renamed.' }],
           considered: 3,
           unchanged: 0,
+          refused: 0,
           archived_left_out: 0,
         },
         rules: previewed?.rules,
