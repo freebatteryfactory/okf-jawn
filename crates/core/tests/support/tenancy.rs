@@ -431,12 +431,15 @@ impl FakeQueue {
 }
 
 impl FakeUploads {
-    /// Hold `record` in `scope`.
+    /// Hold `record` in `scope`, in place of the slot of that identity there, as a slot that
+    /// was completed or taken by a job reads afterwards.
     ///
     /// # Errors
     /// Returns when the lock is poisoned.
     pub fn put(&self, scope: &StorageScope, record: UploadRecord) -> Built<()> {
-        lock(&self.slots)?.push((scope.clone(), record));
+        let mut slots = lock(&self.slots)?;
+        slots.retain(|(held_in, held)| !(held_in == scope && held.id == record.id));
+        slots.push((scope.clone(), record));
         Ok(())
     }
 }

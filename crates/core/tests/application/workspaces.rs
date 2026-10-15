@@ -1161,6 +1161,26 @@ async fn a_resumed_restore_whose_job_has_run_answers_that_job() -> TestResult {
         .uploads
         .put(&scope()?, upload(&sha, true, Some(first.id))?)?;
     restore_commit(&tenancy, mutation(47)).await?;
+    // The restored head holds the archive's history: every check of a first attempt refuses it.
+    tenancy.world.versions.put_log(
+        &revision('f')?,
+        None,
+        LogResponse {
+            commits: vec![commit('f')?, commit('e')?, commit('a')?],
+            next_cursor: None,
+        },
+    )?;
+    let refused = err_of(
+        tenancy
+            .service
+            .restore_workspace(&restorer(Attempt::First)?, restore_request(sha.clone())?)
+            .await,
+    )?;
+    assert_eq!(
+        refused.code,
+        ErrorCode::Conflict,
+        "a first attempt is refused now"
+    );
     let again = tenancy
         .service
         .restore_workspace(&restorer(Attempt::Resumed)?, restore_request(sha)?)
