@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::ErrorCode;
 use okf_jawn_contract::identity::WorkspacePath;
-use okf_jawn_core::conformance::{EditCheck, OkfConformance};
+use okf_jawn_core::conformance::{EditCheck, MISSING_FILE_LINK, OkfConformance};
 use okf_jawn_core::storage::CandidateCheck;
 use uuid::Uuid;
 
@@ -342,6 +342,120 @@ fn candidate_check_of_an_edit_reports_the_broken_links_of_the_files_it_touched_o
             broken_at("notes/other.md", "lost.md"),
             broken_at("notes/plan.md", "gone.md"),
         ]
+    );
+    Ok(())
+}
+
+/// Core's findings about links to files that are not Markdown, as (location, message), sorted.
+fn missing_files(warnings: &[Warning]) -> Vec<(Option<String>, String)> {
+    let mut missing: Vec<(Option<String>, String)> = warnings
+        .iter()
+        .filter(|warning| warning.code == MISSING_FILE_LINK)
+        .map(|warning| (warning.location.clone(), warning.message.clone()))
+        .collect();
+    missing.sort();
+    missing
+}
+
+/// A conformant note whose body is `body`.
+fn note_with(title: &str, body: &str) -> String {
+    format!("---\ntype: Note\ntitle: {title}\ndescription: A note.\n---\n# {title}\n\n{body}\n")
+}
+
+/// Links to files the candidate holds, written every way okf-core reads a link (relative,
+/// from the root, percent-encoded, with an anchor), give no warning at all: not the
+/// validator's broken-link info, which okf-core 0.2.7 gives for each of them, and not core's
+/// missing-file warning. The production check and an edit's check that touched the note agree.
+#[test]
+fn candidate_check_reports_nothing_for_a_link_to_a_file_the_candidate_holds() -> TestResult {
+    let staged = Staged::new()?;
+    std::fs::create_dir_all(staged.0.join("notes/pics"))?;
+    std::fs::create_dir_all(staged.0.join("pics"))?;
+    staged.write("notes/pics/p.png", "png")?;
+    staged.write("notes/pics/my p.png", "png")?;
+    staged.write("pics/q.png", "png")?;
+    staged.write(
+        "notes/a.md",
+        &note_with(
+            "A",
+            "![p](pics/p.png) ![q](/pics/q.png) ![s](pics/my%20p.png) [r](pics/p.png#top)",
+        ),
+    )?;
+    let a = WorkspacePath::try_from("notes/a.md".to_owned())?;
+    for warnings in [
+        OkfConformance.check(&staged.0, &[])?,
+        EditCheck::new(std::slice::from_ref(&a), None).check(&staged.0, &[])?,
+    ] {
+        assert_eq!(broken_links(&warnings), Vec::new(), "{warnings:?}");
+        assert_eq!(missing_files(&warnings), Vec::new(), "{warnings:?}");
+    }
+    Ok(())
+}
+
+/// A link to a file the candidate does not hold is core's own warning, located at the note
+/// that holds the link, in place of the validator's broken-link info; a folder or a file
+/// elsewhere with that name does not count as holding it.
+#[test]
+fn candidate_check_reports_a_link_to_a_missing_file_at_the_note_that_holds_it() -> TestResult {
+    let staged = Staged::new()?;
+    // Not the linked file: a folder of its name, and the same name in another folder.
+    std::fs::create_dir_all(staged.0.join("notes/pics/p.png"))?;
+    staged.write("q.pdf", "pdf")?;
+    staged.write("notes/a.md", &note_with("A", "![p](pics/p.png) [q](q.pdf)"))?;
+    let a = WorkspacePath::try_from("notes/a.md".to_owned())?;
+    for warnings in [
+        OkfConformance.check(&staged.0, &[])?,
+        EditCheck::new(std::slice::from_ref(&a), None).check(&staged.0, &[])?,
+    ] {
+        assert_eq!(broken_links(&warnings), Vec::new(), "{warnings:?}");
+        assert_eq!(
+            missing_files(&warnings),
+            [
+                (
+                    Some("notes/a.md".to_owned()),
+                    "link to a missing file: pics/p.png".to_owned()
+                ),
+                (
+                    Some("notes/a.md".to_owned()),
+                    "link to a missing file: q.pdf".to_owned()
+                ),
+            ],
+            "{warnings:?}"
+        );
+    }
+    Ok(())
+}
+
+/// A broken link to a note, written with `.md` or with no extension, keeps the validator's
+/// broken-link info as it is, beside core's warning for a missing file in the same note.
+#[test]
+fn candidate_check_keeps_the_validators_finding_for_a_link_to_a_missing_note() -> TestResult {
+    let staged = Staged::new()?;
+    staged.write(
+        "notes/a.md",
+        &note_with("A", "[g](gone.md) [h](lost) [i](pics/i.png)"),
+    )?;
+    let warnings = OkfConformance.check(&staged.0, &[])?;
+    assert_eq!(
+        broken_links(&warnings),
+        [
+            broken_at("notes/a.md", "gone.md"),
+            broken_at("notes/a.md", "lost"),
+        ]
+    );
+    assert!(
+        warnings
+            .iter()
+            .filter(|warning| warning.message.contains("does not resolve to a concept"))
+            .all(|warning| warning.code == "okf_validator_info"),
+        "{warnings:?}"
+    );
+    assert_eq!(
+        missing_files(&warnings),
+        [(
+            Some("notes/a.md".to_owned()),
+            "link to a missing file: pics/i.png".to_owned()
+        )]
     );
     Ok(())
 }
