@@ -438,10 +438,10 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   );
   // A refusal of the save at a field of the rules (`/rules/…`, a JSON Pointer into the request):
   // shown at that field in the form, which takes keyboard focus there once when it arrives.
-  const refusedKeys =
-    save.refused !== null && save.refused.field.startsWith('/rules/')
-      ? pointerKeys(save.refused.field.slice('/rules'.length))
-      : null;
+  const refusedField = save.refused?.field ?? '';
+  const refusedKeys = refusedField.startsWith('/rules/')
+    ? pointerKeys(refusedField.slice('/rules'.length))
+    : null;
   const fieldRefusal =
     refusedKeys === null || save.refused === null
       ? undefined

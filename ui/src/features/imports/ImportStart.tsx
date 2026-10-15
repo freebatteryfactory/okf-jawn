@@ -247,12 +247,10 @@ export function ImportStart({ workspaceId, head, entries, included, onStarted }:
 
 export interface StartedJobsProps {
   workspaceId: string;
-  /** The person may write: only then are Cancel and a retry offered on a job. */
-  canWrite: boolean;
 }
 
 /** The jobs started from this page, newest first, each as the service now reports it. */
-export function StartedJobs({ workspaceId, canWrite }: StartedJobsProps) {
+export function StartedJobs({ workspaceId }: StartedJobsProps) {
   const heading = useId();
   const started = useUploads((state) => state.started[workspaceId]);
   if (started === undefined || started.length === 0) return null;
@@ -261,7 +259,7 @@ export function StartedJobs({ workspaceId, canWrite }: StartedJobsProps) {
       <h3 id={heading} className="panel-heading">
         Imports started here
       </h3>
-      <StartedList workspaceId={workspaceId} jobIds={started} canWrite={canWrite} />
+      <StartedList workspaceId={workspaceId} jobIds={started} />
       <p>
         <Link to="/w/$workspaceId/jobs" params={{ workspaceId }}>
           All jobs of this workspace
@@ -271,15 +269,7 @@ export function StartedJobs({ workspaceId, canWrite }: StartedJobsProps) {
   );
 }
 
-function StartedList({
-  workspaceId,
-  jobIds,
-  canWrite,
-}: {
-  workspaceId: string;
-  jobIds: readonly string[];
-  canWrite: boolean;
-}) {
+function StartedList({ workspaceId, jobIds }: { workspaceId: string; jobIds: readonly string[] }) {
   const feed = useJobsFeed(workspaceId);
   // A job was answered: a stream that had stopped for a session that ended is asked for again.
   const { wake } = feed;
@@ -294,13 +284,7 @@ function StartedList({
   return (
     <ul className="job-list">
       {jobIds.map((jobId) => (
-        <StartedJob
-          key={jobId}
-          workspaceId={workspaceId}
-          jobId={jobId}
-          live={feed.live}
-          canWrite={canWrite}
-        />
+        <StartedJob key={jobId} workspaceId={workspaceId} jobId={jobId} live={feed.live} />
       ))}
     </ul>
   );
@@ -310,12 +294,10 @@ function StartedJob({
   workspaceId,
   jobId,
   live,
-  canWrite,
 }: {
   workspaceId: string;
   jobId: string;
   live: boolean;
-  canWrite: boolean;
 }) {
   const job = useQuery(jobOptions(workspaceId, jobId, live));
   // A failed reading keeps the job as last reported, with its notice beside it.
@@ -328,9 +310,7 @@ function StartedJob({
   });
   return (
     <>
-      {job.data !== undefined && (
-        <JobRow workspaceId={workspaceId} job={job.data} canWrite={canWrite} />
-      )}
+      {job.data !== undefined && <JobRow workspaceId={workspaceId} job={job.data} />}
       {(failure.shown || job.data === undefined) && (
         <li className="job">
           {failure.shown ? (
