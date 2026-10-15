@@ -33,6 +33,17 @@
 //! taking the destination (`Staged::occupied`); a move onto any other item's or file's key is
 //! refused as taken.
 //!
+//! okf-core 0.2.7's `move_concept` appends `.md` to a moved concept's relative links to files
+//! that are not Markdown, on every move (`![p](pics/p.png)` becomes `![p](pics/p.png.md)`):
+//! `Link::resolve` gives an id for any relative target inside the bundle, and the outgoing-link
+//! rewrite takes every such link for a link to a concept, which `compute_relative_path` ends in
+//! `.md`. As a workaround, every move (`move_in`, which every hop of `MoveItem`, `park` and a
+//! Rewind's `move_back` takes) writes the moved item's body again from its body before the
+//! move, rewritten with okf-core's own public functions as `move_concept` rewrites it but taking
+//! a relative link for a concept's only when the bundle holds that concept, the one condition
+//! of the upstream fix (`moved_body`); okf-core's frontmatter is kept as it wrote it. The
+//! workaround is removed when an okf-core release carries the fix.
+//!
 //! For the same reason, every write that names a new path checks the folders it names against
 //! the staged tree's own spellings before that path is written there
 //! (`Staged::refuse_respelled_folder`): `notes/new.md` when the tree holds `Notes/` would land in
@@ -50,7 +61,8 @@ use std::path::{Path, PathBuf};
 
 use git2::Repository;
 use okf_core::{
-    Bundle, ConceptId, Link, LinkRewriteAction, MoveOptions, RefactorError, rewrite_markdown_links,
+    Bundle, ConceptId, Document, Link, LinkKind, LinkRewriteAction, MoveOptions, RefactorError,
+    compute_relative_path, rebase_relative_path, rewrite_markdown_links,
 };
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::TextOrigin;
@@ -849,6 +861,7 @@ fn move_in(
                 None => internal(format!("moving {source} to {destination} failed: {other}")),
             },
         })?;
+    keep_file_links(bundle, &from, &to, &moved.target_path)?;
     // Every file the move wrote besides the item's own two: the referrers it rewrote.
     for path in &moved.affected_files {
         if *path != moved.source_path
@@ -859,6 +872,62 @@ fn move_in(
         }
     }
     staged.rescan()
+}
+
+/// Write the body of the item okf-core just moved from `from` to `to` again (the module
+/// header's workaround for okf-core 0.2.7): its body in `bundle`, the staged tree before the
+/// move, rewritten for the move (`moved_body`), into the file okf-core wrote at `written`. The
+/// frontmatter is the one okf-core wrote there (its relative paths rebased), read back and
+/// written with okf-core's own parser and serializer, whose round trip keeps every value
+/// (`parse(emit(v)) == v`), so its bytes are okf-core's.
+fn keep_file_links(
+    bundle: &Bundle,
+    from: &ConceptId,
+    to: &ConceptId,
+    written: &Path,
+) -> Result<(), ApiError> {
+    let before = bundle
+        .get(from)
+        .ok_or_else(|| internal(format!("the moved concept {from} is not in the bundle")))?;
+    let mut document = Document::parse(&read_text(written)?).map_err(|error| {
+        internal(format!(
+            "the item okf-core moved to {to} does not parse: {error}"
+        ))
+    })?;
+    document.body = moved_body(bundle, &before.document.body, from, to);
+    write_text(written, &document.serialize())
+}
+
+/// `body`, the body of the concept `from`, with its links rewritten for a move to `to` as
+/// `okf_core::move_concept` rewrites them, with one condition more, the upstream fix's: a
+/// relative link that resolves to a concept `bundle` holds becomes a link to that concept
+/// (`compute_relative_path`, then the link's anchor); any other relative link, such as one to
+/// an image or a file that is not Markdown, whether that file exists or not, is rebased as a
+/// path (`rebase_relative_path`), which keeps its name. Every other link is kept.
+fn moved_body(bundle: &Bundle, body: &str, from: &ConceptId, to: &ConceptId) -> String {
+    let folder = |id: &ConceptId| {
+        id.parent()
+            .map(|parent| parent.segments().to_vec())
+            .unwrap_or_default()
+    };
+    let (from_folder, to_folder) = (folder(from), folder(to));
+    let (rewritten, _) = rewrite_markdown_links(body, |link, _| {
+        if link.kind != LinkKind::Relative {
+            return LinkRewriteAction::Keep;
+        }
+        LinkRewriteAction::Rewrite(match link.resolve(from).filter(|id| bundle.contains(id)) {
+            Some(concept) => {
+                let anchor = link
+                    .target
+                    .find('#')
+                    .and_then(|at| link.target.get(at..))
+                    .unwrap_or_default();
+                format!("{}{anchor}", compute_relative_path(to, &concept))
+            }
+            None => rebase_relative_path(&from_folder, &to_folder, &link.target),
+        })
+    });
+    rewritten
 }
 
 fn set_status(
