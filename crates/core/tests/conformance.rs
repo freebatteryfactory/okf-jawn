@@ -435,18 +435,19 @@ fn candidate_check_reports_a_link_to_a_missing_file_at_the_note_that_holds_it() 
     Ok(())
 }
 
-/// A broken link to a note, written with `.md` or with no extension, keeps the validator's
-/// broken-link info as it is, beside core's warning for a missing file in the same note; and the
-/// validator's other findings about a missing file (a path field, V27) are kept as they are.
+/// A broken link to a note, written with `.md` (with an anchor too) or with no extension, keeps
+/// the validator's broken-link info as it is, beside core's warning for a missing file in the same
+/// note; and the validator's other findings about a missing file (a path field, V27) are kept as
+/// they are.
 #[test]
 fn candidate_check_keeps_the_validators_finding_for_a_link_to_a_missing_note() -> TestResult {
     let staged = Staged::new()?;
     // A path field naming a missing file: the validator's own finding (V27), not a link.
-    let with_resource = note_with("A", "[g](gone.md) [h](lost) [i](pics/i.png)").replacen(
-        "---\n",
-        "---\nresource: ./data.csv\n",
-        1,
-    );
+    let with_resource = note_with(
+        "A",
+        "[g](gone.md) [h](lost) [s](gone.md#part) [i](pics/i.png)",
+    )
+    .replacen("---\n", "---\nresource: ./data.csv\n", 1);
     staged.write("notes/a.md", &with_resource)?;
     let warnings = OkfConformance.check(&staged.0, &[])?;
     assert!(
@@ -462,6 +463,7 @@ fn candidate_check_keeps_the_validators_finding_for_a_link_to_a_missing_note() -
         broken_links(&warnings),
         [
             broken_at("notes/a.md", "gone.md"),
+            broken_at("notes/a.md", "gone.md#part"),
             broken_at("notes/a.md", "lost"),
         ]
     );
