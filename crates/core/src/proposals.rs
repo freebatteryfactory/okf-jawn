@@ -72,6 +72,7 @@ pub trait ProposalStore: Send + Sync {
     /// Append a discussion comment without certifying content.
     ///
     /// Unique on `mutation_id`: a repeated id inserts nothing and returns the prior comment.
+    /// `NotFound`, writing nothing, when the workspace has no such proposal.
     fn add_comment<'a>(
         &'a self,
         scope: &'a StorageScope,
