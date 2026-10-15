@@ -287,6 +287,37 @@ describe('who may edit, and where', () => {
 
     const session = () => useDraftSessions.getState().sessions[sessionKey(WS, NOTE)];
 
+    it('lists the kept text as a Source’s, never ticked, while the page holds nothing of the item', async () => {
+      const LAST = 'e'.repeat(40);
+      // The note's read at the last head never answers: the page holds nothing of it there.
+      const { held, router } = await refused(asSource, {
+        [ITEM]: (body) =>
+          JSON.stringify(body.at).includes(LAST)
+            ? new Promise<never>(() => {})
+            : ok(
+                itemDocument(
+                  body.item_id !== NOTE
+                    ? otherSummary
+                    : JSON.stringify(body.at).includes(NEWER)
+                      ? asSource
+                      : noteSummary,
+                ),
+              ),
+      });
+      // Another item in the pane, then a head at which nothing of the note was read.
+      const tree = screen.getByRole('tree', { name: 'Folders' });
+      fireEvent.click(within(tree).getByRole('treeitem', { name: /^Plan/ }));
+      await eventually(() => expect(router.state.location.pathname).toBe(`/w/${WS}/i/${OTHER}`));
+      await refreshTo(held, LAST);
+      const drafts = screen.getByRole('region', { name: /^Drafts/ });
+      const tick = await eventuallyGet(() =>
+        within(drafts).getByRole('checkbox', { name: 'Include Item 22222222 in the Snapshot' }),
+      );
+      expect(tick.closest('li')?.textContent).toContain('Source · ');
+      expect(tick).toHaveProperty('checked', false);
+      expect(within(drafts).getByRole('button', { name: 'Snapshot 0 drafts' })).toBeDefined();
+    });
+
     it('stops offering "Edit" once a read says it is a Source, and focus on the switch goes to the page’s heading', async () => {
       const { held } = becomesSource();
       renderAt(`/w/${WS}/i/${NOTE}`);
@@ -1665,6 +1696,29 @@ describe('typed text is never lost silently', () => {
     expect(textIn(textBox('Text of Meeting notes'))).toBe(`${COMMITTED} kept`);
     expect(saveState()).toBe('Not saved. Your text is kept here.');
     expect(screen.getByRole('button', { name: 'Try again' })).toBeDefined();
+  });
+
+  it('lists text only in this page as a Note’s, ticked, when the page holds nothing of its item at the head shown', async () => {
+    const held = { head: HEAD };
+    const api = writable({
+      [SAVE]: () => fail(503, 'unavailable', 'busy'),
+      '/api/workspaces/open-workspace': () => ok({ ...writableWorkspace, head: held.head }),
+    });
+    const { box } = await startEditing();
+    typeInto(box, ' kept');
+    fireEvent.click(screen.getByRole('button', { name: 'Close tab' }));
+    await eventually(() => expect(screen.queryByRole('tab')).toBeNull());
+    // At the newer head no pane has read the item: the row is not told its title.
+    await refreshTo(held, NEWER);
+    const drafts = screen.getByRole('region', { name: /^Drafts/ });
+    const tick = await eventuallyGet(() =>
+      within(drafts).getByRole('checkbox', { name: 'Include Item 22222222 in the Snapshot' }),
+    );
+    // A session is only ever of a Note this page edits: offered, as any Note's draft is.
+    expect(tick).toHaveProperty('checked', true);
+    expect(tick.closest('li')?.textContent).toContain('not saved');
+    expect(within(drafts).getByRole('button', { name: 'Snapshot 1 draft' })).toBeDefined();
+    expect(api.callsTo(ITEM).filter((body) => JSON.stringify(body.at).includes(NEWER))).toEqual([]);
   });
 
   it('asks before the page is left with unsaved text, and saves at once', async () => {
