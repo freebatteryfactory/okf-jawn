@@ -3,7 +3,9 @@
  * they would rename, and applying a preview.
  *
  * The rules are read at the head the workspace shows (`get_rules` at that revision), so they are
- * the rules of the version on screen and are read afresh under a new head. The schema the form is
+ * the rules of the version on screen and are read afresh under a new head. A version holds rules,
+ * none at all, or a stored file this build cannot read as rules (`StoredRules`); the last is
+ * shown with its text and its problems for repair, never as "no rules". The schema the form is
  * built from is the service's own (`get_form_schema`, name `naming-rules`).
  *
  * A preview writes nothing. `preview_names` takes the items to look at by id, so the items of the
@@ -37,6 +39,7 @@ import type {
   NamingRules,
   RenamePlan,
   Revision,
+  Warning,
 } from '../../api/generated/types.gen';
 import { listedDraft } from '../drafts/drafts-list';
 import { type DraftAfterChange, draftLeftBehind, followOwnChange } from '../drafts/saving';
@@ -48,18 +51,80 @@ import type { Attempt } from '../tree/changes';
 /** The name of the naming rules' schema among the service's form schemas. */
 export const RULES_SCHEMA = 'naming-rules';
 
+/** The rules a workspace with none saved starts from: none at all, in this build's format. */
+export const NO_RULES: NamingRules = { schema_version: 1, rules: [] };
+
 /**
- * The saved rules at the revision the workspace shows. `get_rules` answers them inside its
- * answer, beside the revision read and a stored file that cannot be read as rules; this page
- * reads the rules alone, and has none when the answer holds none.
+ * What a version holds as its naming rules (`get_rules`, ruling 11): rules; no rules saved at
+ * all; or a stored file that cannot be read as this build's rules, with its text and what is
+ * wrong with it. A file that cannot be read is never taken for "no rules": the page shows it, so
+ * that the person can repair it.
  */
+export type StoredRules =
+  | { kind: 'rules'; rules: NamingRules }
+  | { kind: 'none' }
+  | { kind: 'unreadable'; text: string; problems: Warning[] };
+
+/**
+ * The answer of `get_rules` as what the version holds. A stored file that cannot be read wins
+ * over rules beside it (the contract never sends both): such rules are not what the file says.
+ * Defined once, so the query's selection is not run again at every drawing.
+ */
+export function storedRulesOf(answer: GetRulesResponse): StoredRules {
+  if (answer.unreadable !== undefined && answer.unreadable !== null) {
+    return { kind: 'unreadable', ...answer.unreadable };
+  }
+  if (answer.rules !== undefined && answer.rules !== null) {
+    return { kind: 'rules', rules: answer.rules };
+  }
+  return { kind: 'none' };
+}
+
+/** The rules edits start from in what a version holds; none for a file that cannot be read. */
+export function startingRules(stored: StoredRules): NamingRules | undefined {
+  if (stored.kind === 'rules') return stored.rules;
+  return stored.kind === 'none' ? NO_RULES : undefined;
+}
+
+/** Whether two versions hold the same rules: rules in any key order, or the same stored text. */
+export function sameStored(a: StoredRules, b: StoredRules): boolean {
+  if (a.kind === 'rules' && b.kind === 'rules') return sameRules(a.rules, b.rules);
+  if (a.kind === 'unreadable' && b.kind === 'unreadable') return a.text === b.text;
+  return a.kind === b.kind;
+}
+
+/** What the version the workspace shows holds as its naming rules. */
 export function rulesOptions(workspaceId: string, head: Revision) {
   return queryOptions({
     ...getRulesOptions({
       body: { workspace_id: workspaceId, at: { kind: 'revision', revision: head } },
     }),
-    select: (answer: GetRulesResponse): NamingRules | undefined => answer.rules ?? undefined,
+    select: storedRulesOf,
   });
+}
+
+/**
+ * Where a problem the service found in a stored rules file is (its `location`): a line and a
+ * column ("line 2, column 7", as the YAML reader gives one); a JSON Pointer into the file
+ * (`/rules/0/glob`), which the page places at a line and column by reading the text; the whole
+ * file (no location); or other words, shown as they are.
+ */
+export type ProblemPlace =
+  | { kind: 'line'; line: number; column: number }
+  | { kind: 'pointer'; pointer: string }
+  | { kind: 'file' }
+  | { kind: 'words'; words: string };
+
+export function problemPlace(location: string | null | undefined): ProblemPlace {
+  if (location === undefined || location === null || location.trim() === '') {
+    return { kind: 'file' };
+  }
+  const at = /^\s*line (\d+)(?:,\s*column (\d+))?\s*$/i.exec(location);
+  if (at !== null) {
+    return { kind: 'line', line: Number(at[1] ?? '1'), column: Number(at[2] ?? '1') };
+  }
+  if (location.startsWith('/')) return { kind: 'pointer', pointer: location };
+  return { kind: 'words', words: location };
 }
 
 /** The schema the rules form is built from; it does not change while the page is open. */
