@@ -2,7 +2,8 @@
 //! composed over the real data directory instead of a test application: core's dispatch, the
 //! service's own `purge_workspace`, `create_item` and `save_draft`, and every storage adapter.
 //! The purge empties the completed ledger rows of the purged workspace, keeps its own, touches
-//! no other workspace's row, and a purge asked for again after it completed answers it.
+//! no other workspace's row; a purge asked for again after it completed answers it, and one
+//! asked for again after its job failed is resumed through the store's retry of a tenant job.
 //!
 //! Two stand-ins, said here rather than hidden:
 //! - `create_workspace` is not built on this branch (core M1.4a builds it in parallel), so
@@ -28,6 +29,7 @@ use check::{TestResult, err_of, some};
 use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::{JobId, MutationId, TenantId, WorkspaceId};
+use okf_jawn_contract::import::JobState;
 use okf_jawn_contract::purge::{Purge, PurgeState};
 use okf_jawn_contract::workspace::{CreateWorkspaceRequest, Workspace};
 use okf_jawn_core::access::AccessControl;
@@ -365,6 +367,7 @@ async fn carry_out(storage: &Storage, purge: &Purge) -> TestResult {
     };
     let mut record = records.get_purge(&tenant, purge_id).await?;
     record.state = PurgeState::Running;
+    record.error = None;
     let mut record = records.update_purge(&tenant, record).await?;
     let report = storage
         .purger()
@@ -575,6 +578,79 @@ async fn purge_ledger_service_a_purge_asked_for_again_answers_the_completed_one(
     let records = rusqlite::Connection::open(directory.path().join("records.sqlite"))?;
     let recorded: i64 = records.query_row("SELECT count(*) FROM purges", [], |row| row.get(0))?;
     assert_eq!(recorded, 1, "no second purge of the workspace");
+    Ok(())
+}
+
+/// Contract ruling 24 and P5, through the service and real storage: a purge whose tenant job
+/// failed (ingest's handler then records the purge failed) is resumed by asking again under
+/// another key, on a base that names nothing: the store's retry of the tenant job makes it
+/// runnable, it is queued again, and the purge completes.
+#[tokio::test]
+async fn purge_ledger_service_a_failed_purge_asked_for_again_is_resumed() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let composed = Composed::new(Storage::open(directory.path())?)?;
+    let created = call(
+        &composed,
+        "create_workspace",
+        json!({ "name": "Trip", "description": "", "idempotency_key": key(1) }),
+    )
+    .await?;
+    let workspace = workspace_of(&created)?;
+    let head = some(created.get("head"), "the head")?.clone();
+    let purge: Purge = serde_json::from_value(
+        call(
+            &composed,
+            "purge_workspace",
+            json!({ "workspace_id": workspace, "base_revision": head, "idempotency_key": key(2) }),
+        )
+        .await?,
+    )?;
+    let records = composed.storage.records();
+    let tenant = tenant()?;
+    let jobs = JobScope::Tenant(tenant.clone());
+    let refusal = ApiError::new(ErrorCode::Unavailable, "the drain timed out");
+    let claimed = some(records.claim_job(purge.job_id).await?, "the purge's job")?;
+    records
+        .fail_job(claimed.lease, refusal.clone(), true)
+        .await?;
+    let mut failed = records.get_purge(&tenant, purge.id).await?;
+    failed.state = PurgeState::Failed;
+    failed.error = Some(refusal);
+    records.update_purge(&tenant, failed).await?;
+    let answered: Purge = serde_json::from_value(
+        call(
+            &composed,
+            "purge_workspace",
+            json!({
+                "workspace_id": workspace,
+                "base_revision": "f".repeat(40),
+                "idempotency_key": key(3)
+            }),
+        )
+        .await?,
+    )?;
+    assert_eq!(
+        (answered.id, answered.state),
+        (purge.id, PurgeState::Failed)
+    );
+    assert_eq!(
+        records.get_job(&jobs, purge.job_id).await?.state,
+        JobState::Queued,
+        "the store's retry made the tenant job runnable"
+    );
+    assert_eq!(
+        composed
+            .queue
+            .deliveries
+            .lock()
+            .map_err(|_| poisoned())?
+            .clone(),
+        vec![(jobs.clone(), purge.job_id); 2]
+    );
+    carry_out(&composed.storage, &purge).await?;
+    let completed = records.get_purge(&tenant, purge.id).await?;
+    assert_eq!(completed.state, PurgeState::Completed);
+    assert!(completed.error.is_none());
     Ok(())
 }
 
