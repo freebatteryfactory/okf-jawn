@@ -1,5 +1,5 @@
 {
-  "git_sha": "22769b76bb05e36d28f31ae0165b309cf0dc71a0",
+  "git_sha": "8982906f8970270d576ebfc78b81007b6fa49d24",
   "inputs": [
     ".bun-version",
     ".cargo/config.toml",
@@ -23,7 +23,7 @@
     "ui/tsconfig.json",
     "ui/vite.config.ts"
   ],
-  "produced_at": "2026-10-14T21:55:24.362Z",
+  "produced_at": "2026-10-15T12:10:17.425Z",
   "component": "mcp-apps-protocol-qualification",
   "gate": "mcp-apps-protocol-qualification",
   "result": "PASS",
@@ -212,7 +212,7 @@
   ],
   "not_judged": [],
   "harness_error_detail": [],
-  "finished_at": "2026-10-14T21:59:25.036Z",
+  "finished_at": "2026-10-15T12:13:31.803Z",
   "scope": {
     "summary": "This run renders the real MCP App bundle in a real MCP Apps host, against a fixture MCP server. It qualifies the App side and the protocol libraries; it does not test the product server.",
     "real": [
@@ -285,8 +285,8 @@
   },
   "harness_binary": {
     "path": "<abs>/release/okf-qualify-mcp-apps.exe",
-    "bytes": 5308416,
-    "sha256": "8e54f1abf059746d7e1dc47a381c6f6bf5659e223075528d5220fafc0a7935a7",
+    "bytes": 5328384,
+    "sha256": "78e1bba5a8ebf12a7881ca118d04d683fc4e7cfeedbfc2dda85fe763960891a7",
     "args": [
       "--http",
       "127.0.0.1:18765"
@@ -311,7 +311,7 @@
     ]
   },
   "bundle_sizes": {
-    "app": 1605915
+    "app": 1608364
   },
   "app_bundle": {
     "node_env": "development",
@@ -336,7 +336,7 @@
     "resource_count": 1,
     "resources": [
       {
-        "byteLength": 1605915,
+        "byteLength": 1608364,
         "metaUi": {
           "csp": {
             "connectDomains": [],
@@ -348,7 +348,7 @@
         "name": "app",
         "path": "ui/dist-apps/app.html",
         "readable": true,
-        "sha256": "40569329da1c7f87c25ab60f74da979b6d2ba2ea80e8c961368ab2accf772277",
+        "sha256": "2ce1e63932f6dea5582154ca80b162ee5bb3a23c914aaa50e6bd7872860dc8da",
         "uri": "ui://okf-jawn/app.html"
       }
     ],
@@ -432,12 +432,12 @@
             "app"
           ]
         },
-        "input_schema_sha256": "4014c208d1ad4b4879f1b80da6a6491ed52b97625a6f97a908fc03870a6806e3",
+        "input_schema_sha256": "f89c68f84479c1a15a8a7a3a2f0707d9cc092cf40970b0117497eb843b273da9",
         "output_schema_sha256": "86221fcf16d504e6e51dd487e8633a2fb34707f7b22318213d1bd307aaf67c09"
       }
     ],
     "product_read_object": {
-      "input_schema_sha256": "4014c208d1ad4b4879f1b80da6a6491ed52b97625a6f97a908fc03870a6806e3",
+      "input_schema_sha256": "f89c68f84479c1a15a8a7a3a2f0707d9cc092cf40970b0117497eb843b273da9",
       "output_schema_sha256": "86221fcf16d504e6e51dd487e8633a2fb34707f7b22318213d1bd307aaf67c09"
     },
     "resources": [
@@ -451,7 +451,7 @@
       {
         "uri": "ui://okf-jawn/app.html",
         "mime_type": "text/html;profile=mcp-app",
-        "text_sha256": "40569329da1c7f87c25ab60f74da979b6d2ba2ea80e8c961368ab2accf772277",
+        "text_sha256": "2ce1e63932f6dea5582154ca80b162ee5bb3a23c914aaa50e6bd7872860dc8da",
         "csp": {
           "connectDomains": [],
           "resourceDomains": []
@@ -541,18 +541,18 @@
   "basic_host": {
     "status": "passed",
     "source": {
-      "status": "cached",
+      "status": "fetched",
       "repository": "https://github.com/modelcontextprotocol/ext-apps",
       "requested_tag": "v2.0.3",
       "commit": "82221c0c8ce7661efa6771c9d461511b1650495f",
-      "commit_resolved_at": "2026-10-14T17:17:59.255Z",
+      "commit_resolved_at": "2026-10-15T12:11:57.372Z",
       "files_verified": 14,
       "files_expected": 14,
       "package": {
         "name": "@modelcontextprotocol/ext-apps-basic-host",
         "version": "2.0.3"
       },
-      "lockfile_sha256": "7193d3a9288a2e75cf6e26d64608b624b3487c311e57a6701bb043ce6cd773cc"
+      "lockfile_sha256": "b38341600684612131571bd6d9c0228603029c9024ebfff53c10b5f8b8b10954"
     },
     "browser": {
       "name": "chromium",
@@ -858,7 +858,7 @@
   },
   "host_render": {
     "status": "not_run",
-    "meaning": "hosts/ directory exists but is empty. Place screenshots or notes from claude.ai / ChatGPT before claiming an observed host render.",
+    "meaning": "No files under .artifacts/qualification/mcp-apps/hosts/. Host render for claude.ai / ChatGPT remains not_run until screenshots or notes are placed there. This receipt does not invent PASS.",
     "gate": "mcp-apps-web-hosts"
   },
   "static_bundle_smoke": {
