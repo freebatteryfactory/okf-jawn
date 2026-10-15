@@ -381,6 +381,36 @@ test.describe('changing the tree and the naming rules', () => {
     await shot(page, '20-new-folder');
   });
 
+  test('a rename from the tree that changes only letter case is sent as such', async ({ page }) => {
+    const played = await service();
+    await routeApi(page, played.answers);
+    await page.goto(`${server.origin()}/w/${WS}`);
+    await openNotes(page);
+    // From the folder's row to the note's, by the keyboard; F2 there opens "Rename or move" for
+    // it, with focus in the name.
+    await page.keyboard.press('ArrowDown');
+    await expect(row(page, /Meeting notes/)).toBeFocused();
+    await page.keyboard.press('F2');
+    const name = page.getByRole('textbox', { name: 'File name' });
+    await expect(name).toBeFocused();
+    await expect(name).toHaveValue('meeting.md');
+    await page.keyboard.press('ControlOrMeta+a');
+    await page.keyboard.type('Meeting.md');
+    await page.keyboard.press('Enter');
+    // Not refused by the page as "where it is now": storage takes it as one move (PR #34).
+    await expect(page.getByText('“Meeting notes” is now at notes/Meeting.md.')).toBeVisible();
+    await expect(page.getByText('This is where it is now.')).toHaveCount(0);
+    expect(played.sent).toMatchObject([
+      {
+        path: 'move_item',
+        body: { item_id: NOTE, destination: 'notes/Meeting.md', base_revision: HEAD },
+      },
+    ]);
+    await expect(headLine(page)).toContainText(revision(0));
+    await expectNoAxeViolations(page, 'the tree after a case-only rename');
+    await shot(page, '24a-case-only-rename');
+  });
+
   test('rename an open item and keep its tab, then change its status', async ({ page }) => {
     const played = await service();
     await routeApi(page, played.answers);
