@@ -23,11 +23,16 @@
  *
  * The answer of each part is a job, not a finished import. It is told to the cache at once, in the
  * state it reports (`rememberJob`), and remembered as started here; the files it took leave the
- * list, since an upload is the input of one job, and the uploads the service holds are listed
- * again (`held-uploads.ts`).
+ * list, since an upload is the input of one job, the caller is told which uploads it took (so the
+ * uploads the service holds that the person included are no longer included), and the uploads the
+ * service holds are listed again (`held-uploads.ts`). All this as each part is answered, not once
+ * all are: after a later part failed, what is still to import is only what no part took.
  *
  * Idempotency: the request is repeated under the keys it had while it names the same uploads, the
  * same folder and the same base, so an import whose answer was lost is the same jobs, not more.
+ * After a part failed, "the same uploads" are those of the parts not answered yet: the uploads
+ * still to import, which is all the page then offers. So pressing Import again then is the
+ * failed part again, under its key, as the notice's retry is.
  */
 import type { QueryClient } from '@tanstack/react-query';
 import { startImport } from '../../api/generated/sdk.gen';
@@ -60,6 +65,10 @@ export interface ImportAttempt {
 export const uploadsOf = (attempt: ImportAttempt) =>
   attempt.parts.flatMap((part) => part.uploadIds);
 
+/** The uploads of the parts of an attempt that no job has taken yet, in order. */
+const pendingOf = (attempt: ImportAttempt) =>
+  attempt.parts.flatMap((part) => (part.job === null ? part.uploadIds : []));
+
 /** `uploadIds` in parts of at most `MAX_IMPORT_UPLOADS`, in order. */
 export function partsOf(uploadIds: readonly string[]): string[][] {
   const parts: string[][] = [];
@@ -69,14 +78,17 @@ export function partsOf(uploadIds: readonly string[]): string[][] {
   return parts;
 }
 
-/** The request for these uploads, this folder and this base: the last one again while the same. */
+/**
+ * The request for these uploads, this folder and this base: the last one again while the same,
+ * the uploads compared with those of its parts not answered yet.
+ */
 export function importAttempt(
   last: ImportAttempt | null,
   uploadIds: string[],
   destination: string,
   baseRevision: Revision,
 ): ImportAttempt {
-  const asked = last === null ? [] : uploadsOf(last);
+  const asked = last === null ? [] : pendingOf(last);
   const same =
     last !== null &&
     last.destination === destination &&
@@ -109,14 +121,16 @@ export function importBase(shown: Revision, mine: ReadonlyArray<Job | undefined>
 
 /**
  * Start the import, part by part: each part not answered yet, in order. `shown` is the revision
- * the workspace shows now. Resolves with the job of every part. Rejects with what a part threw;
- * the parts before it keep their jobs in the attempt, so its retry starts from that part.
+ * the workspace shows now; `taken` is told the uploads of each part as soon as a job took them.
+ * Resolves with the job of every part. Rejects with what a part threw; the parts before it keep
+ * their jobs in the attempt, so its retry starts from that part.
  */
 export async function beginImport(
   client: QueryClient,
   workspaceId: string,
   attempt: ImportAttempt,
   shown: Revision,
+  taken?: (uploadIds: readonly string[]) => void,
 ): Promise<Job[]> {
   for (const part of attempt.parts) {
     if (part.job !== null) continue;
@@ -145,6 +159,7 @@ export async function beginImport(
         .map((entry) => entry.id),
     );
     uploads.jobStarted(workspaceId, job.id, shown);
+    taken?.(part.uploadIds);
     heldUploadsChanged(client, workspaceId);
   }
   return attempt.parts.flatMap((part) => (part.job === null ? [] : [part.job]));

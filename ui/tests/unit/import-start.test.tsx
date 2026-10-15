@@ -169,6 +169,22 @@ describe('the identity of a start_import request', () => {
     expect(keyOf(importAttempt(null, ['u1'], '', HEAD))).toMatch(/^[0-9a-f-]{36}$/);
   });
 
+  it('is the one before, after a part was answered, for the uploads of the parts not answered yet', () => {
+    const begun: ImportAttempt = {
+      parts: [
+        { key: 'the-first-key', uploadIds: ['u1'], job: jobOf('queued') },
+        { key: 'the-second-key', uploadIds: ['u2'], job: null },
+      ],
+      destination: 'notes',
+      baseRevision: HEAD,
+    };
+    expect(importAttempt(begun, ['u2'], 'notes', HEAD)).toBe(begun);
+    // Naming again the uploads a job took is another request, of new parts.
+    const again = importAttempt(begun, ['u1', 'u2'], 'notes', HEAD);
+    expect(again.parts.map((part) => [part.uploadIds, part.job])).toEqual([[['u1', 'u2'], null]]);
+    expect(keyOf(again)).not.toBe('the-first-key');
+  });
+
   it(`names at most ${MAX_IMPORT_UPLOADS} uploads in one request, the contract's bound: more go in parts, in order, each under its key`, () => {
     expect(startImportSchema.properties.upload_ids.maxItems).toBe(MAX_IMPORT_UPLOADS);
     const ids = (n: number) => Array.from({ length: n }, (_, at) => `u${at}`);

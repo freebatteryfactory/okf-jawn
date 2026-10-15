@@ -14,6 +14,7 @@ import {
   waitFor,
   within,
 } from '@testing-library/react';
+import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createQueryClient } from '../../src/app/query-client';
 import { heldUploadsChanged } from '../../src/features/imports/held-uploads';
@@ -421,5 +422,82 @@ describe('an import of more uploads than one request names', () => {
       ),
     ).toBeDefined();
     expect(importButton().textContent).toBe('Import 5001 uploaded files');
+  });
+
+  /** ImportStart over uploads the service holds, as the import page keeps them included. */
+  function Holding({ held }: { held: string[] }) {
+    const [included, setIncluded] = useState(held);
+    return (
+      <ImportStart
+        workspaceId={WS}
+        head={HEAD}
+        entries={[]}
+        included={included}
+        onStarted={(taken) => setIncluded((now) => now.filter((id) => !taken.includes(id)))}
+      />
+    );
+  }
+  /** `start_import` answering a job for each part, and failing the second request it gets. */
+  const secondFails = () => {
+    let answers = 0;
+    return mockApi({
+      [START]: () => {
+        answers += 1;
+        return answers === 2
+          ? fail(503, 'unavailable', 'busy')
+          : accepted(jobOf('queued', { id: `88888888-8888-4888-8888-00000000000${answers}` }));
+      },
+    });
+  };
+  const failed = 'Starting the import: The service is temporarily unavailable.';
+
+  it('says how many parts were accepted before a part failed, and the uploads they took are taken at once', async () => {
+    secondFails();
+    const all = ids(MAX_IMPORT_UPLOADS + 1);
+    const taken = vi.fn();
+    render(
+      <QueryClientProvider client={createQueryClient()}>
+        <ImportStart workspaceId={WS} head={HEAD} entries={[]} included={all} onStarted={taken} />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(importButton());
+    expect(await screen.findByText(failed)).toBeDefined();
+    expect(
+      screen.getByText(
+        '1 part was accepted before this failure: its job is below. Trying again starts the part that failed, then the rest.',
+      ),
+    ).toBeDefined();
+    // The part the service accepted took its uploads: said at once, not only once all are started.
+    expect(taken.mock.calls).toEqual([[all.slice(0, MAX_IMPORT_UPLOADS)]]);
+  });
+
+  it('sends only what is still held at the next press of Import after a part failed: that part, under its key', async () => {
+    const api = secondFails();
+    const all = ids(MAX_IMPORT_UPLOADS + 1);
+    render(
+      <QueryClientProvider client={createQueryClient()}>
+        <Holding held={all} />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(importButton());
+    expect(await screen.findByText(failed)).toBeDefined();
+    // The uploads the first part took are no longer included: the button counts what is left.
+    await waitFor(() => expect(importButton().getAttribute('aria-disabled')).toBe('false'));
+    expect(importButton().textContent).toBe('Import 1 uploaded file');
+    // Import, not the notice's retry.
+    fireEvent.click(importButton());
+    await waitFor(() => expect(api.callsTo(START)).toHaveLength(3));
+    const [first, second, third] = api.callsTo(START);
+    expect(first?.upload_ids).toEqual(all.slice(0, MAX_IMPORT_UPLOADS));
+    expect(third?.upload_ids).toEqual(all.slice(MAX_IMPORT_UPLOADS));
+    // The same request as the part that failed: an answer lost then is not a second job now.
+    expect(third).toEqual(second);
+    expect(
+      await screen.findByText(
+        /^Import of 5001 files into the top of the workspace was accepted in 2 parts/,
+      ),
+    ).toBeDefined();
+    expect(importButton().textContent).toBe('Import 0 uploaded files');
+    expect(api.violations).toEqual([]);
   });
 });

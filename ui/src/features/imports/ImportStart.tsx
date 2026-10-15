@@ -9,7 +9,9 @@
  * holds that the person included (`WaitingUploads.tsx`); the button says how many. It is always
  * there (`aria-disabled` with nothing to import, and while it works), so it keeps keyboard focus.
  * More than `MAX_IMPORT_UPLOADS` files are imported in parts, one job each, and the page says so
- * before the button is pressed.
+ * before the button is pressed. The uploads each part took leave what is included as soon as the
+ * part is accepted, so after a later part failed, Import names only what no part took: the part
+ * that failed again, under its key (`importAttempt`), and the parts after it.
  *
  * The answer is a job for each part. Each is shown at once below, in the state the service
  * reported, and a polite status says so; it is never worded as an import that has finished. From
@@ -89,7 +91,7 @@ export interface ImportStartProps {
   entries: readonly UploadEntry[];
   /** Uploads the service holds that the person included in the import, beside the list's own. */
   included: readonly string[];
-  /** The import of these uploads started: they are taken. */
+  /** A job took these uploads: told for each part of an import, as soon as it is accepted. */
   onStarted?: (uploadIds: readonly string[]) => void;
 }
 
@@ -124,13 +126,15 @@ export function ImportStart({ workspaceId, head, entries, included, onStarted }:
   const parts = partsOf(ready).length;
   const last = useRef<ImportAttempt | null>(null);
   const start = useMutation({
-    mutationFn: (attempt: ImportAttempt) => beginImport(client, workspaceId, attempt, head),
+    // The uploads of each part are taken as soon as its job is: a part that fails after it does
+    // not leave them included, to be named again.
+    mutationFn: (attempt: ImportAttempt) =>
+      beginImport(client, workspaceId, attempt, head, (taken) => onStarted?.(taken)),
     onSuccess: (jobs, attempt) => {
       last.current = null;
       const where =
         attempt.destination === '' ? 'the top of the workspace' : `“${attempt.destination}”`;
       setSaid(startedWords(uploadsOf(attempt).length, where, jobs));
-      onStarted?.(uploadsOf(attempt));
     },
   });
   const begin = () => {
@@ -229,8 +233,9 @@ export function ImportStart({ workspaceId, head, entries, included, onStarted }:
       </p>
       {failure.shown && startedParts > 0 && (
         <p role="note" className="notice">
-          {count(startedParts, 'part was', 'parts were')} accepted before this failure: their jobs
-          are below. Trying again starts the part that failed, then the rest.
+          {count(startedParts, 'part was', 'parts were')} accepted before this failure:{' '}
+          {startedParts === 1 ? 'its job is' : 'their jobs are'} below. Trying again starts the part
+          that failed, then the rest.
         </p>
       )}
       {failure.shown && folderRefused === null && (
