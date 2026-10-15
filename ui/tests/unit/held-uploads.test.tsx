@@ -106,7 +106,7 @@ describe('the uploads the service holds', () => {
   });
 
   it('does not list again an upload this page’s own list holds', async () => {
-    const { service, queryClient } = await openWith([older]);
+    const { api, service, queryClient } = await openWith([older]);
     const opened = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(function open(
       this: HTMLInputElement,
     ) {
@@ -118,8 +118,12 @@ describe('the uploads the service holds', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Upload 1 file' }));
     await waitFor(() => expect(importButton().textContent).toBe('Import 1 uploaded file'));
     // Listed again once the upload finished: the service holds it, and so does the page's list.
+    const asked = api.callsTo(LIST_UPLOADS).length;
     act(() => heldUploadsChanged(queryClient, WS));
-    await waitFor(() => expect(service.slots.filter((slot) => slot.complete)).toHaveLength(2));
+    expect(service.slots.filter((slot) => slot.complete)).toHaveLength(2);
+    // Both lists asked again, and the answer drawn: it holds the page's own upload too.
+    await waitFor(() => expect(api.callsTo(LIST_UPLOADS).length).toBe(asked + 2));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
     await waitFor(() =>
       expect(
         within(waitingList())
