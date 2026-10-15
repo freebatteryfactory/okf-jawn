@@ -307,7 +307,14 @@ fn links_of(
     file: &ItemFile,
     by_path: &BTreeMap<String, ItemId>,
 ) -> Vec<Link> {
-    let source = ConceptId::parse(path.as_str().trim_end_matches(".md")).ok();
+    // One `.md` comes off, as okf-core's `ConceptId::from_path` takes it: the item at
+    // `x/.md.md` is the concept `x/.md`, whose links resolve from `x/`.
+    let source = ConceptId::parse(
+        path.as_str()
+            .strip_suffix(".md")
+            .unwrap_or_else(|| path.as_str()),
+    )
+    .ok();
     let mut links = Vec::new();
     for (index, line) in file.document.body.lines().enumerate() {
         for link in okf_core::links::extract_links(line) {
