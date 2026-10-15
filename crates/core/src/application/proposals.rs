@@ -57,7 +57,8 @@
 //!    proposal is `conflict`, it becomes `accepted` from `conflict` instead: this mutation's
 //!    promotion landed (step 3 answered it, or a resumed attempt found it by the mutation), so
 //!    the mark is false. It was set by a second acceptance in the window after this promotion
-//!    landed and before this step, which the store refused because this promotion moved the head.
+//!    landed and before this step, which the store refused as stale because this promotion had
+//!    moved the head off the proposal's base.
 //! 5. The new revision is indexed and a `changed` event appended (`shared::announce`); it names
 //!    no item, because a proposal may change several.
 //! 6. A `proposal_updated` event naming the proposal.
@@ -89,8 +90,9 @@
 //! proposal when the comment of this mutation (`derive_comment_id`) is among its comments, and
 //! `conflict` otherwise. The candidate reference stays: it is history. Known limit: a change of
 //! the status by someone else between this decline's check and its compare-and-set (an accept
-//! that lands then) leaves the reason comment on that proposal, and the decline answers the
-//! compare-and-set's `conflict`.
+//! that lands then, or another person's decline: the store takes an identical change as a retry
+//! only from the mutation that wrote it) leaves the reason comment on that proposal, and the
+//! decline answers the compare-and-set's `conflict`.
 //!
 //! Comments (`add_comment`) are allowed on a proposal in any status. A comment's source is
 //! checked as every citation is, in its own workspace (`sources::checked_citation`), and kept
