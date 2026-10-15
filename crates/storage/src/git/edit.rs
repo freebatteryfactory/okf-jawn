@@ -231,11 +231,11 @@ impl Staged {
     }
 
     /// Whether a file or folder of the staged tree (an empty folder an earlier edit left
-    /// included), or an item, already holds `path`'s collision key, or a path below it, or
-    /// whether a file holds the key of a folder above it. The staged directory is listed and
-    /// compared by key (`entries_under`), so a folder spelled another way counts on a
-    /// filesystem that holds `report.md/` and `Report.md` apart as on one that holds them as
-    /// one.
+    /// included), or an item, already holds `path`'s collision key, or a path below it (whose
+    /// folder at that key is listed too), or whether a file holds the key of a folder above it.
+    /// The staged directory is listed and compared by key (`entries_under`), so a folder spelled
+    /// another way counts on a filesystem that holds `report.md/` and `Report.md` apart as on
+    /// one that holds them as one.
     ///
     /// `own` is the moved item's own file, for a move. Only when it holds `path`'s own key (a
     /// rename that changes only letter case, see the module header) is it not counted; then,
@@ -248,7 +248,6 @@ impl Staged {
         if own.is_none() && self.root.join(path.as_str()).exists() {
             return Ok(true);
         }
-        let folder_prefix = format!("{key}/");
         // Every folder the path would need: a file already holding one of those keys blocks it.
         let folders: Vec<&str> = key
             .match_indices('/')
@@ -259,9 +258,8 @@ impl Staged {
                 return false;
             }
             let existing = collision_key(existing);
-            existing == key
-                || existing.starts_with(&folder_prefix)
-                || (!folder && folders.contains(&existing.as_str()))
+            // Anything below `path` is under a folder at its key, which is an entry itself.
+            existing == key || (!folder && folders.contains(&existing.as_str()))
         }) || self
             .items
             .values()
