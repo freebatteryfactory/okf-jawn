@@ -1,0 +1,31 @@
+# core M1.3b: the integration owner's rulings on the design (2026-10-14)
+
+On core-m1-3b-design.md (phase 1). Phase 2 builds the design as written, with these rulings. Format: ruling — why.
+
+## The open questions
+- **Q1 first match; Q2 globs compared as collision keys; Q3 the glob shape as stated; Q5 `snake` needs `_` and `kebab` needs `-`; Q8 the date spellings as stated, year-first always year-month-day; Q9 an ambiguous date leaves the whole item unchanged with a warning; Q10 `time`'s format-description syntax (version 3), an empty format keeps dates as written; Q11 date placeholders only, one rule per type for type-dependent destinations, an empty destination refused; Q13 the extension policy acts on a source card's extension tail, `.md` always lower case; Q14 collisions as stated, an import never fails on naming; Q15 at most 256 rules, 1,024 bytes a text field, 1,000 entries an apply; Q16 an import's collision keys at its base revision (ruling 26, R-I8: the brief's "head" was wrong); Q17 as stated.** Accepted as proposed — engineering calls with a stated reason each in the design.
+- **Q4 word breaks: space, `-` and `_` only (owner decision).** No camelCase or letter/digit splitting: `iPhone` and `PowerPoint` stay whole.
+- **Q6 Title case: a word that already holds a capital is kept as written (owner decision);** other words get a capital first letter (`über` becomes `Über`).
+- **Q7 the standard version-suffix list (owner decision):** trailing `v2`, `v1.2`, `final`, `copy`, `copy 2` after a space, `-` or `_`, and ` (1)`, any case, repeatedly, never emptying the name; `draft`, `old`, `rev2` and a bare `-2` are kept.
+- **Q12 aliases: the old path is recorded, and reviews are not touched (owner decision).** A rename with `alias_preservation` appends the item's old path to its frontmatter `aliases` list (existing entries kept, the old path not added twice). The review fingerprint (`ItemDocument.content_digest`) leaves out `aliases`, so a pure rename never turns a reviewed item to `changed`: that digest change is contract batch 2's ruling 31 (it lands with the contract change, before phase 2). P2 (`keep_alias` on `MoveItem`) is therefore needed and is built in phase 2.
+
+## The requests
+- **Manifest (mine, the first commit of the phase 2 branch):** `glob` 0.3.4, `convert_case` 0.12.0, `regex` 1.13.1 and `unicode-normalization` 0.1.25 become core dependencies (pinned in the workspace manifest as every dependency is), and `time`'s features are stated; vendor notes for each. Both receipts go stale; I requalify Docling and MCP Apps at integration.
+- **P0** (`VersionStore::rules` answers the file's text and the parse result with line and column), **P1** (one-pass tree listing with each source card's original name, including dot-folders), **P2** (`MoveItem.keep_alias`): built in phase 2 as port changes (core doc, storage, every fake), each with its storage test.
+- **K1 and K2 (a case-only rename is refused; dropping the check would delete the file on a case-insensitive filesystem): moved out to the storage-paths package (storage-paths-brief.md, ruling S1), which runs now and lands before phase 2.** A move whose source and target differ only in case goes through a parked name beside the source inside storage's edit, so `Report.md` to `report.md` works for every caller; `apply_names` therefore needs no workaround of its own and uses `MoveItem` as it is.
+- **K3 (`.MD` items invisible to okf-core): moved to the storage-paths package too (ruling S3): a note's file ends in `.md` in lower case; `X.MD` is refused at the door with the fix named. The extension policy of Q13 already writes `.md`.**
+- **K4 (a segment over 255 UTF-16 units):** SPEC section 2 refuses it; contract batch 2's ruling 30 (`WorkspacePath`). A rule that would produce one gives that entry a warning and no rename.
+- **K5 (an apply reloads the bundle per move) and K6 (`show` and `list` scan every item):** carried as performance items in the plan; the 1,000-entry bound of Q15 stands until a batch move exists.
+- **K7:** the MCP server's result budget applies to the `rules` tool, as to every tool.
+
+## When
+Phase 2 starts after contract batch 2 is on main (it needs the `GetRulesResponse` wrapper, the `preview_names` selection, the titles, rulings 30 and 31). The integration owner then creates its branch, commits the manifest change, and sends the builder on with this file.
+
+## Carried into phase 2 (2026-10-15)
+- **The stale core comment.** `crates/core/src/application/history.rs` around line 417 says the store refuses a move between two spellings of one key. Since PR #34 the store moves between them, as one move through a parked name. Correct the sentence. If `item_restore` treats a case-only difference specially because of it, test that a Rewind of a case-only rename works.
+- **Use what main now has.**
+  - `MoveItem` takes a case-only rename as one move, so `apply_names` uses it directly.
+  - Contract ruling 33's `collision_key_of` gives the key of any string; use it, not a key computation of your own.
+  - Contract ruling 32's `fit_segment` and N8's `numbered_source_card_name` shorten card names; the import's naming function (R-I4) uses them rather than its own.
+- **A link to a file survives a move (PR #35),** so `apply_names`' moves keep file links. Do not re-test okf-core's link rewriting; test only that `apply_names` goes through `MoveItem`.
+- **`RenamePlan.refused` (contract, committed on this branch as 68b00f9).** `preview_names` counts the items whose rules give a refused name apart from `unchanged`: a collision under `reject`, a result that is no `WorkspacePath`, or an ambiguous date. Each is named in the plan's warnings, and `considered = entries + unchanged + refused`. Test the identity.
