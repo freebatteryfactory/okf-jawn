@@ -13,7 +13,7 @@ import {
 } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CSRF_COOKIE, CSRF_HEADER } from '../../src/app/api-client';
-import { MAX_FILE_BYTES, useUploads } from '../../src/features/imports/upload-list';
+import { boundOver, MAX_FILE_BYTES, useUploads } from '../../src/features/imports/upload-list';
 import { resetUploads, UPLOADS_AT_ONCE } from '../../src/features/imports/uploading';
 import { fail, type Handler, mockApi, ok } from './support/api';
 import {
@@ -451,7 +451,36 @@ describe('choosing files', () => {
       expect(api.violations).toEqual([]);
     });
 
-    it('applies it, once read, to the files listed before it was known, before any is sent', async () => {
+    it('says the smaller of the two bounds a file is over: the page’s, or the service’s', () => {
+      const MiB = 1024 * 1024;
+      expect(boundOver(600 * MiB, 100 * MiB)).toEqual({ bytes: 100 * MiB, whose: 'service' });
+      expect(boundOver(600 * MiB, 1024 * MiB)).toEqual({ bytes: MAX_FILE_BYTES, whose: 'page' });
+      expect(boundOver(MAX_FILE_BYTES + 1, null)).toEqual({ bytes: MAX_FILE_BYTES, whose: 'page' });
+      expect(boundOver(4, 3)).toEqual({ bytes: 3, whose: 'service' });
+      expect(boundOver(3, 3)).toBeNull();
+      expect(boundOver(MAX_FILE_BYTES, null)).toBeNull();
+    });
+
+    it('applies it, once read, to the files listed before it was known', async () => {
+      let answer: (() => void) | null = null;
+      setup(uploadService(), {
+        [SESSION]: () =>
+          new Promise((resolve) => {
+            answer = () => resolve(session('3')());
+          }),
+      });
+      await openImport();
+      choose('Choose files…', [fileOf('over.txt', 'abcd')]);
+      expect(rowOf('over.txt').textContent).toContain('Not sent yet.');
+      act(() => answer?.());
+      await waitFor(() =>
+        expect(rowOf('over.txt').textContent).toContain(
+          'Too large: the service takes files of up to 3 bytes.',
+        ),
+      );
+    });
+
+    it('waits for the limit when Upload is pressed before it is read, and sends nothing over it', async () => {
       let answer: (() => void) | null = null;
       const { api } = setup(uploadService(), {
         [SESSION]: () =>
