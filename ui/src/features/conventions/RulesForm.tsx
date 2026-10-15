@@ -8,10 +8,12 @@
  * accepts no unknown key, such a key is reported as a problem, by its name, until it is removed.
  *
  * Every problem is shown at its field and in a list above the form. A preview is asked only for
- * rules without a problem (`onPreview`); `onChange` reports every change, valid or not.
+ * rules without a problem (`onPreview`); `onChange` reports every change, valid or not. A refusal
+ * of the service at a field (`fieldRefusal`: a JSON Pointer into the rules, ruling 5) is shown at
+ * that field too (`refusalAt`).
  */
 import Form from '@rjsf/core';
-import type { IconButtonProps, RJSFSchema, RJSFValidationError } from '@rjsf/utils';
+import type { ErrorSchema, IconButtonProps, RJSFSchema, RJSFValidationError } from '@rjsf/utils';
 import { customizeValidator } from '@rjsf/validator-ajv8';
 import { flushSync } from 'react-dom';
 import type { NamingRules } from '../../api/generated/types.gen';
@@ -29,6 +31,24 @@ export interface RulesFormProps {
   onChange?: (value: unknown) => void;
   /** A preview is being made: the button says so and asks for nothing more meanwhile. */
   previewing?: boolean;
+  /** Errors the service gave at fields, shown there (`refusalAt`). */
+  extraErrors?: ErrorSchema<NamingRules> | undefined;
+}
+
+/**
+ * A refusal at `keys` (the steps of a JSON Pointer into the rules) as the form's errors: the
+ * message at that field. The form names a field's element `root_<steps joined by _>`
+ * (`fieldElementId`).
+ */
+export function refusalAt(keys: readonly string[], message: string): ErrorSchema<NamingRules> {
+  let errors: Record<string, unknown> = { __errors: [message] };
+  for (const key of [...keys].reverse()) errors = { [key]: errors };
+  return errors as ErrorSchema<NamingRules>;
+}
+
+/** The id of the element of the field at `keys`, as the form names it. */
+export function fieldElementId(keys: readonly string[]): string {
+  return ['root', ...keys].join('_');
 }
 
 /**
@@ -99,7 +119,14 @@ const BUTTONS = {
   CopyButton: worded('Copy this rule'),
 };
 
-export function RulesForm({ schema, value, onPreview, onChange, previewing }: RulesFormProps) {
+export function RulesForm({
+  schema,
+  value,
+  onPreview,
+  onChange,
+  previewing,
+  extraErrors,
+}: RulesFormProps) {
   return (
     <Form<NamingRules>
       className="rules-form"
@@ -110,6 +137,7 @@ export function RulesForm({ schema, value, onPreview, onChange, previewing }: Ru
       noHtml5Validate
       validator={validator}
       transformErrors={named}
+      {...(extraErrors === undefined ? {} : { extraErrors })}
       templates={{ ButtonTemplates: BUTTONS }}
       onChange={(event) => onChange?.(event.formData)}
       onSubmit={(event) => {

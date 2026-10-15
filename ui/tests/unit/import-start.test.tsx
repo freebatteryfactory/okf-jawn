@@ -590,6 +590,32 @@ describe('starting the import', () => {
     expect(api.callsTo(JOBS)).toHaveLength(2);
   });
 
+  it('shows a refusal of the folder at its field, which takes focus, and not as a notice', async () => {
+    const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {
+      [START]: () => ({
+        status: 400,
+        body: {
+          code: 'invalid_input',
+          message: 'a folder ends with no dot',
+          field: '/destination',
+        },
+      }),
+    });
+    const folder = screen.getByRole('combobox', { name: 'Folder to import into' });
+    fireEvent.change(folder, { target: { value: 'notes.' } });
+    fireEvent.click(importButton());
+    await eventually(() => expect(folder.getAttribute('aria-invalid')).toBe('true'));
+    expect(document.activeElement).toBe(folder);
+    expect(folder.getAttribute('aria-describedby') ?? '').toContain(
+      screen.getByText('The service refused this folder: a folder ends with no dot').id,
+    );
+    expect(screen.queryByText(/^Starting the import:/)).toBeNull();
+    // Typing another folder takes the refusal away.
+    fireEvent.change(folder, { target: { value: 'notes' } });
+    expect(folder.getAttribute('aria-invalid')).toBe('false');
+    expect(api.callsTo(START)).toHaveLength(1);
+  });
+
   // An import's base is stated by the contract (ruling 26): a head that moved does not refuse it.
   // So no conflict is read as a stale base, whatever field it names.
   it.each([

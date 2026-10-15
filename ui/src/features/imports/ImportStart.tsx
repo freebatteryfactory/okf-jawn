@@ -15,8 +15,10 @@
  * reported, and a polite status says so; it is never worded as an import that has finished. From
  * then on its row follows the job (`features/jobs`).
  *
- * A refusal is shown in the words of its code, with the service's own beside them. A head that
- * moved since the base does not refuse an import (ruling 26), so nothing here speaks of one.
+ * A refusal is shown in the words of its code, with the service's own beside them. A refusal of the
+ * folder (its `field` is the JSON Pointer `/destination`, ruling 5) is shown at the folder's field
+ * instead, which takes keyboard focus. A head that moved since the base does not refuse an import
+ * (ruling 26), so nothing here speaks of one.
  *
  * What the import is based on is `importBase` (`import-start.ts`): the revision shown, or the
  * revision this page's own finished import made, when that is newer than what is shown. The page
@@ -24,10 +26,11 @@
  */
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { Job, Revision } from '../../api/generated/types.gen';
 import { short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
+import { classifyFailure } from '../errors/failure';
 import { useRetry } from '../errors/retry';
 import type { FolderListing } from '../explorer/folder-listing';
 import { useJobsFeed } from '../jobs/feed';
@@ -103,6 +106,8 @@ function startedWords(attemptFiles: number, where: string, jobs: readonly Job[])
 export function ImportStart({ workspaceId, head, entries, included, onStarted }: ImportStartProps) {
   const client = useQueryClient();
   const folderId = useId();
+  const folderRef = useRef<HTMLInputElement | null>(null);
+  const folderErrorId = useId();
   const hintId = useId();
   const suggestionsId = useId();
   const buttonRef = useRef<HTMLButtonElement | null>(null);
@@ -141,6 +146,18 @@ export function ImportStart({ workspaceId, head, entries, included, onStarted }:
     run: () => (last.current === null ? Promise.resolve() : start.mutateAsync(last.current)),
     loaded: () => buttonRef.current,
   });
+  // A refusal of the folder: shown at its field, which takes keyboard focus when it arrives.
+  const refusal = start.isError ? classifyFailure(start.error) : null;
+  const folderRefused =
+    refusal?.kind === 'api' && refusal.error.field === '/destination'
+      ? refusal.error.message
+      : null;
+  const focusedFor = useRef<unknown>(null);
+  useLayoutEffect(() => {
+    if (folderRefused === null || focusedFor.current === start.error) return;
+    focusedFor.current = start.error;
+    folderRef.current?.focus();
+  });
   // The parts already accepted, when a later one failed.
   const startedParts = last.current?.parts.filter((part) => part.job !== null).length ?? 0;
 
@@ -157,13 +174,24 @@ export function ImportStart({ workspaceId, head, entries, included, onStarted }:
         <label htmlFor={folderId}>Folder to import into</label>
         <input
           id={folderId}
+          ref={folderRef}
           type="text"
           value={destination}
           list={suggestionsId}
-          aria-describedby={hintId}
+          aria-describedby={folderRefused === null ? hintId : `${folderErrorId} ${hintId}`}
+          aria-invalid={folderRefused !== null}
           autoComplete="off"
-          onChange={(event) => setDestination(event.target.value)}
+          onChange={(event) => {
+            setDestination(event.target.value);
+            // The refusal was of the folder typed before.
+            if (folderRefused !== null) start.reset();
+          }}
         />
+        {folderRefused !== null && (
+          <p id={folderErrorId} className="field-error">
+            The service refused this folder: {folderRefused}
+          </p>
+        )}
         <datalist id={suggestionsId}>
           {folders.map((folder) => (
             <option key={folder} value={folder} />
@@ -205,7 +233,7 @@ export function ImportStart({ workspaceId, head, entries, included, onStarted }:
           are below. Trying again starts the part that failed, then the rest.
         </p>
       )}
-      {failure.shown && (
+      {failure.shown && folderRefused === null && (
         <FailureNotice
           context="Starting the import"
           error={failure.error}

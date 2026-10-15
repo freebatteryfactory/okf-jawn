@@ -669,6 +669,88 @@ describe('a new note and a new folder', () => {
     expect(api.callsTo(CREATE)).toHaveLength(1);
   });
 
+  it('moves keyboard focus to the field a refusal names: its JSON Pointer into the request', async () => {
+    service({
+      [CREATE]: () => refuse(400, 'invalid_input', 'a title is at most 200 bytes', '/title'),
+    });
+    await openTree();
+    await userEvent.click(button('New note'));
+    await userEvent.type(field('Title'), 'Decisions');
+    await userEvent.click(button('Create the note'));
+    const title = field('Title');
+    await waitFor(() => expect(title.getAttribute('aria-invalid')).toBe('true'));
+    expect(document.activeElement).toBe(title);
+    expect(document.getElementById(title.getAttribute('aria-describedby') ?? '')?.textContent).toBe(
+      'The service refused this: a title is at most 200 bytes',
+    );
+  });
+
+  it('offers the version a stale-base refusal names, without asking for the head', async () => {
+    const { api } = service({
+      [CREATE]: () => ({
+        status: 409,
+        body: {
+          code: 'conflict',
+          message: 'the head moved',
+          field: '/base_revision',
+          detail: { kind: 'stale_base', head: FIRST },
+        },
+      }),
+    });
+    await openTree();
+    const opened = api.callsTo(OPEN).length;
+    await userEvent.click(button('New note'));
+    await userEvent.type(field('Title'), 'Decisions');
+    await userEvent.click(button('Create the note'));
+    expect(
+      await screen.findByText(
+        'The workspace has a newer version than the one shown here: it now holds revision cccccccccc, and a change is only made on the version you see. Show that version, check this form, then press its button again.',
+      ),
+    ).toBeTruthy();
+    // The refusal named the head: nothing more is asked to learn it (the one request since is the
+    // shell's own check, which runs after every refusal).
+    expect(api.callsTo(OPEN).length - opened).toBe(1);
+    expect(screen.queryByRole('button', { name: 'Refresh the workspace' })).toBeNull();
+    const show = button('Show revision cccccccccc');
+    act(() => show.focus());
+    await userEvent.click(show);
+    expect(screen.getByText(/Showing the workspace as of/).textContent).toContain('cccccccccc');
+    expect(
+      screen.getByText(
+        'The workspace now shows revision cccccccccc. Nothing was changed yet: check this form, then press its button again.',
+      ),
+    ).toBeTruthy();
+    // The notice left with focus in it: focus is on the form's button, not on the page.
+    expect(document.activeElement).toBe(button('Create the note'));
+    expect(api.violations).toEqual([]);
+  });
+
+  it('says an archived workspace as archived, with no retry and no head asked', async () => {
+    const { api } = service({
+      [CREATE]: () => ({
+        status: 409,
+        body: {
+          code: 'conflict',
+          message: 'the workspace is archived',
+          detail: { kind: 'workspace_archived', archived_at: '2026-01-02T08:15:00.000Z' },
+        },
+      }),
+    });
+    await openTree();
+    const opened = api.callsTo(OPEN).length;
+    await userEvent.click(button('New note'));
+    await userEvent.type(field('Title'), 'Decisions');
+    await userEvent.click(button('Create the note'));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Creating the note: This workspace is archived.');
+    expect(alert.textContent).toMatch(/nothing in it can be changed until it is unarchived/);
+    expect(alert.textContent).not.toMatch(/newer version/);
+    expect(
+      screen.queryByRole('button', { name: /Try again|Reload|Refresh the workspace/ }),
+    ).toBeNull();
+    expect(api.callsTo(OPEN).length - opened).toBeLessThanOrEqual(1);
+  });
+
   it('creates a folder and puts keyboard focus on its row', async () => {
     const { api } = service();
     renderAt(`/w/${WS}`);

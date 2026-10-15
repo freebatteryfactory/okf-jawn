@@ -88,7 +88,7 @@ import {
   type YamlEditorHandle,
   YamlFindings,
 } from '../../lib/YamlEditor';
-import { writeYaml, type YamlPlace, type YamlRead } from '../../lib/yaml';
+import { pointerKeys, writeYaml, type YamlPlace, type YamlRead } from '../../lib/yaml';
 import { readOffThread } from '../../lib/yaml-reading';
 import { short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
@@ -97,7 +97,7 @@ import type { HeadChange } from '../explorer/head';
 import { ChangeFailure, useChange } from '../tree/ChangeForms';
 import { useWorkspaceChanges } from '../tree/context';
 import { folderProblem } from '../tree/names';
-import { formHolds, RulesForm, rulesProblems } from './RulesForm';
+import { fieldElementId, formHolds, RulesForm, refusalAt, rulesProblems } from './RulesForm';
 import {
   applyPreview,
   keepOrder,
@@ -436,6 +436,29 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
     // A failed save is repeated only while the rules on screen are the ones it carried.
     (carried) => rules !== null && sameRules(carried, rules),
   );
+  // A refusal of the save at a field of the rules (`/rules/…`, a JSON Pointer into the request):
+  // shown at that field in the form, which takes keyboard focus there once when it arrives.
+  const refusedKeys =
+    save.refused !== null && save.refused.field.startsWith('/rules/')
+      ? pointerKeys(save.refused.field.slice('/rules'.length))
+      : null;
+  const fieldRefusal =
+    refusedKeys === null || save.refused === null
+      ? undefined
+      : refusalAt(refusedKeys, `The service refused this: ${save.refused.message}`);
+  const focusedRefusal = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    const field = save.refused?.field ?? null;
+    if (field === null) {
+      focusedRefusal.current = null;
+      return;
+    }
+    if (refusedKeys === null || view !== 'form' || focusedRefusal.current === field) return;
+    const element = document.getElementById(fieldElementId(refusedKeys));
+    if (element === null) return;
+    focusedRefusal.current = field;
+    element.focus();
+  });
   const previewing = useMutation({
     mutationFn: (asked: { rules: NamingRules; folder: string; head: Revision }) =>
       previewRenames(workspaceId, asked.head, asked.rules, asked.folder),
@@ -753,6 +776,7 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
                       <RulesForm
                         schema={form}
                         value={value}
+                        extraErrors={fieldRefusal}
                         onChange={(next) => {
                           // The form is one view of the value: the YAML is written from it again,
                           // its keys where they were.

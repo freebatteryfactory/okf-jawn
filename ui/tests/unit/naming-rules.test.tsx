@@ -1086,6 +1086,23 @@ describe('a refusal that names a field of the rules or of a preview', () => {
     expect(api.callsTo(SET)).toHaveLength(1);
   });
 
+  it('set_rules: a refusal at a field of the form is shown at that field, which takes focus', async () => {
+    service({
+      [SET]: () =>
+        refuse(400, 'invalid_input', 'the glob does not parse: unclosed [', '/rules/rules/0/glob'),
+    });
+    await openRules();
+    await setPrefix('2025-');
+    await userEvent.click(button('Save the rules'));
+    await refusalWith('the glob does not parse: unclosed [');
+    const glob = within(panel()).getByRole('textbox', { name: /^Applies to paths/ });
+    await waitFor(() => expect(document.activeElement).toBe(glob));
+    expect(glob.id).toBe('root_rules_0_glob');
+    expect(panel().querySelector('#root_rules_0_glob__error')?.textContent).toContain(
+      'The service refused this: the glob does not parse: unclosed [',
+    );
+  });
+
   it('apply_names: the field is named in the notice, and nothing reads as renamed', async () => {
     const { api } = service({
       [APPLY]: () =>

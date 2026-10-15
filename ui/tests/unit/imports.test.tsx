@@ -807,6 +807,31 @@ describe('uploading', () => {
     );
   });
 
+  it('says what the slot holds against what was announced when the finish names a mismatch', async () => {
+    const service = uploadService();
+    service.script.complete.push(() => ({
+      status: 409,
+      body: {
+        code: 'conflict',
+        message: 'the upload does not match',
+        detail: { kind: 'upload_mismatch', expected_bytes: '3', received_bytes: '2' },
+      },
+    }));
+    setup(service);
+    await openImport();
+    choose('Choose files…', [fileOf('a.txt', 'abc')]);
+    upload();
+    await notUploaded('a.txt');
+    const row = rowOf('a.txt');
+    expect(row.textContent).toContain(
+      'Uploading a.txt: What the service holds does not match this file.',
+    );
+    expect(row.textContent).toContain(
+      'It was announced with 3 bytes and holds 2. Send it again: the file goes into a new upload.',
+    );
+    expect(within(row).getByRole('button', { name: 'Send it again' })).toBeDefined();
+  });
+
   it('reads too large as too large when it is the slot, asked again, that is refused', async () => {
     const service = uploadService();
     service.script.put.push((transfer, usual) => {
