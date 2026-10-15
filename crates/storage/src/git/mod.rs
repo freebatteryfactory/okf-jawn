@@ -65,6 +65,10 @@ struct Write {
     edits: Vec<TreeEdit>,
 }
 
+/// The refusal of a candidate whose proposal's reference another write already set: it is about
+/// no base, so it carries no `StaleBase`.
+const CANDIDATE_TAKEN: &str = "this proposal already has a candidate from another write";
+
 impl GitVersions {
     pub(crate) const fn new(repositories: Repositories, records: Db, blobs: LocalBlobs) -> Self {
         Self {
@@ -384,10 +388,7 @@ impl VersionStore for GitVersions {
                             warnings::replayed(&records, scope, changes.mutation_id, retained)?;
                         return Ok((replay, named_by(&repository, retained, named)?));
                     }
-                    return Err(ApiError::new(
-                        ErrorCode::Conflict,
-                        "this proposal already has a candidate from another write",
-                    ));
+                    return Err(ApiError::new(ErrorCode::Conflict, CANDIDATE_TAKEN));
                 }
                 let mutation_id = changes.mutation_id;
                 let write = Write {
@@ -642,7 +643,12 @@ fn promote(
     })
 }
 
-/// Point `name` at `commit`, only if it still points at `current` (or does not exist).
+/// Point `name` at `commit`, only if it still points at `current`; with no `current`, only if
+/// it does not exist yet.
+///
+/// A lost compare-and-set of the head (`current` given) means the head is not the expected one:
+/// `moved_head`, with `StaleBase`. A candidate's reference that another write set meanwhile
+/// (no `current`) is about no base: a plain `Conflict` (`CANDIDATE_TAKEN`).
 fn move_reference(
     repository: &Repository,
     name: &str,
@@ -656,13 +662,15 @@ fn move_reference(
         None => repository.reference(name, commit, false, "okf-jawn candidate"),
     };
     moved.map(|_| ()).map_err(|error| {
-        if matches!(
+        if !matches!(
             error.code(),
             git2::ErrorCode::Modified | git2::ErrorCode::Exists
         ) {
-            moved_head(repository)
-        } else {
-            git(&error)
+            return git(&error);
+        }
+        match current {
+            Some(_) => moved_head(repository),
+            None => ApiError::new(ErrorCode::Conflict, CANDIDATE_TAKEN),
         }
     })
 }

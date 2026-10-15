@@ -525,7 +525,9 @@ pub trait VersionStore: Send + Sync {
     /// (`derive_commit_mutation_id`). When a commit carrying this mutation's trailer
     /// already lies after `expected_head` on the head's history, that commit is returned with
     /// `replayed` set, the check is not run and nothing is written. Otherwise, when the head is
-    /// not `expected_head`, the call fails with `Conflict` and writes nothing.
+    /// not `expected_head` (an `expected_head` the repository does not hold included), the call
+    /// fails with `Conflict` and writes nothing. That refusal carries `ErrorDetail::StaleBase`
+    /// naming the head and no `field`: the caller, which knows its request, names the field.
     ///
     /// `check` runs once on the staged candidate tree, and is told which other files the edits
     /// made the store rewrite (`CandidateCheck::check`, `rewritten`). Its error rejects the
@@ -606,6 +608,8 @@ pub trait VersionStore: Send + Sync {
     /// answered with the check's findings (`Committed::warnings`), which the store keeps with
     /// it as it keeps a commit's, so a repeat answers the same findings, `replayed` set (or
     /// the one warning `replay_warnings_unavailable` when it kept none for that candidate).
+    /// When another write already set the reference, the call fails with a plain `Conflict`: it
+    /// is about no base, so it carries no `StaleBase`.
     fn create_candidate<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -615,7 +619,8 @@ pub trait VersionStore: Send + Sync {
     ) -> PortFuture<'a, Committed>;
     /// Accept a candidate: commit the candidate's exact tree on top of `expected_head`.
     ///
-    /// Fails with `Conflict`, writing nothing, when the head is not `expected_head`, when the
+    /// Fails with `Conflict`, writing nothing, when the head is not `expected_head` (with
+    /// `ErrorDetail::StaleBase` naming the head and no `field`, as `commit`), when the
     /// candidate's parent is not `expected_head`, or when `candidate` is not the revision the
     /// proposal reference retains. The promoted tree is the tree that was checked when the
     /// candidate was created, so no check runs here and the result has no warnings. Idempotent

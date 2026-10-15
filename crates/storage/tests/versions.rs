@@ -60,6 +60,13 @@ struct Interloper {
     moved_to: std::sync::Mutex<Option<git2::Oid>>,
 }
 
+/// A check that, while a candidate is staged, sets the candidate's proposal reference to the head
+/// as another write of the same proposal would (another handle on the same repository).
+struct SetsTheReference {
+    repository: std::path::PathBuf,
+    reference: String,
+}
+
 /// A check that accepts every candidate with the warnings it was made with, and counts its runs.
 struct Warns {
     warnings: Vec<Warning>,
@@ -136,6 +143,22 @@ impl CandidateCheck for Interloper {
         if let Ok(mut slot) = self.moved_to.lock() {
             *slot = Some(moved);
         }
+        Ok(Vec::new())
+    }
+}
+
+impl CandidateCheck for SetsTheReference {
+    fn check(
+        &self,
+        _root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
+        let fault = |error: git2::Error| ApiError::new(ErrorCode::Internal, error.to_string());
+        let repository = git2::Repository::open_bare(&self.repository).map_err(fault)?;
+        let head = repository.refname_to_id("refs/heads/main").map_err(fault)?;
+        repository
+            .reference(&self.reference, head, false, "another write")
+            .map_err(fault)?;
         Ok(Vec::new())
     }
 }
@@ -820,7 +843,7 @@ async fn find_commit_since_a_revision_the_repository_never_held_is_not_found() -
 #[tokio::test]
 async fn an_expected_head_the_repository_never_held_conflicts() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let (storage, scope, _) = workspace(directory.path()).await?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
     let versions = storage.versions();
     let unknown = Revision::try_from("ab".repeat(20))?;
     let error = err_of(
@@ -833,6 +856,13 @@ async fn an_expected_head_the_repository_never_held_conflicts() -> TestResult {
             .await,
     )?;
     assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    // Review N5: a head the repository never held is not the head (`held_head`), so the
+    // refusal names the head as a moved head's does, and leaves the field to the caller.
+    let stale = ErrorDetail::StaleBase {
+        head: initial.clone(),
+    };
+    assert_eq!(error.detail.as_deref(), Some(&stale));
+    assert_eq!(error.field, None);
     let promoted = err_of(
         versions
             .promote_candidate(
@@ -849,6 +879,8 @@ async fn an_expected_head_the_repository_never_held_conflicts() -> TestResult {
             .await,
     )?;
     assert_eq!(promoted.code, ErrorCode::Conflict, "{}", promoted.message);
+    assert_eq!(promoted.detail.as_deref(), Some(&stale));
+    assert_eq!(promoted.field, None);
     Ok(())
 }
 
@@ -1193,6 +1225,53 @@ async fn a_candidate_is_retained_off_the_head_and_promoted_exactly() -> TestResu
         ErrorCode::Conflict,
         "the head moved since the confirmation"
     );
+    // Review N5: the refusal names the head the expected one was compared with.
+    assert_eq!(
+        stale.detail.as_deref(),
+        Some(&ErrorDetail::StaleBase {
+            head: accepted.revision
+        })
+    );
+    assert_eq!(stale.field, None);
+    Ok(())
+}
+
+/// Review N5: a candidate whose proposal's reference another write set while it was staged is
+/// refused with a plain `Conflict`: the refusal is about no base, so it carries no `StaleBase`.
+#[tokio::test]
+async fn a_candidate_whose_reference_another_write_set_meanwhile_is_a_plain_conflict() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let proposal: okf_jawn_contract::identity::ProposalId = uuid!(60)?;
+    let check = Arc::new(SetsTheReference {
+        repository: repository_path(directory.path(), &scope),
+        reference: format!("refs/okf-jawn/proposals/{}", proposal.0),
+    });
+    let refused = err_of(
+        storage
+            .versions()
+            .create_candidate(
+                &scope,
+                proposal,
+                CandidateChanges {
+                    mutation_id: uuid!(61)?,
+                    base: initial.clone(),
+                    author: person("agent"),
+                    message: "Propose a note".to_owned(),
+                    edits: vec![note(uuid!(12)?, "proposed.md", "Proposed.")?],
+                },
+                check,
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Conflict, "{}", refused.message);
+    assert_eq!(
+        refused.message,
+        "this proposal already has a candidate from another write"
+    );
+    assert_eq!(refused.detail, None);
+    assert_eq!(storage.versions().head(&scope).await?, initial);
     Ok(())
 }
 
