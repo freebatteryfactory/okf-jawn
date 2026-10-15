@@ -25,7 +25,7 @@ import {
   MAX_IMPORT_UPLOADS,
 } from '../../src/features/imports/import-start';
 import { resetUploads } from '../../src/features/imports/uploading';
-import { fail, type Handler, mockApi, ok } from './support/api';
+import { fail, type Handler, mockApi, ok, type Reply } from './support/api';
 import {
   accepted,
   DISCARD_UPLOAD,
@@ -305,6 +305,41 @@ describe('the uploads the service holds', () => {
         .map((body) => (body.page as { cursor?: string | null }).cursor ?? null);
       expect(cursors).toEqual([null, '1', '2']);
       expect(api.violations).toEqual([]);
+    });
+
+    it('keeps focus on the button when a further page brings no upload and is not the last', async () => {
+      const service = paged();
+      const usual = service.handlers[LIST_UPLOADS];
+      const held: { answer: () => void } = { answer: () => {} };
+      await openWith(
+        [report, older, newest],
+        {
+          // The service answers the page at "1" empty, when the test says, and names a page after it.
+          [LIST_UPLOADS]: (body) => {
+            const page = body.page as { cursor?: string | null };
+            if (page.cursor === '1') {
+              return new Promise<Reply>((resolve) => {
+                held.answer = () => resolve(ok({ items: [], next_cursor: '2' }));
+              });
+            }
+            return usual === undefined ? fail(500, 'internal', 'no listing') : usual(body);
+          },
+        },
+        service,
+      );
+      await within(section()).findByRole('heading', {
+        name: 'Uploaded and not imported (1, and more)',
+      });
+      act(() => more().focus());
+      fireEvent.click(more());
+      const button = await within(section()).findByRole('button', { name: 'Listing more…' });
+      act(() => held.answer());
+      await waitFor(() => expect(button.textContent).toBe('Show more uploads'));
+      expect(rows()).toHaveLength(1);
+      expect(document.activeElement).toBe(button);
+      fireEvent.click(more());
+      await waitFor(() => expect(rows()).toHaveLength(2));
+      expect(document.activeElement).toBe(tick('papers/report.pdf'));
     });
 
     it('moves focus to the list’s heading when the last page brings no upload', async () => {
