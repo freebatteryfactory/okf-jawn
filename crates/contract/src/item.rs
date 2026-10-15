@@ -181,8 +181,8 @@ pub struct CreateItemRequest {
     pub type_name: String,
     /// Built-in role.
     pub kind: ItemKind,
-    /// Markdown content, at most 8 MiB in UTF-8.
-    #[schemars(length(max = MAX_ITEM_TEXT_BYTES))]
+    /// Markdown content. At most 8388608 bytes in UTF-8: a character takes one to four.
+    #[schemars(extend("x-max-utf8-bytes" = MAX_ITEM_TEXT_BYTES))]
     pub body: String,
     /// Preserved extension properties.
     pub properties: std::collections::BTreeMap<String, serde_json::Value>,
@@ -216,8 +216,8 @@ pub struct SaveDraftRequest {
     pub item_id: crate::identity::ItemId,
     /// Revision the editor saw; equal to the current head to rebase after resolving a conflict.
     pub base_revision: crate::identity::Revision,
-    /// Drafted Markdown body, at most 8 MiB in UTF-8.
-    #[schemars(length(max = MAX_ITEM_TEXT_BYTES))]
+    /// Drafted Markdown body. At most 8388608 bytes in UTF-8: a character takes one to four.
+    #[schemars(extend("x-max-utf8-bytes" = MAX_ITEM_TEXT_BYTES))]
     pub body: String,
     /// Complete preserved property map.
     pub properties: std::collections::BTreeMap<String, serde_json::Value>,
@@ -444,10 +444,9 @@ pub const APP_HEADER_KEY: &str = "okf_jawn";
 /// It bounds every write field that carries a whole item's text or a proposal's item text:
 /// `body` of `create_item` and `save_draft`, `body` of a proposal's `create` and `edit` changes,
 /// `markdown` of its `supply_extraction` changes, and `corrected_markdown` of `correct_digest`.
-/// Each field's published schema states it as `maxLength`. JSON Schema counts characters there,
-/// and a text never has more characters than UTF-8 bytes, so a text within this bound always
-/// passes the schema; `check_rules` counts the bytes and refuses a longer text as `too_large`,
-/// naming the field.
+/// Each field's published schema states it as `x-max-utf8-bytes`, never as `maxLength`, which
+/// JSON Schema counts in characters; `check_rules` counts the bytes and refuses a longer text as
+/// `too_large`, naming the field.
 /// The request body as a whole is bounded by `transport::MAX_REQUEST_BODY_BYTES`.
 pub const MAX_ITEM_TEXT_BYTES: usize = 8 * 1024 * 1024;
 

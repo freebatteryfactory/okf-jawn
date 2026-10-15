@@ -110,8 +110,8 @@ pub struct Job {
 /// Register immutable upload intent before streaming bytes.
 ///
 /// `filename` and `relative_path` are bounded in UTF-8 bytes (`MAX_UPLOAD_FILENAME_BYTES`,
-/// `MAX_UPLOAD_RELATIVE_PATH_BYTES`): the schema states the bound in characters, which a text
-/// within it never exceeds, and `check_rules` counts the bytes and refuses a longer name as
+/// `MAX_UPLOAD_RELATIVE_PATH_BYTES`): the schema states each bound as `x-max-utf8-bytes`, never as
+/// a `maxLength` in characters, and `check_rules` counts the bytes and refuses a longer name as
 /// `too_large` on its field. A `filename` that gives no workspace path for its source card
 /// (`conventions::source_card_name`, then `WorkspacePath::from_supplied`) is refused as
 /// `invalid_input` on `/filename` when the slot is opened; an import that later places the
@@ -121,11 +121,12 @@ pub struct Job {
 pub struct CreateUploadRequest {
     /// Workspace whose permissions and storage scope apply.
     pub workspace_id: crate::identity::WorkspaceId,
-    /// Original filename, preserved; at most 1024 bytes of UTF-8.
-    #[schemars(length(max = MAX_UPLOAD_FILENAME_BYTES))]
+    /// Original filename, preserved. At most 1024 bytes in UTF-8: a character takes one to four.
+    #[schemars(extend("x-max-utf8-bytes" = MAX_UPLOAD_FILENAME_BYTES))]
     pub filename: String,
-    /// Supplied folder context, preserved; at most 4096 bytes of UTF-8.
-    #[schemars(length(max = MAX_UPLOAD_RELATIVE_PATH_BYTES))]
+    /// Supplied folder context, preserved.
+    /// At most 4096 bytes in UTF-8: a character takes one to four.
+    #[schemars(extend("x-max-utf8-bytes" = MAX_UPLOAD_RELATIVE_PATH_BYTES))]
     pub relative_path: String,
     /// Expected decimal byte count. A size over `limits.upload_bytes` is refused as
     /// `too_large` on `/size` when the slot is opened.
@@ -379,8 +380,9 @@ pub struct CorrectDigestRequest {
     pub base_revision: crate::identity::Revision,
     /// Digest being corrected.
     pub digest: crate::identity::Digest,
-    /// Corrected text kept separate from generated text, at most 8 MiB in UTF-8.
-    #[schemars(length(max = crate::item::MAX_ITEM_TEXT_BYTES))]
+    /// Corrected text kept separate from generated text.
+    /// At most 8388608 bytes in UTF-8: a character takes one to four.
+    #[schemars(extend("x-max-utf8-bytes" = crate::item::MAX_ITEM_TEXT_BYTES))]
     pub corrected_markdown: String,
     /// Keep the accepted agent-supplied text of this proposal over a later complete
     /// conversion: `corrected_markdown` must equal that text (compared by digest), and the

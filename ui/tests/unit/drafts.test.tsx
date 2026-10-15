@@ -6,6 +6,7 @@
 import { QueryObserver } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import saveDraftSchema from '../../../api/schemas/save_draft.input.json';
 import { REQUEST_TIMEOUT_MS, UPLOAD_BYTES_PER_SECOND } from '../../src/app/api-client';
 import { createQueryClient } from '../../src/app/query-client';
 import { itemOptions } from '../../src/features/documents/DocumentView';
@@ -1211,6 +1212,10 @@ describe('a save with no answer is not forgotten', () => {
 });
 
 describe('a text too long to save', () => {
+  it('takes the bound the request schema states in UTF-8 bytes', () => {
+    expect(saveDraftSchema.properties.body['x-max-utf8-bytes']).toBe(MAX_BODY_BYTES);
+  });
+
   it('sends a body of exactly the bound, and never one byte more', async () => {
     const api = writable();
     const { queryClient } = await startEditing();

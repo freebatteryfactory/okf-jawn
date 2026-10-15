@@ -1645,7 +1645,7 @@ export const zConnector = z.object({
 export const zCorrectDigestRequest = z.object({
     adopts: zProposalId.nullish(),
     base_revision: zRevision,
-    corrected_markdown: z.string().max(8388608),
+    corrected_markdown: z.string(),
     digest: zDigest,
     idempotency_key: zIdempotencyKey,
     item_id: zItemId,
@@ -1688,17 +1688,17 @@ export const zCreateSandboxCapabilityRequest = z.object({
  * Register immutable upload intent before streaming bytes.
  *
  * `filename` and `relative_path` are bounded in UTF-8 bytes (`MAX_UPLOAD_FILENAME_BYTES`,
- * `MAX_UPLOAD_RELATIVE_PATH_BYTES`): the schema states the bound in characters, which a text
- * within it never exceeds, and `check_rules` counts the bytes and refuses a longer name as
+ * `MAX_UPLOAD_RELATIVE_PATH_BYTES`): the schema states each bound as `x-max-utf8-bytes`, never as
+ * a `maxLength` in characters, and `check_rules` counts the bytes and refuses a longer name as
  * `too_large` on its field. A `filename` that gives no workspace path for its source card
  * (`conventions::source_card_name`, then `WorkspacePath::from_supplied`) is refused as
  * `invalid_input` on `/filename` when the slot is opened; an import that later places the
  * card in a folder where the path cannot be written still refuses the job.
  */
 export const zCreateUploadRequest = z.object({
-    filename: z.string().max(1024),
+    filename: z.string(),
     idempotency_key: zIdempotencyKey,
-    relative_path: z.string().max(4096),
+    relative_path: z.string(),
     sha256: zDigest.nullish(),
     size: z.string(),
     workspace_id: zWorkspaceId
@@ -2216,7 +2216,7 @@ export const zRetryJobRequest = z.object({
  */
 export const zSaveDraftRequest = z.object({
     base_revision: zRevision,
-    body: z.string().max(8388608),
+    body: z.string(),
     idempotency_key: zIdempotencyKey,
     item_id: zItemId,
     properties: z.record(z.string(), z.unknown()),
@@ -2368,14 +2368,17 @@ export const zListWorkspacesResponse = z.object({
     next_cursor: z.string().nullish()
 });
 
-export const zWorkspacePath = z.string().min(1).max(4096).regex(/^[^\/\\:<>"|?*\x00-\x1f]+(\/[^\/\\:<>"|?*\x00-\x1f]+)*$/);
+/**
+ * A relative path inside one workspace, in Unicode NFC, with `/` between segments. At most 4096 bytes in UTF-8: a character takes one to four.
+ */
+export const zWorkspacePath = z.string().min(1).regex(/^[^\/\\:<>"|?*\x00-\x1f]+(\/[^\/\\:<>"|?*\x00-\x1f]+)*$/);
 
 /**
  * Permitted proposal mutations; no review or acceptance variants exist.
  */
 export const zChange = z.union([
     z.object({
-        body: z.string().max(8388608),
+        body: z.string(),
         item_kind: zItemKind.nullish(),
         kind: z.literal('create'),
         path: zWorkspacePath,
@@ -2383,7 +2386,7 @@ export const zChange = z.union([
         type_name: z.string()
     }),
     z.object({
-        body: z.string().max(8388608),
+        body: z.string(),
         item_id: zItemId,
         kind: z.literal('edit'),
         properties: z.record(z.string(), z.unknown())
@@ -2401,7 +2404,7 @@ export const zChange = z.union([
         based_on: zDigest.nullish(),
         item_id: zItemId,
         kind: z.literal('supply_extraction'),
-        markdown: z.string().max(8388608),
+        markdown: z.string(),
         pages: z.array(zPageRange).optional()
     })
 ]);
@@ -2421,7 +2424,7 @@ export const zCreateFolderRequest = z.object({
  */
 export const zCreateItemRequest = z.object({
     base_revision: zRevision,
-    body: z.string().max(8388608),
+    body: z.string(),
     idempotency_key: zIdempotencyKey,
     kind: zItemKind,
     path: zWorkspacePath,

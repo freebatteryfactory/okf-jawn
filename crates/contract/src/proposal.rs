@@ -13,8 +13,8 @@ pub enum Change {
         path: crate::identity::WorkspacePath,
         #[doc = "Type name."]
         type_name: String,
-        #[doc = "Body, at most 8 MiB in UTF-8."]
-        #[schemars(length(max = crate::item::MAX_ITEM_TEXT_BYTES))]
+        #[doc = "Body. At most 8388608 bytes in UTF-8: a character takes one to four."]
+        #[schemars(extend("x-max-utf8-bytes" = crate::item::MAX_ITEM_TEXT_BYTES))]
         body: String,
         #[doc = "Properties."]
         properties: std::collections::BTreeMap<String, serde_json::Value>,
@@ -27,8 +27,8 @@ pub enum Change {
     Edit {
         #[doc = "Item id."]
         item_id: crate::identity::ItemId,
-        #[doc = "Body, at most 8 MiB in UTF-8."]
-        #[schemars(length(max = crate::item::MAX_ITEM_TEXT_BYTES))]
+        #[doc = "Body. At most 8388608 bytes in UTF-8: a character takes one to four."]
+        #[schemars(extend("x-max-utf8-bytes" = crate::item::MAX_ITEM_TEXT_BYTES))]
         body: String,
         #[doc = "Properties."]
         properties: std::collections::BTreeMap<String, serde_json::Value>,
@@ -55,8 +55,9 @@ pub enum Change {
         #[doc = "Pages the text covers, as the agent claims; empty for the whole."]
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pages: Vec<crate::common::PageRange>,
-        #[doc = "The complete proposed text, Markdown, at most 8 MiB in UTF-8."]
-        #[schemars(length(max = crate::item::MAX_ITEM_TEXT_BYTES))]
+        #[doc = "The complete proposed text, Markdown."]
+        #[doc = "At most 8388608 bytes in UTF-8: a character takes one to four."]
+        #[schemars(extend("x-max-utf8-bytes" = crate::item::MAX_ITEM_TEXT_BYTES))]
         markdown: String,
     },
 }

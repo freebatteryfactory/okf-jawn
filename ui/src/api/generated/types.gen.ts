@@ -412,7 +412,7 @@ export type CellRange = {
  */
 export type Change = {
     /**
-     * Body, at most 8 MiB in UTF-8.
+     * Body. At most 8388608 bytes in UTF-8: a character takes one to four.
      */
     body: string;
     /**
@@ -437,7 +437,7 @@ export type Change = {
     type_name: string;
 } | {
     /**
-     * Body, at most 8 MiB in UTF-8.
+     * Body. At most 8388608 bytes in UTF-8: a character takes one to four.
      */
     body: string;
     /**
@@ -478,7 +478,8 @@ export type Change = {
     item_id: ItemId;
     kind: 'supply_extraction';
     /**
-     * The complete proposed text, Markdown, at most 8 MiB in UTF-8.
+     * The complete proposed text, Markdown.
+     * At most 8388608 bytes in UTF-8: a character takes one to four.
      */
     markdown: string;
     /**
@@ -890,7 +891,8 @@ export type CorrectDigestRequest = {
      */
     base_revision: Revision;
     /**
-     * Corrected text kept separate from generated text, at most 8 MiB in UTF-8.
+     * Corrected text kept separate from generated text.
+     * At most 8388608 bytes in UTF-8: a character takes one to four.
      */
     corrected_markdown: string;
     /**
@@ -994,7 +996,7 @@ export type CreateItemRequest = {
      */
     base_revision: Revision;
     /**
-     * Markdown content, at most 8 MiB in UTF-8.
+     * Markdown content. At most 8388608 bytes in UTF-8: a character takes one to four.
      */
     body: string;
     /**
@@ -1077,8 +1079,8 @@ export type CreateSandboxCapabilityRequest = {
  * Register immutable upload intent before streaming bytes.
  *
  * `filename` and `relative_path` are bounded in UTF-8 bytes (`MAX_UPLOAD_FILENAME_BYTES`,
- * `MAX_UPLOAD_RELATIVE_PATH_BYTES`): the schema states the bound in characters, which a text
- * within it never exceeds, and `check_rules` counts the bytes and refuses a longer name as
+ * `MAX_UPLOAD_RELATIVE_PATH_BYTES`): the schema states each bound as `x-max-utf8-bytes`, never as
+ * a `maxLength` in characters, and `check_rules` counts the bytes and refuses a longer name as
  * `too_large` on its field. A `filename` that gives no workspace path for its source card
  * (`conventions::source_card_name`, then `WorkspacePath::from_supplied`) is refused as
  * `invalid_input` on `/filename` when the slot is opened; an import that later places the
@@ -1086,7 +1088,7 @@ export type CreateSandboxCapabilityRequest = {
  */
 export type CreateUploadRequest = {
     /**
-     * Original filename, preserved; at most 1024 bytes of UTF-8.
+     * Original filename, preserved. At most 1024 bytes in UTF-8: a character takes one to four.
      */
     filename: string;
     /**
@@ -1094,7 +1096,8 @@ export type CreateUploadRequest = {
      */
     idempotency_key: IdempotencyKey;
     /**
-     * Supplied folder context, preserved; at most 4096 bytes of UTF-8.
+     * Supplied folder context, preserved.
+     * At most 4096 bytes in UTF-8: a character takes one to four.
      */
     relative_path: string;
     /**
@@ -4379,7 +4382,7 @@ export type SaveDraftRequest = {
      */
     base_revision: Revision;
     /**
-     * Drafted Markdown body, at most 8 MiB in UTF-8.
+     * Drafted Markdown body. At most 8388608 bytes in UTF-8: a character takes one to four.
      */
     body: string;
     /**
@@ -5175,6 +5178,9 @@ export type Workspace = {
  */
 export type WorkspaceId = string;
 
+/**
+ * A relative path inside one workspace, in Unicode NFC, with `/` between segments. At most 4096 bytes in UTF-8: a character takes one to four.
+ */
 export type WorkspacePath = string;
 
 export type GetResourceMetadataData = {

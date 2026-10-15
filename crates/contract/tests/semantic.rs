@@ -403,7 +403,9 @@ fn workspace_path_schema_states_the_expressible_part_of_its_rule() -> Result<(),
         ))
     );
     assert_eq!(schema.get("minLength"), Some(&json!(1)));
-    assert_eq!(schema.get("maxLength"), Some(&json!(4096)));
+    // Ruling 34: the bound is in bytes, so it is stated as `x-max-utf8-bytes`, never `maxLength`.
+    assert_eq!(schema.get("maxLength"), None);
+    assert_eq!(schema.get("x-max-utf8-bytes"), Some(&json!(4096)));
     // What a regular expression cannot state stays in `TryFrom`.
     for path in [
         ".",

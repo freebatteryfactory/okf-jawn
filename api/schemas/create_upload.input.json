@@ -17,21 +17,21 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Register immutable upload intent before streaming bytes.\n\n`filename` and `relative_path` are bounded in UTF-8 bytes (`MAX_UPLOAD_FILENAME_BYTES`,\n`MAX_UPLOAD_RELATIVE_PATH_BYTES`): the schema states the bound in characters, which a text\nwithin it never exceeds, and `check_rules` counts the bytes and refuses a longer name as\n`too_large` on its field. A `filename` that gives no workspace path for its source card\n(`conventions::source_card_name`, then `WorkspacePath::from_supplied`) is refused as\n`invalid_input` on `/filename` when the slot is opened; an import that later places the\ncard in a folder where the path cannot be written still refuses the job.",
+  "description": "Register immutable upload intent before streaming bytes.\n\n`filename` and `relative_path` are bounded in UTF-8 bytes (`MAX_UPLOAD_FILENAME_BYTES`,\n`MAX_UPLOAD_RELATIVE_PATH_BYTES`): the schema states each bound as `x-max-utf8-bytes`, never as\na `maxLength` in characters, and `check_rules` counts the bytes and refuses a longer name as\n`too_large` on its field. A `filename` that gives no workspace path for its source card\n(`conventions::source_card_name`, then `WorkspacePath::from_supplied`) is refused as\n`invalid_input` on `/filename` when the slot is opened; an import that later places the\ncard in a folder where the path cannot be written still refuses the job.",
   "properties": {
     "filename": {
-      "description": "Original filename, preserved; at most 1024 bytes of UTF-8.",
-      "maxLength": 1024,
-      "type": "string"
+      "description": "Original filename, preserved. At most 1024 bytes in UTF-8: a character takes one to four.",
+      "type": "string",
+      "x-max-utf8-bytes": 1024
     },
     "idempotency_key": {
       "$ref": "#/$defs/IdempotencyKey",
       "description": "Retry identity."
     },
     "relative_path": {
-      "description": "Supplied folder context, preserved; at most 4096 bytes of UTF-8.",
-      "maxLength": 4096,
-      "type": "string"
+      "description": "Supplied folder context, preserved.\nAt most 4096 bytes in UTF-8: a character takes one to four.",
+      "type": "string",
+      "x-max-utf8-bytes": 4096
     },
     "sha256": {
       "anyOf": [

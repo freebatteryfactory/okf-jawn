@@ -156,7 +156,8 @@ pub struct IdentityError(pub &'static str);
 /// value.
 pub const LOCAL_TENANT_ID: &str = "local";
 
-/// The most UTF-8 bytes of a `WorkspacePath`: 4096.
+/// The most UTF-8 bytes of a `WorkspacePath`: 4096. Its schema states it as `x-max-utf8-bytes`,
+/// never as a `maxLength` in characters.
 pub const MAX_WORKSPACE_PATH_BYTES: usize = 4096;
 
 /// The most UTF-16 code units of one segment of a `WorkspacePath`: 255, the longest name NTFS
@@ -242,7 +243,8 @@ impl JsonSchema for WorkspacePath {
         schemars::json_schema!({
             "type": "string",
             "minLength": 1,
-            "maxLength": MAX_WORKSPACE_PATH_BYTES,
+            "x-max-utf8-bytes": MAX_WORKSPACE_PATH_BYTES,
+            "description": "A relative path inside one workspace, in Unicode NFC, with `/` between segments. At most 4096 bytes in UTF-8: a character takes one to four.",
             "pattern": WORKSPACE_PATH_PATTERN
         })
     }

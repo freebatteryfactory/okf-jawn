@@ -9,7 +9,9 @@
 use check::{TestResult, err_of, some};
 use okf_jawn_contract::access::{CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE, SESSION_COOKIE_HTTPS};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::identity::{LOCAL_TENANT_ID, MAX_WORKSPACE_PATH_BYTES, TenantId};
+use okf_jawn_contract::identity::{
+    LOCAL_TENANT_ID, MAX_WORKSPACE_PATH_BYTES, TenantId, WorkspacePath,
+};
 use okf_jawn_contract::import::{
     CorrectDigestRequest, CreateUploadRequest, DEFAULT_MAX_UPLOAD_BYTES, MAX_IMPORT_UPLOADS,
     MAX_UPLOAD_FILENAME_BYTES, MAX_UPLOAD_RELATIVE_PATH_BYTES, StartImportRequest,
@@ -196,29 +198,77 @@ fn every_item_text_passes_at_the_bound_and_is_too_large_one_byte_over() -> TestR
     Ok(())
 }
 
+/// Ruling 34: a bound counted in UTF-8 bytes is stated as `x-max-utf8-bytes` with its sentence,
+/// never as `maxLength`, which JSON Schema (and the generated client) counts in characters.
+fn assert_byte_bound(property: Option<&Value>, bytes: usize, label: &str) -> TestResult {
+    let property = some(property, label)?;
+    assert_eq!(property.get("maxLength"), None, "{label} carries maxLength");
+    assert_eq!(
+        property.get("x-max-utf8-bytes"),
+        Some(&json!(bytes)),
+        "{label}"
+    );
+    let description = some(
+        property.get("description").and_then(Value::as_str),
+        "the bounded field's description",
+    )?;
+    let sentence = format!("At most {bytes} bytes in UTF-8: a character takes one to four.");
+    assert!(description.contains(&sentence), "{label}: {description}");
+    Ok(())
+}
+
+/// Every node of `schema` that states a byte bound states no `maxLength` beside it.
+fn no_byte_bound_has_a_max_length(schema: &Value, at: &str) -> TestResult {
+    match schema {
+        Value::Object(fields) => {
+            assert!(
+                !(fields.contains_key("x-max-utf8-bytes") && fields.contains_key("maxLength")),
+                "{at} states its byte bound as maxLength too"
+            );
+            for (key, value) in fields {
+                no_byte_bound_has_a_max_length(value, &format!("{at}/{key}"))?;
+            }
+        }
+        Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                no_byte_bound_has_a_max_length(value, &format!("{at}/{index}"))?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 #[test]
-fn every_bounded_field_publishes_the_bound_as_its_maximum_length() -> TestResult {
-    let bound = json!(MAX_ITEM_TEXT_BYTES);
+fn every_byte_bounded_field_states_its_bound_in_bytes_never_as_max_length() -> TestResult {
     for (label, schema, pointer) in [
         (
             "create_item",
             schema_for::<CreateItemRequest>()?,
-            "/properties/body/maxLength",
+            "/properties/body",
         ),
         (
             "save_draft",
             schema_for::<SaveDraftRequest>()?,
-            "/properties/body/maxLength",
+            "/properties/body",
         ),
         (
             "correct_digest",
             schema_for::<CorrectDigestRequest>()?,
-            "/properties/corrected_markdown/maxLength",
+            "/properties/corrected_markdown",
         ),
     ] {
-        assert_eq!(schema.pointer(pointer), Some(&bound), "{label} {pointer}");
+        assert_byte_bound(
+            schema.pointer(pointer),
+            MAX_ITEM_TEXT_BYTES,
+            &format!("{label} {pointer}"),
+        )?;
+        no_byte_bound_has_a_max_length(&schema, label)?;
     }
+    let path = schema_for::<WorkspacePath>()?;
+    assert_byte_bound(Some(&path), MAX_WORKSPACE_PATH_BYTES, "WorkspacePath")?;
     let proposal = schema_for::<OpenProposalRequest>()?;
+    no_byte_bound_has_a_max_length(&proposal, "open_proposal")?;
     let variants = some(
         proposal
             .pointer("/$defs/Change/oneOf")
@@ -235,7 +285,11 @@ fn every_bounded_field_publishes_the_bound_as_its_maximum_length() -> TestResult
         )?;
         for field in ["body", "markdown"] {
             if let Some(property) = variant.pointer(&format!("/properties/{field}")) {
-                assert_eq!(property.get("maxLength"), Some(&bound), "{kind}.{field}");
+                assert_byte_bound(
+                    Some(property),
+                    MAX_ITEM_TEXT_BYTES,
+                    &format!("{kind}.{field}"),
+                )?;
                 bounded.push(format!("{kind}.{field}"));
             }
         }
@@ -366,14 +420,17 @@ fn an_import_takes_one_to_the_bound_of_uploads_each_once() -> TestResult {
 #[test]
 fn the_upload_and_import_bounds_are_published_in_the_schemas() -> TestResult {
     let upload = schema_for::<CreateUploadRequest>()?;
-    assert_eq!(
-        upload.pointer("/properties/filename/maxLength"),
-        Some(&json!(MAX_UPLOAD_FILENAME_BYTES))
-    );
-    assert_eq!(
-        upload.pointer("/properties/relative_path/maxLength"),
-        Some(&json!(MAX_UPLOAD_RELATIVE_PATH_BYTES))
-    );
+    assert_byte_bound(
+        upload.pointer("/properties/filename"),
+        MAX_UPLOAD_FILENAME_BYTES,
+        "create_upload /filename",
+    )?;
+    assert_byte_bound(
+        upload.pointer("/properties/relative_path"),
+        MAX_UPLOAD_RELATIVE_PATH_BYTES,
+        "create_upload /relative_path",
+    )?;
+    no_byte_bound_has_a_max_length(&upload, "create_upload")?;
     let import = schema_for::<StartImportRequest>()?;
     assert_eq!(
         import.pointer("/properties/upload_ids/minItems"),
