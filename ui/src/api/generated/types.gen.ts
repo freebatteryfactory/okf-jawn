@@ -2559,7 +2559,9 @@ export type Job = {
      */
     restore?: RestoreReport | null;
     /**
-     * Present exactly when `state` is `failed`: whether `retry_job` will accept it.
+     * Whether `retry_job` will accept the job: present when it failed under a build that
+     * records this field, and absent in every other state. A job that failed before this field
+     * existed has none; `retry_job` still decides for it.
      */
     retryable?: boolean | null;
     /**

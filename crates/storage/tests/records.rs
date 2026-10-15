@@ -392,10 +392,13 @@ async fn a_jobs_failure_instants_and_retry_flag_follow_its_state() -> TestResult
     let waiting = records.get_job(&scope, lapsed.id).await?;
     assert_eq!(waiting.state, JobState::Queued);
     assert!(waiting.started_at.is_none(), "{:?}", waiting.started_at);
-    // A cancelled job is finished.
+    // A cancelled job is finished, and carries no retry flag: only a failure does (review N4).
     let cancelled = records.cancel_job(&scope, uuid!(10)?, lapsed.id).await?;
     assert_eq!(cancelled.state, JobState::Cancelled);
     assert!(cancelled.finished_at.is_some());
+    assert!(cancelled.retryable.is_none(), "{:?}", cancelled.retryable);
+    let stored = records.get_job(&scope, lapsed.id).await?;
+    assert!(stored.retryable.is_none(), "{:?}", stored.retryable);
     Ok(())
 }
 

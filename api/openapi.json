@@ -4458,7 +4458,7 @@
             "description": "What a completed restore did."
           },
           "retryable": {
-            "description": "Present exactly when `state` is `failed`: whether `retry_job` will accept it.",
+            "description": "Whether `retry_job` will accept the job: present when it failed under a build that\nrecords this field, and absent in every other state. A job that failed before this field\nexisted has none; `retry_job` still decides for it.",
             "type": [
               "boolean",
               "null"
