@@ -110,7 +110,9 @@ impl ConfirmationStore for FakeConfirmations {
 
     // "Atomically consume a confirmation for `mutation_id`. Checks subject, session, action,
     // target, revision, digest and expiry, and records which `MutationId` consumed it.
-    // Consuming again with the same `MutationId` succeeds; a different `MutationId` fails with
+    // Consuming again with the same `MutationId` succeeds while those checks still pass: the
+    // expiry is checked on every consume, so once the confirmation has expired it is refused
+    // (`Conflict`) to the mutation that consumed it too ... A different `MutationId` fails with
     // `Conflict` as already used." The order and codes are storage's.
     fn consume<'a>(
         &'a self,

@@ -1,7 +1,7 @@
 //! Session-bound human confirmation challenges; consuming one records which `MutationId` used it.
 //!
-//! A retry of the same `MutationId` after a crash may consume again successfully; a different
-//! `MutationId` still fails as already used.
+//! A retry of the same `MutationId` after a crash may consume again successfully, before the
+//! confirmation expires; a different `MutationId` still fails as already used.
 
 use okf_jawn_contract::identity::{ConfirmationId, Digest, MutationId, Revision, Timestamp};
 use okf_jawn_contract::review::{Confirmation, ConfirmationAction, ConfirmationTarget};
@@ -62,8 +62,11 @@ pub trait ConfirmationStore: Send + Sync {
     /// Atomically consume a confirmation for `mutation_id`.
     ///
     /// Checks subject, session, action, target, revision, digest and expiry, and records which
-    /// `MutationId` consumed it. Consuming again with the same `MutationId` succeeds; a
-    /// different `MutationId` fails with `Conflict` as already used.
+    /// `MutationId` consumed it. Consuming again with the same `MutationId` succeeds while those
+    /// checks still pass: the expiry is checked on every consume, so once the confirmation has
+    /// expired it is refused (`Conflict`) to the mutation that consumed it too, and a retry that
+    /// must finish after the expiry tells from its own records that its first attempt consumed
+    /// it. A different `MutationId` fails with `Conflict` as already used.
     fn consume<'a>(
         &'a self,
         scope: &'a StorageScope,
