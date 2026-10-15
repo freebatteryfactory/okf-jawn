@@ -881,8 +881,9 @@ fn move_in(
 /// header's workaround for okf-core 0.2.7): its body in `bundle`, the staged tree before the
 /// move, rewritten for the move (`moved_body`), into the file okf-core wrote at `written`. The
 /// frontmatter is the one okf-core wrote there (its relative paths rebased), read back and
-/// written with okf-core's own parser and serializer, whose round trip keeps every value
-/// (`parse(emit(v)) == v`), so its bytes are okf-core's.
+/// written with okf-core's own parser and serializer: its emitter is built so that
+/// `parse(emit(v)) == v` (okf-core's `yaml::emitter`), so emitting the value read back writes
+/// the frontmatter okf-core wrote (pinned for a rebased `sources` entry by the file-links tests).
 fn keep_file_links(
     bundle: &Bundle,
     from: &ConceptId,
