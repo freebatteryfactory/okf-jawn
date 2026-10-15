@@ -1148,6 +1148,49 @@ async fn a_stale_acceptance_announces_the_conflict_it_marks() -> TestResult {
     Ok(())
 }
 
+/// Review probe P4 whole (N2): after a racing acceptance marked the proposal `conflict`, the
+/// first acceptance's retry finds its promotion by its mutation and writes `accepted` over the
+/// false mark (a compare-and-set from `conflict`), then finishes; a repeat answers the same.
+#[tokio::test]
+async fn a_landed_acceptance_is_finished_over_the_conflict_a_racing_one_marked() -> TestResult {
+    let world = proposal_world()?;
+    let (proposal, confirmation) = racing_acceptance(&world).await?;
+    let mut answers = Vec::new();
+    for _ in 0..2 {
+        answers.push(
+            world
+                .service
+                .accept_proposal(
+                    &resumed(accepting(ACCEPTING)?),
+                    accept_request(&proposal, &confirmation, 'a')?,
+                )
+                .await?,
+        );
+    }
+    let result = some(answers.first(), "the retry's answer")?;
+    let again = some(answers.get(1), "the repeat's answer")?;
+    assert_eq!(result.revision, revision('d')?);
+    assert_eq!(again.revision, result.revision);
+    assert_eq!(again.receipt_id, result.receipt_id);
+    assert_eq!(status(&world, proposal.id)?, ProposalStatus::Accepted);
+    assert_eq!(
+        world.proposals.writes()?,
+        [ProposalStatus::Conflict, ProposalStatus::Accepted]
+    );
+    assert_eq!(world.versions.promotions()?.len(), 1);
+    assert_eq!(world.world.search.indexed()?, [revision('d')?]);
+    assert_eq!(
+        proposal_events(&world, proposal.id)?,
+        [
+            Some(mutation(OPENED)),
+            Some(mutation(ACCEPTING.saturating_add(1))),
+            Some(mutation(ACCEPTING))
+        ]
+    );
+    assert_eq!(world.world.records.receipts()?.len(), 1);
+    Ok(())
+}
+
 /// A stale acceptance whose event failed after it marked the proposal `conflict` is finished by
 /// its retry: the store takes the same mark under the same mutation as a retry, so the event is
 /// appended once and the stale refusal answered again; nothing is consumed or promoted again.

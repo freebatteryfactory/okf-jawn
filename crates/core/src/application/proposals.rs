@@ -53,7 +53,11 @@
 //!    named the head and the proposal is what is stale. Any other refusal, the store's
 //!    plain `conflict` of a candidate reference that is not the proposal's included, leaves the
 //!    status as it was and is answered as given.
-//! 4. The status becomes `accepted`, a compare-and-set from `open`.
+//! 4. The status becomes `accepted`, a compare-and-set from `open`. When that is refused and the
+//!    proposal is `conflict`, it becomes `accepted` from `conflict` instead: this mutation's
+//!    promotion landed (step 3 answered it, or a resumed attempt found it by the mutation), so
+//!    the mark is false. It was set by a second acceptance in the window after this promotion
+//!    landed and before this step, which the store refused because this promotion moved the head.
 //! 5. The new revision is indexed and a `changed` event appended (`shared::announce`); it names
 //!    no item, because a proposal may change several.
 //! 6. A `proposal_updated` event naming the proposal.
@@ -68,10 +72,10 @@
 //! which the store takes as a retry only from the mutation that wrote it: then this attempt's
 //! first one marked it, so the attempt appends its event and answers its stale refusal again,
 //! naming the head as it is now; otherwise the proposal is refused as any `conflict` one is.
-//! Known limit: between a
-//! promotion that landed and step 4, another person may decline the proposal, which is still
-//! `open`; the retry then answers the compare-and-set's `conflict`, and the accepted content
-//! stays on the line under a proposal shown as declined.
+//! Known limit, of a decline only: between a promotion that landed and step 4, another person may
+//! decline the proposal, which is still `open`; the retry then answers the compare-and-set's
+//! `conflict`, and the accepted content stays on the line under a proposal shown as declined.
+//! (The decliner was already answered, so the decline is not overwritten.)
 //!
 //! Declining (`decline_proposal`) needs no confirmation (the contract has none). The proposal must
 //! be `open`; the request's reason is recorded as a comment by the person who declines, under the
@@ -640,8 +644,8 @@ async fn candidate_edits(
 /// the `proposal_updated` event and the receipt (steps 4 to 7 of the module header).
 ///
 /// # Errors
-/// Returns the compare-and-set's `Conflict` when the proposal is no longer open, or any port
-/// error.
+/// Returns the compare-and-set's `Conflict` when the proposal is neither open nor marked
+/// `conflict` (declined meanwhile, the header's known limit), or any port error.
 async fn accepted(
     service: &ApplicationService,
     context: &OperationContext,
@@ -650,9 +654,9 @@ async fn accepted(
     committed: Committed,
 ) -> Result<MutationResult, ApiError> {
     let mutation = mutation_id(context)?;
-    let stored = service
-        .ports()
-        .proposals
+    let proposals = &service.ports().proposals;
+    let id = proposal.id;
+    let marked = proposals
         .update(
             scope,
             mutation,
@@ -662,7 +666,30 @@ async fn accepted(
             },
             ProposalStatus::Open,
         )
-        .await?;
+        .await;
+    let stored = match marked {
+        Ok(stored) => stored,
+        Err(refused) if refused.code == ErrorCode::Conflict => {
+            // `committed` is this mutation's promotion, so a `conflict` mark set meanwhile (by an
+            // acceptance the store refused because this promotion moved the head) is false.
+            let now = proposals.get(scope, id).await?;
+            if now.status != ProposalStatus::Conflict {
+                return Err(refused);
+            }
+            proposals
+                .update(
+                    scope,
+                    mutation,
+                    Proposal {
+                        status: ProposalStatus::Accepted,
+                        ..now
+                    },
+                    ProposalStatus::Conflict,
+                )
+                .await?
+        }
+        Err(error) => return Err(error),
+    };
     announce(service, scope.clone(), mutation, &committed.revision, None).await?;
     proposal_updated(service, scope, mutation, stored.id).await?;
     let receipt_id = record_receipt(service, context, scope, Some(mutation), Vec::new()).await?;
