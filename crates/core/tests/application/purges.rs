@@ -340,6 +340,46 @@ async fn a_failed_purge_whose_job_runs_again_by_itself_is_only_queued() -> TestR
     Ok(())
 }
 
+/// A failed job is made runnable at most once per mutation (the store's rule): a resumed
+/// attempt of the same request that finds the job failed again queues it without a second
+/// retry; another request (another key, so another mutation) retries it.
+#[tokio::test]
+async fn a_failed_purge_is_retried_once_per_request() -> TestResult {
+    let world = PurgeWorld::new()?;
+    let failed = recorded(90, PurgeState::Failed)?;
+    world
+        .records
+        .put(&tenant()?, failed.clone(), JobState::Failed)?;
+    let first = admin(OperationName::PurgeWorkspace, Some(60))?;
+    world
+        .service
+        .purge_workspace(&first, request('f', 60)?)
+        .await?;
+    // The job runs and fails again before the first request's answer was stored.
+    world
+        .records
+        .set_job(failed.job_id, JobState::Failed, true)?;
+    let resumed = OperationContext {
+        attempt: Attempt::Resumed,
+        ..first
+    };
+    world
+        .service
+        .purge_workspace(&resumed, request('f', 60)?)
+        .await?;
+    assert_eq!(world.records.retries()?, [mutation(60)]);
+    assert_eq!(world.records.job(failed.job_id)?.state, JobState::Failed);
+    let another = admin(OperationName::PurgeWorkspace, Some(61))?;
+    world
+        .service
+        .purge_workspace(&another, request('f', 61)?)
+        .await?;
+    assert_eq!(world.records.retries()?, [mutation(60), mutation(61)]);
+    assert_eq!(world.records.job(failed.job_id)?.state, JobState::Queued);
+    assert_delivered(&world, failed.job_id, 3)?;
+    Ok(())
+}
+
 /// A failure the store holds as not retryable cannot be made runnable: the store's refusal is
 /// the answer, and nothing is queued.
 #[tokio::test]

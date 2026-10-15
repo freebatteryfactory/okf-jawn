@@ -3377,7 +3377,8 @@ mod job_handler {
     #[tokio::test]
     async fn a_workspace_purge_does_not_wait_for_a_sealed_restore_that_no_longer_runs() -> TestResult
     {
-        let world = world()?;
+        // A bound short enough that waiting for the queued restore would fail the purge.
+        let world = world_with_drain(Duration::from_secs(2))?;
         let restore = sealed_restore(&world, 330).await?;
         world.records.expire_running()?;
         assert_eq!(world.records.expire_leases().await?, 1);
@@ -3397,7 +3398,14 @@ mod job_handler {
         let world = world_with_drain(Duration::from_millis(60))?;
         let restore = sealed_restore(&world, 340).await?;
         let (id, _, purge_id) = workspace_purge(&world, 341)?;
+        let started = tokio::time::Instant::now();
         assert!(run(&world, id).await?);
+        // The bound from above: the attempt gives up soon after it, not long after.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
         let entry = world.records.entry(id)?;
         assert_eq!(entry.job.state, JobState::Failed);
         let (message, retryable) = some(entry.failures.first(), "the failure")?;
@@ -3485,6 +3493,26 @@ mod job_handler {
         assert_eq!(
             entry.job.error.as_ref().map(|error| error.message.clone()),
             Some(refusal.message)
+        );
+        Ok(())
+    }
+
+    /// P5: a purge whose removal ran but whose completion could not be recorded is recorded
+    /// failed with that error and no report: a report is present exactly when the purge
+    /// completed.
+    #[tokio::test]
+    async fn a_purge_whose_completion_cannot_be_recorded_is_recorded_failed_without_a_report()
+    -> TestResult {
+        let world = world()?;
+        world.records.fail_purge_update(PurgeState::Completed)?;
+        let (id, _, purge_id) = workspace_purge(&world, 375)?;
+        assert!(run(&world, id).await?);
+        let failed = world.records.purge(purge_id)?;
+        assert_eq!(failed.state, PurgeState::Failed);
+        assert_eq!(failed.report, None);
+        assert_eq!(
+            failed.error.as_ref().map(|error| &error.code),
+            Some(&ErrorCode::Unavailable)
         );
         Ok(())
     }
