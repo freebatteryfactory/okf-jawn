@@ -20,9 +20,10 @@
 //! - `record_artifact` is unique on the mutation id.
 //!
 //! Time does not pass by itself: `expire_running` marks every live claim expired, as a lease
-//! lapsing would. Purge records are kept as given (`get_purge`, `update_purge`); review,
-//! receipt and derived-object records are not modelled; those methods answer
-//! `NotImplemented`, so a test that reaches one fails loudly.
+//! lapsing would. Purge records are kept as given (`get_purge`, `update_purge`, which a test
+//! may make fail once, `fail_purge_update`); review, receipt and derived-object records are
+//! not modelled; those methods answer `NotImplemented`, so a test that reaches one fails
+//! loudly.
 //!
 //! `FakeEvents` encodes the `EventLog::append` doc: with a mutation identity, an identical
 //! notification already appended under it in the same log is not appended again; without one,
@@ -39,7 +40,7 @@ use okf_jawn_contract::identity::{
     Timestamp,
 };
 use okf_jawn_contract::import::{Job, JobState, ListJobsResponse};
-use okf_jawn_contract::purge::{Purge, PurgeTarget};
+use okf_jawn_contract::purge::{Purge, PurgeState, PurgeTarget};
 use okf_jawn_contract::review::Review;
 use okf_jawn_core::events::{EventLog, EventQuery, EventScope, NewEvent};
 use okf_jawn_core::jobs::{
@@ -92,6 +93,8 @@ pub struct FakeRecords {
     list_page: Mutex<Option<usize>>,
     /// Jobs inserted so far, for their order.
     inserted: std::sync::atomic::AtomicUsize,
+    /// The purge state whose next `update_purge` fails, writing nothing, once.
+    failing_purge_update: Mutex<Option<PurgeState>>,
 }
 
 /// One notification as the fake log keeps it: its log, its mutation identity and the event.
@@ -394,6 +397,28 @@ impl FakeRecords {
     /// Returns `NotFound` for an unknown job.
     pub fn cancel(&self, id: JobId) -> Result<(), ApiError> {
         self.lock()?.get_mut(&id).ok_or_else(not_found)?.job.state = JobState::Cancelled;
+        Ok(())
+    }
+
+    /// Make the next `update_purge` that records `state` fail with `Unavailable`, writing
+    /// nothing, once, as a store that could not write would.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn fail_purge_update(&self, state: PurgeState) -> Result<(), ApiError> {
+        *self.failing_purge_update.lock().map_err(|_| poisoned())? = Some(state);
+        Ok(())
+    }
+
+    /// The failure a test asked of an `update_purge` recording `state`, taken.
+    fn refused_update(&self, state: PurgeState) -> Result<(), ApiError> {
+        let mut failing = self.failing_purge_update.lock().map_err(|_| poisoned())?;
+        if failing.take_if(|failing| *failing == state).is_some() {
+            return Err(ApiError::new(
+                ErrorCode::Unavailable,
+                "the purge record could not be written",
+            ));
+        }
         Ok(())
     }
 
@@ -746,7 +771,10 @@ impl RecordStore for FakeRecords {
     }
 
     fn update_purge<'a>(&'a self, _tenant: &'a TenantId, purge: Purge) -> PortFuture<'a, Purge> {
-        let stored = self.insert_purge(purge.clone()).map(|()| purge);
+        let stored = self.refused_update(purge.state).and_then(|()| {
+            self.insert_purge(purge.clone())?;
+            Ok(purge)
+        });
         Box::pin(async move { stored })
     }
 
@@ -925,6 +953,7 @@ mod tests {
         records.finish(id)?;
         assert_eq!(records.entry(id)?.job.state, JobState::Succeeded);
         records.cancel_before_seal(id)?;
+        records.fail_purge_update(okf_jawn_contract::purge::PurgeState::Failed)?;
         Ok(())
     }
 

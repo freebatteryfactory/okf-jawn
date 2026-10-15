@@ -17,7 +17,7 @@ use okf_jawn_contract::{
     error::{ApiError, ErrorCode},
     history::{BlameResponse, DiffResponse, LogResponse},
     identity::{
-        Digest, ItemId, MutationId, ProposalId, PurgeId, Revision, TenantId, WorkspaceId,
+        Digest, ItemId, JobId, MutationId, ProposalId, PurgeId, Revision, TenantId, WorkspaceId,
         WorkspacePath,
     },
     item::{ItemDocument, ItemKind, ItemStatus, ItemSummary, TypeDefinition},
@@ -1154,6 +1154,21 @@ pub fn derive_purge_id(mutation_id: MutationId) -> PurgeId {
     PurgeId(derived_uuid(b"purge", mutation_id, 0))
 }
 
+/// The identity under which a purge's drain cancels one job of the purged workspace
+/// (`RecordStore::cancel_job`; the `Purger` caller's duty).
+///
+/// Derived from the purge job's mutation and the cancelled job, so a resumed purge cancels each
+/// job under the identity its first attempt used, and the store makes no second transition.
+#[must_use]
+pub fn derive_drain_mutation_id(purge_mutation: MutationId, job: JobId) -> MutationId {
+    let mut hasher = Sha256::new();
+    hasher.update(b"okf-jawn derived identity\0");
+    hasher.update(b"drain\0");
+    hasher.update(purge_mutation.0.as_bytes());
+    hasher.update(job.0.as_bytes());
+    MutationId(version_8(hasher.finalize().into()))
+}
+
 /// A version-8 UUID from SHA-256 of a label, a mutation identity and a count.
 fn derived_uuid(label: &[u8], mutation_id: MutationId, ordinal: u32) -> uuid::Uuid {
     let mut hasher = Sha256::new();
@@ -1162,7 +1177,11 @@ fn derived_uuid(label: &[u8], mutation_id: MutationId, ordinal: u32) -> uuid::Uu
     hasher.update(b"\0");
     hasher.update(mutation_id.0.as_bytes());
     hasher.update(ordinal.to_be_bytes());
-    let hash: [u8; 32] = hasher.finalize().into();
+    version_8(hasher.finalize().into())
+}
+
+/// The version-8 UUID of the first sixteen bytes of a hash.
+fn version_8(hash: [u8; 32]) -> uuid::Uuid {
     let mut bytes = [0_u8; 16];
     for (target, source) in bytes.iter_mut().zip(hash) {
         *target = source;

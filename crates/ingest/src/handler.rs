@@ -19,6 +19,12 @@
 //! (`RecordStore::seal`), from which point the store refuses to cancel it, and it goes on to
 //! its completion (`restore`).
 //!
+//! A workspace purge job is the `Purger`'s caller: before it calls the purger it drains the
+//! workspace's jobs, cancelling each queued or running one and waiting, at most
+//! `HandlerLimits::drain`, until none runs (`drain`). A purge job that fails records its
+//! purge `Failed`, with the error, before the runtime records the job's failure; asking for
+//! the purge again resumes it (contract ruling 24).
+//!
 //! What a job commits is announced as core's `announce` does for a request (core
 //! `application::shared::commit`): every revision an ingest job lands (each import commit, the
 //! redigest commit, the revision a restore produces), written now or replayed, is first indexed
@@ -44,7 +50,8 @@ use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::EventKind;
 use okf_jawn_contract::identity::{
-    ArtifactId, Digest, ItemId, MutationId, PurgeId, Revision, TenantId, UploadId, WorkspaceId,
+    ArtifactId, Digest, ItemId, JobId, MutationId, PurgeId, Revision, TenantId, UploadId,
+    WorkspaceId,
 };
 use okf_jawn_contract::import::{Job, JobState};
 use okf_jawn_contract::purge::{Purge, PurgeReport, PurgeState};
@@ -58,7 +65,8 @@ use okf_jawn_core::jobs::{
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::search::SearchIndex;
 use okf_jawn_core::storage::{
-    Backups, BlobStore, CandidateCheck, ObjectInfo, Purger, StorageScope, VersionStore,
+    Backups, BlobStore, CandidateCheck, ObjectInfo, Page, Purger, StorageScope, VersionStore,
+    derive_drain_mutation_id,
 };
 use okf_jawn_core::uploads::UploadStore;
 
@@ -99,6 +107,9 @@ pub struct HandlerLimits {
     pub heartbeat: Duration,
     /// The time budget of one window (`ConversionInput::timeout`).
     pub window_timeout: Duration,
+    /// The longest a workspace purge waits for the workspace's jobs to stop running
+    /// (`DRAIN_BOUND` in production).
+    pub drain: Duration,
 }
 
 /// What a finished job produced, before it is written as the claim's completion.
@@ -152,6 +163,18 @@ pub(crate) enum Renewed<T> {
 /// The media type both archives are served with (`download_artifact`,
 /// `download_tenant_artifact`).
 pub const ARCHIVE_MEDIA_TYPE: &str = "application/zip";
+
+/// The longest a workspace purge waits for the workspace's jobs to stop running (the drain)
+/// before its attempt fails, to be resumed when the purge is asked for again: ten minutes,
+/// long enough for a running conversion's lease to expire. A job whose attempt died stays
+/// `running` until its lease lapses (five minutes, storage's job lease) and the runtime's next
+/// sweep, a third of a lease later, queues it again, where the purge's record keeps any worker
+/// from claiming it; a restore past its point of no return renews its lease and is waited for
+/// while it finishes. Storage's purge waits as long for the target's writes in flight.
+pub const DRAIN_BOUND: Duration = Duration::from_secs(600);
+
+/// How many of the workspace's jobs one page of the drain's listing asks for.
+const DRAIN_PAGE: u16 = 500;
 
 impl IngestHandler {
     /// A handler over storage's ports.
@@ -478,7 +501,9 @@ impl IngestHandler {
         })
     }
 
-    /// Run a purge job of the tenant: a workspace purge or an item purge.
+    /// Run a purge job of the tenant: a workspace purge, which drains the workspace's jobs
+    /// first, or an item purge, which storage has not built (its purger answers
+    /// `NotImplemented`) and which drains nothing until it is built.
     async fn purge_job(&self, attempt: &Attempt<'_>, tenant: &TenantId) -> Result<Done, ApiError> {
         let claimed = attempt.claimed;
         match &claimed.spec {
@@ -486,7 +511,8 @@ impl IngestHandler {
                 purge_id,
                 workspace_id,
             } => {
-                self.purge(attempt, tenant, *purge_id, |purger| {
+                let drained = item_scope(tenant, *workspace_id);
+                self.purge(attempt, tenant, *purge_id, Some(drained), |purger| {
                     purger.purge_workspace(tenant, claimed.mutation_id, *purge_id, *workspace_id)
                 })
                 .await
@@ -497,7 +523,7 @@ impl IngestHandler {
                 item_id,
             } => {
                 let scope = item_scope(tenant, *workspace_id);
-                self.purge(attempt, tenant, *purge_id, |purger| async move {
+                self.purge(attempt, tenant, *purge_id, None, |purger| async move {
                     purger
                         .purge_item(&scope, claimed.mutation_id, *purge_id, *item_id)
                         .await
@@ -518,15 +544,23 @@ impl IngestHandler {
         }
     }
 
-    /// Carry out a purge and keep its record current: running, then its report. The removal
-    /// runs under the heartbeat and is never dropped; its report is recorded even when the job
-    /// was cancelled meanwhile, since the purge record states what was removed, and the job then
-    /// stops without a completion.
+    /// Carry out a purge and keep its record current: running, then its report, or failed.
+    ///
+    /// A workspace purge drains the workspace's jobs first (`drain`, given the workspace). The
+    /// removal then runs under the heartbeat and is never dropped; its report is recorded even
+    /// when the job was cancelled meanwhile, since the purge record states what was removed, and
+    /// the job then stops without a completion. Any error once the record was read is the purge
+    /// job's failure, which the runtime records and which no attempt repeats by itself: the
+    /// purge is first recorded `Failed` with that error (contract ruling 24; repeating the
+    /// request resumes it). An attempt that had lost its lease records the same; the attempt
+    /// that runs the job next records `Running` over it. When the failed state cannot be
+    /// recorded either, the error returned says so and the purge stays as it was.
     async fn purge<'a, F, Fut>(
         &'a self,
         attempt: &'a Attempt<'a>,
         tenant: &'a TenantId,
         purge_id: PurgeId,
+        drained: Option<StorageScope>,
         remove: F,
     ) -> Result<Done, ApiError>
     where
@@ -535,28 +569,171 @@ impl IngestHandler {
     {
         let records = &self.ports.records;
         let mut purge: Purge = records.get_purge(tenant, purge_id).await?;
-        let mut done = Done::default();
-        if purge.state != PurgeState::Completed {
-            purge.state = PurgeState::Running;
-            purge.error = None;
-            purge.completed_at = None;
-            purge = records.update_purge(tenant, purge).await?;
-            let report =
-                match renewing(&self.ports, attempt, remove(self.ports.purger.as_ref())).await? {
-                    Renewed::Done(report) => report,
-                    Renewed::Cancelled(report) => {
-                        done = Done::stopped();
-                        report
-                    }
-                };
-            purge.report = Some(report);
-            purge.state = PurgeState::Completed;
-            // The store stamps `completed_at` in the write that first records completion
-            // (`RecordStore::update_purge`); the handler has no clock and passes none.
-            purge.completed_at = None;
-            let _stored = records.update_purge(tenant, purge).await?;
+        if purge.state == PurgeState::Completed {
+            return Ok(Done::default());
         }
+        let error = match self
+            .remove(attempt, tenant, purge.clone(), drained, remove)
+            .await
+        {
+            Ok(done) => return Ok(done),
+            Err(error) => error,
+        };
+        purge.state = PurgeState::Failed;
+        purge.error = Some(error.clone());
+        purge.report = None;
+        purge.completed_at = None;
+        match records.update_purge(tenant, purge).await {
+            Ok(_failed) => Err(error),
+            Err(unrecorded) => Err(ApiError {
+                message: format!(
+                    "{}; recording the purge as failed failed too: {}",
+                    error.message, unrecorded.message
+                ),
+                ..error
+            }),
+        }
+    }
+
+    /// Record the purge running, drain the workspace when there is one, run the removal under
+    /// the heartbeat and record its report as completed.
+    async fn remove<'a, F, Fut>(
+        &'a self,
+        attempt: &'a Attempt<'a>,
+        tenant: &'a TenantId,
+        mut purge: Purge,
+        drained: Option<StorageScope>,
+        remove: F,
+    ) -> Result<Done, ApiError>
+    where
+        F: FnOnce(&'a dyn Purger) -> Fut,
+        Fut: Future<Output = Result<PurgeReport, ApiError>> + 'a,
+    {
+        let records = &self.ports.records;
+        purge.state = PurgeState::Running;
+        purge.error = None;
+        purge.completed_at = None;
+        let mut purge = records.update_purge(tenant, purge).await?;
+        if let Some(scope) = &drained {
+            self.drain(attempt, scope).await?;
+        }
+        let mut done = Done::default();
+        let report =
+            match renewing(&self.ports, attempt, remove(self.ports.purger.as_ref())).await? {
+                Renewed::Done(report) => report,
+                Renewed::Cancelled(report) => {
+                    done = Done::stopped();
+                    report
+                }
+            };
+        purge.report = Some(report);
+        purge.state = PurgeState::Completed;
+        // The store stamps `completed_at` in the write that first records completion
+        // (`RecordStore::update_purge`); the handler has no clock and passes none.
+        purge.completed_at = None;
+        let _stored = records.update_purge(tenant, purge).await?;
         Ok(done)
+    }
+
+    /// The `Purger` caller's drain: cancel every queued or running job of the purged workspace
+    /// and wait, at most `HandlerLimits::drain`, until none is running.
+    ///
+    /// Each pass lists the workspace's jobs again, every page, and cancels each queued or
+    /// running one under `derive_drain_mutation_id` of the purge job's mutation and that job, so
+    /// a resumed purge cancels the same way and the store makes no second transition. Each
+    /// cancellation that took effect is announced (`job_updated`, in the workspace's log, under
+    /// that identity, so a resumed purge appends no second one). A job past its point of no
+    /// return (a sealed restore) refuses its cancellation: while it runs the drain waits for it;
+    /// once its attempt died and its lease lapsed it is queued and no worker can claim it (the
+    /// purge's record refuses the claim), so it is not waited for, and the purge removes its
+    /// row. Between passes, every `HandlerLimits::heartbeat`, the purge job renews its lease.
+    ///
+    /// "Running" is the store's state. A job cancelled while its attempt is inside one storage
+    /// call is `cancelled` at once, though that attempt stops only when the call returns; every
+    /// write it would then make to the workspace storage refuses from the moment the purge was
+    /// recorded (`Purger`). The one write storage does not refuse, the import of a restore, runs
+    /// only after the restore sealed itself, so it is never cancelled and always waited for.
+    ///
+    /// # Errors
+    /// Returns `Unavailable`, naming the jobs still running, when one still runs once the bound
+    /// has passed: the purge job fails, retryable, and the run that repeating the request
+    /// starts drains again. Returns any port error.
+    async fn drain(&self, attempt: &Attempt<'_>, scope: &StorageScope) -> Result<(), ApiError> {
+        let limits = self.ports.limits;
+        let started = tokio::time::Instant::now();
+        loop {
+            let running = self.cancel_unfinished(attempt.claimed, scope).await?;
+            if running.is_empty() {
+                return Ok(());
+            }
+            let waited = started.elapsed();
+            if waited >= limits.drain {
+                let named: Vec<String> = running.iter().map(|job| job.0.to_string()).collect();
+                return Err(ApiError::new(
+                    ErrorCode::Unavailable,
+                    format!(
+                        "the purge waited {:?} for the workspace's jobs to stop, and {} still \
+                         run past their point of no return; asking for the purge again resumes it",
+                        limits.drain,
+                        named.join(", ")
+                    ),
+                ));
+            }
+            let _renewed = attempt.renew(&self.ports).await?;
+            let rest = limits.drain.saturating_sub(waited);
+            tokio::time::sleep(limits.heartbeat.min(rest).max(Duration::from_millis(1))).await;
+        }
+    }
+
+    /// One pass of the drain over every page of the workspace's jobs: cancel each queued or
+    /// running one, and answer the jobs still running after it.
+    async fn cancel_unfinished(
+        &self,
+        claimed: &ClaimedJob,
+        scope: &StorageScope,
+    ) -> Result<Vec<JobId>, ApiError> {
+        let records = &self.ports.records;
+        let jobs = JobScope::Workspace(scope.clone());
+        let mut running = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = records
+                .list_jobs(
+                    &jobs,
+                    Page {
+                        cursor,
+                        limit: DRAIN_PAGE,
+                    },
+                )
+                .await?;
+            for job in page.items {
+                if !matches!(job.state, JobState::Queued | JobState::Running) {
+                    continue;
+                }
+                let cancel = derive_drain_mutation_id(claimed.mutation_id, job.id);
+                let stands = match records.cancel_job(&jobs, cancel, job.id).await {
+                    Ok(cancelled) => {
+                        if cancelled.state == JobState::Cancelled {
+                            announce_cancelled(self.ports.events.as_ref(), scope, cancel, job.id)
+                                .await?;
+                        }
+                        cancelled
+                    }
+                    // Refused: past its point of no return, or finished since it was listed.
+                    Err(error) if error.code == ErrorCode::Conflict => {
+                        records.get_job(&jobs, job.id).await?
+                    }
+                    Err(error) => return Err(error),
+                };
+                if stands.state == JobState::Running {
+                    running.push(job.id);
+                }
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => return Ok(running),
+            }
+        }
     }
 }
 
@@ -692,6 +869,38 @@ pub(crate) async fn announce_job(
             &scope,
             None,
             job_event(EventKind::JobUpdated, claimed, None, None),
+        )
+        .await?;
+    Ok(())
+}
+
+/// Announce that a purge's drain cancelled `job` of the purged workspace (`job_updated`, in the
+/// workspace's log) under the cancellation's identity, so a resumed purge that finds the job
+/// cancelled already appends no second notification.
+///
+/// # Errors
+/// Returns the event log's error.
+async fn announce_cancelled(
+    events: &dyn EventLog,
+    scope: &StorageScope,
+    cancel: MutationId,
+    job: JobId,
+) -> Result<(), ApiError> {
+    let _event = events
+        .append(
+            &EventScope::Workspace(scope.clone()),
+            Some(cancel),
+            NewEvent {
+                kind: EventKind::JobUpdated,
+                revision: None,
+                item_id: None,
+                job_id: Some(job),
+                connector_id: None,
+                actor: None,
+                operation: None,
+                proposal_id: None,
+                count: None,
+            },
         )
         .await?;
     Ok(())
