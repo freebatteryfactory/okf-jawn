@@ -72,8 +72,9 @@ export function heldUploadsChanged(client: QueryClient, workspaceId: string) {
 }
 
 /**
- * The workspaces where a slot the page's list held in `before` (an entry's slot or its verified
- * upload) is held by no entry in `now`: removed, or left for a new slot.
+ * The workspaces where a slot an entry of the page's list held in `before` (`slotId`) is held by
+ * no entry in `now`: removed, or left for a new slot. A verified upload is its entry's slot:
+ * `uploading.ts` sets `uploadId` only to the `slotId` of the same try, and neither changes after.
  */
 export function slotsLetGo(
   before: readonly UploadEntry[],
@@ -81,15 +82,9 @@ export function slotsLetGo(
 ): ReadonlySet<string> {
   const workspaces = new Set<string>();
   if (before === now) return workspaces;
-  const kept = new Set<string>();
-  for (const entry of now) {
-    if (entry.slotId !== null) kept.add(entry.slotId);
-    if (entry.uploadId !== null) kept.add(entry.uploadId);
-  }
+  const kept = new Set(now.map((entry) => entry.slotId));
   for (const entry of before) {
-    for (const id of [entry.slotId, entry.uploadId]) {
-      if (id !== null && !kept.has(id)) workspaces.add(entry.workspaceId);
-    }
+    if (entry.slotId !== null && !kept.has(entry.slotId)) workspaces.add(entry.workspaceId);
   }
   return workspaces;
 }
