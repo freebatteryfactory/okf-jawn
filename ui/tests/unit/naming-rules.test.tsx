@@ -53,7 +53,6 @@ import {
   RECEIPT,
   readResponse,
   renderAt,
-  SOURCE,
   sourceSummary,
   WS,
   workspace,
@@ -204,25 +203,34 @@ function service(overrides: Record<string, Handler> = {}, rules: unknown = saved
     },
     [PREVIEW]: (body) => {
       const revision = revisionAsked(body, state.head);
-      const selection = body.selection as { item_ids?: unknown } | undefined;
-      const ids = Array.isArray(selection?.item_ids) ? selection.item_ids : [];
+      // The selection, as the service resolves it: the workspace, or a folder (and those under it).
+      const selection = body.selection as { kind?: unknown; folder?: unknown } | undefined;
+      const folder = typeof selection?.folder === 'string' ? selection.folder : '';
+      const selected = itemsAt(revision).filter(
+        (item) =>
+          selection?.kind === 'workspace' ||
+          (selection?.kind === 'folder' && item.path.startsWith(`${folder}/`)),
+      );
+      const considered = selected.filter((item) => !item.archived);
+      const entries = considered
+        .map((item) => ({
+          item_id: item.id,
+          from: item.path,
+          to: item.kind === 'source' ? item.path : renamed(item.path, body.rules),
+          warnings:
+            item.id === OTHER ? [{ code: 'ambiguous_date', message: 'No date was found.' }] : [],
+        }))
+        // The plan lists only the items whose path would change.
+        .filter((entry) => entry.from !== entry.to);
       return ok({
         base_revision: revision,
         rules_digest: DIGEST,
-        entries: itemsAt(revision)
-          .filter((item) => ids.includes(item.id))
-          .map((item) => ({
-            item_id: item.id,
-            from: item.path,
-            to: item.kind === 'source' ? item.path : renamed(item.path, body.rules),
-            warnings:
-              item.id === OTHER ? [{ code: 'ambiguous_date', message: 'No date was found.' }] : [],
-          })),
+        entries,
         duplicate_observations: [],
         warnings: [{ code: 'note', message: 'Index files are not renamed.' }],
-        considered: ids.length,
-        unchanged: 0,
-        archived_left_out: 0,
+        considered: considered.length,
+        unchanged: considered.length - entries.length,
+        archived_left_out: selected.length - considered.length,
       });
     },
     [APPLY]: (body) => {
@@ -298,7 +306,7 @@ describe('whether a preview may still be applied', () => {
     unchanged: 0,
     archived_left_out: 0,
   };
-  const preview: Preview = { plan, rules: savedRules, folder: '', looked: 3 };
+  const preview: Preview = { plan, rules: savedRules, folder: '' };
 
   it('holds while the head and the rules are those of the preview, whatever the key order', () => {
     const reordered = { rules: [{ ...rule }], schema_version: 1 };
@@ -473,8 +481,8 @@ describe('the naming rules', () => {
       {
         workspace_id: WS,
         at: { kind: 'revision', revision: HEAD },
-        // The top level, then the folder under it.
-        selection: { kind: 'items', item_ids: [SOURCE, NOTE, OTHER] },
+        // The whole workspace: the service reads its items itself.
+        selection: { kind: 'workspace' },
         rules: { schema_version: 1, rules: [{ ...rule, prefix: '2025-' }] },
       },
     ]);
@@ -488,8 +496,9 @@ describe('the naming rules', () => {
       'notes/plan.mdnotes/2025-plan.mdNo date was found.',
     ]);
     expect(panel().textContent).toContain(
-      '2 items would be renamed, and 1 keeps its name, of the 3 items in the whole workspace',
+      '2 items would be renamed, and 1 keeps its name, of the 3 items considered in the whole workspace',
     );
+    expect(panel().textContent).toContain('No archived item is among them.');
     expect(panel().textContent).toContain('Index files are not renamed.');
     expect(panel().textContent).toContain('Nothing has been renamed.');
     // Nothing was written, and the workspace shows the same version.
@@ -498,27 +507,41 @@ describe('the naming rules', () => {
     expect(api.violations).toEqual([]);
   });
 
-  it('lists every page of a folder before it previews', async () => {
-    const { api } = service({
-      [LIST]: (body) => {
-        const revision = revisionAsked(body, HEAD);
-        const page = body.page as { cursor?: string | null };
-        const second = page.cursor === 'next';
-        return ok({
-          folders: [],
-          items: [{ ...(second ? otherSummary : noteSummary), revision }],
-          revision,
-          next_cursor: second ? null : 'next',
-        });
-      },
+  it('asks the service once for the selection, and lists no folder of its own for it', async () => {
+    const { api } = service();
+    await openRules();
+    const listed = api.callsTo(LIST).length;
+    await setPrefix('2025-');
+    await previewNow();
+    expect(api.callsTo(PREVIEW)).toHaveLength(1);
+    expect(api.callsTo(LIST)).toHaveLength(listed);
+  });
+
+  it('says the counts the plan gives: the items considered, those that keep their names, and the archived left out', async () => {
+    service({
+      [PREVIEW]: (body) =>
+        ok({
+          base_revision: revisionAsked(body, HEAD),
+          rules_digest: DIGEST,
+          entries: [
+            { item_id: NOTE, from: noteSummary.path, to: 'notes/2025-meeting.md', warnings: [] },
+          ],
+          duplicate_observations: [],
+          warnings: [],
+          considered: 4,
+          unchanged: 3,
+          archived_left_out: 2,
+        }),
     });
     await openRules();
     await setPrefix('2025-');
     await previewNow();
-    expect(api.callsTo(PREVIEW).at(0)?.selection).toEqual({
-      kind: 'items',
-      item_ids: [NOTE, OTHER],
-    });
+    expect(panel().textContent).toContain(
+      '1 item would be renamed, and 3 keep their names, of the 4 items considered in the whole workspace',
+    );
+    expect(panel().textContent).toContain(
+      '2 archived items are left out: archived items are never renamed.',
+    );
   });
 
   it('gives the documents back their place when an item is opened from the folders', async () => {
@@ -530,7 +553,7 @@ describe('the naming rules', () => {
     expect(screen.queryByRole('region', { name: 'Naming rules' })).toBeNull();
   });
 
-  it('previews one folder when asked, and asks nothing for a folder that holds no item', async () => {
+  it('previews one folder and those under it when asked, and says when it holds no item', async () => {
     const { api } = service();
     await openRules();
     await setPrefix('2025-');
@@ -538,22 +561,29 @@ describe('the naming rules', () => {
     await userEvent.type(folder, 'notes');
     await previewNow();
     expect(api.callsTo(PREVIEW).at(0)?.selection).toEqual({
-      kind: 'items',
-      item_ids: [NOTE, OTHER],
+      kind: 'folder',
+      folder: 'notes',
+      recursive: true,
     });
+    expect(panel().textContent).toContain(
+      'of the 2 items considered in the folder notes and the folders under it',
+    );
     await userEvent.clear(folder);
     await userEvent.type(folder, 'empty');
     await userEvent.click(button('Preview the renames'));
-    expect(
-      (await screen.findByText('There is nothing to preview.')).closest('[role="alert"]'),
-    ).toBeTruthy();
-    expect(api.callsTo(PREVIEW)).toHaveLength(1);
+    await waitFor(() =>
+      expect(panel().textContent).toContain(
+        'There is no item to rename in the folder empty and the folders under it',
+      ),
+    );
+    expect(api.callsTo(PREVIEW)).toHaveLength(2);
+    expect(within(panel()).queryByRole('button', { name: /Apply this preview/ })).toBeNull();
     await userEvent.clear(folder);
     await userEvent.type(folder, 'a//b');
     await userEvent.click(button('Preview the renames'));
     expect(document.activeElement).toBe(folder);
     expect(folder.getAttribute('aria-invalid')).toBe('true');
-    expect(api.callsTo(PREVIEW)).toHaveLength(1);
+    expect(api.callsTo(PREVIEW)).toHaveLength(2);
   });
 
   it('applies only after the question, sending exactly the plan and the rules of the preview', async () => {
@@ -594,12 +624,11 @@ describe('the naming rules', () => {
               to: 'notes/2025-plan.md',
               warnings: [{ code: 'ambiguous_date', message: 'No date was found.' }],
             },
-            { item_id: SOURCE, from: 'report.pdf.md', to: 'report.pdf.md', warnings: [] },
           ],
           duplicate_observations: [],
           warnings: [{ code: 'note', message: 'Index files are not renamed.' }],
           considered: 3,
-          unchanged: 0,
+          unchanged: 1,
           archived_left_out: 0,
         },
         rules: previewed?.rules,
@@ -2313,15 +2342,13 @@ describe('what the two views of the rules say and keep', () => {
     expect(note.getAttribute('role')).toBe('note');
   });
 
-  it('says in a preview that archived items are left out, and that their number cannot be told', async () => {
+  it('says in a preview how many archived items it left out, as the plan counts them', async () => {
     service();
     await openRules();
     await setPrefix('2025-');
     await previewNow();
     const preview = screen.getByRole('region', { name: 'Preview: what would be renamed' });
-    expect(preview.textContent).toContain(
-      'Archived items are not listed in the workspace as it is now, so they are not in this preview and would not be renamed. How many there are cannot be told here.',
-    );
+    expect(preview.textContent).toContain('No archived item is among them.');
   });
 });
 

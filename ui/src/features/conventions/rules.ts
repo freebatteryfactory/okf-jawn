@@ -8,12 +8,10 @@
  * shown with its text and its problems for repair, never as "no rules". The schema the form is
  * built from is the service's own (`get_form_schema`, name `naming-rules`).
  *
- * A preview writes nothing. `preview_names` takes the items to look at by id, so the items of the
- * chosen folder and of every folder under it are listed first, page by page, at the same
- * revision: one `list_items` request for each 200 entries of each folder (a workspace of 10,000
- * items in 100 folders is about 150 requests, one after another). Pages already listed for the
- * tree are reused. A folder that fails to list fails the preview: a preview of some of the items
- * is not shown as a preview of all of them.
+ * A preview writes nothing. `preview_names` takes a selection (ruling 10): the whole workspace, or
+ * a folder with every folder under it. The service reads the items itself, in one request, and
+ * answers how many it considered, how many would keep their names, and how many archived items it
+ * left out (archived items are never renamed); the plan's entries are the renames alone.
  *
  * Applying sends back exactly the plan the service answered and the rules it was previewed with;
  * the service checks both again (the plan's base revision and the digest of the rules). The
@@ -35,7 +33,7 @@ import {
 import { applyNames, previewNames, setRules } from '../../api/generated/sdk.gen';
 import type {
   GetRulesResponse,
-  ListItemsResponse,
+  NameSelection,
   NamingRules,
   RenamePlan,
   Revision,
@@ -44,7 +42,6 @@ import type {
 import { listedDraft } from '../drafts/drafts-list';
 import { type DraftAfterChange, draftLeftBehind, followOwnChange } from '../drafts/saving';
 import { sessionKey, useDraftSessions } from '../drafts/sessions';
-import { listingPageOptions } from '../explorer/folder-listing';
 import { adoptHeadFrom, checkHeadsAgain, type HeadChange } from '../explorer/head';
 import type { Attempt } from '../tree/changes';
 
@@ -196,72 +193,37 @@ export async function saveRules(
   return { revision: data.revision, previousHead, itemIds: [], adopted };
 }
 
-/**
- * The ids of every item in `folder` ('' is the whole workspace) and in the folders under it, as
- * listed at `revision`. Rejects with what a listing threw.
- */
-export async function itemsUnder(
-  client: QueryClient,
-  workspaceId: string,
-  revision: Revision,
-  folder: string,
-): Promise<string[]> {
-  const ids: string[] = [];
-  const waiting = [folder];
-  for (let next = waiting.pop(); next !== undefined; next = waiting.pop()) {
-    let cursor: string | null = null;
-    do {
-      const page: ListItemsResponse = await client.fetchQuery({
-        ...listingPageOptions(workspaceId, revision, next, cursor),
-        staleTime: Number.POSITIVE_INFINITY,
-      });
-      for (const item of page.items) ids.push(item.id);
-      waiting.push(...page.folders);
-      cursor = page.next_cursor ?? null;
-    } while (cursor !== null);
-  }
-  return ids;
-}
-
 /** A preview as the person saw it: the plan, and what it was made of. */
 export interface Preview {
   plan: RenamePlan;
   /** The rules it was previewed with: an apply sends these, not what the editor holds later. */
   rules: NamingRules;
-  /** The folder whose items were looked at; '' is the whole workspace. */
+  /** The folder whose items, and those of every folder under it, were looked at; '' is all. */
   folder: string;
-  /** How many items were looked at. */
-  looked: number;
 }
 
-/** Thrown by a preview of a folder that holds no item: nothing is asked of `preview_names`. */
-export class NothingToPreview extends Error {
-  constructor() {
-    super('There is no item to preview');
-    this.name = 'NothingToPreview';
-  }
+/** What a preview of `folder` asks for: the whole workspace, or the folder and those under it. */
+export function selectionOf(folder: string): NameSelection {
+  return folder === '' ? { kind: 'workspace' } : { kind: 'folder', folder, recursive: true };
 }
 
 /** What these rules would rename among the items of `folder`, at `revision`. Writes nothing. */
 export async function previewRenames(
-  client: QueryClient,
   workspaceId: string,
   revision: Revision,
   rules: NamingRules,
   folder: string,
 ): Promise<Preview> {
-  const itemIds = await itemsUnder(client, workspaceId, revision, folder);
-  if (itemIds.length === 0) throw new NothingToPreview();
   const { data } = await previewNames({
     body: {
       workspace_id: workspaceId,
       at: { kind: 'revision', revision },
-      selection: { kind: 'items', item_ids: itemIds },
+      selection: selectionOf(folder),
       rules,
     },
     throwOnError: true,
   });
-  return { plan: data, rules, folder, looked: itemIds.length };
+  return { plan: data, rules, folder };
 }
 
 /**

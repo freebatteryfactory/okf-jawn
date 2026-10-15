@@ -24,7 +24,9 @@
  *
  * A preview writes nothing. It lists each item that would be renamed with its name now and its
  * name after, as a table (read row by row with a screen reader's table keys; the column it is in
- * scrolls from any control), with the service's warnings and the duplicate paths it observed. A preview belongs to the revision and the rules it was made of.
+ * scrolls from any control), with the service's warnings and the duplicate paths it observed, and
+ * the counts the plan gives: the items considered, those that keep their names, and the archived
+ * items left out (ruling 10). A preview belongs to the revision and the rules it was made of.
  * When either is no longer what the page shows (the person saved the rules, made another change
  * or refreshed; the rules were edited; the service refused the preview as out of date), it is
  * marked out of date and cannot be applied: the person previews again. Applying asks first, and
@@ -74,7 +76,7 @@
 
 import { Tabs } from '@base-ui/react/tabs';
 import type { RJSFSchema } from '@rjsf/utils';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { type RefObject, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { z } from 'zod';
 import type { NamingRules, RenamePlan, Revision, Warning } from '../../api/generated/types.gen';
@@ -99,7 +101,6 @@ import { formHolds, RulesForm, rulesProblems } from './RulesForm';
 import {
   applyPreview,
   keepOrder,
-  NothingToPreview,
   type Preview,
   previewRenames,
   problemPlace,
@@ -222,7 +223,6 @@ export function staleReason(
 }
 
 export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
-  const client = useQueryClient();
   const { workspaceId, head, canWrite } = useWorkspaceChanges();
   const heading = useId();
   const previewHeading = useId();
@@ -438,7 +438,7 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   );
   const previewing = useMutation({
     mutationFn: (asked: { rules: NamingRules; folder: string; head: Revision }) =>
-      previewRenames(client, workspaceId, asked.head, asked.rules, asked.folder),
+      previewRenames(workspaceId, asked.head, asked.rules, asked.folder),
     onSuccess: (made) => {
       setPreview(made);
       setAsking(false);
@@ -446,10 +446,9 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
       focusNext.current = 'preview';
     },
   });
-  const nothing = previewing.isError && previewing.error instanceof NothingToPreview;
   const previewFailure = useRetry({
     request: workspaceId,
-    failed: previewing.isError && !nothing,
+    failed: previewing.isError,
     error: previewing.error,
     run: () =>
       previewing.variables === undefined
@@ -509,7 +508,6 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   }
 
   const renames = preview === null ? [] : preview.plan.entries.filter((e) => e.from !== e.to);
-  const kept = preview === null ? 0 : preview.plan.entries.length - renames.length;
 
   /**
    * Whether the YAML view holds text that is not read yet (typed a moment ago, or being read).
@@ -688,7 +686,7 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
       {/* Present from the start, so what an action did is announced. */}
       <p role="status" className="meta rules-said">
         {previewing.isPending && !previewFailure.retrying
-          ? 'Listing the items and making the preview…'
+          ? 'Making the preview…'
           : save.pending
             ? 'Saving the rules…'
             : apply.pending
@@ -995,17 +993,6 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
         sameWords={RULES_REFUSED}
         withdrawnWords="The rules on this page are no longer the ones that were sent, so they are not sent again by themselves. Check them, then press “Save the rules” to save them as they are now."
       />
-      {nothing && (
-        <div role="alert" className="failure-notice">
-          <p>
-            <strong>There is nothing to preview.</strong>
-          </p>
-          <p>
-            {folder === '' ? 'This workspace' : `The folder ${folder}`} holds no item, so nothing
-            was asked of the service.
-          </p>
-        </div>
-      )}
       {previewFailure.shown && (
         <FailureNotice
           context="Previewing the renames"
@@ -1020,17 +1007,21 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
             Preview: what would be renamed
           </h3>
           <p>
-            {count(renames.length, 'item', 'items')} would be renamed
-            {kept > 0 ? `, and ${count(kept, 'keeps its name', 'keep their names')}` : ''}, of the{' '}
-            {count(preview.looked, 'item', 'items')} in{' '}
-            {preview.folder === '' ? 'the whole workspace' : `the folder ${preview.folder}`} at
-            revision{' '}
+            {preview.plan.considered === 0
+              ? 'There is no item to rename'
+              : `${count(renames.length, 'item', 'items')} would be renamed, and ${count(preview.plan.unchanged, 'keeps its name', 'keep their names')}, of the ${count(preview.plan.considered, 'item', 'items')} considered`}{' '}
+            in{' '}
+            {preview.folder === ''
+              ? 'the whole workspace'
+              : `the folder ${preview.folder} and the folders under it`}{' '}
+            at revision{' '}
             <code title={preview.plan.base_revision}>{short(preview.plan.base_revision)}</code>.
             Nothing has been renamed.
           </p>
           <p className="meta">
-            Archived items are not listed in the workspace as it is now, so they are not in this
-            preview and would not be renamed. How many there are cannot be told here.
+            {preview.plan.archived_left_out === 0
+              ? 'No archived item is among them.'
+              : `${count(preview.plan.archived_left_out, 'archived item is', 'archived items are')} left out: archived items are never renamed.`}
           </p>
           {stale !== null && (
             <div role="alert" className="failure-notice">
