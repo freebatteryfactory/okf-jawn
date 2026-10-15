@@ -1,15 +1,29 @@
 //! Route only declared operations through validation, target authorization, and the mutation ledger.
 //!
 //! Order: validate, decode, `check_rules()`, `targets()`, authorize every target, build the
-//! context, `MutationStore::begin`, the handler, then `complete` on success or `release` on
-//! error. `check_rules` refuses what no grant can make valid, such as a View bound to another
-//! workspace, so its refusal is `InvalidInput` whoever asks.
+//! context, the archive rule, `MutationStore::begin`, the handler, then `complete` on success or
+//! `release` on error. `check_rules` refuses what no grant can make valid, such as a View bound
+//! to another workspace, so its refusal is `InvalidInput` whoever asks.
+//!
+//! The archive rule (contract ruling 25): a mutation that writes a workspace (its first
+//! target's, `written_workspace`) and is not in `operations::ALLOWED_WHILE_ARCHIVED` is refused
+//! with `Conflict` and `ErrorDetail::WorkspaceArchived` while that workspace is archived. The
+//! catalog entry is read once, through `Application::archived_at`, only for such a mutation and
+//! only after authorization, so a caller who may not write the workspace learns nothing of it.
+//! The refusal comes before the ledger begins the mutation and is recorded nowhere: it is not a
+//! permission refusal. A retry of a mutation that completed before the archive is refused the
+//! same way, since the rule runs before the ledger could replay it. A mutation authorized at the
+//! tenant (a workspace's creation, a purge, an installation backup, a connector) writes no
+//! workspace target and is not checked.
 //! "Error" is anything that fails after `begin` granted the lease, not only the handler: a
 //! failure to serialize the response, to build the ledger body, or in `complete` itself also
 //! releases the lease, and the caller receives the first error, never the release's.
 //! A request that declares no target is refused as `Internal` before any grant is looked up,
 //! and so is a draft-bearing, backup, restore or purge operation on a route that is not a human
-//! session (`access::check_human_route`, refused as `Forbidden`). Every `Forbidden` from
+//! session (`access::check_human_route`, refused as `Forbidden`), and a connector operation on
+//! any route but the local owner's (`access::check_local_owner_route`, `Forbidden`). A
+//! `create_connector` refused at one of its listed workspaces names that entry,
+//! `/workspace_ids/<index>`, as the refusal's field. Every `Forbidden` from
 //! authorization, dispatch's or a handler's own (such as `access::authorize_job_kind`), is
 //! recorded as a `permission_denied` event before the refusal is returned: in the log of the
 //! refusing workspace target; when no target was evaluated as the refuser (a route refusal, a
@@ -34,8 +48,10 @@
 //! the row with it, so an attempt whose lease was taken over cannot complete or release the
 //! attempt that now holds the mutation.
 
+use std::any::Any;
+
 use jsonschema::error::ValidationErrorKind;
-use okf_jawn_contract::access::Principal;
+use okf_jawn_contract::access::{CreateConnectorRequest, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::{ConnectorId, MutationId, WorkspaceId};
 use okf_jawn_contract::metadata::OperationName;
@@ -78,12 +94,14 @@ macro_rules! dispatch_operations {
                         match authorize_targets(ports.access, caller, operation, &request).await {
                             Ok(context) => context,
                             Err(refusal) => {
+                                let refusal = name_refused_entry(&request, refusal);
                                 return Err(
                                     record_denial(ports.events, caller.principal, operation, &request, refusal)
                                         .await,
                                 );
                             }
                         };
+                    refuse_while_archived(service, caller.principal, operation, &request).await?;
                     let replay = <$request as RequestScope>::REPLAY;
                     let named = <$request as RequestScope>::RESPONSE_WORKSPACE;
                     match prepare_mutation(ports, &mut context, replay, &request).await? {
@@ -387,9 +405,10 @@ async fn authorize_targets(
             "Request declares no authorization target",
         )));
     }
-    // No grant lets an agent route see a draft or back up, restore or purge, so this runs
-    // before any grant is looked up.
+    // No grant lets an agent route see a draft or back up, restore or purge, and none lets any
+    // route but the local owner's manage connectors, so these run before any grant is looked up.
     access::check_human_route(principal, operation).map_err(Refusal::before_targets)?;
+    access::check_local_owner_route(principal, operation).map_err(Refusal::before_targets)?;
     for target in targets {
         let at = |error| Refusal {
             error,
@@ -431,6 +450,74 @@ async fn authorize_targets(
         mutation: None,
         attempt: Attempt::First,
     })
+}
+
+/// Refuse a mutation of an archived workspace that `operations::ALLOWED_WHILE_ARCHIVED` does
+/// not allow (contract ruling 25).
+///
+/// Only a mutation that writes a workspace is checked: its first target's workspace
+/// (`written_workspace`), the one its table permission names. The workspace's catalog entry is
+/// read once, through `Application::archived_at`. Nothing is recorded: the refusal is a state of
+/// the workspace, not a missing grant.
+///
+/// # Errors
+/// Returns `Conflict` with `ErrorDetail::WorkspaceArchived` while the workspace is archived, or
+/// the error of `Application::archived_at`.
+async fn refuse_while_archived(
+    service: &dyn Application,
+    principal: &Principal,
+    operation: OperationName,
+    request: &impl RequestScope,
+) -> Result<(), ApiError> {
+    if request.idempotency_key().is_none() || operation.allowed_while_archived() {
+        return Ok(());
+    }
+    let Some(workspace_id) = written_workspace(&request.targets()) else {
+        return Ok(());
+    };
+    let scope = StorageScope {
+        tenant_id: principal.tenant_id.clone(),
+        workspace_id,
+    };
+    match service.archived_at(&scope).await? {
+        Some(archived_at) => Err(ApiError::new(
+            ErrorCode::Conflict,
+            format!(
+                "The workspace is archived, and {} does not run in an archived workspace; \
+                 unarchive it first",
+                operation.as_str()
+            ),
+        )
+        .with_detail(ErrorDetail::WorkspaceArchived { archived_at })),
+        None => Ok(()),
+    }
+}
+
+/// Name the request entry a refused workspace target came from, when the target is one of a
+/// list: a `create_connector` refused at one of its workspaces names `/workspace_ids/<index>`,
+/// the first entry that lists it (contract ruling 22). Every other refusal is returned as it
+/// is; a refusal before any target, or at the tenant's, names no entry.
+fn name_refused_entry(request: &dyn Any, refusal: Refusal) -> Refusal {
+    let Some(Target::Workspace(workspace, _)) = refusal.target else {
+        return refusal;
+    };
+    if refusal.error.code != ErrorCode::Forbidden {
+        return refusal;
+    }
+    let Some(connector) = request.downcast_ref::<CreateConnectorRequest>() else {
+        return refusal;
+    };
+    match connector
+        .workspace_ids
+        .iter()
+        .position(|listed| *listed == workspace)
+    {
+        Some(index) => Refusal {
+            error: refusal.error.with_field(format!("/workspace_ids/{index}")),
+            target: refusal.target,
+        },
+        None => refusal,
+    }
 }
 
 /// Record a `Forbidden` authorization refusal of an authenticated caller and return the
