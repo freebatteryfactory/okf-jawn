@@ -1,7 +1,7 @@
 //! Application boundaries own typed operations; storage and transport implement them.
 //!
 //! Besides one method per operation, `Application` answers one question dispatch asks before a
-//! mutation runs: whether the workspace it writes is archived (`Application::archived_at`).
+//! mutation runs: whether a workspace it names is archived (`Application::archived_at`).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -25,9 +25,9 @@ macro_rules! application_port {
 
             /// When the workspace in `scope` was archived; `None` while it is not.
             ///
-            /// Dispatch asks this once, after authorization and before the mutation ledger, for
-            /// a mutation that writes a workspace and is not in
-            /// `operations::ALLOWED_WHILE_ARCHIVED`, and refuses it while the answer is `Some`
+            /// Dispatch asks this after authorization and before the mutation ledger, once for
+            /// each workspace a mutation that is not in `operations::ALLOWED_WHILE_ARCHIVED`
+            /// names in its targets, and refuses the mutation while an answer is `Some`
             /// (contract ruling 25). `ApplicationService` reads its workspace catalog. Every
             /// implementation in the crates answers it explicitly. The provided answer, `None`,
             /// which applies no archive rule, is kept only for the bindings' shared response

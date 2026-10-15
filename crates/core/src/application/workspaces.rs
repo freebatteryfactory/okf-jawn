@@ -35,11 +35,11 @@
 //! the change was made at), with a receipt and no warnings. A retry under the same mutation
 //! answers the catalog's first result and the first receipt.
 //!
-//! The archive rule is dispatch's (`dispatch`, contract ruling 25): a mutation of an archived
-//! workspace that `operations::ALLOWED_WHILE_ARCHIVED` does not list is refused before its
-//! handler, from the catalog entry `archived_at` reads. The two store guards are storage's: an
-//! archive is refused while an import, redigest or restore job of the workspace is queued or
-//! running, and no such job is accepted for an archived workspace.
+//! The archive rule is dispatch's (`dispatch`, contract ruling 25): a mutation that
+//! `operations::ALLOWED_WHILE_ARCHIVED` does not list is refused before its handler while any
+//! workspace it names is archived, from the catalog entry `archived_at` reads. The two store
+//! guards are storage's: an archive is refused while an import, redigest or restore job of the
+//! workspace is queued or running, and no such job is accepted for an archived workspace.
 //!
 //! Jobs. Each job-starting operation records its job (`RecordStore::create_job`, unique on the
 //! request's mutation, so a retry answers the job the first attempt created), then wakes the

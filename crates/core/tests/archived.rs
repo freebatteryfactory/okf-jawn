@@ -1,6 +1,6 @@
-//! Dispatch's two rules of core M1.4: a mutation of an archived workspace that
-//! `operations::ALLOWED_WHILE_ARCHIVED` does not list is refused before its handler and before
-//! the ledger (contract ruling 25), and the connector operations run only for the local owner
+//! Dispatch's two rules of core M1.4: a mutation that `operations::ALLOWED_WHILE_ARCHIVED` does
+//! not list is refused before its handler and before the ledger while any workspace it names is
+//! archived (contract ruling 25), and the connector operations run only for the local owner
 //! (`operations::LOCAL_OWNER_ONLY`, contract ruling 22), with a refused `create_connector`
 //! naming the listed workspace that refused it. Every case goes through `dispatch` with the
 //! fixture grants and ledger, and fails when the rule it names is removed.
@@ -48,6 +48,7 @@ const ITEM: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const JOB: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const UPLOAD: &str = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const CONNECTOR: &str = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+const PROPOSAL: &str = "99999999-9999-4999-8999-999999999999";
 
 /// The mutations an archived workspace allows that name it in their targets or body, each sent
 /// to the archived workspace.
@@ -183,6 +184,37 @@ fn body(operation: &str, workspace_id: &str) -> Result<Value, String> {
     Ok(body)
 }
 
+/// A citation of the note at `ITEM` in `workspace_id`.
+fn cited(workspace_id: &str) -> Value {
+    json!({
+        "workspace_id": workspace_id, "item_id": ITEM, "path": "notes/a.md",
+        "revision": REVISION, "selection": { "kind": "all" }
+    })
+}
+
+/// A comment written in `written` on a proposal there, citing `source` when given.
+fn comment(written: &str, source: Option<&str>) -> Value {
+    let mut body = json!({
+        "workspace_id": written, "proposal_id": PROPOSAL, "text": "see this",
+        "idempotency_key": KEY
+    });
+    if let (Some(source), Some(fields)) = (source, body.as_object_mut()) {
+        fields.insert("source".to_owned(), cited(source));
+    }
+    body
+}
+
+/// Assert `refused` is the archive refusal of the fixture's archived workspace.
+fn assert_archived(refused: &ApiError, what: &str) -> TestResult {
+    assert_eq!(refused.code, ErrorCode::Conflict, "{what}");
+    let detail = some(refused.detail.as_deref(), "the archived detail")?;
+    assert!(
+        matches!(detail, ErrorDetail::WorkspaceArchived { archived_at: at } if *at == archived_at()?),
+        "{what}: {detail:?}"
+    );
+    Ok(())
+}
+
 #[test]
 fn every_mutation_an_archived_workspace_allows_is_sent_by_these_tests() -> TestResult {
     let mutations = mutations()?;
@@ -237,6 +269,85 @@ async fn a_mutation_of_an_archived_workspace_is_refused_before_its_handler_and_i
         let context = some(contexts.first(), "the handler's run")?;
         assert_eq!(context.attempt, Attempt::First, "{operation}");
     }
+    Ok(())
+}
+
+/// Every workspace a mutation names is checked, whichever of its targets names it: a comment
+/// written in an archived workspace citing a live one, and one written in a live workspace
+/// citing an archived one, are both refused; one citing a live workspace runs.
+#[tokio::test]
+async fn a_comment_naming_an_archived_workspace_on_either_side_is_refused() -> TestResult {
+    for (written, source) in [(ARCHIVED, LIVE), (LIVE, ARCHIVED)] {
+        let (app, ports) = world()?;
+        let alice = principal("alice", AccessRoute::LocalOwner)?;
+        let refused = err_of(
+            call(
+                &app,
+                &ports,
+                &alice,
+                "add_comment",
+                comment(written, Some(source)),
+            )
+            .await,
+        )?;
+        let what = format!("written in {written}, citing {source}");
+        assert_archived(&refused, &what)?;
+        assert_eq!(app.handlers.call_count("add_comment")?, 0, "{what}");
+        assert!(ports.events.appended()?.is_empty(), "{what}");
+        // Each workspace is asked once, in target order, until one is archived.
+        let asked: Vec<_> = app
+            .asked()?
+            .into_iter()
+            .map(|scope| scope.workspace_id)
+            .collect();
+        let expected = if written == ARCHIVED {
+            vec![workspace(ARCHIVED)?]
+        } else {
+            vec![workspace(LIVE)?, workspace(ARCHIVED)?]
+        };
+        assert_eq!(asked, expected, "{what}");
+    }
+    let (app, ports) = world()?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let _ran = call(
+        &app,
+        &ports,
+        &alice,
+        "add_comment",
+        comment(LIVE, Some(LIVE)),
+    )
+    .await;
+    assert_eq!(app.handlers.call_count("add_comment")?, 1);
+    assert_eq!(
+        app.asked()?.len(),
+        1,
+        "a workspace named twice is asked once"
+    );
+    Ok(())
+}
+
+/// A connector would be granted every workspace it lists: listing an archived one refuses it.
+#[tokio::test]
+async fn a_connector_listing_an_archived_workspace_is_refused() -> TestResult {
+    let (app, ports) = world()?;
+    let owner = principal("alice", AccessRoute::LocalOwner)?;
+    let request = json!({
+        "label": "agent", "workspace_ids": [LIVE, ARCHIVED], "allow_propose": false,
+        "idempotency_key": KEY
+    });
+    let refused = err_of(call(&app, &ports, &owner, "create_connector", request).await)?;
+    assert_archived(&refused, "create_connector")?;
+    assert_eq!(
+        refused.field, None,
+        "only a Forbidden refusal names an entry"
+    );
+    assert_eq!(app.handlers.call_count("create_connector")?, 0);
+    let asked: Vec<_> = app
+        .asked()?
+        .into_iter()
+        .map(|scope| scope.workspace_id)
+        .collect();
+    assert_eq!(asked, vec![workspace(LIVE)?, workspace(ARCHIVED)?]);
     Ok(())
 }
 
@@ -313,7 +424,7 @@ async fn a_mutation_authorized_at_the_tenant_asks_no_archive_question() -> TestR
     for operation in [
         "create_workspace",
         "backup_installation",
-        "create_connector",
+        "revoke_connector",
     ] {
         let (app, ports) = world()?;
         let alice = principal("alice", AccessRoute::LocalOwner)?;

@@ -5,16 +5,17 @@
 //! `release` on error. `check_rules` refuses what no grant can make valid, such as a View bound
 //! to another workspace, so its refusal is `InvalidInput` whoever asks.
 //!
-//! The archive rule (contract ruling 25): a mutation that writes a workspace (its first
-//! target's, `written_workspace`) and is not in `operations::ALLOWED_WHILE_ARCHIVED` is refused
-//! with `Conflict` and `ErrorDetail::WorkspaceArchived` while that workspace is archived. The
-//! catalog entry is read once, through `Application::archived_at`, only for such a mutation and
-//! only after authorization, so a caller who may not write the workspace learns nothing of it.
-//! The refusal comes before the ledger begins the mutation and is recorded nowhere: it is not a
-//! permission refusal. A retry of a mutation that completed before the archive is refused the
-//! same way, since the rule runs before the ledger could replay it. A mutation authorized at the
-//! tenant (a workspace's creation, a purge, an installation backup, a connector) writes no
-//! workspace target and is not checked.
+//! The archive rule (contract ruling 25): a mutation that is not in
+//! `operations::ALLOWED_WHILE_ARCHIVED` is refused with `Conflict` and
+//! `ErrorDetail::WorkspaceArchived` while any workspace its targets name is archived: the one
+//! it writes, a workspace a comment cites, a workspace a connector would be granted. Each
+//! distinct workspace's catalog entry is read once, through `Application::archived_at`, only for
+//! such a mutation and only after authorization, so a caller who may not use the workspace
+//! learns nothing of it. The refusal comes before the ledger begins the mutation and is
+//! recorded nowhere: it is not a permission refusal. A retry of a mutation that completed
+//! before the archive is refused the same way, since the rule runs before the ledger could
+//! replay it. A mutation authorized only at the tenant (a workspace's creation, an installation
+//! backup, a revocation) names no workspace and is not checked.
 //! "Error" is anything that fails after `begin` granted the lease, not only the handler: a
 //! failure to serialize the response, to build the ledger body, or in `complete` itself also
 //! releases the lease, and the caller receives the first error, never the release's.
@@ -474,16 +475,19 @@ async fn authorize_targets(
     })
 }
 
-/// Refuse a mutation of an archived workspace that `operations::ALLOWED_WHILE_ARCHIVED` does
-/// not allow (contract ruling 25).
+/// Refuse a mutation that names an archived workspace when `operations::ALLOWED_WHILE_ARCHIVED`
+/// does not allow it (contract ruling 25).
 ///
-/// Only a mutation that writes a workspace is checked: its first target's workspace
-/// (`written_workspace`), the one its table permission names. The workspace's catalog entry is
-/// read once, through `Application::archived_at`. Nothing is recorded: the refusal is a state of
-/// the workspace, not a missing grant.
+/// Every workspace the mutation's targets name is checked, not only the one it writes: a
+/// comment written in a live workspace that cites an archived one, and a connector that would
+/// be granted an archived one, are refused as a write in it is, whatever the order of the
+/// targets. Each distinct workspace's catalog entry is read once, through
+/// `Application::archived_at`, in target order, until one is archived. A mutation authorized
+/// only at the tenant names no workspace and asks nothing. Nothing is recorded: the refusal is
+/// a state of the workspace, not a missing grant.
 ///
 /// # Errors
-/// Returns `Conflict` with `ErrorDetail::WorkspaceArchived` while the workspace is archived, or
+/// Returns `Conflict` with `ErrorDetail::WorkspaceArchived` of the first archived workspace, or
 /// the error of `Application::archived_at`.
 async fn refuse_while_archived(
     service: &dyn Application,
@@ -494,25 +498,33 @@ async fn refuse_while_archived(
     if request.idempotency_key().is_none() || operation.allowed_while_archived() {
         return Ok(());
     }
-    let Some(workspace_id) = written_workspace(&request.targets()) else {
-        return Ok(());
-    };
-    let scope = StorageScope {
-        tenant_id: principal.tenant_id.clone(),
-        workspace_id,
-    };
-    match service.archived_at(&scope).await? {
-        Some(archived_at) => Err(ApiError::new(
-            ErrorCode::Conflict,
-            format!(
-                "The workspace is archived, and {} does not run in an archived workspace; \
-                 unarchive it first",
-                operation.as_str()
-            ),
-        )
-        .with_detail(ErrorDetail::WorkspaceArchived { archived_at })),
-        None => Ok(()),
+    let mut asked: Vec<WorkspaceId> = Vec::new();
+    for target in request.targets() {
+        let Target::Workspace(workspace_id, _) = target else {
+            continue;
+        };
+        if asked.contains(&workspace_id) {
+            continue;
+        }
+        asked.push(workspace_id);
+        let scope = StorageScope {
+            tenant_id: principal.tenant_id.clone(),
+            workspace_id,
+        };
+        if let Some(archived_at) = service.archived_at(&scope).await? {
+            return Err(ApiError::new(
+                ErrorCode::Conflict,
+                format!(
+                    "Workspace {} is archived, and {} does not run on an archived workspace; \
+                     unarchive it first",
+                    workspace_id.0,
+                    operation.as_str()
+                ),
+            )
+            .with_detail(ErrorDetail::WorkspaceArchived { archived_at }));
+        }
     }
+    Ok(())
 }
 
 /// Name the request entry a `Forbidden` workspace target came from, when the request lists that
