@@ -233,9 +233,11 @@ async function service(): Promise<Service> {
           selection?.kind === 'workspace' ||
           (selection?.kind === 'folder' && item.path.startsWith(`${selection.folder ?? ''}/`)),
       );
+      // Archived items are left out of the plan and counted (ruling 10).
+      const considered = selected.filter((item) => !item.archived);
       const asked = body.rules as { rules: Array<{ prefix: string }> };
       const prefix = asked.rules[0]?.prefix ?? '';
-      const entries = selected
+      const entries = considered
         .map((item) => {
           const cut = item.path.lastIndexOf('/') + 1;
           const to =
@@ -251,9 +253,9 @@ async function service(): Promise<Service> {
         entries,
         duplicate_observations: [],
         warnings: [],
-        considered: selected.length,
-        unchanged: selected.length - entries.length,
-        archived_left_out: 0,
+        considered: considered.length,
+        unchanged: considered.length - entries.length,
+        archived_left_out: selected.length - considered.length,
       });
     },
     '/api/conventions/apply-names': (body) => {
