@@ -1040,6 +1040,58 @@ describe('what the version shown holds as its rules', () => {
     expect(api.violations).toEqual([]);
   });
 
+  it('shows another file that cannot be read, saved meanwhile, before the repair replaces it, and asks', async () => {
+    // Someone else saves another file that cannot be read while this page repairs the first.
+    const otherText = 'schema_version: 1\nrules:\n  - glob: "["\n    case: shouting\n';
+    const other = new BrokenFile({
+      text: otherText,
+      problems: [
+        {
+          code: 'rules_glob_invalid',
+          message: 'The pattern [ is not a valid glob.',
+          location: '/rules/0/glob',
+        },
+        {
+          code: 'rules_yaml_invalid',
+          message: 'unknown variant `shouting`',
+          location: 'line 4, column 11',
+        },
+      ],
+    });
+    const own = service({}, broken);
+    await openPanel();
+    const box = await findTextBox('The naming rules as YAML');
+    const mine = brokenText.replace('schema_version: 2', 'schema_version: 1').replace('**x', '**');
+    await typeYaml(box, mine);
+    const next = own.moveHead();
+    own.state.rules.set(next, other);
+    await userEvent.click(button('Save the rules'));
+    await userEvent.click(await screen.findByRole('button', { name: 'Refresh the workspace' }));
+    // The file saved now is on the page, read-only, with what is wrong with it.
+    const theirs = await screen.findByRole('textbox', {
+      name: 'The rules file as it is saved now, which cannot be read (read-only)',
+    });
+    expect(theirs).toHaveProperty('readOnly', true);
+    expect(theirs).toHaveProperty('value', otherText);
+    const note = theirs.closest('[role="note"]');
+    expect(note?.textContent).toContain('The saved rules are no longer the ones you started from.');
+    expect([...(note?.querySelectorAll('li') ?? [])].map((each) => each.textContent)).toEqual([
+      'At /rules/0/glob: The pattern [ is not a valid glob.',
+      'Line 4, column 11: unknown variant `shouting`',
+    ]);
+    // The person's repair is still theirs, in the YAML view.
+    expect(textIn(box)).toBe(mine);
+    // No plain "Save": the button says that it replaces, and asks before it does.
+    expect(screen.queryByRole('button', { name: 'Save the rules' })).toBeNull();
+    await userEvent.click(button('Replace the saved rules with mine…'));
+    expect(screen.getByRole('group', { name: 'Replace the saved rules with yours?' })).toBeTruthy();
+    expect(own.api.callsTo(SET)).toHaveLength(1);
+    await userEvent.click(button('Replace them with mine'));
+    await waitFor(() => expect(said()).toContain('The rules are saved.'));
+    expect(own.api.callsTo(SET).at(1)).toMatchObject({ base_revision: next, rules: repaired });
+    expect(own.api.violations).toEqual([]);
+  });
+
   it('counts the person’s text as an edit of the file before leaving, and the file’s own text as none', async () => {
     service({}, broken);
     await openPanel();
