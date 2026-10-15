@@ -1,5 +1,6 @@
 //! Workspace paths against real Git repositories, on the filesystem the tests run on: what a
-//! note's file is, a rename that changes only letter case, and a folder spelled two ways.
+//! note's file is, a rename that changes only letter case, a folder spelled two ways, the links
+//! to files that a moved note keeps, and its links to itself, which follow it.
 //!
 //! Windows and macOS treat `Report.md` and `report.md` as one file; Linux and Git treat them as
 //! two. Storage edits a staged copy of the tree on the disk it runs on, so every assertion here
@@ -83,21 +84,27 @@ const REFERRER_MOVED: &str = "Read [a](Notes/report.md), [b](Notes/report.md#sec
                               [c](/Notes/report.md), [d](notes/report.md).";
 
 /// Bodies of `Notes/Report.md`, by link style, and the body its file holds after it is renamed
-/// to `Notes/report.md` as a direct okf-core move writes it. Recorded on Linux (WSL Ubuntu
-/// 24.04, okf-core 0.2.7), where `Report.md` and `report.md` are two files, from this branch at
-/// ad6415c with the parking removed (`let from = if false` in `move_item`), so that the rename
-/// was one `move_concept` from `Notes/Report` to `Notes/report`; each file was printed whole
-/// and its body is kept here (the frontmatter is `NOTE_10`; the referrer's is `REFERRER_MOVED`).
-const DIRECT_MOVES: [(&str, &str, &str); 5] = [
+/// to `Notes/report.md` as a direct move writes it. Recorded on Linux (WSL Ubuntu 24.04,
+/// okf-core 0.2.7), where `Report.md` and `report.md` are two files, from this branch with the
+/// parking removed, so that the rename was one move from `Notes/Report` to `Notes/report`; each
+/// file was printed whole and its body is kept here (the frontmatter is `NOTE_10`; the
+/// referrer's is `REFERRER_MOVED`). The first four were recorded at ad6415c (`let from = if
+/// false` in `move_item`), where a move was one `move_concept`; the last two with the file-links
+/// workaround (`moved_body`), which leaves those four as they were but for the item's link to
+/// itself in "dot slash".
+const DIRECT_MOVES: [(&str, &str, &str); 6] = [
     (
         "above the root",
         "Up [a](../../outside.pdf) and [b](../../../x.md#t).",
         "Up [a](../outside.pdf) and [b](../x.md#t).",
     ),
+    // okf-core 0.2.7 writes the item's link to itself as a link to its old name, `Report.md`,
+    // which this value held until the self-link ruling: the link now follows the item to its
+    // new name, as a direct move writes it too (`moved_body`).
     (
         "dot slash",
         "Here [p](./plan.md) and [me](./Report.md).",
-        "Here [p](plan.md) and [me](Report.md).",
+        "Here [p](plan.md) and [me](report.md).",
     ),
     (
         "anchor",
@@ -109,15 +116,51 @@ const DIRECT_MOVES: [(&str, &str, &str); 5] = [
         "Absolute [p](/Notes/plan.md) and [r](/ref.md#top).",
         "Absolute [p](/Notes/plan.md) and [r](/ref.md#top).",
     ),
-    // This value includes the `.md` okf-core 0.2.7 appends to a relative link to a file that is
-    // not Markdown on every move, direct or not (review N8). A later package changes that, and
-    // this expected value with it.
+    // okf-core 0.2.7 alone appends `.md` to a relative link to a file that is not Markdown on
+    // every move, direct or not (review N8), which this value held until the file-links package:
+    // `pics/p.png.md` and `../files/a.pdf.md`. Storage now writes the moved body again without
+    // it (`moved_body`, the edit.rs header).
     (
         "not Markdown",
         "File ![i](pics/p.png) and [f](../files/a.pdf).",
-        "File ![i](pics/p.png.md) and [f](../files/a.pdf.md).",
+        "File ![i](pics/p.png) and [f](../files/a.pdf).",
     ),
+    // A link to a folder loses its `/` when it is rebased; read again by a second hop, `plan`
+    // then names the note `Notes/plan.md` and would become `plan.md`.
+    ("folder link", "Folder [d](plan/).", "Folder [d](plan)."),
 ];
+
+/// The body of the note `notes/a.md` that the file-links tests move: relative links to an image
+/// and a text file below its folder and a pdf beside it, a link to the note `notes/other.md`
+/// with and without an anchor, and an absolute link.
+const FILE_LINKS: &str = "See [Other](other.md) and [part](other.md#part).\n\n![p](pics/p.png)\n\
+                          [a](../files/a.pdf)\n[s](sub/notes.txt)\n[abs](/files/a.pdf)";
+/// The `sources[].resource` of that note: the image.
+const FILE_LINKS_SOURCE: &str = "pics/p.png";
+/// The files those links name, as the tree spells them.
+const FILE_LINKS_NAMED: [&str; 3] = ["notes/pics/p.png", "files/a.pdf", "notes/sub/notes.txt"];
+/// The body of `notes/other.md`, which links to the moved note at `{to}` and to the image.
+const FILE_LINKS_REFERRER: &str = "Back to [A]({to}). Logo: ![p](pics/p.png)";
+/// The body of `deep/x/far.md`, which links to two of those files and not to the moved note.
+const FILE_LINKS_FAR: &str = "Far [f](../../files/a.pdf) and ![p](../../notes/pics/p.png).";
+/// What the moves to `archive/` add to `FILE_LINKS` (`file_links_seeded`, `wider`): a link to
+/// `notes/other.md` without `.md`, and a percent-encoded link to the note `notes/my note.md`.
+const FILE_LINKS_WIDER: &str = "\n[o](other)\n[n](my%20note.md)";
+/// `FILE_LINKS` and `FILE_LINKS_WIDER` after a move to `archive/a.md`: each link resolved from
+/// the note's old folder, so `[o](other)` names `notes/other.md` and not the `archive/other.md`
+/// beside the new file, and the percent-encoded link taken literally, as okf-core takes it, so it
+/// is rebased as a path and keeps its spelling.
+const FILE_LINKS_ARCHIVED: &str = "See [Other](../notes/other.md) and \
+                                   [part](../notes/other.md#part).\n\n\
+                                   ![p](../notes/pics/p.png)\n[a](../files/a.pdf)\n\
+                                   [s](../notes/sub/notes.txt)\n[abs](/files/a.pdf)\n\
+                                   [o](../notes/other.md)\n[n](../notes/my%20note.md)";
+
+/// The body of the note `notes/a.md` that the self-link tests move: links to itself, relative
+/// (beside it, with an anchor, through `./`, through its folder from above, without `.md`),
+/// absolute with and without an anchor, and a pure anchor.
+const SELF_LINKS: &str = "Me [m](a.md), [s](a.md#sec), [d](./a.md#sec), [up](../notes/a.md), \
+                          [abs](/notes/a.md), [abs2](/notes/a.md#sec), [bare](a), [x](#sec).";
 
 impl CandidateCheck for Accept {
     fn check(&self, _root: &Path, _rewritten: &[WorkspacePath]) -> Result<Vec<Warning>, ApiError> {
@@ -946,9 +989,9 @@ async fn a_move_below_the_items_own_file_is_still_refused_as_taken() -> TestResu
 
 /// A rename by letter case writes the moved item's file, and its referrer's, byte for byte as a
 /// direct move writes them on Linux (`DIRECT_MOVES`): a link that climbs above the bundle root,
-/// `./` links (one of them to the item itself), anchors, absolute links and links to files
-/// that are not Markdown. okf-core rewrites the item's own links on each hop, and not
-/// idempotently, so only the first hop's bytes are a direct move's.
+/// `./` links (one of them to the item itself), anchors, absolute links, links to files that
+/// are not Markdown and a link to a folder. The item's own links are rewritten on each hop, and
+/// not idempotently, so only the first hop's bytes are a direct move's.
 #[tokio::test]
 async fn a_case_only_rename_writes_what_a_direct_move_writes() -> TestResult {
     for (style, body, direct) in DIRECT_MOVES {
@@ -1155,27 +1198,49 @@ async fn an_item_named_like_its_private_name_is_renamed_by_case() -> TestResult 
 }
 
 /// Item 10 at `Notes/Report.md`, `Notes/other.md` (item 12) linking to it, and a reference to
-/// item 10's first private name while nothing holds that name: with `cited`, a `sources` entry
-/// of `Notes/cited.md`; otherwise Markdown links in `Notes/other.md` and `Notes/bystander.md`.
-/// A rename by letter case parks the item elsewhere, so the broken reference stays as it was,
-/// only the link to the item follows it, and the check is told only `Notes/other.md`.
-async fn renamed_beside_a_broken_reference(cited: bool) -> TestResult {
+/// item 10's first private name while nothing holds that name, of one `style` alone: `cited`, a
+/// `sources` entry of `Notes/cited.md`; `absolute`, an absolute link in `Notes/bystander.md`;
+/// `far`, a relative link from another folder, `elsewhere/far.md`; otherwise relative links
+/// beside it in `Notes/other.md` and `Notes/bystander.md`. A rename by letter case parks the
+/// item elsewhere, so the broken reference stays as it was, only the link to the item follows
+/// it, and the check is told only `Notes/other.md`.
+async fn renamed_beside_a_broken_reference(style: &str) -> TestResult {
     let space = Workspace::new().await?;
     let ghost = parked_name("recase", 10);
-    let (other, at, reference) = if cited {
-        let sources = BTreeMap::from([("sources".to_owned(), json!([{ "resource": ghost }]))]);
-        (
-            "Only [real](Report.md).".to_owned(),
-            "Notes/cited.md",
-            note_with(14, "Notes/cited.md", "Cites it.", sources)?,
-        )
-    } else {
-        let only = format!("Only [ghost]({ghost}).");
-        (
-            format!("[ghost]({ghost}) and [real](Report.md)."),
-            "Notes/bystander.md",
-            note(14, "Notes/bystander.md", &only)?,
-        )
+    let only_real = "Only [real](Report.md).".to_owned();
+    let (other, at, reference) = match style {
+        "cited" => {
+            let sources = BTreeMap::from([("sources".to_owned(), json!([{ "resource": ghost }]))]);
+            (
+                only_real,
+                "Notes/cited.md",
+                note_with(14, "Notes/cited.md", "Cites it.", sources)?,
+            )
+        }
+        "absolute" => {
+            let only = format!("Only [ghost](/Notes/{ghost}).");
+            (
+                only_real,
+                "Notes/bystander.md",
+                note(14, "Notes/bystander.md", &only)?,
+            )
+        }
+        "far" => {
+            let only = format!("Only [ghost](../Notes/{ghost}).");
+            (
+                only_real,
+                "elsewhere/far.md",
+                note(14, "elsewhere/far.md", &only)?,
+            )
+        }
+        _ => {
+            let only = format!("Only [ghost]({ghost}).");
+            (
+                format!("[ghost]({ghost}) and [real](Report.md)."),
+                "Notes/bystander.md",
+                note(14, "Notes/bystander.md", &only)?,
+            )
+        }
     };
     let seeded = space
         .commit(
@@ -1207,12 +1272,15 @@ async fn renamed_beside_a_broken_reference(cited: bool) -> TestResult {
     Ok(())
 }
 
-/// A link, or a `sources` entry, that points at the first private name while nothing holds it
-/// is a broken reference that a rename by letter case leaves alone.
+/// A link beside it, an absolute link, a link from another folder, or a `sources` entry, that
+/// points at the first private name while nothing holds it is a broken reference that a rename
+/// by letter case leaves alone.
 #[tokio::test]
 async fn a_link_to_the_private_name_is_not_rewritten_by_a_case_only_rename() -> TestResult {
-    renamed_beside_a_broken_reference(false).await?;
-    renamed_beside_a_broken_reference(true).await
+    for style in ["beside", "absolute", "far", "cited"] {
+        renamed_beside_a_broken_reference(style).await?;
+    }
+    Ok(())
 }
 
 /// Item 20 moved from `a/x.md` to `b/c/x.md`, then rewound. With `plain`, a plain file holds
@@ -1266,6 +1334,319 @@ async fn rewound_past(plain: bool) -> TestResult {
 async fn a_rewind_parks_past_a_taken_private_name_and_leaves_links_to_it() -> TestResult {
     rewound_past(true).await?;
     rewound_past(false).await
+}
+
+// File links: a moved note keeps its links to files that are not Markdown.
+
+/// The body of item 10 as `file_links_seeded` writes it: `FILE_LINKS`, and with `wider`
+/// `FILE_LINKS_WIDER` after it.
+fn file_links_body(wider: bool) -> String {
+    if wider {
+        format!("{FILE_LINKS}{FILE_LINKS_WIDER}")
+    } else {
+        FILE_LINKS.to_owned()
+    }
+}
+
+/// Item 10 at `notes/a.md`, with a `sources` entry naming the image (`FILE_LINKS_SOURCE`) and
+/// the body `file_links_body(wider)`; item 11 at `notes/other.md` (`FILE_LINKS_REFERRER`); item
+/// 12 at `deep/x/far.md` (`FILE_LINKS_FAR`). With `wider`, also item 13 at `archive/other.md`,
+/// a note beside the destination named like the one item 10 links to, and item 14 at
+/// `notes/my note.md`, which item 10's percent-encoded link names. With `files`, the files the
+/// links name (`FILE_LINKS_NAMED`) are committed beside them straight through Git; without, none
+/// of them exists.
+async fn file_links_seeded(space: &Workspace, files: bool, wider: bool) -> Fallible<Revision> {
+    let sources = BTreeMap::from([(
+        "sources".to_owned(),
+        json!([{ "resource": FILE_LINKS_SOURCE }]),
+    )]);
+    let mut edits = vec![
+        note_with(10, "notes/a.md", &file_links_body(wider), sources)?,
+        note(
+            11,
+            "notes/other.md",
+            &FILE_LINKS_REFERRER.replace("{to}", "a.md"),
+        )?,
+        note(12, "deep/x/far.md", FILE_LINKS_FAR)?,
+    ];
+    if wider {
+        edits.push(note(13, "archive/other.md", "Another note named other.")?);
+        edits.push(note(14, "notes/my note.md", "Mine.")?);
+    }
+    let seeded = space.commit(2, &space.initial, edits).await?;
+    if !files {
+        return Ok(seeded);
+    }
+    let written: Vec<(&str, Vec<u8>)> = FILE_LINKS_NAMED
+        .iter()
+        .map(|at| (*at, at.as_bytes().to_vec()))
+        .collect();
+    space.raw(900, &[], &written)
+}
+
+/// Item 10 (`file_links_seeded`, with and without the files its links name, and `wider`)
+/// moved to `to`. Its file is the seeded one with the body `body` and okf-core's rebase of its
+/// `sources` entry, `source`, whether the named files exist or not; item 11's link to it reads
+/// `link` and its image link is untouched; item 12, which links only to files, keeps its bytes;
+/// and the check is told only item 11's file. Answers the workspace and the revisions before
+/// and after.
+async fn file_links_moved(
+    to: &str,
+    body: &str,
+    source: &str,
+    link: &str,
+    wider: bool,
+) -> Fallible<Vec<(Workspace, Revision, Revision)>> {
+    let mut spaces = Vec::new();
+    for files in [true, false] {
+        let space = Workspace::new().await?;
+        let seeded = file_links_seeded(&space, files, wider).await?;
+        let recording = Arc::new(Recording::default());
+        let moved_on = space
+            .commit_with(3, &seeded, vec![moved(10, to)?], recording.clone())
+            .await?
+            .revision;
+        let before = String::from_utf8(some(space.file(&seeded, "notes/a.md")?, "item 10")?)?;
+        let expected = before.replace(&file_links_body(wider), body).replace(
+            &format!("resource: {FILE_LINKS_SOURCE}"),
+            &format!("resource: {source}"),
+        );
+        let after = String::from_utf8(some(space.file(&moved_on, to)?, "item 10 moved")?)?;
+        assert_eq!(after, expected, "{to}, files present: {files}");
+        assert_eq!(
+            space.body(&moved_on, 11).await?,
+            FILE_LINKS_REFERRER.replace("{to}", link),
+            "{to}, files present: {files}"
+        );
+        assert_eq!(
+            space.file(&moved_on, "deep/x/far.md")?,
+            space.file(&seeded, "deep/x/far.md")?,
+            "{to}, files present: {files}"
+        );
+        assert_eq!(recording.seen()?, [vec!["notes/other.md".to_owned()]]);
+        spaces.push((space, seeded, moved_on));
+    }
+    Ok(spaces)
+}
+
+/// A move within the note's folder leaves every link as it was: no `.md` is appended to a link
+/// to an image or another file that is not Markdown.
+#[tokio::test]
+async fn file_links_survive_a_move_within_its_folder() -> TestResult {
+    file_links_moved("notes/b.md", FILE_LINKS, FILE_LINKS_SOURCE, "b.md", false).await?;
+    Ok(())
+}
+
+/// A move to another folder rebases every relative link and keeps each file's name: the image
+/// and the text file below the note's old folder are reached from the new one, the pdf above
+/// it keeps its path, the links to the note keep their anchor, and the absolute link is kept.
+/// Every link is resolved from the note's old folder: a link to a note without `.md` names that
+/// note, with `.md`, and not the note of the same name that the destination folder holds
+/// (`archive/other.md`). A percent-encoded link to a note is read literally, as okf-core reads
+/// it, so it is rebased as a path and keeps its encoding (`FILE_LINKS_ARCHIVED`).
+#[tokio::test]
+async fn file_links_survive_a_move_to_another_folder() -> TestResult {
+    file_links_moved(
+        "archive/a.md",
+        FILE_LINKS_ARCHIVED,
+        "../notes/pics/p.png",
+        "../archive/a.md",
+        true,
+    )
+    .await?;
+    Ok(())
+}
+
+/// A move three folders deep rebases every relative link the same way.
+#[tokio::test]
+async fn file_links_survive_a_move_deeper() -> TestResult {
+    file_links_moved(
+        "archive/2026/q3/a.md",
+        "See [Other](../../../notes/other.md) and [part](../../../notes/other.md#part).\n\n\
+         ![p](../../../notes/pics/p.png)\n[a](../../../files/a.pdf)\n\
+         [s](../../../notes/sub/notes.txt)\n[abs](/files/a.pdf)",
+        "../../../notes/pics/p.png",
+        "../archive/2026/q3/a.md",
+        false,
+    )
+    .await?;
+    Ok(())
+}
+
+/// A rename that changes only letter case, which goes by a private name beside the note, leaves
+/// every link as it was.
+#[tokio::test]
+async fn file_links_survive_a_rename_by_letter_case() -> TestResult {
+    file_links_moved("notes/A.md", FILE_LINKS, FILE_LINKS_SOURCE, "A.md", false).await?;
+    Ok(())
+}
+
+/// A Rewind of the move to another folder puts item 10 back at `notes/a.md` with the bytes it
+/// held there and item 11's link back to it, and a Rewind to the moved revision puts it back
+/// at `archive/a.md` with the bytes it held there; item 12 keeps its bytes throughout. A Rewind
+/// moves the item back with its links (`move_back`, through the same rewrite) and then writes
+/// the earlier revision's bytes of the item itself, so this pins the outcome; the moved bytes
+/// themselves are pinned by `file_links_survive_a_move_to_another_folder`.
+#[tokio::test]
+async fn file_links_survive_a_rewind_of_a_move() -> TestResult {
+    let moves = file_links_moved(
+        "archive/a.md",
+        FILE_LINKS_ARCHIVED,
+        "../notes/pics/p.png",
+        "../archive/a.md",
+        true,
+    )
+    .await?;
+    for (space, seeded, moved_on) in moves {
+        let back = space
+            .commit(4, &moved_on, vec![restore(10, &seeded)?])
+            .await?;
+        let forth = space
+            .commit(5, &back, vec![restore(10, &moved_on)?])
+            .await?;
+        for (revision, earlier, at) in [
+            (&back, &seeded, "notes/a.md"),
+            (&forth, &moved_on, "archive/a.md"),
+        ] {
+            assert_eq!(space.item_at(revision, at).await?, Some(uuid!(10)?));
+            for file in [at, "notes/other.md", "deep/x/far.md"] {
+                assert_eq!(
+                    space.file(revision, file)?,
+                    space.file(earlier, file)?,
+                    "{file}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+// Self links: a moved note's links to itself follow it.
+
+/// Item 10 at `notes/a.md` with the body `SELF_LINKS`, and item 11 at `notes/other.md` linking
+/// to it, with item 10 moved to `to`. Item 10's file is the seeded one with the body `body`,
+/// byte for byte; item 11's link to it reads `link`; no private name is in the tree. Answers the
+/// workspace and the revisions before and after.
+async fn self_links_moved(
+    to: &str,
+    body: &str,
+    link: &str,
+) -> Fallible<(Workspace, Revision, Revision)> {
+    let space = Workspace::new().await?;
+    let seeded = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "notes/a.md", SELF_LINKS)?,
+                note(11, "notes/other.md", "Back to [A](a.md).")?,
+            ],
+        )
+        .await?;
+    let moved_on = space.commit(3, &seeded, vec![moved(10, to)?]).await?;
+    let before = String::from_utf8(some(space.file(&seeded, "notes/a.md")?, "item 10")?)?;
+    let after = String::from_utf8(some(space.file(&moved_on, to)?, "item 10 moved")?)?;
+    assert_eq!(after, before.replace(SELF_LINKS, body), "{to}");
+    assert_eq!(
+        space.body(&moved_on, 11).await?,
+        format!("Back to [A]({link}).")
+    );
+    let files = space.files(&moved_on)?;
+    assert!(
+        !files.iter().any(|file| file.contains("okf-jawn-")),
+        "{files:?}"
+    );
+    Ok((space, seeded, moved_on))
+}
+
+/// A move within the note's folder: every link to itself names its new name, the relative ones
+/// beside it, the absolute ones from the root, each with its anchor; the pure anchor is kept.
+#[tokio::test]
+async fn self_links_follow_a_move_within_its_folder() -> TestResult {
+    self_links_moved(
+        "notes/b.md",
+        "Me [m](b.md), [s](b.md#sec), [d](b.md#sec), [up](b.md), [abs](/notes/b.md), \
+         [abs2](/notes/b.md#sec), [bare](b.md), [x](#sec).",
+        "b.md",
+    )
+    .await?;
+    Ok(())
+}
+
+/// A move to another folder: every relative link to itself names the new file beside it, and
+/// every absolute one the new folder.
+#[tokio::test]
+async fn self_links_follow_a_move_to_another_folder() -> TestResult {
+    self_links_moved(
+        "archive/a.md",
+        "Me [m](a.md), [s](a.md#sec), [d](a.md#sec), [up](a.md), [abs](/archive/a.md), \
+         [abs2](/archive/a.md#sec), [bare](a.md), [x](#sec).",
+        "../archive/a.md",
+    )
+    .await?;
+    Ok(())
+}
+
+/// A rename that changes only letter case, which goes by a private name beside the note: every
+/// link to itself names the destination, never the private name its first hop moved it to.
+#[tokio::test]
+async fn self_links_follow_a_rename_by_letter_case() -> TestResult {
+    self_links_moved(
+        "notes/A.md",
+        "Me [m](A.md), [s](A.md#sec), [d](A.md#sec), [up](A.md), [abs](/notes/A.md), \
+         [abs2](/notes/A.md#sec), [bare](A.md), [x](#sec).",
+        "A.md",
+    )
+    .await?;
+    Ok(())
+}
+
+/// A Rewind of the move to another folder, and of the rename by letter case, puts item 10 back
+/// at `notes/a.md` with the bytes it held there (its links to `a.md`) and item 11's link back to
+/// it; a Rewind to the moved revision puts the moved bytes back. As in
+/// `file_links_survive_a_rewind_of_a_move`, the Rewind writes the earlier revision's bytes of
+/// the item after it moves the item back, so this pins the outcome; the moved bytes are pinned
+/// by the two moves it starts from.
+#[tokio::test]
+async fn self_links_follow_a_rewind_of_a_move() -> TestResult {
+    for (to, body, link) in [
+        (
+            "archive/a.md",
+            "Me [m](a.md), [s](a.md#sec), [d](a.md#sec), [up](a.md), [abs](/archive/a.md), \
+             [abs2](/archive/a.md#sec), [bare](a.md), [x](#sec).",
+            "../archive/a.md",
+        ),
+        (
+            "notes/A.md",
+            "Me [m](A.md), [s](A.md#sec), [d](A.md#sec), [up](A.md), [abs](/notes/A.md), \
+             [abs2](/notes/A.md#sec), [bare](A.md), [x](#sec).",
+            "A.md",
+        ),
+    ] {
+        let (space, seeded, moved_on) = self_links_moved(to, body, link).await?;
+        let back = space
+            .commit(4, &moved_on, vec![restore(10, &seeded)?])
+            .await?;
+        let forth = space
+            .commit(5, &back, vec![restore(10, &moved_on)?])
+            .await?;
+        for (revision, earlier, at) in [(&back, &seeded, "notes/a.md"), (&forth, &moved_on, to)] {
+            assert_eq!(space.item_at(revision, at).await?, Some(uuid!(10)?));
+            for file in [at, "notes/other.md"] {
+                assert_eq!(
+                    space.file(revision, file)?,
+                    space.file(earlier, file)?,
+                    "{to}: {file}"
+                );
+            }
+            let files = space.files(revision)?;
+            assert!(
+                !files.iter().any(|file| file.contains("okf-jawn-")),
+                "{files:?}"
+            );
+        }
+    }
+    Ok(())
 }
 
 // S2: a folder spelled two ways.
@@ -1470,19 +1851,30 @@ async fn restored_paths_spelled_another_way_are_refused() -> TestResult {
 }
 
 /// `RestorePaths` of a path below a folder the tree now holds as a file, in another spelling
-/// or the same, is refused alike on every system, before anything below the file is read:
-/// `Conflict` on the listing's field, naming the path and the file.
+/// or the same, at the root or below another folder, is refused alike on every system, before
+/// anything below the file is read: `Conflict` on the listing's field, naming the path and the
+/// file.
 #[tokio::test]
 async fn restored_paths_below_a_file_are_refused_naming_it() -> TestResult {
-    for file in ["NOTES", "notes"] {
+    for (folder, file) in [
+        ("notes", "NOTES"),
+        ("notes", "notes"),
+        ("docs/notes", "docs/NOTES"),
+    ] {
         let space = Workspace::new().await?;
+        let restored = format!("{folder}/a.md");
         let early = space
-            .commit(2, &space.initial, vec![note(10, "notes/a.md", "Ten.")?])
+            .commit(2, &space.initial, vec![note(10, &restored, "Ten.")?])
             .await?;
-        space.raw(900, &["notes/a.md", "notes/index.md"], &[])?;
+        let index = format!("{folder}/index.md");
+        space.raw(900, &[restored.as_str(), index.as_str()], &[])?;
         let filed = space.raw(901, &[], &[(file, b"plain".to_vec())])?;
         let error = space
-            .refused(3, &filed, vec![restore_paths(&early, &["notes/a.md"])?])
+            .refused(
+                3,
+                &filed,
+                vec![restore_paths(&early, &[restored.as_str()])?],
+            )
             .await?;
         assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
         assert_eq!(
@@ -1493,7 +1885,7 @@ async fn restored_paths_below_a_file_are_refused_naming_it() -> TestResult {
         );
         assert_eq!(
             error.message,
-            format!("notes/a.md: {file} is a file, not a folder")
+            format!("{restored}: {file} is a file, not a folder")
         );
     }
     Ok(())
@@ -1658,34 +2050,167 @@ async fn a_tree_with_two_spellings_of_a_file_refuses_every_commit_but_a_whole_re
 
 /// A tree built in Git with two files whose names differ only in Unicode normalization (`café`
 /// with a precomposed `é`, and `cafe` with a combining accent, as macOS merges them) refuses
-/// every commit naming both, as two spellings of one path.
+/// every commit naming both, escaped so that they do not print alike, and saying that the names
+/// differ in how their characters are encoded and that macOS keeps them as one (Windows keeps
+/// them apart); two names that differ in letter case as well are said to differ in both. A
+/// whole-tree Rewind repairs either.
 #[tokio::test]
 async fn a_tree_with_two_normalizations_of_a_name_refuses_every_commit() -> TestResult {
+    for (composed, decomposed, clash, what) in [
+        (
+            "notes/caf\u{e9}.txt",
+            "notes/cafe\u{301}.txt",
+            "notes/caf\\u{e9}.txt collides with notes/cafe\\u{301}.txt",
+            "two names that differ only in how their characters are encoded, which macOS keeps as \
+             one",
+        ),
+        (
+            "notes/Caf\u{e9}.txt",
+            "notes/cafe\u{301}.txt",
+            "notes/cafe\\u{301}.txt collides with notes/Caf\\u{e9}.txt",
+            "two names that differ in letter case and in how their characters are encoded, which \
+             macOS keeps as one",
+        ),
+    ] {
+        let space = Workspace::new().await?;
+        let seeded = space
+            .commit(2, &space.initial, vec![note(10, "notes/a.md", "Ten.")?])
+            .await?;
+        let spelled = space.raw(
+            900,
+            &[],
+            &[(composed, b"one".to_vec()), (decomposed, b"two".to_vec())],
+        )?;
+        for (mutation, edit) in [(3, edited(10, "Changed.")?), (4, set_type("Memo"))] {
+            let error = space.refused(mutation, &spelled, vec![edit]).await?;
+            assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+            assert_eq!(
+                error.message,
+                format!(
+                    "{clash}: the revision holds {what}; the workspace can be restored to a \
+                     revision from before they appeared"
+                )
+            );
+        }
+        let repaired = space
+            .commit(
+                5,
+                &spelled,
+                vec![TreeEdit::RestoreWorkspace {
+                    from: seeded.clone(),
+                }],
+            )
+            .await?;
+        assert_eq!(space.files(&repaired)?, space.files(&seeded)?);
+    }
+    Ok(())
+}
+
+/// The Kelvin sign (U+212A) lower-cases to `k`, but NFC makes it `K`: a name holding it is not
+/// in NFC, so beside `k` or `K` it is a pair that differs in how its characters are encoded,
+/// which macOS keeps as one and NTFS keeps apart, never a pair Windows keeps as one. Beside `k`
+/// the two differ in letter case too; beside `K`, only in encoding. Alone, as the `k` of
+/// `.okf`, it spells a name the server writes in a way only macOS would merge with it. Each
+/// refuses every commit naming both spellings escaped, and a whole-tree Rewind repairs it.
+#[tokio::test]
+async fn a_name_with_the_kelvin_sign_differs_in_encoding_not_only_in_letter_case() -> TestResult {
+    let then = "the workspace can be restored to a revision from before";
+    for (written, message) in [
+        (
+            ["notes/\u{212A}.txt", "notes/k.txt"],
+            format!(
+                "notes/\\u{{212a}}.txt collides with notes/k.txt: the revision holds two names \
+                 that differ in letter case and in how their characters are encoded, which \
+                 macOS keeps as one; {then} they appeared"
+            ),
+        ),
+        (
+            ["notes/\u{212A}.txt", "notes/K.txt"],
+            format!(
+                "notes/\\u{{212a}}.txt collides with notes/K.txt: the revision holds two names \
+                 that differ only in how their characters are encoded, which macOS keeps as one; \
+                 {then} they appeared"
+            ),
+        ),
+        (
+            [".o\u{212A}f/x.json", "notes/b.txt"],
+            format!(
+                ".o\\u{{212a}}f collides with the server's .okf: the revision spells a path the \
+                 server writes another way, which macOS would merge with it; {then} \
+                 .o\\u{{212a}}f appeared"
+            ),
+        ),
+    ] {
+        let space = Workspace::new().await?;
+        let seeded = space
+            .commit(2, &space.initial, vec![note(10, "notes/a.md", "Ten.")?])
+            .await?;
+        let [first, second] = written;
+        let spelled = space.raw(
+            900,
+            &[],
+            &[(first, b"one".to_vec()), (second, b"two".to_vec())],
+        )?;
+        let error = space
+            .refused(3, &spelled, vec![edited(10, "Changed.")?])
+            .await?;
+        assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+        assert_eq!(error.message, message);
+        let repaired = space
+            .commit(
+                4,
+                &spelled,
+                vec![TreeEdit::RestoreWorkspace {
+                    from: seeded.clone(),
+                }],
+            )
+            .await?;
+        assert_eq!(space.files(&repaired)?, space.files(&seeded)?);
+    }
+    Ok(())
+}
+
+/// A whole-tree Rewind to a revision that holds two spellings of one path, from a head that
+/// holds neither, is refused saying that the revision being restored holds them and that an
+/// earlier one can be chosen, not that the workspace's own revision does.
+#[tokio::test]
+async fn a_rewind_to_a_revision_with_two_spellings_says_it_is_the_restored_one() -> TestResult {
     let space = Workspace::new().await?;
     let seeded = space
-        .commit(2, &space.initial, vec![note(10, "notes/a.md", "Ten.")?])
-        .await?;
-    let composed = "notes/caf\u{e9}.txt";
-    let decomposed = "notes/cafe\u{301}.txt";
-    let spelled = space.raw(
-        900,
-        &[],
-        &[(composed, b"one".to_vec()), (decomposed, b"two".to_vec())],
-    )?;
-    for (mutation, edit) in [(3, edited(10, "Changed.")?), (4, set_type("Memo"))] {
-        let error = space.refused(mutation, &spelled, vec![edit]).await?;
-        assert_conflict_naming(&error, &[composed, decomposed, "collides with"]);
-    }
-    let repaired = space
         .commit(
-            5,
+            2,
+            &space.initial,
+            vec![
+                note(10, "Notes/a.md", "Ten.")?,
+                note(11, "b.md", "Eleven.")?,
+            ],
+        )
+        .await?;
+    let spelled = two_spellings(&space, &seeded, "notes/b.md")?;
+    let clean = space
+        .commit(
+            3,
             &spelled,
             vec![TreeEdit::RestoreWorkspace {
                 from: seeded.clone(),
             }],
         )
         .await?;
-    assert_eq!(space.files(&repaired)?, space.files(&seeded)?);
+    let error = space
+        .refused(
+            4,
+            &clean,
+            vec![TreeEdit::RestoreWorkspace {
+                from: spelled.clone(),
+            }],
+        )
+        .await?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    assert_eq!(
+        error.message,
+        "notes collides with Notes: the revision being restored holds two spellings of one path, \
+         which Windows and macOS keep as one; choose a revision from before they appeared"
+    );
     Ok(())
 }
 
@@ -1854,9 +2379,9 @@ async fn a_revision_spelling_a_server_name_another_way_is_refused_naming_the_rep
 }
 
 /// A Rewind of an item to a revision whose corrections of it spell a digest's name another way
-/// is refused like a revision that holds it, naming the corrections' workspace path, the
-/// server's spelling and the repair: the corrections folder is checked by its workspace paths
-/// before it is written.
+/// is refused naming the corrections' workspace path, the server's spelling, that the revision
+/// being restored holds it, and the repair: the corrections folder is checked by its workspace
+/// paths before it is written.
 #[tokio::test]
 async fn a_rewind_to_respelled_corrections_is_refused_naming_the_repair() -> TestResult {
     let space = Workspace::new().await?;
@@ -1883,9 +2408,9 @@ async fn a_rewind_to_respelled_corrections_is_refused_naming_the_repair() -> Tes
         error.message,
         format!(
             "{respelled} collides with the server's .okf/corrections/{LETTERED}/{digest}.json: \
-             the revision spells a path the server writes another way, which Windows and macOS \
-             would merge with it; the workspace can be restored to a revision from before \
-             {respelled} appeared"
+             the revision being restored spells a path the server writes another way, which \
+             Windows and macOS would merge with it; choose a revision from before {respelled} \
+             appeared"
         )
     );
     Ok(())
@@ -1907,6 +2432,38 @@ async fn restored_paths_spelling_a_server_name_another_way_are_refused() -> Test
         .await?;
     assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
     assert_eq!(error.message, ".OKF collides with the server's .okf");
+    Ok(())
+}
+
+/// A restore of paths that leaves a folder `newdir/INDEX.md/` beside a note of `newdir/`, a
+/// folder the tree did not hold, is refused naming both spellings before the folder indexes are
+/// regenerated, on every system: on a filesystem that holds `INDEX.md` and `index.md` as one the
+/// new folder's index could not be written, and on one that holds them apart the commit would
+/// hold both. The staged copy is checked once, after the edits (the review's R1-d probe).
+#[tokio::test]
+async fn restored_paths_leaving_a_respelled_index_are_refused_before_the_indexes() -> TestResult {
+    let space = Workspace::new().await?;
+    space
+        .commit(2, &space.initial, vec![note(10, "a.md", "Ten.")?])
+        .await?;
+    let restored = ["newdir/a.md", "newdir/INDEX.md/x.json"];
+    let early = space.raw(
+        900,
+        &[],
+        &[
+            ("newdir/a.md", b"A plain note.".to_vec()),
+            ("newdir/INDEX.md/x.json", b"{}".to_vec()),
+        ],
+    )?;
+    let clean = space.raw(901, &restored, &[])?;
+    let error = space
+        .refused(3, &clean, vec![restore_paths(&early, &restored)?])
+        .await?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    assert_eq!(
+        error.message,
+        "newdir/INDEX.md collides with the server's newdir/index.md"
+    );
     Ok(())
 }
 

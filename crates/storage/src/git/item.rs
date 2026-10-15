@@ -34,6 +34,15 @@ pub(crate) struct ItemFile {
     pub(crate) header: ApplicationHeader,
 }
 
+/// Whose tree a refusal of a held respelling names (`Respelled::held`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Holder {
+    /// The base a write stages: the head, or the base of a proposal's candidate.
+    Head,
+    /// The earlier revision a Rewind restores (`RestoreItem`, `RestoreWorkspace`).
+    Restored,
+}
+
 /// What the store refuses to find in a tree (`respelled`): two spellings of one path, or a path
 /// the server writes spelled another way.
 #[derive(Debug)]
@@ -185,32 +194,79 @@ impl Respelled {
     }
 
     /// The refusal of a revision that already holds this (`repo::materialize`): `Conflict`,
-    /// naming both spellings and the repair, a whole-tree restore of an earlier revision.
-    pub(crate) fn held(&self) -> ApiError {
-        let message = if self.server {
-            format!(
-                "{}: the revision spells a path the server writes another way, which Windows and \
-                 macOS would merge with it; the workspace can be restored to a revision from \
-                 before {} appeared",
-                self.clash(),
-                self.path
-            )
+    /// naming both spellings, what is wrong with them (`what`), and the repair. For the base a
+    /// write stages (`Holder::Head`) the repair is a whole-tree restore of a revision from before
+    /// they appeared; for the revision a Rewind restores (`Holder::Restored`) the message says
+    /// it is that revision that holds them, and the repair is to choose an earlier one.
+    pub(crate) fn held(&self, holder: Holder) -> ApiError {
+        let appeared = if self.server {
+            shown(&self.path, self.encoded())
         } else {
-            format!(
-                "{}: the revision holds two spellings of one path, which Windows and macOS keep \
-                 as one; the workspace can be restored to a revision from before they appeared",
-                self.clash()
-            )
+            "they".to_owned()
+        };
+        let message = match holder {
+            Holder::Head => format!(
+                "{}: the revision {}; the workspace can be restored to a revision from before \
+                 {appeared} appeared",
+                self.clash(),
+                self.what()
+            ),
+            Holder::Restored => format!(
+                "{}: the revision being restored {}; choose a revision from before {appeared} \
+                 appeared",
+                self.clash(),
+                self.what()
+            ),
         };
         ApiError::new(ErrorCode::Conflict, message)
     }
 
+    /// The words of the refusal of an archive whose reference `reference` names a tree that
+    /// holds this (`repo::respelled_in_archive`): both spellings and what is wrong with them.
+    pub(crate) fn archived(&self, reference: &str) -> String {
+        format!("{}: its {reference} {}", self.clash(), self.what())
+    }
+
+    /// Both spellings, each escaped when they differ beyond letter case (`shown`).
     fn clash(&self) -> String {
+        let encoded = self.encoded();
+        let (path, other) = (shown(&self.path, encoded), shown(&self.other, encoded));
         if self.server {
-            format!("{} collides with the server's {}", self.path, self.other)
+            format!("{path} collides with the server's {other}")
         } else {
-            format!("{} collides with {}", self.path, self.other)
+            format!("{path} collides with {other}")
         }
+    }
+
+    /// What is wrong with the two spellings, after "the revision": a path the server writes
+    /// spelled another way (one that differs from it in how its characters are encoded only
+    /// macOS would merge with it), two spellings that differ only in letter case (Windows and
+    /// macOS keep them as one), or two names that differ in how their characters are encoded,
+    /// Unicode normalization (only macOS keeps those as one), alone or with letter case.
+    fn what(&self) -> &'static str {
+        if self.server && self.encoded() {
+            "spells a path the server writes another way, which macOS would merge with it"
+        } else if self.server {
+            "spells a path the server writes another way, which Windows and macOS would merge with \
+             it"
+        } else if !self.encoded() {
+            "holds two spellings of one path, which Windows and macOS keep as one"
+        } else if nfc(&self.path) == nfc(&self.other) {
+            "holds two names that differ only in how their characters are encoded, which macOS \
+             keeps as one"
+        } else {
+            "holds two names that differ in letter case and in how their characters are encoded, \
+             which macOS keeps as one"
+        }
+    }
+
+    /// Whether the two spellings differ beyond letter case: in how their characters are
+    /// encoded, which only normalization makes one (they share a collision key). That is so
+    /// when either is not in NFC (`nfc`), even where lower-casing alone would make them one:
+    /// the Kelvin sign (U+212A) lower-cases to `k` but is `K` in NFC, and NTFS keeps it apart
+    /// from both, so `\u{212A}` beside `k` is not a pair that Windows keeps as one.
+    fn encoded(&self) -> bool {
+        nfc(&self.path) != self.path || nfc(&self.other) != self.other
     }
 }
 
@@ -380,6 +436,36 @@ pub(crate) fn collision_key(path: &str) -> String {
         },
         |valid| valid.collision_key(),
     )
+}
+
+/// `path` in NFC, segment by segment as `collision_key` normalizes it: a segment that is not a
+/// valid path even in NFC is kept as it is.
+fn nfc(path: &str) -> String {
+    path.split('/')
+        .map(|segment| {
+            WorkspacePath::from_supplied(segment)
+                .map_or_else(|_| segment.to_owned(), |valid| valid.as_str().to_owned())
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// `path` as a refusal shows it: with `escaped`, every character that is not ASCII written as
+/// its code point (`\u{e9}`), so two names that differ only in how their characters are
+/// encoded do not print alike.
+fn shown(path: &str, escaped: bool) -> String {
+    if !escaped {
+        return path.to_owned();
+    }
+    path.chars()
+        .map(|character| {
+            if character.is_ascii() {
+                character.to_string()
+            } else {
+                character.escape_unicode().to_string()
+            }
+        })
+        .collect()
 }
 
 fn properties_of(document: &Document) -> BTreeMap<String, Json> {

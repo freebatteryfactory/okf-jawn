@@ -12,11 +12,14 @@
 //! reserved name (`.okf/`, `index.md`, `log.md`) in any letter case: it is refused naming the
 //! path before anything is written. After the edits, no two paths, files or folders, may share
 //! a collision key, and no path may spell a name the server writes (`item::SERVER_NAMES`)
-//! another way (`Staged::refuse_collisions`; a tree that already holds either is refused when
-//! it is staged, `repo::materialize`, naming the repair); the folder indexes are regenerated,
-//! the change is appended to `log.md`, and the same refusal runs again on the result. The files a
-//! move rewrote besides the moved item's own (the referrers) are remembered, and the candidate
-//! check is told them (`Staged::rewritten`, `CandidateCheck::check`).
+//! another way (`Staged::refuse_collisions`; a tree that already holds either is refused when it
+//! is staged, `repo::materialize`, naming the repair); then the folder indexes are regenerated
+//! and the change is appended to `log.md`. The refusal does not run again after those: they
+//! write only `index.md` in the tree's folders and `log.md` at the root, and a tree that spells
+//! either another way is already refused, so nothing they write can make a collision the
+//! refusal passed (a second run after them was reached by no tree, and was dropped). The files
+//! a move rewrote besides the moved item's own (the referrers) are remembered, and the
+//! candidate check is told them (`Staged::rewritten`, `CandidateCheck::check`).
 //! Conformance is the `CandidateCheck`'s decision, not this module's.
 //!
 //! The staged tree is on the server's own filesystem, where Windows and macOS hold `Report.md`
@@ -32,6 +35,27 @@
 //! sees one move in one commit. For that move only, the item's own file does not count as
 //! taking the destination (`Staged::occupied`); a move onto any other item's or file's key is
 //! refused as taken.
+//!
+//! okf-core 0.2.7's `move_concept` appends `.md` to a moved concept's relative links to files
+//! that are not Markdown, on every move (`![p](pics/p.png)` becomes `![p](pics/p.png.md)`):
+//! `Link::resolve` gives an id for any relative target inside the bundle, and the outgoing-link
+//! rewrite takes every such link for a link to a concept, which `compute_relative_path` ends in
+//! `.md`. As a workaround, every move (`move_in`, which every hop of `MoveItem`, `park` and a
+//! Rewind's `move_back` takes) writes the moved item's body again from its body before the
+//! move, rewritten with okf-core's own public functions as `move_concept` rewrites it but taking
+//! a relative link for a concept's only when the bundle holds that concept, the one condition
+//! of the upstream fix (`moved_body`); okf-core's frontmatter is kept as it wrote it. The
+//! workaround is removed when an okf-core release carries the fix. The same rewrite makes the
+//! item's links to itself follow it, which `move_concept` does not (it writes a relative one as
+//! a link to the old name and keeps an absolute one): a link that resolves to the moved concept
+//! names the path the move ends at, a relative one as `compute_relative_path` gives it and an
+//! absolute one as `/<path>.md`, the form okf-core gives another note's absolute link to the
+//! moved item, each with its anchor; a pure anchor (`#sec`) is kept. A `sources` entry of the
+//! frontmatter that names the item itself is not covered: okf-core rebases it as a path, so it
+//! keeps naming the old one. Reference-style links and their definitions (`[t][ref]`,
+//! `[ref]: pics/p.png`) and raw HTML (`<img src="pics/p.png">`) are not links that
+//! `rewrite_markdown_links` sees, so a move to another folder leaves them as written, and they
+//! then resolve from the new folder, as with okf-core 0.2.7 and the upstream fix.
 //!
 //! For the same reason, every write that names a new path checks the folders it names against
 //! the staged tree's own spellings before that path is written there
@@ -50,7 +74,8 @@ use std::path::{Path, PathBuf};
 
 use git2::Repository;
 use okf_core::{
-    Bundle, ConceptId, Link, LinkRewriteAction, MoveOptions, RefactorError, rewrite_markdown_links,
+    Bundle, ConceptId, Document, Link, LinkKind, LinkRewriteAction, MoveOptions, RefactorError,
+    compute_relative_path, rebase_relative_path, rewrite_markdown_links,
 };
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::TextOrigin;
@@ -60,7 +85,7 @@ use okf_jawn_core::items::{ApplicationHeader, refuse_header_change, refuse_heade
 use okf_jawn_core::storage::{SourceCard, TreeEdit};
 
 use super::item::{
-    CORRECTIONS_DIR, INDEX_FILE, ItemFile, LOG_FILE, RULES_FILE, SOURCES_DIR, SUPPLIED_DIR,
+    CORRECTIONS_DIR, Holder, INDEX_FILE, ItemFile, LOG_FILE, RULES_FILE, SOURCES_DIR, SUPPLIED_DIR,
     TYPES_FILE, bare_header, check_item_path, collision_key, is_item_path, is_reserved, new_item,
     respelled,
 };
@@ -158,9 +183,11 @@ impl Staged {
     /// way (`respelled`), so a tree never holds two files, or two spellings of one folder, that
     /// a case-insensitive filesystem would merge, whatever the edits did. On such a filesystem
     /// the staged copy cannot hold such a pair; the tree it was staged from is checked for one
-    /// when it is staged (`repo::materialize`). It runs after the edits and again after the
-    /// indexes and the log are written (`stage_and_commit`), so the rule holds on what is
-    /// committed.
+    /// when it is staged (`repo::materialize`). It runs once, after the edits and before the
+    /// indexes and the log are written (`stage_and_commit`), and the rule still holds on what is
+    /// committed: those writes are `index.md` in folders the tree holds and `log.md` at the root,
+    /// and a tree that spells either another way, as a file or a folder, is refused here as a
+    /// path the server writes spelled another way.
     pub(crate) fn refuse_collisions(&self) -> Result<(), ApiError> {
         for path in self.items.values() {
             WorkspacePath::try_from(path.clone()).map_err(|error| {
@@ -214,11 +241,11 @@ impl Staged {
     }
 
     /// Whether a file or folder of the staged tree (an empty folder an earlier edit left
-    /// included), or an item, already holds `path`'s collision key, or a path below it, or
-    /// whether a file holds the key of a folder above it. The staged directory is listed and
-    /// compared by key (`entries_under`), so a folder spelled another way counts on a
-    /// filesystem that holds `report.md/` and `Report.md` apart as on one that holds them as
-    /// one.
+    /// included), or an item, already holds `path`'s collision key, or a path below it (whose
+    /// folder at that key is listed too), or whether a file holds the key of a folder above it.
+    /// The staged directory is listed and compared by key (`entries_under`), so a folder spelled
+    /// another way counts on a filesystem that holds `report.md/` and `Report.md` apart as on
+    /// one that holds them as one.
     ///
     /// `own` is the moved item's own file, for a move. Only when it holds `path`'s own key (a
     /// rename that changes only letter case, see the module header) is it not counted; then,
@@ -231,7 +258,6 @@ impl Staged {
         if own.is_none() && self.root.join(path.as_str()).exists() {
             return Ok(true);
         }
-        let folder_prefix = format!("{key}/");
         // Every folder the path would need: a file already holding one of those keys blocks it.
         let folders: Vec<&str> = key
             .match_indices('/')
@@ -242,9 +268,8 @@ impl Staged {
                 return false;
             }
             let existing = collision_key(existing);
-            existing == key
-                || existing.starts_with(&folder_prefix)
-                || (!folder && folders.contains(&existing.as_str()))
+            // Anything below `path` is under a folder at its key, which is an entry itself.
+            existing == key || (!folder && folders.contains(&existing.as_str()))
         }) || self
             .items
             .values()
@@ -364,7 +389,7 @@ fn apply_one(repository: &Repository, staged: &mut Staged, edit: TreeEdit) -> Re
             let commit = commit_of(repository, &from)?;
             let tree = commit.tree().map_err(|error| super::repo::git(&error))?;
             clear_directory(&staged.root)?;
-            materialize(repository, &tree, &staged.root)?;
+            materialize(repository, &tree, &staged.root, Holder::Restored)?;
             staged.rescan()
         }
     }
@@ -596,7 +621,11 @@ fn move_back(
     }
     let mut parked = Vec::with_capacity(movers.len());
     for (item, current, destination) in movers {
-        let private = park(staged, item, &current, "rewind", None)?;
+        // `ends` is the hop's own target here: the next hop reads these bytes and takes a link to
+        // the private path for one to the item itself, and `restore_items` then writes the earlier
+        // revision's bytes over them. Named for the destination, a link of the item to itself
+        // would be taken for a link to another mover that is parked from that path after it.
+        let private = park(staged, item, &current, "rewind", None, None)?;
         parked.push((private, destination));
     }
     for item in destinations.keys() {
@@ -667,7 +696,7 @@ fn restore_folder(
                 .map_err(|error| super::repo::git(&error))?;
             std::fs::create_dir_all(&target)
                 .map_err(|error| io_error("create", &target, &error))?;
-            materialize_at(repository, &folder, &target, path)
+            materialize_at(repository, &folder, &target, path, Holder::Restored)
         }
         Ok(_) => Ok(()),
         Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(()),
@@ -714,7 +743,17 @@ fn move_item(
     // hop would rewrite the item's own links once more, and okf-core's rewrite is not
     // idempotent (`../../a.pdf` becomes `../a.pdf`, then `../a.pdf.md`), so the first hop's
     // bytes are written at the destination after it.
-    let private = park(staged, item, &source, "recase", Some("/destination"))?;
+    // Those bytes are what lands, so the first hop's `ends` is the move's final destination,
+    // not the hop's own target: the item's links to itself name the destination. Named for the
+    // private path, they would carry the private name into the committed tree.
+    let private = park(
+        staged,
+        item,
+        &source,
+        "recase",
+        Some(destination),
+        Some("/destination"),
+    )?;
     let parked = staged.root.join(private.as_str());
     let bytes = std::fs::read(&parked).map_err(|error| io_error("read", &parked, &error))?;
     relink(
@@ -729,7 +768,11 @@ fn move_item(
 
 /// Move the item file at `current` to a private path beside it, with every link that points at
 /// it (`move_in`), and answer that path. The caller moves the item on from there within the
-/// same commit, so the private path reaches no commit's tree. `field` is passed to `move_in`.
+/// same commit, so the private path reaches no commit's tree. `ends` is where the bytes this
+/// hop writes end up, for the item's links to itself (`moved_body`): the destination of a
+/// rename by letter case, whose first hop's bytes are written there (`move_item`), or, when it
+/// is `None`, the private path, for a hop whose bytes the next hop moves on. `field` is passed
+/// to `move_in`.
 ///
 /// The private path is the first free one of `okf-jawn-<purpose>-<item id>.md`, then
 /// `okf-jawn-<purpose>-<item id>-1.md`, `-2` and so on, in `current`'s folder. Free means that
@@ -743,6 +786,7 @@ fn park(
     item: ItemId,
     current: &str,
     purpose: &str,
+    ends: Option<&WorkspacePath>,
     field: Option<&str>,
 ) -> Result<WorkspacePath, ApiError> {
     let bundle = load(&staged.root)?;
@@ -763,7 +807,15 @@ fn park(
         if linked.contains(&concept(private.as_str())?) || staged.occupied(&private, None)? {
             continue;
         }
-        move_in(staged, &bundle, current, private.as_str(), field)?;
+        let ends = ends.unwrap_or(&private);
+        move_in(
+            staged,
+            &bundle,
+            current,
+            private.as_str(),
+            ends.as_str(),
+            field,
+        )?;
         return Ok(private);
     }
     Err(internal(format!(
@@ -819,21 +871,27 @@ fn relink(
     field: Option<&str>,
 ) -> Result<(), ApiError> {
     let bundle = load(&staged.root)?;
-    move_in(staged, &bundle, source, destination, field)
+    // The hop is the whole move: its target is where it ends.
+    move_in(staged, &bundle, source, destination, destination, field)
 }
 
-/// `relink` on `bundle`, the staged tree as it is now. A refusal other than an existing target
-/// is `InvalidInput` on `field` for a caller's move, and `Internal` for the server's own
-/// (`field` is `None`).
+/// `relink` on `bundle`, the staged tree as it is now. `ends` is the path the item's links to
+/// itself name after this hop (`moved_body`): `destination` for a single move and for each hop of
+/// a Rewind's `move_back` (whose first hop ends at its private path), and the final destination
+/// for the first hop of a rename by letter case (`park`), whose bytes are the ones kept. A refusal other than an
+/// existing target is `InvalidInput` on `field` for a caller's move, and `Internal` for the
+/// server's own (`field` is `None`).
 fn move_in(
     staged: &mut Staged,
     bundle: &Bundle,
     source: &str,
     destination: &str,
+    ends: &str,
     field: Option<&str>,
 ) -> Result<(), ApiError> {
     let from = concept(source)?;
     let to = concept(destination)?;
+    let ends = concept(ends)?;
     let options = MoveOptions {
         update_index: false,
         update_log: false,
@@ -849,6 +907,7 @@ fn move_in(
                 None => internal(format!("moving {source} to {destination} failed: {other}")),
             },
         })?;
+    keep_file_links(bundle, &from, &to, &ends, &moved.target_path)?;
     // Every file the move wrote besides the item's own two: the referrers it rewrote.
     for path in &moved.affected_files {
         if *path != moved.source_path
@@ -859,6 +918,81 @@ fn move_in(
         }
     }
     staged.rescan()
+}
+
+/// Write the body of the item okf-core just moved from `from` to `to` again (the module
+/// header's workaround for okf-core 0.2.7): its body in `bundle`, the staged tree before the
+/// move, rewritten for the move, its links to itself naming `ends` (`moved_body`), into the
+/// file okf-core wrote at `written`. The frontmatter is the one okf-core wrote there (its
+/// relative paths rebased), read back and written with okf-core's own parser and serializer:
+/// its emitter is built so that `parse(emit(v)) == v` (okf-core's `yaml::emitter`), so emitting
+/// the value read back writes the frontmatter okf-core wrote (pinned for a rebased `sources`
+/// entry by the file-links tests).
+fn keep_file_links(
+    bundle: &Bundle,
+    from: &ConceptId,
+    to: &ConceptId,
+    ends: &ConceptId,
+    written: &Path,
+) -> Result<(), ApiError> {
+    let before = bundle
+        .get(from)
+        .ok_or_else(|| internal(format!("the moved concept {from} is not in the bundle")))?;
+    let mut document = Document::parse(&read_text(written)?).map_err(|error| {
+        internal(format!(
+            "the item okf-core moved to {to} does not parse: {error}"
+        ))
+    })?;
+    document.body = moved_body(bundle, &before.document.body, from, to, ends);
+    write_text(written, &document.serialize())
+}
+
+/// `body`, the body of the concept `from`, with its links rewritten for a move to `to` as
+/// `okf_core::move_concept` rewrites them, with two conditions more. First, a link to the
+/// concept itself (`link.resolve(from)` is `from`: the literal reading of a percent-encoded
+/// target, which okf-core's rewrite of other notes' links takes too) names `ends`, the concept
+/// the whole move ends at: a relative one as `compute_relative_path(to, ends)`, an absolute one
+/// as `/<ends>.md`, each followed by the link's anchor. A pure anchor (`#sec`) resolves to
+/// nothing and is kept. Then the upstream fix's: a relative link that resolves to a concept
+/// `bundle` holds becomes a link to that concept (`compute_relative_path`, then the link's
+/// anchor); any other relative link, such as one to an image or a file that is not Markdown,
+/// whether that file exists or not, is rebased as a path (`rebase_relative_path`), which keeps
+/// its name. Every other link is kept.
+fn moved_body(
+    bundle: &Bundle,
+    body: &str,
+    from: &ConceptId,
+    to: &ConceptId,
+    ends: &ConceptId,
+) -> String {
+    let folder = |id: &ConceptId| {
+        id.parent()
+            .map(|parent| parent.segments().to_vec())
+            .unwrap_or_default()
+    };
+    let (from_folder, to_folder) = (folder(from), folder(to));
+    let (rewritten, _) = rewrite_markdown_links(body, |link, _| {
+        let anchor = link
+            .target
+            .find('#')
+            .and_then(|at| link.target.get(at..))
+            .unwrap_or_default();
+        let resolved = link.resolve(from);
+        if resolved.as_ref() == Some(from) {
+            return LinkRewriteAction::Rewrite(match link.kind {
+                LinkKind::Absolute => format!("/{ends}.md{anchor}"),
+                _ => format!("{}{anchor}", compute_relative_path(to, ends)),
+            });
+        }
+        if link.kind != LinkKind::Relative {
+            return LinkRewriteAction::Keep;
+        }
+        LinkRewriteAction::Rewrite(match resolved.filter(|id| bundle.contains(id)) {
+            Some(concept) => format!("{}{anchor}", compute_relative_path(to, &concept)),
+            None => rebase_relative_path(&from_folder, &to_folder, &link.target),
+        })
+    });
+    rewritten
 }
 
 fn set_status(
