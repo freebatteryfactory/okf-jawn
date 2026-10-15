@@ -2044,6 +2044,32 @@ async fn a_resumed_snapshot_keeps_a_draft_saved_again_with_only_its_aliases_chan
     Ok(())
 }
 
+/// Review N1, the other side: a resumed Snapshot takes the committed item's digest as the draft's
+/// is taken, aliases included, so a committed draft that carries an alias and was not saved again
+/// is still removed.
+#[tokio::test]
+async fn a_resumed_snapshot_removes_a_committed_draft_that_carries_aliases() -> TestResult {
+    let world = resumable()?;
+    world
+        .drafts
+        .save(&scope()?, mutation(76), aliased(NOTE, 'a')?)
+        .await?;
+    let caller = first_attempt_fails_after_its_commit(&world).await?;
+    let retried = world
+        .service
+        .commit_items(&caller, snapshot(&[NOTE, OTHER])?)
+        .await?;
+    assert_eq!(retried.revision, revision('b')?);
+    assert_eq!(world.versions.commits()?.len(), 1, "no second commit");
+    assert_eq!(
+        world.drafts.held()?.len(),
+        0,
+        "both committed drafts are removed: {:?}",
+        world.drafts.held()?
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_resumed_snapshot_completes_when_the_editor_discarded_a_draft_meanwhile() -> TestResult {
     let world = resumable()?;
