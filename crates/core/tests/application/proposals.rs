@@ -1302,6 +1302,45 @@ async fn a_stale_acceptance_whose_mark_another_won_still_answers_stale() -> Test
     Ok(())
 }
 
+/// A store fault at the stale mark is answered as given: only the mark's `Conflict` becomes the
+/// stale refusal. The proposal stays `open`, and the retry marks it, announces it and answers
+/// the stale refusal.
+#[tokio::test]
+async fn a_store_fault_at_the_stale_mark_is_answered_as_given_and_the_retry_marks_it() -> TestResult
+{
+    let world = proposal_world()?;
+    let (proposal, confirmation) = opened_and_confirmed(&world).await?;
+    world.world.versions.set_head(revision('e')?)?;
+    world.proposals.fail_next(ProposalCall::Update)?;
+    let error = err_of(
+        world
+            .service
+            .accept_proposal(
+                &accepting(ACCEPTING)?,
+                accept_request(&proposal, &confirmation, 'a')?,
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Unavailable, "{error}");
+    assert_eq!(status(&world, proposal.id)?, ProposalStatus::Open);
+    let error = err_of(
+        world
+            .service
+            .accept_proposal(
+                &resumed(accepting(ACCEPTING)?),
+                accept_request(&proposal, &confirmation, 'a')?,
+            )
+            .await,
+    )?;
+    assert_stale(&error, &revision('e')?, Some("/expected_head"));
+    assert_eq!(status(&world, proposal.id)?, ProposalStatus::Conflict);
+    assert_eq!(
+        proposal_events(&world, proposal.id)?,
+        [Some(mutation(OPENED)), Some(mutation(ACCEPTING))]
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_plain_conflict_of_the_promotion_leaves_the_proposal_open() -> TestResult {
     let world = proposal_world()?;
