@@ -27,10 +27,13 @@ import {
   explorerHandlers,
   HEAD,
   NOTE,
+  noteSummary,
   OLD,
   OTHER,
+  otherSummary,
   renderAt,
   SOURCE,
+  sourceSummary,
   WS,
 } from './support/workspace';
 
@@ -45,12 +48,25 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/** The items of this workspace a warning can name, as the list carries them. */
+const ITEMS = [noteSummary, otherSummary, sourceSummary];
+
+/** A warning as the service lists it: with the item it names, as that item is (ruling 7). */
 const warning = (
   kind: AttentionItem['kind'],
   message: string,
   itemId: string | null,
   action: AttentionItem['action'] = 'get_item',
-): AttentionItem => ({ kind, message, action, ...(itemId === null ? {} : { item_id: itemId }) });
+): AttentionItem => {
+  const item = ITEMS.find((each) => each.id === itemId);
+  return {
+    kind,
+    message,
+    action,
+    ...(itemId === null ? {} : { item_id: itemId }),
+    ...(item === undefined ? {} : { item }),
+  };
+};
 
 const THREE = [
   warning('broken_link', 'The link to plan-2024.md leads nowhere.', NOTE, 'get_links'),
@@ -136,15 +152,72 @@ describe('the list of warnings', () => {
     await openAttention();
     const link = await screen.findByRole('link', { name: 'Meeting notes' });
     expect(link.getAttribute('href')).toBe(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
-    // The title was read at that revision too.
+    // The title is the one the list carries: nothing is read for the row.
     expect(
       api
         .callsTo(ITEM)
         .some(
           (body) => JSON.stringify(body.at) === JSON.stringify({ kind: 'revision', revision: OLD }),
         ),
-    ).toBe(true);
+    ).toBe(false);
     expect(screen.getByText(/for\s+revision/).textContent).toContain('bbbbbbbbbb');
+  });
+
+  it('opens the item at the place a warning is about, and says which place', async () => {
+    setup(() =>
+      answer([
+        {
+          ...warning('instruction_like', 'Line 12 reads “ignore previous instructions”.', NOTE),
+          selection: { kind: 'lines', range: { start: 12, end: 12 } },
+        },
+      ]),
+    );
+    await openAttention();
+    const link = await screen.findByRole('link', { name: 'Meeting notes' });
+    const href = new URL(link.getAttribute('href') ?? '', 'http://page');
+    expect(href.pathname).toBe(`/w/${WS}/i/${NOTE}`);
+    expect(href.searchParams.get('rev')).toBe(HEAD);
+    expect(JSON.parse(href.searchParams.get('sel') ?? 'null')).toEqual({
+      kind: 'lines',
+      range: { start: 12, end: 12 },
+    });
+    expect(rows().at(0)?.textContent).toContain('in Meeting notes, at line 12');
+  });
+
+  it('names an item the list does not carry by its identity, with no link: it was purged', async () => {
+    const purged: AttentionItem = {
+      kind: 'invalidated',
+      message: 'This item was removed by a purge.',
+      action: 'get_item',
+      item_id: OTHER,
+    };
+    setup(() => answer([purged]));
+    await openAttention();
+    await waitFor(() => expect(rows()).toHaveLength(1));
+    expect(rows().at(0)?.textContent).toContain(
+      'in an item that is no longer there (item 33333333)',
+    );
+    expect(within(rows().at(0) ?? document.body).queryByRole('link')).toBeNull();
+  });
+
+  it('links uploads waiting to be imported to the uploads the service holds', async () => {
+    setup(() =>
+      answer([
+        warning(
+          'uploads_waiting',
+          '3 uploads are complete and not imported (2 MB).',
+          null,
+          'list_uploads',
+        ),
+      ]),
+    );
+    await openAttention();
+    const link = await screen.findByRole('link', {
+      name: 'See the uploads waiting to be imported',
+    });
+    expect(link.getAttribute('href')).toBe(`/w/${WS}/import#uploads-held`);
+    expect(rows().at(0)?.textContent).toContain('Uploaded files waiting to be imported');
+    expect(rows().at(0)?.textContent).not.toContain('Suggested next step');
   });
 
   it('says that a warning is of a kind this page does not know, by the service’s name for it', async () => {

@@ -38,7 +38,8 @@ export function WaitingUploads({ workspaceId, own, included, onInclude }: Waitin
   const heading = useId();
   const [said, setSaid] = useState('');
   return (
-    <section aria-labelledby={heading} className="held-uploads">
+    // The place Attention's "uploads waiting" links to (`HELD_UPLOADS`).
+    <section aria-labelledby={heading} className="held-uploads" id="uploads-held">
       <h3 id={heading} className="panel-heading">
         Uploads the service holds
       </h3>
