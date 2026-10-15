@@ -384,15 +384,29 @@ pub trait RecordStore: Send + Sync {
     /// Record a purge and, in the same transaction, its tenant job (`PurgeWorkspace` or
     /// `PurgeItem` from the target) under `mutation_id`.
     ///
-    /// Unique on `purge.id`: a repeated id returns the prior purge. While a purge of the same
-    /// target is not completed, any request for that target returns that unfinished purge and
-    /// records nothing: that is how a failed purge is resumed.
+    /// Unique on `purge.id`: a repeated id returns the prior purge. A request for a target that
+    /// a purge already names returns that purge and records nothing (the one `find_purge`
+    /// answers): the unfinished one while there is one, which is how a failed purge is
+    /// resumed, otherwise the completed one, since a target is purged once (contract ruling
+    /// 24).
     fn create_purge<'a>(
         &'a self,
         tenant: &'a TenantId,
         mutation_id: MutationId,
         purge: NewPurge,
     ) -> PortFuture<'a, Purge>;
+    /// The purge a request for `target` is answered with: the unfinished purge of the target
+    /// while there is one, otherwise the first completed one; `None` when no purge names the
+    /// target. Nothing is recorded.
+    ///
+    /// It is the purge `create_purge` would return instead of recording one, read without
+    /// recording, so a caller answers a recorded purge before it checks what only a new purge
+    /// needs (`purge_workspace` checks `base_revision` only then).
+    fn find_purge<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        target: &'a PurgeTarget,
+    ) -> PortFuture<'a, Option<Purge>>;
     /// Read one purge; it outlives the workspace it removed.
     fn get_purge<'a>(&'a self, tenant: &'a TenantId, purge: PurgeId) -> PortFuture<'a, Purge>;
     /// Store the progress, report or failure of a purge and return it as stored.

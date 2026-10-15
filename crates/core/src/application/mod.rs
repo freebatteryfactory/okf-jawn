@@ -6,9 +6,9 @@
 //! `ports::Application` implementation for `ApplicationService` is organized as cohesive child
 //! modules of this one: `items` (folders, items and types), `drafts`, `reads` (`read_item` and
 //! sandbox capabilities), `sources` (citations and object reads), `history` (Timeline, Changes,
-//! Who, Snapshot and Rewind), `navigation` (search, links and the graph) and `status` (health,
-//! readiness and the session), over the shared steps in `shared` (revision resolution, commits,
-//! receipts).
+//! Who, Snapshot and Rewind), `navigation` (search, links and the graph), `status` (health,
+//! readiness and the session) and `purges` (recording, resuming and reading a workspace
+//! purge), over the shared steps in `shared` (revision resolution, commits, receipts).
 //!
 //! Operations whose part of the construction plan has not landed answer `NotImplemented`,
 //! naming the operation; nothing here claims an operation works that is not built, and no
@@ -129,6 +129,12 @@ macro_rules! route {
     };
     (get_session) => {
         status::get_session
+    };
+    (purge_workspace) => {
+        purges::purge_workspace
+    };
+    (get_purge) => {
+        purges::get_purge
     };
     ($pending:ident) => {
         pending
@@ -412,6 +418,7 @@ mod drafts;
 mod history;
 mod items;
 mod navigation;
+mod purges;
 mod reads;
 mod shared;
 mod sources;

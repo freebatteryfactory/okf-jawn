@@ -23,7 +23,7 @@ use okf_jawn_core::jobs::{
 };
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{ObjectInfo, Page, Provenance, StorageScope};
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::db::{
     Db, conflict, cursor, internal, job_scope_key, json, not_found, page_limit, paged, scope_key,
@@ -388,6 +388,19 @@ impl RecordStore for SqliteRecords {
         Box::pin(self.db.transaction(move |transaction| {
             insert_purge(transaction, &tenant, mutation_id, &purge)
         }))
+    }
+
+    fn find_purge<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        target: &'a PurgeTarget,
+    ) -> PortFuture<'a, Option<Purge>> {
+        let tenant = tenant.clone();
+        let target_key = target_key(target);
+        Box::pin(
+            self.db
+                .call(move |connection| purge_of_target(connection, &tenant, &target_key)),
+        )
     }
 
     fn get_purge<'a>(&'a self, tenant: &'a TenantId, purge: PurgeId) -> PortFuture<'a, Purge> {
@@ -909,33 +922,28 @@ fn control(
     }
 }
 
-/// Record a purge with its tenant job, or return the purge already recorded for its id or the
-/// unfinished purge of the same target.
+/// Record a purge with its tenant job, or return the purge already recorded for its id, or
+/// else the purge of the same target (`purge_of_target`).
 fn insert_purge(
     transaction: &Transaction<'_>,
     tenant: &TenantId,
     mutation_id: MutationId,
     purge: &NewPurge,
 ) -> Result<Purge, ApiError> {
-    let target_key = match &purge.target {
-        PurgeTarget::Workspace { workspace_id } => format!("workspace/{}", workspace_id.0),
-        PurgeTarget::Item {
-            workspace_id,
-            item_id,
-        } => format!("item/{}/{}", workspace_id.0, item_id.0),
-    };
+    let target_key = target_key(&purge.target);
     let prior: Option<String> = transaction
         .query_row(
-            "SELECT record FROM purges WHERE tenant_id = ?1
-               AND (purge_id = ?2 OR (target_key = ?3 AND state <> 'completed'))
-             ORDER BY purge_id = ?2 DESC LIMIT 1",
-            params![tenant.as_str(), purge.id.0.to_string(), target_key],
+            "SELECT record FROM purges WHERE tenant_id = ?1 AND purge_id = ?2",
+            params![tenant.as_str(), purge.id.0.to_string()],
             |row| row.get(0),
         )
         .optional()
         .map_err(|error| sql(&error))?;
     if let Some(prior) = prior {
         return serde_json::from_str(&prior).map_err(|error| json(&error));
+    }
+    if let Some(prior) = purge_of_target(transaction, tenant, &target_key)? {
+        return Ok(prior);
     }
     let job = insert_job(
         transaction,
@@ -971,6 +979,38 @@ fn insert_purge(
         )
         .map_err(|error| sql(&error))?;
     Ok(record)
+}
+
+/// The key a purge's target is stored and looked up by (`purges.target_key`).
+fn target_key(target: &PurgeTarget) -> String {
+    match target {
+        PurgeTarget::Workspace { workspace_id } => format!("workspace/{}", workspace_id.0),
+        PurgeTarget::Item {
+            workspace_id,
+            item_id,
+        } => format!("item/{}/{}", workspace_id.0, item_id.0),
+    }
+}
+
+/// The purge a request for the target is answered with (contract ruling 24): the unfinished
+/// one while there is one, otherwise the first completed one, in the order they were recorded.
+fn purge_of_target(
+    connection: &Connection,
+    tenant: &TenantId,
+    target_key: &str,
+) -> Result<Option<Purge>, ApiError> {
+    let found: Option<String> = connection
+        .query_row(
+            "SELECT record FROM purges WHERE tenant_id = ?1 AND target_key = ?2
+             ORDER BY state = 'completed', rowid LIMIT 1",
+            params![tenant.as_str(), target_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| sql(&error))?;
+    found
+        .map(|record| serde_json::from_str(&record).map_err(|error| json(&error)))
+        .transpose()
 }
 
 fn leased_row(transaction: &Transaction<'_>, job_id: JobId) -> Result<LeasedRow, ApiError> {

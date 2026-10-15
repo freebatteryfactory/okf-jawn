@@ -502,8 +502,11 @@ async fn a_completion_attaches_only_an_artifact_its_own_job_created() -> TestRes
     Ok(())
 }
 
+/// A purge is unique per target (contract ruling 24): another request for the target returns
+/// the unfinished purge, and once it completed the completed one, recording nothing either
+/// time. `find_purge` answers the same purge without recording anything.
 #[tokio::test]
-async fn a_removal_record_is_unique_while_unfinished_and_carries_a_tenant_job() -> TestResult {
+async fn a_removal_record_is_unique_per_target_and_carries_a_tenant_job() -> TestResult {
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;
     let records = storage.records();
@@ -534,14 +537,135 @@ async fn a_removal_record_is_unique_while_unfinished_and_carries_a_tenant_job() 
         resumed.id, first.id,
         "the unfinished purge of the target is returned"
     );
+    assert_eq!(
+        some(records.find_purge(&tenant()?, &target).await?, "the purge")?.id,
+        first.id
+    );
     let mut completed = first.clone();
     completed.state = PurgeState::Completed;
     records.update_purge(&tenant()?, completed).await?;
-    let next = records.create_purge(&tenant()?, uuid!(23)?, other).await?;
-    assert_eq!(next.id, uuid!(22)?);
+    let next = records.create_purge(&tenant()?, uuid!(24)?, other).await?;
     assert_eq!(
-        records.get_purge(&tenant()?, first.id).await?.state,
-        PurgeState::Completed
+        (next.id, next.state),
+        (first.id, PurgeState::Completed),
+        "the completed purge of the target is returned"
+    );
+    assert_eq!(
+        some(records.find_purge(&tenant()?, &target).await?, "the purge")?.id,
+        first.id
+    );
+    let connection = Connection::open(storage.data().records_path())?;
+    let counted: (i64, i64) = connection.query_row(
+        "SELECT (SELECT count(*) FROM purges), (SELECT count(*) FROM jobs)",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(counted, (1, 1), "one purge and its one tenant job");
+    // Another target has none.
+    let elsewhere = PurgeTarget::Workspace {
+        workspace_id: uuid!(2)?,
+    };
+    assert!(records.find_purge(&tenant()?, &elsewhere).await?.is_none());
+    let item = PurgeTarget::Item {
+        workspace_id: uuid!(1)?,
+        item_id: uuid!(3)?,
+    };
+    assert!(records.find_purge(&tenant()?, &item).await?.is_none());
+    let other_tenant = TenantId::try_from("elsewhere".to_owned())?;
+    assert!(records.find_purge(&other_tenant, &target).await?.is_none());
+    Ok(())
+}
+
+/// Ruling 24 for data recorded before it: where a target has a completed purge and an
+/// unfinished one, the unfinished one is answered, and of two completed ones the first.
+#[tokio::test]
+async fn a_targets_unfinished_purge_is_answered_before_a_completed_one() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let records = storage.records();
+    let target = PurgeTarget::Workspace {
+        workspace_id: uuid!(1)?,
+    };
+    let purge = |id: u32| -> Fallible<NewPurge> {
+        Ok(NewPurge {
+            id: uuid!(id)?,
+            target: target.clone(),
+            initiator: owner(),
+        })
+    };
+    let first = records
+        .create_purge(&tenant()?, uuid!(21)?, purge(20)?)
+        .await?;
+    let mut completed = first.clone();
+    completed.state = PurgeState::Completed;
+    records.update_purge(&tenant()?, completed).await?;
+    // A second purge of the target, as a build before ruling 24 recorded one, and a third.
+    let connection = Connection::open(storage.data().records_path())?;
+    for (id, state, column) in [
+        (30, PurgeState::Completed, "completed"),
+        (40, PurgeState::Running, "running"),
+    ] {
+        let mut record = first.clone();
+        record.id = uuid!(id)?;
+        record.state = state;
+        connection.execute(
+            "INSERT INTO purges (purge_id, tenant_id, target_key, state, mutation_id, record)
+             VALUES (?1, 'local', ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                uuid_text(id),
+                format!("workspace/{}", uuid_text(1)),
+                column,
+                uuid_text(id + 1),
+                serde_json::to_string(&record)?
+            ],
+        )?;
+    }
+    let found = some(records.find_purge(&tenant()?, &target).await?, "the purge")?;
+    assert_eq!((found.id, found.state), (uuid!(40)?, PurgeState::Running));
+    let answered = records
+        .create_purge(&tenant()?, uuid!(51)?, purge(50)?)
+        .await?;
+    assert_eq!(answered.id, uuid!(40)?);
+    connection.execute("DELETE FROM purges WHERE purge_id = ?1", [uuid_text(40)])?;
+    let found = some(records.find_purge(&tenant()?, &target).await?, "the purge")?;
+    assert_eq!(found.id, first.id, "the first completed purge");
+    Ok(())
+}
+
+/// P5: a purge recorded as failed keeps refusing every write to its workspace, as one in any
+/// other state does (`purge::guard`).
+#[tokio::test]
+async fn a_failed_purge_keeps_refusing_its_workspaces_writes() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let records = storage.records();
+    let recorded = records
+        .create_purge(
+            &tenant()?,
+            uuid!(21)?,
+            NewPurge {
+                id: uuid!(20)?,
+                target: PurgeTarget::Workspace {
+                    workspace_id: uuid!(1)?,
+                },
+                initiator: owner(),
+            },
+        )
+        .await?;
+    let mut failed = recorded.clone();
+    failed.state = PurgeState::Failed;
+    failed.error = Some(ApiError::new(ErrorCode::Unavailable, "the drain timed out"));
+    records.update_purge(&tenant()?, failed).await?;
+    let refused = err_of(
+        records
+            .create_job(&workspace_scope()?, new_job(5, JobSpec::RebuildIndex)?)
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Conflict);
+    assert!(
+        refused.message.contains(&uuid_text(20)) && refused.message.contains("(failed)"),
+        "{}",
+        refused.message
     );
     Ok(())
 }

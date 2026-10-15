@@ -39,7 +39,7 @@ use okf_jawn_contract::identity::{
     Timestamp,
 };
 use okf_jawn_contract::import::{Job, JobState, ListJobsResponse};
-use okf_jawn_contract::purge::Purge;
+use okf_jawn_contract::purge::{Purge, PurgeTarget};
 use okf_jawn_contract::review::Review;
 use okf_jawn_core::events::{EventLog, EventQuery, EventScope, NewEvent};
 use okf_jawn_core::jobs::{
@@ -735,6 +735,14 @@ impl RecordStore for FakeRecords {
     fn get_purge<'a>(&'a self, _tenant: &'a TenantId, purge: PurgeId) -> PortFuture<'a, Purge> {
         let found = self.purge(purge);
         Box::pin(async move { found })
+    }
+
+    fn find_purge<'a>(
+        &'a self,
+        _tenant: &'a TenantId,
+        _target: &'a PurgeTarget,
+    ) -> PortFuture<'a, Option<Purge>> {
+        unmodelled("find_purge")
     }
 
     fn update_purge<'a>(&'a self, _tenant: &'a TenantId, purge: Purge) -> PortFuture<'a, Purge> {
