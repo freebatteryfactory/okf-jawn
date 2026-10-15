@@ -25,6 +25,7 @@ import {
   zDeleteItemRequest,
   zDiscardDraftRequest,
   zDraft,
+  zEmpty,
   zGetItemRequest,
   zGetReceiptRequest,
   zGetRulesRequest,
@@ -51,6 +52,7 @@ import {
   zSaveDraftRequest,
   zSearchRequest,
   zSearchResponse,
+  zSessionResponse,
   zSetLifecycleRequest,
   zSetRulesRequest,
   zWorkspace,
@@ -99,6 +101,7 @@ export const CONTRACT: Record<string, { request: ZodType; response: ZodType }> =
   '/api/reads/get-sources': { request: zGetSourcesRequest, response: zGetSourcesResponse },
   '/api/search/search-items': { request: zSearchRequest, response: zSearchResponse },
   '/api/events/get-receipt': { request: zGetReceiptRequest, response: zReceipt },
+  '/api/session/get-session': { request: zEmpty, response: zSessionResponse },
 };
 
 /**

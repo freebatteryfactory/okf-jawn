@@ -8,7 +8,8 @@
  * application's root (`drop-guard.ts`): over this box that is what lets a browser deliver the
  * drop, and anywhere else it keeps the file from opening in place of the app. The buttons are the
  * keyboard's way; the drop is the pointer's. Each file is listed with the path it came in and its size before anything is sent,
- * and can be removed. A file larger than this page uploads is listed as too large and never sent.
+ * and can be removed. A file larger than this page uploads, or than the service takes (`limits.upload_bytes`
+ * of `get_session`, once read: Upload waits for it), is listed as too large and never sent.
  * A file of a dropped folder that the browser could not hand over is listed by its path as not
  * readable, and never sent; the other files of the folder are listed as usual. A polite status
  * says how many were listed, and what of a drop was not: a file that could not be read, a folder
@@ -45,7 +46,16 @@
  * in its place, else the last row, else "Choose files…". "Upload" never leaves; with nothing to
  * upload it is unavailable (`aria-disabled`), not gone.
  */
-import { type DragEvent, type RefObject, useId, useLayoutEffect, useRef, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  type DragEvent,
+  type RefObject,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import type { Revision } from '../../api/generated/types.gen';
 import { type HeldFocus, takeHeld, useWatchedPart } from '../../lib/focus';
 import { FailureNotice } from '../errors/FailureNotice';
@@ -61,6 +71,7 @@ import {
   pathOf,
 } from './files';
 import { ImportStart, StartedJobs } from './ImportStart';
+import { sessionOptions, uploadLimitOf } from './limits';
 import { describeProblem, shownName } from './paths';
 import {
   collisions,
@@ -187,6 +198,14 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
   const listHeading = useId();
   const entries = useWorkspaceUploads(workspaceId);
   const add = useUploads((state) => state.add);
+  const applyLimit = useUploads((state) => state.applyLimit);
+  const client = useQueryClient();
+  // The most the service takes of one file: applied to what is listed once it is known.
+  const session = useQuery(sessionOptions());
+  const limit = uploadLimitOf(session.data);
+  useEffect(() => {
+    if (limit !== null) applyLimit(limit);
+  }, [limit, applyLimit]);
   const [choiceNote, setChoiceNote] = useState('');
   const [over, setOver] = useState(false);
   const filesInput = useRef<HTMLInputElement | null>(null);
@@ -195,7 +214,7 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
   const listRef = useRef<HTMLUListElement | null>(null);
 
   const list = (chosen: readonly ChosenFile[], rest: DropRemainder = NOTHING_LEFT) => {
-    setChoiceNote(describeChoice(add(workspaceId, chosen, rest.unreadable), rest));
+    setChoiceNote(describeChoice(add(workspaceId, chosen, rest.unreadable, limit), rest));
   };
   const picked = (input: HTMLInputElement) => {
     list(chosenFromPicker(input.files ?? []));
@@ -339,7 +358,17 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
           type="button"
           aria-disabled={toUpload === 0}
           onClick={() => {
-            if (toUpload > 0) uploadChosen(workspaceId);
+            if (toUpload === 0) return;
+            // Nothing is sent before the service's limit is known, when it can be: the files over
+            // it are refused here. A session that cannot be read leaves the limit to the service.
+            void client
+              .fetchQuery(sessionOptions())
+              .then((read) => {
+                const known = uploadLimitOf(read);
+                if (known !== null) applyLimit(known);
+              })
+              .catch(() => undefined)
+              .finally(() => uploadChosen(workspaceId));
           }}
         >
           Upload {count(toUpload, 'file', 'files')}
@@ -383,10 +412,15 @@ function Standing({ entry }: { entry: UploadEntry }) {
     case 'failed':
       return <>Not uploaded.</>;
     case 'too-large':
-      return (
+      return entry.over?.whose === 'service' ? (
         <>
-          Too large: this page uploads files of up to {describeSize(MAX_FILE_BYTES)}. It will not be
-          sent.
+          Too large: the service takes files of up to {describeSize(entry.over.bytes)}. It will not
+          be sent.
+        </>
+      ) : (
+        <>
+          Too large: this page uploads files of up to{' '}
+          {describeSize(entry.over?.bytes ?? MAX_FILE_BYTES)}. It will not be sent.
         </>
       );
     case 'unreadable':

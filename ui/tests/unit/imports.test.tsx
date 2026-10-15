@@ -41,6 +41,7 @@ import {
 } from './support/workspace';
 
 const OPEN = '/api/workspaces/open-workspace';
+const SESSION = '/api/session/get-session';
 const WORKSPACES = '/api/workspaces/list-workspaces';
 const TOKEN = '0123456789abcdef0123456789abcdef';
 
@@ -422,6 +423,65 @@ describe('choosing files', () => {
     expect(rowOf('over.bin').textContent).toContain('Too large');
     expect(rowOf('over.bin').textContent).not.toContain('Not uploaded.');
     expect(api.callsTo(CREATE)).toEqual([]);
+  });
+
+  describe('the most the service takes of one file (limits.upload_bytes)', () => {
+    const session = (uploadBytes: string) => () =>
+      ok({
+        csrf_required: false,
+        principal: { subject: 'ada', tenant_id: 'local', route: 'local_owner' },
+        limits: { upload_bytes: uploadBytes, request_body_bytes: 1_048_576, item_text_bytes: 8 },
+      });
+
+    it('refuses a file over it before anything is sent, says the limit, and takes one at it', async () => {
+      const { api } = setup(uploadService(), { [SESSION]: session('3') });
+      await openImport();
+      await waitFor(() => expect(api.callsTo(SESSION)).toHaveLength(1));
+      choose('Choose files…', [fileOf('at.txt', 'abc'), fileOf('over.txt', 'abcd')]);
+      await waitFor(() =>
+        expect(rowOf('over.txt').textContent).toContain(
+          'Too large: the service takes files of up to 3 bytes. It will not be sent.',
+        ),
+      );
+      expect(rowOf('at.txt').textContent).toContain('Not sent yet.');
+      upload();
+      await uploaded('at.txt');
+      expect(api.callsTo(CREATE).map((body) => body.filename)).toEqual(['at.txt']);
+      expect(rowOf('over.txt').textContent).toContain('Too large');
+      expect(api.violations).toEqual([]);
+    });
+
+    it('applies it, once read, to the files listed before it was known, before any is sent', async () => {
+      let answer: (() => void) | null = null;
+      const { api } = setup(uploadService(), {
+        [SESSION]: () =>
+          new Promise((resolve) => {
+            answer = () => resolve(session('3')());
+          }),
+      });
+      await openImport();
+      choose('Choose files…', [fileOf('over.txt', 'abcd')]);
+      expect(rowOf('over.txt').textContent).toContain('Not sent yet.');
+      // Upload waits for the limit: nothing is sent before it is known.
+      fireEvent.click(screen.getByRole('button', { name: 'Upload 1 file' }));
+      expect(api.callsTo(CREATE)).toEqual([]);
+      act(() => answer?.());
+      await waitFor(() =>
+        expect(rowOf('over.txt').textContent).toContain(
+          'Too large: the service takes files of up to 3 bytes.',
+        ),
+      );
+      expect(api.callsTo(CREATE)).toEqual([]);
+    });
+
+    it('leaves the limit to the service when the session cannot be read', async () => {
+      const { api } = setup();
+      await openImport();
+      choose('Choose files…', [fileOf('a.txt', 'abc')]);
+      upload();
+      await uploaded('a.txt');
+      expect(api.callsTo(CREATE)).toHaveLength(1);
+    });
   });
 
   it('offers nothing to a person who may only read', async () => {
