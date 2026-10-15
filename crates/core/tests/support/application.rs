@@ -2223,6 +2223,7 @@ impl ProposalStore for Unused {
         &'a self,
         _scope: &'a StorageScope,
         _proposal: Proposal,
+        _expected: okf_jawn_contract::proposal::ProposalStatus,
     ) -> PortFuture<'a, Proposal> {
         unused()
     }

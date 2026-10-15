@@ -556,7 +556,9 @@ async fn proposals_and_comments_are_unique_on_their_mutation_and_page() -> TestR
     assert_eq!(rest.next_cursor, None);
     let mut declined = first.clone();
     declined.status = ProposalStatus::Declined;
-    proposals.update(&workspace, declined).await?;
+    proposals
+        .update(&workspace, declined, ProposalStatus::Open)
+        .await?;
     let open = proposals
         .list(
             &workspace,
@@ -596,6 +598,159 @@ async fn proposals_and_comments_are_unique_on_their_mutation_and_page() -> TestR
             .await,
     )?;
     assert_eq!(error.code, ErrorCode::NotFound);
+    Ok(())
+}
+
+/// The stored status of proposal `id` in `workspace`.
+async fn stored_status(
+    storage: &Storage,
+    workspace: &StorageScope,
+    id: u32,
+) -> Fallible<ProposalStatus> {
+    Ok(storage.proposals().get(workspace, uuid!(id)?).await?.status)
+}
+
+/// `ProposalStore::update` is a compare-and-set on the stored status: written only from the
+/// expected status, refused with `Conflict` and nothing written otherwise, a no-op when the
+/// stored record is written again, and `NotFound` for a proposal the workspace does not hold.
+#[tokio::test]
+async fn a_proposal_status_change_is_written_only_from_the_expected_status() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let proposals = storage.proposals();
+    let workspace = scope(1)?;
+    proposals
+        .insert(&workspace, uuid!(70)?, proposal(71, &ProposalStatus::Open)?)
+        .await?;
+    let declined = proposals
+        .update(
+            &workspace,
+            proposal(71, &ProposalStatus::Declined)?,
+            ProposalStatus::Open,
+        )
+        .await?;
+    assert_eq!(declined.status, ProposalStatus::Declined);
+    // From `open` again: the stored status is `declined`, so nothing is written.
+    let error = err_of(
+        proposals
+            .update(
+                &workspace,
+                proposal(71, &ProposalStatus::Accepted)?,
+                ProposalStatus::Open,
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    assert_eq!(
+        stored_status(&storage, &workspace, 71).await?,
+        ProposalStatus::Declined
+    );
+    // A retry of the decline: the stored record again, accepted whatever was expected.
+    let again = proposals
+        .update(
+            &workspace,
+            proposal(71, &ProposalStatus::Declined)?,
+            ProposalStatus::Open,
+        )
+        .await?;
+    assert_eq!(again.status, ProposalStatus::Declined);
+    // The same status with another field is a change, and the status is not the expected one.
+    let mut retitled = proposal(71, &ProposalStatus::Declined)?;
+    retitled.title = "another title".to_owned();
+    let error = err_of(
+        proposals
+            .update(&workspace, retitled.clone(), ProposalStatus::Open)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    assert_eq!(
+        proposals.get(&workspace, uuid!(71)?).await?.title,
+        "proposal 71"
+    );
+    // From the stored status it is written.
+    let written = proposals
+        .update(&workspace, retitled, ProposalStatus::Declined)
+        .await?;
+    assert_eq!(written.title, "another title");
+    assert_eq!(
+        proposals.get(&workspace, uuid!(71)?).await?.title,
+        "another title"
+    );
+    let error = err_of(
+        proposals
+            .update(
+                &scope(2)?,
+                proposal(71, &ProposalStatus::Accepted)?,
+                ProposalStatus::Declined,
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::NotFound, "{error}");
+    Ok(())
+}
+
+/// An accept and a decline of one open proposal, racing: exactly one is written and the other
+/// is refused with `Conflict`, and the stored status is the winner's. The spawn order alternates
+/// so both interleavings occur over the rounds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_status_changes_racing_from_open_write_one_and_refuse_the_other() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let workspace = scope(1)?;
+    let (mut accepted_wins, mut declined_wins) = (0_u32, 0_u32);
+    for round in 0..300_u32 {
+        let id = round.saturating_add(2000);
+        storage
+            .proposals()
+            .insert(&workspace, uuid!(id)?, proposal(id, &ProposalStatus::Open)?)
+            .await?;
+        let (to_accept, to_decline) = (storage.proposals(), storage.proposals());
+        let (accept_scope, decline_scope) = (workspace.clone(), workspace.clone());
+        let accepted = proposal(id, &ProposalStatus::Accepted)?;
+        let declined = proposal(id, &ProposalStatus::Declined)?;
+        let accept = async move {
+            to_accept
+                .update(&accept_scope, accepted, ProposalStatus::Open)
+                .await
+        };
+        let decline = async move {
+            to_decline
+                .update(&decline_scope, declined, ProposalStatus::Open)
+                .await
+        };
+        let (accept, decline) = if round % 2 == 0 {
+            let decline = tokio::spawn(decline);
+            (tokio::spawn(accept), decline)
+        } else {
+            let accept = tokio::spawn(accept);
+            (accept, tokio::spawn(decline))
+        };
+        let (accept, decline) = tokio::join!(accept, decline);
+        let winner = match (accept?, decline?) {
+            (Ok(_), Err(error)) => {
+                assert_eq!(error.code, ErrorCode::Conflict, "round {round}: {error}");
+                accepted_wins = accepted_wins.saturating_add(1);
+                ProposalStatus::Accepted
+            }
+            (Err(error), Ok(_)) => {
+                assert_eq!(error.code, ErrorCode::Conflict, "round {round}: {error}");
+                declined_wins = declined_wins.saturating_add(1);
+                ProposalStatus::Declined
+            }
+            (accept, decline) => {
+                return Err(format!(
+                    "round {round}: exactly one change must win: {accept:?} and {decline:?}"
+                )
+                .into());
+            }
+        };
+        assert_eq!(
+            stored_status(&storage, &workspace, id).await?,
+            winner,
+            "round {round}"
+        );
+    }
+    assert_eq!(accepted_wins.saturating_add(declined_wins), 300);
     Ok(())
 }
 

@@ -2,18 +2,20 @@
 //!
 //! A proposal and a comment are each unique on their `MutationId`; listings page by row order
 //! with an opaque cursor (the row sequence), proposals newest first, comments oldest first.
-//! Every write is refused inside its transaction while a purge names the workspace
-//! (`purge::guard`).
+//! A status change is a compare-and-set inside its transaction (`UPDATE ... WHERE status =
+//! expected`): of two changes racing from one status, one is written and the other refused,
+//! and writing the stored record again is a no-op. Every write is refused inside its
+//! transaction while a purge names the workspace (`purge::guard`).
 
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::identity::{MutationId, ProposalId};
-use okf_jawn_contract::proposal::{Comment, ListProposalsResponse, Proposal};
+use okf_jawn_contract::proposal::{Comment, ListProposalsResponse, Proposal, ProposalStatus};
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::proposals::{CommentPage, ProposalFilter, ProposalStore};
 use okf_jawn_core::storage::{Page, StorageScope};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::db::{Db, cursor, json, not_found, page_limit, paged, scope_key, sql};
+use crate::db::{Db, conflict, cursor, json, not_found, page_limit, paged, scope_key, sql};
 use crate::purge::guard;
 
 /// `ProposalStore` over the records database.
@@ -120,25 +122,51 @@ impl ProposalStore for SqliteProposals {
         &'a self,
         scope: &'a StorageScope,
         proposal: Proposal,
+        expected: ProposalStatus,
     ) -> PortFuture<'a, Proposal> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
             guard::refuse(transaction, &tenant, &workspace)?;
+            let id = proposal.id.0.to_string();
+            let status = variant_text!(&proposal.status)?;
+            let record = serde_json::to_string(&proposal).map_err(|error| json(&error))?;
+            let stored: (String, String) = transaction
+                .query_row(
+                    "SELECT status, record FROM proposals
+                     WHERE tenant_id = ?1 AND workspace_id = ?2 AND proposal_id = ?3",
+                    params![tenant, workspace, id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|error| sql(&error))?
+                .ok_or_else(|| not_found("proposal"))?;
+            // A retry of a change that was written: the same record again changes nothing.
+            if stored == (status.clone(), record.clone()) {
+                return Ok(proposal);
+            }
+            // The compare-and-set: written only while the stored status is the expected one,
+            // in this transaction, so of two changes racing from one status one is refused.
             let changed = transaction
                 .execute(
                     "UPDATE proposals SET status = ?1, record = ?2
-                     WHERE tenant_id = ?3 AND workspace_id = ?4 AND proposal_id = ?5",
+                     WHERE tenant_id = ?3 AND workspace_id = ?4 AND proposal_id = ?5
+                       AND status = ?6",
                     params![
-                        variant_text!(&proposal.status)?,
-                        serde_json::to_string(&proposal).map_err(|error| json(&error))?,
+                        status,
+                        record,
                         tenant,
                         workspace,
-                        proposal.id.0.to_string()
+                        id,
+                        variant_text!(&expected)?
                     ],
                 )
                 .map_err(|error| sql(&error))?;
             if changed == 0 {
-                return Err(not_found("proposal"));
+                return Err(conflict(format!(
+                    "the proposal is {}, not {}",
+                    stored.0,
+                    variant_text!(&expected)?
+                )));
             }
             Ok(proposal)
         }))

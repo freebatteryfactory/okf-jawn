@@ -648,7 +648,7 @@ async fn proposal_calls(
             },
         )
         .await?;
-    let updated = proposals.update(scope, read).await?;
+    let updated = proposals.update(scope, read, ProposalStatus::Open).await?;
     proposals
         .add_comment(scope, mutation_id, updated.id, comment)
         .await?;
