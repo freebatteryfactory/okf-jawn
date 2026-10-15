@@ -276,6 +276,31 @@ async fn opening_a_proposal_writes_its_checked_candidate_its_row_and_an_event() 
 }
 
 #[tokio::test]
+async fn the_findings_about_an_edited_item_are_the_proposals_warnings() -> TestResult {
+    let world = proposal_world()?;
+    // The edit drops the recommended description: the check finds it, at the item's path.
+    let proposal = open(
+        &world,
+        OPENED,
+        vec![Change::Edit {
+            item_id: ItemId(Uuid::from_u128(NOTE)),
+            body: "# Plan\n".to_owned(),
+            properties: serde_json::from_value(json!({ "type": "Note", "title": "Plan" }))?,
+        }],
+    )
+    .await?;
+    assert!(
+        proposal
+            .warnings
+            .iter()
+            .any(|warning| warning.location.as_deref() == Some("notes/plan.md")),
+        "{:?}",
+        proposal.warnings
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_proposal_is_drafted_on_its_base_even_when_the_head_moved() -> TestResult {
     let world = proposal_world()?;
     world.world.versions.set_head(revision('e')?)?;
@@ -1523,6 +1548,11 @@ async fn a_comments_citation_is_checked_as_every_citation_is() -> TestResult {
     )?;
     let mut elsewhere = plan_citation(1)?;
     elsewhere.path = path("notes/other.md")?;
+    // The note is at `b` too: only the purge check refuses its citation there.
+    world
+        .world
+        .versions
+        .put_document(&revision('b')?, plan(&revision('b')?)?)?;
     let mut purged = plan_citation(1)?;
     purged.revision = revision('b')?;
     let mut located = plan_citation(1)?;
@@ -1548,6 +1578,15 @@ async fn a_comments_citation_is_checked_as_every_citation_is() -> TestResult {
         )?;
         assert_eq!(error.code, code, "{error}");
         assert_eq!(error.field.as_deref(), field, "{error}");
+        if field.is_none() {
+            assert_eq!(
+                error.detail.as_deref(),
+                Some(&ErrorDetail::Invalidated {
+                    purge_id,
+                    replacement: None
+                })
+            );
+        }
     }
     assert!(world.proposals.comments()?.is_empty());
     Ok(())
@@ -1646,29 +1685,45 @@ async fn comments_are_listed_oldest_first_page_by_page() -> TestResult {
 async fn a_citation_in_a_workspace_the_reader_may_not_read_is_left_out() -> TestResult {
     let world = proposal_world()?;
     let proposal = open(&world, OPENED, vec![create("notes/new.md")?]).await?;
-    world
-        .service
-        .add_comment(
-            &with_elsewhere(OperationName::AddComment, Some(COMMENTING))?,
-            comment_request(&proposal, Some(plan_citation(ELSEWHERE)?))?,
-        )
-        .await?;
+    // Two comments cite the other workspace, one cites the proposal's own.
+    for (number, workspace) in [
+        (COMMENTING, ELSEWHERE),
+        (COMMENTING.saturating_add(1), ELSEWHERE),
+        (COMMENTING.saturating_add(2), 1),
+    ] {
+        world
+            .service
+            .add_comment(
+                &with_elsewhere(OperationName::AddComment, Some(number))?,
+                comment_request(&proposal, Some(plan_citation(workspace)?))?,
+            )
+            .await?;
+    }
     let elsewhere = WorkspaceId(Uuid::from_u128(ELSEWHERE));
     let reader = alice(OperationName::ListComments, None)?;
-    // No grant on the other workspace: the comment, without its citation.
+    let shown = |listed: &[okf_jawn_contract::proposal::Comment]| -> Vec<bool> {
+        listed
+            .iter()
+            .map(|comment| comment.source.is_some())
+            .collect()
+    };
+    // No grant on the other workspace: those comments, without their citation.
     let listed = comments_as(&world, &reader, &proposal).await?;
-    assert!(some(listed.first(), "the comment")?.source.is_none());
+    assert_eq!(shown(&listed), [false, false, true]);
     // A grant without `read` is no better.
     world.access.grant(elsewhere, vec![Permission::Write])?;
     let listed = comments_as(&world, &reader, &proposal).await?;
-    assert!(some(listed.first(), "the comment")?.source.is_none());
-    // With `read`, the citation is there; each listing looks the grant up again.
+    assert_eq!(shown(&listed), [false, false, true]);
+    // With `read`, the citations are there.
     world.access.grant(elsewhere, vec![Permission::Read])?;
     let listed = comments_as(&world, &reader, &proposal).await?;
+    assert_eq!(shown(&listed), [true, true, true]);
     assert_eq!(
         same(&some(listed.first(), "the comment")?.source)?,
         same(&Some(plan_citation(ELSEWHERE)?))?
     );
+    // Each listing looks the grant up again, once for the workspace however many cite it, and
+    // never for the proposal's own workspace.
     assert_eq!(world.access.lookups()?, [elsewhere, elsewhere, elsewhere]);
     // A lookup that fails otherwise than by refusing fails the listing.
     world.access.fail(elsewhere, ErrorCode::Unavailable)?;
@@ -1689,10 +1744,28 @@ async fn a_citation_in_a_workspace_the_reader_may_not_read_is_left_out() -> Test
             .await,
     )?;
     assert_eq!(error.code, ErrorCode::Unavailable);
-    // An agent's delegation that does not reach the workspace reads no citation in it.
+    // An access adapter that does not know the workspace answers as no grant.
     world.access.fail(elsewhere, ErrorCode::NotFound)?;
     let listed = comments_as(&world, &reader, &proposal).await?;
-    assert!(some(listed.first(), "the comment")?.source.is_none());
+    assert_eq!(shown(&listed), [false, false, true]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_citation_of_a_workspace_dispatch_did_not_authorize_is_refused() -> TestResult {
+    let world = proposal_world()?;
+    let proposal = open(&world, OPENED, vec![create("notes/new.md")?]).await?;
+    let error = err_of(
+        world
+            .service
+            .add_comment(
+                &commenting(COMMENTING)?,
+                comment_request(&proposal, Some(plan_citation(ELSEWHERE)?))?,
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Internal);
+    assert!(world.proposals.comments()?.is_empty());
     Ok(())
 }
 
@@ -1740,6 +1813,23 @@ async fn a_kept_citation_is_remapped_or_invalidated_when_it_is_read() -> TestRes
         } else {
             assert_eq!(source.revision, revision('a')?);
             assert_eq!(comment.invalidated_by, Some(purge_id), "{replacement:?}");
+        }
+        // A store fault reading the cited item at the rewritten revision is no "not there".
+        if replacement.is_some() {
+            world
+                .world
+                .versions
+                .fail_next_show(ErrorCode::Unavailable)?;
+            let error = err_of(
+                comments_as(
+                    &world,
+                    &alice(OperationName::ListComments, None)?,
+                    &proposal,
+                )
+                .await,
+            )?;
+            let error = some(error.downcast_ref::<ApiError>(), "an ApiError")?;
+            assert_eq!(error.code, ErrorCode::Unavailable);
         }
     }
     Ok(())

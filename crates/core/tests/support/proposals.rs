@@ -7,8 +7,9 @@
 //! `FakeProposals` encodes what `ProposalStore`'s doc states, each rule quoted above the code
 //! that keeps it. Where it is kinder than storage's `SqliteProposals`: its cursor is a decimal
 //! offset into the listing rather than a row number, so a row inserted between two pages shifts
-//! the next page (storage's does not); and it refuses nothing while a purge names the workspace
-//! (storage refuses every write then).
+//! the next page (storage's does not); it accepts a comment on a proposal the workspace does
+//! not hold, which the port doc leaves open and storage refuses; and it refuses nothing while a
+//! purge names the workspace (storage refuses every write then).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -300,8 +301,9 @@ impl ProposalStore for FakeProposals {
     }
 
     // "Append a discussion comment without certifying content. Unique on `mutation_id`: a
-    // repeated id inserts nothing and returns the prior comment." Storage also refuses a comment
-    // on a proposal the workspace does not hold (`NotFound`), as `list_comments` documents.
+    // repeated id inserts nothing and returns the prior comment." The doc says nothing of a
+    // proposal the workspace does not hold, so the fake accepts the comment (storage refuses it
+    // with `NotFound`): `add_comment` reads the proposal first itself.
     fn add_comment<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -312,13 +314,6 @@ impl ProposalStore for FakeProposals {
         Box::pin(async move {
             self.injected(ProposalCall::AddComment)?;
             let mut state = lock_api(&self.state)?;
-            if !state
-                .proposals
-                .iter()
-                .any(|(held, _, row)| held == scope && row.id == proposal)
-            {
-                return Err(ApiError::new(ErrorCode::NotFound, "no such proposal"));
-            }
             if let Some((_, _, _, prior)) = state
                 .comments
                 .iter()

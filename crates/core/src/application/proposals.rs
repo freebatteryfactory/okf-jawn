@@ -72,7 +72,10 @@
 //! then a `proposal_updated` event; the answer is the declined proposal. The comment comes first
 //! because it is the mark of this decline: an already `declined` proposal answers the stored
 //! proposal when the comment of this mutation (`derive_comment_id`) is among its comments, and
-//! `conflict` otherwise. The candidate reference stays: it is history.
+//! `conflict` otherwise. The candidate reference stays: it is history. Known limit: a change of
+//! the status by someone else between this decline's check and its compare-and-set (an accept
+//! that lands then) leaves the reason comment on that proposal, and the decline answers the
+//! compare-and-set's `conflict`.
 //!
 //! Comments (`add_comment`) are allowed on a proposal in any status. A comment's source is
 //! checked as every citation is, in its own workspace (`sources::checked_citation`), and kept
