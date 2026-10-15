@@ -609,6 +609,18 @@ async fn create_item_commits_a_note_on_its_base_and_returns_it_as_committed() ->
         .versions
         .put_document(&revision('b')?, committed.clone())?;
     let caller = alice(OperationName::CreateItem, Some(id))?;
+    // The staged tree the commit's check reads holds the new note without a heading.
+    let bare = note(
+        1,
+        &revision('b')?,
+        "notes/new.md",
+        "No heading.\n",
+        json!({ "type": "Note" }),
+    )?;
+    world
+        .versions
+        .stage()
+        .write("notes/new.md", &file_text(&bare))?;
     let created = world
         .service
         .create_item(
@@ -622,6 +634,14 @@ async fn create_item_commits_a_note_on_its_base_and_returns_it_as_committed() ->
     assert_eq!(*under, Some(id));
     assert_eq!(receipt.id, created.receipt_id);
     assert_eq!(receipt.operation_id, OperationName::CreateItem);
+    assert!(
+        created.warnings.iter().any(|warning| {
+            warning.code.starts_with("okf_lint")
+                && warning.location.as_deref() == Some("notes/new.md")
+        }),
+        "{:?}",
+        created.warnings
+    );
     let kept = world.versions.kept_warnings(id)?;
     assert_eq!(
         serde_json::to_value(&created.warnings)?,

@@ -1393,6 +1393,11 @@ mod job_handler {
         let (message, retryable) = some(entry.failures.first(), "the failure")?;
         assert!(message.contains("another job"), "{message}");
         assert!(!retryable);
+        // The store's refusal is the job's failure as it was given, its code kept.
+        assert_eq!(
+            entry.job.error.as_ref().map(|error| &error.code),
+            Some(&ErrorCode::Conflict)
+        );
         // Refused at the consume, before restore_import: one restore applied, by the first job.
         assert_eq!(
             world.backups.restored.lock().map_err(|_| "poisoned")?.len(),
