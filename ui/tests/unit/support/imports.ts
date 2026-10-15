@@ -12,8 +12,10 @@
  *   the SHA-256 of what it holds is the one sent (and the one announced). The hash is computed
  *   here from the bytes that arrived, so a wrong hash or wrong bytes are refused, not believed;
  * - `list_uploads` lists the slots newest first, by state: `incomplete`, `waiting` (complete and
- *   not consumed), `consumed`; `discard_upload` removes a slot and its bytes, is `conflict` for
- *   one a job consumed, and a repeat under its key answers the response first given.
+ *   not consumed), `consumed`; a page holds at most the limit asked (and at most `pageSize`, which
+ *   a test sets to make the service page with few slots), and `next_cursor` names where the next
+ *   page starts; `discard_upload` removes a slot and its bytes, is `conflict` for one a job
+ *   consumed, and a repeat under its key answers the response first given.
  * A test scripts the awkward answers: each scripted step replaces one answer, in order.
  */
 import { vi } from 'vitest';
@@ -223,6 +225,11 @@ export interface UploadService {
   transfer: TransferHandler;
   /** Every slot opened, in order. */
   slots: Slot[];
+  /**
+   * The most one page of `list_uploads` holds, below the limit asked ("server may return fewer"):
+   * none by default.
+   */
+  pageSize: number | null;
   /** The bytes a slot holds, as text. */
   held: (slot: Slot | undefined) => Promise<string>;
   /** Take a transfer's bytes as the service usually does, and say what it answers. */
@@ -297,6 +304,7 @@ export function uploadService(): UploadService {
   };
   const service: UploadService = {
     slots,
+    pageSize: null,
     held: (slot) => new Blob(slot?.parts ?? []).text(),
     accept,
     script: { create: [], put: [], complete: [], get: [] },
@@ -358,7 +366,15 @@ export function uploadService(): UploadService {
         const listed = slots
           .filter((slot) => state === null || stateOf(slot) === state)
           .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-        return ok({ items: listed.map(view), next_cursor: null });
+        const page = body.page as { limit: number; cursor?: string | null };
+        // Opaque to the page; here, where the next page starts in the list as it stands.
+        const from = typeof page.cursor === 'string' ? Number(page.cursor) : 0;
+        const size = Math.min(page.limit, service.pageSize ?? page.limit);
+        const to = from + size;
+        return ok({
+          items: listed.slice(from, to).map(view),
+          next_cursor: to < listed.length ? String(to) : null,
+        });
       },
       [DISCARD_UPLOAD]: (body) => {
         const key = String(body.idempotency_key);

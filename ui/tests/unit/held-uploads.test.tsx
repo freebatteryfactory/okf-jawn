@@ -35,6 +35,7 @@ import {
   LIST_UPLOADS,
   START,
   slotOf,
+  type UploadService,
   uploadService,
 } from './support/imports';
 import { mockTransfers } from './support/transfers';
@@ -56,8 +57,8 @@ afterEach(() => {
 async function openWith(
   held: ReturnType<typeof slotOf>[],
   overrides: Record<string, Handler> = {},
+  service: UploadService = uploadService(),
 ) {
-  const service = uploadService();
   // Copies: a test changes the slots its service holds, never another test's.
   service.slots.push(...held.map((slot) => ({ ...slot })));
   const api = mockApi(
@@ -246,6 +247,113 @@ describe('the uploads the service holds', () => {
       ),
     ).toBeDefined();
     expect(within(section()).queryByText('None.')).toBeNull();
+  });
+
+  describe('a further page, asked for with "Show more uploads"', () => {
+    const newest = slotOf(5, 'newest.txt', 'ab');
+    /** A service that answers one upload a page, so a few slots make pages. */
+    const paged = () => {
+      const service = uploadService();
+      service.pageSize = 1;
+      return service;
+    };
+    const more = () => within(section()).getByRole('button', { name: 'Show more uploads' });
+    const noMore = () =>
+      within(section()).queryByRole('button', { name: /^(Show more uploads|Listing more…)$/ });
+    const tick = (name: string) =>
+      within(section()).getByRole('checkbox', { name: `Include “${name}” in the import` });
+    const rows = () => within(waitingList()).getAllByRole('listitem');
+
+    it('keeps keyboard focus off the page body when "Show more uploads" brings the last page', async () => {
+      await openWith([report, older], {}, paged());
+      await within(section()).findByRole('heading', {
+        name: 'Uploaded and not imported (1, and more)',
+      });
+      const button = more();
+      act(() => button.focus());
+      expect(document.activeElement).toBe(button);
+      fireEvent.click(button);
+      await waitFor(() => expect(rows()).toHaveLength(2));
+      // The last page: the button is gone, with focus in it.
+      expect(noMore()).toBeNull();
+      // Standing rule from M1: keyboard focus never falls to the page body.
+      expect(document.activeElement?.tagName).not.toBe('BODY');
+      // It is on the first upload the page brought.
+      expect(document.activeElement).toBe(tick('papers/report.pdf'));
+    });
+
+    it('asks the next page at the cursor the service named, and focus goes to the first upload it brought', async () => {
+      const { api } = await openWith([report, older, newest], {}, paged());
+      await within(section()).findByRole('heading', {
+        name: 'Uploaded and not imported (1, and more)',
+      });
+      expect(rows().map((row) => row.querySelector('bdi')?.textContent)).toEqual(['newest.txt']);
+      act(() => more().focus());
+      fireEvent.click(more());
+      await waitFor(() => expect(rows()).toHaveLength(2));
+      // Not the last page: the button stays, and focus is on what the page brought.
+      expect(document.activeElement).toBe(tick('older.txt'));
+      expect(more()).toBeDefined();
+      fireEvent.click(more());
+      await waitFor(() => expect(rows()).toHaveLength(3));
+      expect(noMore()).toBeNull();
+      expect(document.activeElement).toBe(tick('papers/report.pdf'));
+      const cursors = api
+        .callsTo(LIST_UPLOADS)
+        .filter((body) => body.state === 'waiting')
+        .map((body) => (body.page as { cursor?: string | null }).cursor ?? null);
+      expect(cursors).toEqual([null, '1', '2']);
+      expect(api.violations).toEqual([]);
+    });
+
+    it('moves focus to the list’s heading when the last page brings no upload', async () => {
+      const service = paged();
+      await openWith([report, older], {}, service);
+      await within(section()).findByRole('heading', {
+        name: 'Uploaded and not imported (1, and more)',
+      });
+      // Discarded elsewhere meanwhile: the page the cursor names is empty, and the last.
+      service.slots.splice(
+        service.slots.findIndex((slot) => slot.id === report.id),
+        1,
+      );
+      act(() => more().focus());
+      fireEvent.click(more());
+      await waitFor(() => expect(noMore()).toBeNull());
+      expect(document.activeElement).toBe(
+        within(section()).getByRole('heading', { name: 'Uploaded and not imported (1)' }),
+      );
+    });
+
+    it('moves focus to the list’s heading when the further page fails, with the notice after it', async () => {
+      const service = paged();
+      const usual = service.handlers[LIST_UPLOADS];
+      await openWith(
+        [report, older],
+        {
+          [LIST_UPLOADS]: (body) => {
+            const page = body.page as { cursor?: string | null };
+            if (typeof page.cursor === 'string') return fail(503, 'unavailable', 'busy');
+            return usual === undefined ? fail(500, 'internal', 'no listing') : usual(body);
+          },
+        },
+        service,
+      );
+      await within(section()).findByRole('heading', {
+        name: 'Uploaded and not imported (1, and more)',
+      });
+      act(() => more().focus());
+      fireEvent.click(more());
+      expect(
+        await within(section()).findByText(
+          'Listing the uploads that are not imported: The service is temporarily unavailable.',
+        ),
+      ).toBeDefined();
+      expect(noMore()).toBeNull();
+      expect(document.activeElement).toBe(
+        within(section()).getByRole('heading', { name: 'Uploaded and not imported (1, and more)' }),
+      );
+    });
   });
 });
 

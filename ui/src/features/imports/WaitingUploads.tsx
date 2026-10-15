@@ -13,6 +13,11 @@
  * focus back to "Discard". The request is repeated under its key by the notice's retry. Once the
  * service has answered, the row leaves and a polite status says so; keyboard focus that was in it
  * goes to the row now in its place, else the one before, else the list's heading.
+ *
+ * "Show more uploads" moves keyboard focus to the first upload the further page brought, as the
+ * jobs list, Attention and search do. When it brought none, focus stays on the button if another
+ * page may follow; the button is gone once the last page is here, and while a further page that
+ * failed is said, so focus then goes to the list's heading.
  */
 import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useId, useLayoutEffect, useRef, useState } from 'react';
@@ -121,6 +126,26 @@ function HeldList({
     (next?.querySelector<HTMLElement>('input, button') ?? headingRef.current)?.focus();
   });
 
+  // "Show more uploads": focus to the first upload the page brought, else the button while it is
+  // there, else the list's heading. In a layout effect, so no frame is drawn with focus on the
+  // page body.
+  const focusFrom = useRef<{ rows: number; pages: number } | null>(null);
+  const pageCount = listed.data?.pages.length ?? 0;
+  const loadingMore = listed.isFetchingNextPage;
+  const moreFailed = listed.isFetchNextPageError;
+  useLayoutEffect(() => {
+    const asked = focusFrom.current;
+    // Settled once another page is here (even an empty one), or the further page failed.
+    if (asked === null || !(pageCount > asked.pages || (moreFailed && !loadingMore))) return;
+    focusFrom.current = null;
+    const first = listRef.current?.querySelectorAll<HTMLElement>(':scope > li').item(asked.rows);
+    (
+      first?.querySelector<HTMLElement>('input, button') ??
+      moreRef.current ??
+      headingRef.current
+    )?.focus();
+  });
+
   return (
     <div className="held-list">
       <h4 id={heading} ref={headingRef} tabIndex={-1}>
@@ -164,12 +189,17 @@ function HeldList({
         <button
           type="button"
           ref={moreRef}
-          aria-disabled={listed.isFetchingNextPage}
+          aria-disabled={loadingMore}
           onClick={() => {
-            if (!listed.isFetchingNextPage) void listed.fetchNextPage();
+            if (loadingMore) return;
+            focusFrom.current = {
+              rows: listRef.current?.querySelectorAll(':scope > li').length ?? 0,
+              pages: pageCount,
+            };
+            void listed.fetchNextPage();
           }}
         >
-          {listed.isFetchingNextPage ? 'Listing more…' : 'Show more uploads'}
+          {loadingMore ? 'Listing more…' : 'Show more uploads'}
         </button>
       )}
     </div>
