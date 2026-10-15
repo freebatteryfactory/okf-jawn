@@ -13,11 +13,13 @@ import {
   within,
 } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { z } from 'zod';
+import createUploadSchema from '../../../api/schemas/create_upload.input.json';
 import { tidyPath } from '../../src/features/imports/files';
 import {
   collisionKey,
   describeProblem,
+  MAX_FILENAME_BYTES,
+  MAX_FOLDER_BYTES,
   pathProblem,
   shownName,
 } from '../../src/features/imports/paths';
@@ -118,34 +120,56 @@ describe('a path the page can see is wrong', () => {
     expect(pathProblem(tidyPath(path))).toBeNull();
   });
 
-  it('finds a name or a folder over the length the request schema allows, and says the bound', () => {
-    const limits = { filename: z.string().max(8), folder: z.string().max(12) };
-    expect(pathProblem({ folder: 'docs', filename: '12345.txt' }, limits)).toEqual({
+  it('finds a name or a folder over its bound in bytes of UTF-8, and says it is too long', () => {
+    const limits = { filename: 8, folder: 12 };
+    // Eight bytes: "é" is two. Nine: one more.
+    expect(pathProblem({ folder: 'docs', filename: 'é123.txt' }, limits)).toEqual({
       kind: 'too-long',
       part: 'name',
       max: 8,
     });
-    expect(pathProblem({ folder: 'docs', filename: '1234.txt' }, limits)).toBeNull();
-    expect(pathProblem({ folder: 'a-folder-of-13', filename: 'a.txt' }, limits)).toEqual({
+    expect(pathProblem({ folder: 'docs', filename: 'é12.txt' }, limits)).toBeNull();
+    // Twelve characters, thirteen bytes: over; twelve bytes: within.
+    expect(pathProblem({ folder: 'a-folder-12é', filename: 'a.txt' }, limits)).toEqual({
       kind: 'too-long',
       part: 'folder',
       max: 12,
     });
     expect(pathProblem({ folder: 'a-folder-12c', filename: 'a.txt' }, limits)).toBeNull();
-    expect(describeProblem({ kind: 'too-long', part: 'name', max: 8 })).toBe(
-      'its name is longer than the service accepts (8 characters at most).',
+    expect(describeProblem({ kind: 'too-long', part: 'name', max: 1024 })).toBe(
+      'its name is too long: the service takes at most 1,024 bytes of text, and a letter with an accent takes two, many other characters three or four.',
     );
-    expect(describeProblem({ kind: 'too-long', part: 'folder', max: 12 })).toBe(
-      'its folder path is longer than the service accepts (12 characters at most).',
+    expect(describeProblem({ kind: 'too-long', part: 'folder', max: 4096 })).toMatch(
+      /^its folder path is too long: the service takes at most 4,096 bytes of text/,
+    );
+    expect(describeProblem({ kind: 'too-long', part: 'name', max: 8 })).not.toMatch(
+      /characters? at most/,
     );
   });
 
-  it('finds no path too long: the generated request schema states its bounds in bytes, not as lengths', () => {
-    // `CreateUploadRequest` states its bounds as `x-max-utf8-bytes`, which the generated zod
-    // schema does not carry; the page's own count of bytes is UI part 2's.
-    expect(
-      pathProblem({ folder: 'x'.repeat(5000), filename: `${'y'.repeat(5000)}.txt` }),
-    ).toBeNull();
+  it('finds a path too long by the contract’s bounds, counted in bytes, as the request schema states them', () => {
+    expect(createUploadSchema.properties.filename['x-max-utf8-bytes']).toBe(MAX_FILENAME_BYTES);
+    expect(createUploadSchema.properties.relative_path['x-max-utf8-bytes']).toBe(MAX_FOLDER_BYTES);
+    // A name of 342 three-byte characters is 1,026 bytes: too long, though far under 1,024
+    // characters. One of 341 is 1,023 bytes, and 1,024 one-byte characters are at the bound.
+    expect(pathProblem({ folder: '', filename: '会'.repeat(342) })).toEqual({
+      kind: 'too-long',
+      part: 'name',
+      max: MAX_FILENAME_BYTES,
+    });
+    expect(pathProblem({ folder: '', filename: '会'.repeat(341) })).toBeNull();
+    expect(pathProblem({ folder: '', filename: 'y'.repeat(MAX_FILENAME_BYTES) })).toBeNull();
+    expect(pathProblem({ folder: '', filename: 'y'.repeat(MAX_FILENAME_BYTES + 1) })).toEqual({
+      kind: 'too-long',
+      part: 'name',
+      max: MAX_FILENAME_BYTES,
+    });
+    expect(pathProblem({ folder: 'é'.repeat(2049), filename: 'a.txt' })).toEqual({
+      kind: 'too-long',
+      part: 'folder',
+      max: MAX_FOLDER_BYTES,
+    });
+    expect(pathProblem({ folder: 'é'.repeat(2048), filename: 'a.txt' })).toBeNull();
   });
 
   it('is listed as one that cannot be imported, with the reason, and is not sent', async () => {
