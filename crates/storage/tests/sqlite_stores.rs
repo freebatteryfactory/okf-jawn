@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::error::ErrorCode;
 use okf_jawn_contract::identity::{Digest, ItemId, Revision, TenantId, Timestamp};
 use okf_jawn_contract::proposal::{Comment, Proposal, ProposalStatus};
@@ -15,7 +16,9 @@ use okf_jawn_core::confirmations::{ConfirmationConsume, ConfirmationCreate, Conf
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::proposals::{ProposalFilter, ProposalStore};
 use okf_jawn_core::sandbox::{SandboxCapabilityStore, SandboxMint, token_hash};
-use okf_jawn_core::storage::{Page, StorageScope};
+use okf_jawn_core::storage::{
+    NewWorkspace, Page, Provenance, StorageScope, WorkspaceCatalog, WorkspaceUpdate,
+};
 use okf_jawn_storage::Storage;
 use serde_json::json;
 
@@ -846,6 +849,79 @@ async fn of_two_identical_status_changes_by_different_mutations_the_second_is_re
         serde_json::to_value(proposals.get(&workspace, uuid!(81)?).await?)?,
         serde_json::to_value(&declined)?
     );
+    Ok(())
+}
+
+/// Review probe P7, first half (R1-N3): a status change under a mutation that already holds
+/// another `workspace_mutations` row, here a catalog change's, cannot keep its writer, so it is
+/// refused `Internal` and rolled back: the proposal stays `open`, and the catalog's retry still
+/// answers the workspace it changed. Dispatch never gives two requests one mutation; this pins
+/// the guard that fails closed if one did.
+#[tokio::test]
+async fn a_status_change_under_a_catalog_changes_mutation_is_rolled_back() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let tenant = TenantId::try_from("local".to_owned())?;
+    let author = Provenance {
+        subject: "ana".to_owned(),
+        route: AccessRoute::LocalOwner,
+        client_id: None,
+    };
+    let created = storage
+        .catalog()
+        .create(
+            &tenant,
+            uuid!(90)?,
+            NewWorkspace {
+                name: "Research".to_owned(),
+                description: "Field notes".to_owned(),
+                creator: author.clone(),
+            },
+        )
+        .await?;
+    let workspace = StorageScope {
+        tenant_id: tenant,
+        workspace_id: created.id,
+    };
+    let renamed = WorkspaceUpdate {
+        expected_head: created.head.clone(),
+        name: "Renamed".to_owned(),
+        description: "New".to_owned(),
+        author,
+    };
+    let shared = uuid!(91)?;
+    storage
+        .catalog()
+        .update(&workspace, shared, renamed.clone())
+        .await?;
+    let proposals = storage.proposals();
+    let mut open = proposal(92, &ProposalStatus::Open)?;
+    open.workspace_id = created.id;
+    let open = proposals.insert(&workspace, uuid!(93)?, open).await?;
+    let error = err_of(
+        proposals
+            .update(
+                &workspace,
+                shared,
+                Proposal {
+                    status: ProposalStatus::Declined,
+                    ..open
+                },
+                ProposalStatus::Open,
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Internal, "{error}");
+    assert_eq!(
+        stored_status(&storage, &workspace, 92).await?,
+        ProposalStatus::Open,
+        "rolled back"
+    );
+    let again = storage
+        .catalog()
+        .update(&workspace, shared, renamed)
+        .await?;
+    assert_eq!(again.name, "Renamed");
     Ok(())
 }
 
