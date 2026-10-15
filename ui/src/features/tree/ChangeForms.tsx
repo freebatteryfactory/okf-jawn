@@ -54,7 +54,14 @@ import {
 } from './changes';
 import { useWorkspaceChanges } from './context';
 import { fieldInWords } from './fields';
-import { folderProblem, joinPath, pathProblem, segmentProblem, splitPath } from './names';
+import {
+  folderProblem,
+  joinPath,
+  noteFileName,
+  pathProblem,
+  segmentProblem,
+  splitPath,
+} from './names';
 
 /** Whether the workspace has a newer head than the one shown; `unknown` when it could not be asked. */
 type Moved = 'checking' | 'moved' | 'same' | 'unknown';
@@ -510,10 +517,12 @@ export function NewEntryForm({ kind, folder: startFolder, onDone, onCancel }: Ne
     made.edited();
   };
 
+  // A note's file ends in ".md" in small letters (`noteFileName`).
+  const sent = kind === 'note' ? noteFileName(name) : name;
   const problems = {
     title: kind === 'note' && title.trim().length === 0 ? 'Give the note a title.' : null,
     folder: folderProblem(folder),
-    name: segmentProblem(name) ?? pathProblem(joinPath(folder, name)),
+    name: segmentProblem(sent) ?? pathProblem(joinPath(folder, sent)),
     type:
       kind === 'note' && typeName.trim().length === 0
         ? 'Give the note a type: any word of your own, such as “note”.'
@@ -536,7 +545,7 @@ export function NewEntryForm({ kind, folder: startFolder, onDone, onCancel }: Ne
       return;
     }
     if (kind === 'note') {
-      note.start({ folder, name, title: title.trim(), typeName: typeName.trim() });
+      note.start({ folder, name: sent, title: title.trim(), typeName: typeName.trim() });
     } else made.start({ folder: joinPath(folder, name) });
   };
 
@@ -654,11 +663,13 @@ export function MoveForm({ item, mark, onDone, onCancel }: MoveFormProps) {
     (result, values) => onDone(result, values.destination),
     submitRef,
   );
-  const destination = joinPath(folder, name);
+  // An item whose file ends in ".md" keeps that ending in small letters (`noteFileName`).
+  const sent = item.path.endsWith('.md') ? noteFileName(name) : name;
+  const destination = joinPath(folder, sent);
   const problems = {
     folder: folderProblem(folder),
     name:
-      segmentProblem(name) ??
+      segmentProblem(sent) ??
       pathProblem(destination) ??
       (destination === item.path
         ? 'This is where it is now. Change the name or the folder.'

@@ -24,6 +24,8 @@ import { fieldInWords } from '../../src/features/tree/fields';
 import {
   folderProblem,
   joinPath,
+  MAX_SEGMENT_UNITS,
+  noteFileName,
   pathProblem,
   segmentProblem,
   splitPath,
@@ -339,6 +341,23 @@ async function openTree(url = `/w/${WS}`) {
   return view;
 }
 
+/**
+ * A path of exactly `bytes` bytes of UTF-8 written with `letter` (one or two bytes), in segments of
+ * at most 200 letters: each within its own bound.
+ */
+function ofBytes(bytes: number, letter: string): string {
+  const size = new TextEncoder().encode(letter).length;
+  const segments: string[] = [];
+  let left = bytes;
+  while (left > 0) {
+    if (segments.length > 0) left -= 1;
+    const letters = Math.min(200, Math.floor(left / size));
+    segments.push(letter.repeat(letters));
+    left -= letters * size;
+  }
+  return segments.join('/');
+}
+
 describe('the rules of a name', () => {
   it('names what is wrong with a segment, and accepts an ordinary one', () => {
     for (const fine of ['meeting.md', 'Réunion 2025.md', 'a', '.env', 'con-cert.md', 'console']) {
@@ -378,16 +397,45 @@ describe('the rules of a name', () => {
     expect(splitPath('notes/2025/a.md')).toEqual({ folder: 'notes/2025', name: 'a.md' });
     expect(splitPath('a.md')).toEqual({ folder: '', name: 'a.md' });
     // The whole path, in the bytes it is sent as: exactly the bound passes, one more does not.
-    expect(pathProblem(`${'a'.repeat(4093)}.md`)).toBeNull();
-    expect(pathProblem(`${'a'.repeat(4094)}.md`)).toBe(
+    // Its segments are within their own bound (255 UTF-16 units), so only the whole is judged.
+    expect(pathProblem(ofBytes(4096, 'a'))).toBeNull();
+    expect(pathProblem(ofBytes(4097, 'a'))).toBe(
       'The folder and the name together are longer than 4096 bytes: they take 4097. Letters outside the basic alphabet take more than one.',
     );
     // A letter of two bytes counts as two, though the client's own schema counts it as one.
-    expect(pathProblem('é'.repeat(2048))).toBeNull();
-    expect(pathProblem('é'.repeat(2049))).toMatch(/longer than 4096 bytes: they take 4098/);
+    expect(pathProblem(ofBytes(4096, 'é'))).toBeNull();
+    expect(pathProblem(ofBytes(4098, 'é'))).toMatch(/longer than 4096 bytes: they take 4098/);
     // Typed as a letter and a combining accent, it is sent as the one letter, and counted so.
-    expect(pathProblem('e\u0301'.repeat(2048))).toBeNull();
+    expect(pathProblem(ofBytes(4096, 'é').normalize('NFD'))).toBeNull();
     expect(pathProblem('a\u0000b')).toBe('This is not a path the workspace can hold.');
+  });
+
+  it('refuses a segment over 255 UTF-16 units, counted in NFC, as NTFS counts a name', () => {
+    expect(MAX_SEGMENT_UNITS).toBe(255);
+    expect(segmentProblem('a'.repeat(255))).toBeNull();
+    expect(segmentProblem('a'.repeat(256))).toBe(
+      'A name holds at most 255 characters, as Windows counts them (an emoji and some rare letters count as two); this one has 256.',
+    );
+    // 128 emoji are 256 units: one too many.
+    expect(segmentProblem('😀'.repeat(128))).toMatch(/this one has 256\./);
+    expect(segmentProblem('😀'.repeat(127))).toBeNull();
+    // 255 accented letters typed as a letter and a combining accent are 510 units, and 255 in NFC.
+    expect(segmentProblem('e\u0301'.repeat(255))).toBeNull();
+    expect(segmentProblem('e\u0301'.repeat(256))).toMatch(/this one has 256\./);
+    // A folder, and a whole path, are judged segment by segment.
+    expect(folderProblem(`notes/${'b'.repeat(256)}`)).toMatch(/^In “b+”: A name holds at most 255/);
+    expect(pathProblem(`notes/${'c'.repeat(256)}.md`)).toMatch(
+      /^In this path: A name holds at most 255 characters/,
+    );
+    expect(pathProblem(`notes/${'c'.repeat(252)}.md`)).toBeNull();
+  });
+
+  it('sends a note’s name ending in ".MD", in any case, with ".md"', () => {
+    expect(noteFileName('Report.MD')).toBe('Report.md');
+    expect(noteFileName('Report.Md')).toBe('Report.md');
+    expect(noteFileName('Report.md')).toBe('Report.md');
+    expect(noteFileName('Report.mdx')).toBe('Report.mdx');
+    expect(noteFileName('Report')).toBe('Report');
   });
 
   it('checks a name as it is sent: in NFC', () => {
@@ -550,6 +598,17 @@ describe('a new note and a new folder', () => {
       expect(within(toolbarArea()).queryByRole('note')).toBeNull();
       expect(toolbarArea().textContent).not.toContain('receipt');
     });
+  });
+
+  it('creates a note named with ".MD" as ".md": a note’s file ends in small letters', async () => {
+    const { api } = service();
+    await openTree();
+    await userEvent.click(button('New note'));
+    await userEvent.type(field('Title'), 'Decisions');
+    await type('File name', 'Decisions.MD');
+    await userEvent.keyboard('{Enter}');
+    await findTextBox('Text of Decisions');
+    expect(api.callsTo(CREATE).at(0)?.path).toBe('notes/Decisions.md');
   });
 
   it('checks the name before anything is sent, and says what is wrong at the field', async () => {
@@ -796,6 +855,22 @@ describe('a move or a rename', () => {
     // Read at the head the move made, without a Refresh.
     expect(await screen.findByText(/Read from notes\/minutes.md at/)).toBeTruthy();
     expect(api.callsTo(READ).some((body) => revisionAsked(body, '') === FIRST)).toBe(true);
+    expect(api.violations).toEqual([]);
+  });
+
+  it('sends a rename that changes only letter case as such, and ".MD" as ".md"', async () => {
+    const { api } = service();
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Rename or move' }));
+    // Only the letter case changes: it is not "where it is now".
+    await type('File name', 'Meeting.MD');
+    await userEvent.keyboard('{Enter}');
+    await within(pane()).findByText('notes/Meeting.md');
+    expect(api.callsTo(MOVE).map((body) => body.destination)).toEqual(['notes/Meeting.md']);
+    expect(
+      screen.queryByText('This is where it is now. Change the name or the folder.'),
+    ).toBeNull();
     expect(api.violations).toEqual([]);
   });
 
