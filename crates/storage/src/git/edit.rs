@@ -54,8 +54,8 @@
 //! frontmatter that names the item itself is not covered: okf-core rebases it as a path, so it
 //! keeps naming the old one. Reference-style links and their definitions (`[t][ref]`,
 //! `[ref]: pics/p.png`) and raw HTML (`<img src="pics/p.png">`) are not links that
-//! `rewrite_markdown_links` sees, so a move to another folder leaves them naming the old
-//! folder, as okf-core 0.2.7 and the upstream fix do.
+//! `rewrite_markdown_links` sees, so a move to another folder leaves them as written, and they
+//! then resolve from the new folder, as with okf-core 0.2.7 and the upstream fix.
 //!
 //! For the same reason, every write that names a new path checks the folders it names against
 //! the staged tree's own spellings before that path is written there
@@ -875,9 +875,10 @@ fn relink(
     move_in(staged, &bundle, source, destination, destination, field)
 }
 
-/// `relink` on `bundle`, the staged tree as it is now. `ends` is the item file's path when the
-/// whole move is done, which the item's links to itself name (`moved_body`): `destination`,
-/// except for the first hop of a rename by letter case (`park`). A refusal other than an
+/// `relink` on `bundle`, the staged tree as it is now. `ends` is the path the item's links to
+/// itself name after this hop (`moved_body`): `destination` for a single move and for each hop of
+/// a Rewind's `move_back` (whose first hop ends at its private path), and the final destination
+/// for the first hop of a rename by letter case (`park`), whose bytes are the ones kept. A refusal other than an
 /// existing target is `InvalidInput` on `field` for a caller's move, and `Internal` for the
 /// server's own (`field` is `None`).
 fn move_in(
