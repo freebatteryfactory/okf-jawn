@@ -6,6 +6,9 @@
 //! a repeated id a no-op that returns the prior row. A job's wire `Job` is kept as JSON with its
 //! state, scope and lease in columns; the specification and initiator are kept exactly as
 //! written and handed back unchanged on every claim. The job lease is `JOB_LEASE_SECONDS`.
+//! `create_job` refuses, before it inserts, a job of a workspace a purge names (`purge::guard`)
+//! and an import, redigest or restore job of an archived workspace
+//! (`catalog::refuse_content_job_while_archived`), a repeated id included.
 
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::events::Receipt;
@@ -23,6 +26,7 @@ use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{ObjectInfo, Page, Provenance, StorageScope};
 use rusqlite::{OptionalExtension, Transaction, params};
 
+use crate::catalog;
 use crate::db::{
     Db, conflict, cursor, internal, job_scope_key, json, not_found, page_limit, paged, scope_key,
     sql, to_i64, to_u64,
@@ -95,10 +99,18 @@ impl RecordStore for SqliteRecords {
         // A job of a workspace a purge names is refused inside the transaction that would
         // record it (`purge::guard`), as are its retries and claims: core cancels and drains
         // the jobs that already run.
+        // An archived workspace accepts no import, redigest or restore job, refused in the same
+        // transaction, so an archive racing this insert is ordered by the database (`catalog`).
         Box::pin(self.db.transaction(move |transaction| {
             let (tenant, workspace) = job_scope_key(&scope);
             if let Some(workspace) = &workspace {
                 guard::refuse(transaction, &tenant, workspace)?;
+                catalog::refuse_content_job_while_archived(
+                    transaction,
+                    &tenant,
+                    workspace,
+                    job.spec.kind(),
+                )?;
             }
             insert_job(transaction, &scope, &job)
         }))

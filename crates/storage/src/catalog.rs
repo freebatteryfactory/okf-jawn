@@ -10,9 +10,21 @@
 //! result under their mutation id (primary key) in the same transaction as the change, so a
 //! repeated id changes nothing and returns the first result. The catalog never filters and
 //! returns `Workspace::permissions` empty.
+//!
+//! An archived workspace runs no job that changes its content (contract ruling 25), held by two
+//! guards over the one records database: `archive` is refused with `Conflict` while an import,
+//! redigest or restore job of the workspace is queued or running, checked in the archive's own
+//! transaction; and `RecordStore::create_job` refuses to insert such a job for an archived
+//! workspace in the insert's transaction (`refuse_content_job_while_archived`). Both run in
+//! immediate transactions, so an archive and such an insert racing are ordered by the database
+//! and exactly one of them is refused. A job already queued or running holds the archive off;
+//! a repeated archive of an archived workspace finds none, since none could be inserted. A
+//! failed job is neither queued nor running; queueing it again is `retry_job`, which core's
+//! dispatch refuses in an archived workspace.
 
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::{MutationId, TenantId, WorkspaceId};
+use okf_jawn_contract::import::{Job, JobKind};
 use okf_jawn_contract::workspace::Workspace;
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
@@ -46,6 +58,14 @@ enum Change {
 /// name, description, created at, archived at: one catalog row.
 type Row = (String, String, String, Option<String>);
 
+/// The kinds of job that change a workspace's content: an archived workspace accepts none, and
+/// a workspace with one queued or running is not archived.
+pub(crate) const CONTENT_JOBS: [JobKind; 3] = [
+    JobKind::Import,
+    JobKind::Redigest,
+    JobKind::RestoreWorkspace,
+];
+
 impl GitCatalog {
     pub(crate) const fn new(db: Db, repositories: Repositories) -> Self {
         Self { db, repositories }
@@ -68,6 +88,9 @@ impl GitCatalog {
                 }
                 let (tenant, id) = scope_key(&scope);
                 guard::refuse(transaction, &tenant, &id)?;
+                if matches!(change, Some(Change::Archive)) {
+                    refuse_archive_while_content_jobs(transaction, &tenant, &id)?;
+                }
                 let mut workspace = read(transaction, &repositories, &scope)?;
                 if let Some(expected) = expected
                     && workspace.head != expected
@@ -371,4 +394,68 @@ fn prior(
     result
         .map(|result| serde_json::from_str(&result).map_err(|error| json(&error)))
         .transpose()
+}
+
+/// Refuse to archive a workspace while an import, redigest or restore job of it is queued or
+/// running: such a job would change an archived workspace's content. Read in the archive's own
+/// transaction, from each unfinished job's stored record by its `kind`.
+fn refuse_archive_while_content_jobs(
+    connection: &Connection,
+    tenant: &str,
+    workspace: &str,
+) -> Result<(), ApiError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT record FROM jobs
+             WHERE tenant_id = ?1 AND workspace_id = ?2 AND state IN ('queued', 'running')",
+        )
+        .map_err(|error| sql(&error))?;
+    let records = statement
+        .query_map(params![tenant, workspace], |row| row.get::<_, String>(0))
+        .map_err(|error| sql(&error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| sql(&error))?;
+    for record in records {
+        let job: Job = serde_json::from_str(&record).map_err(|error| json(&error))?;
+        if CONTENT_JOBS.contains(&job.kind) {
+            return Err(conflict(format!(
+                "job {} of this workspace changes its content and is queued or running; the \
+                 workspace is archived once it ends or is cancelled",
+                job.id.0
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse to insert an import, redigest or restore job (`CONTENT_JOBS`) for an archived
+/// workspace, with `Conflict` and `ErrorDetail::WorkspaceArchived`. Run in the insert's own
+/// transaction (`RecordStore::create_job`). Any other kind, and a workspace that is not
+/// archived or that the catalog does not hold, is let through.
+pub(crate) fn refuse_content_job_while_archived(
+    connection: &Connection,
+    tenant: &str,
+    workspace: &str,
+    kind: JobKind,
+) -> Result<(), ApiError> {
+    if !CONTENT_JOBS.contains(&kind) {
+        return Ok(());
+    }
+    let archived: Option<Option<String>> = connection
+        .query_row(
+            "SELECT archived_at FROM workspaces WHERE tenant_id = ?1 AND workspace_id = ?2",
+            params![tenant, workspace],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| sql(&error))?;
+    match archived.flatten() {
+        Some(archived_at) => Err(conflict(
+            "the workspace is archived; no import, redigest or restore runs in it",
+        )
+        .with_detail(ErrorDetail::WorkspaceArchived {
+            archived_at: from_text!(archived_at.as_str())?,
+        })),
+        None => Ok(()),
+    }
 }

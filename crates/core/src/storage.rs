@@ -750,8 +750,11 @@ pub trait WorkspaceCatalog: Send + Sync {
     /// Archive the workspace and set `archived_at`; its history, objects and records stay.
     ///
     /// Fails with `Conflict` when the head is not `archive.expected_head`, with
-    /// `ErrorDetail::StaleBase` naming the head and no `field`, as `update` does. A repeated
-    /// `mutation_id` changes nothing and returns the archived workspace.
+    /// `ErrorDetail::StaleBase` naming the head and no `field`, as `update` does. Fails with
+    /// `Conflict` while an import, redigest or restore job of the workspace is queued or
+    /// running, checked in the archive's own transaction, so an archive and such a job's
+    /// insert (`RecordStore::create_job`) racing end with one of them refused (contract ruling
+    /// 25). A repeated `mutation_id` changes nothing and returns the archived workspace.
     fn archive<'a>(
         &'a self,
         scope: &'a StorageScope,
