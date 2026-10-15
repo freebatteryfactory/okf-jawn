@@ -732,8 +732,10 @@ pub trait WorkspaceCatalog: Send + Sync {
     fn open<'a>(&'a self, scope: &'a StorageScope) -> PortFuture<'a, Workspace>;
     /// Replace the name and description.
     ///
-    /// Fails with `Conflict` when the head is not `update.expected_head`. A repeated
-    /// `mutation_id` changes nothing and returns the workspace as the first call left it.
+    /// Fails with `Conflict` when the head is not `update.expected_head`, with
+    /// `ErrorDetail::StaleBase` naming the head and no `field`: the caller names its request's.
+    /// A repeated `mutation_id` changes nothing and returns the workspace as the first call left
+    /// it.
     fn update<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -742,7 +744,8 @@ pub trait WorkspaceCatalog: Send + Sync {
     ) -> PortFuture<'a, Workspace>;
     /// Archive the workspace and set `archived_at`; its history, objects and records stay.
     ///
-    /// Fails with `Conflict` when the head is not `archive.expected_head`. A repeated
+    /// Fails with `Conflict` when the head is not `archive.expected_head`, with
+    /// `ErrorDetail::StaleBase` naming the head and no `field`, as `update` does. A repeated
     /// `mutation_id` changes nothing and returns the archived workspace.
     fn archive<'a>(
         &'a self,

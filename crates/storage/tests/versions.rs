@@ -1631,6 +1631,64 @@ async fn the_catalog_creates_once_lists_updates_and_archives() -> TestResult {
     Ok(())
 }
 
+/// Ruling 5: a workspace update or archive whose expected head is not the head is refused with
+/// `StaleBase` naming the head, leaves the field to the caller, and changes nothing.
+#[tokio::test]
+async fn a_workspace_update_or_archive_on_a_moved_head_names_the_head() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let moved = storage
+        .versions()
+        .commit(
+            &scope,
+            changes(20, &initial, vec![note(uuid!(10)?, "a.md", "A")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let catalog = storage.catalog();
+    let updated = err_of(
+        catalog
+            .update(
+                &scope,
+                uuid!(2)?,
+                WorkspaceUpdate {
+                    expected_head: initial.clone(),
+                    name: "Renamed".to_owned(),
+                    description: "New".to_owned(),
+                    author: person("ana"),
+                },
+            )
+            .await,
+    )?;
+    let archived = err_of(
+        catalog
+            .archive(
+                &scope,
+                uuid!(3)?,
+                WorkspaceArchive {
+                    expected_head: initial,
+                    author: person("ana"),
+                },
+            )
+            .await,
+    )?;
+    for error in [&updated, &archived] {
+        assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+        assert_eq!(
+            error.detail.as_deref(),
+            Some(&ErrorDetail::StaleBase {
+                head: moved.clone()
+            })
+        );
+        assert_eq!(error.field, None, "the caller names its request's field");
+    }
+    let shown = catalog.open(&scope).await?;
+    assert_eq!(shown.name, "Research");
+    assert!(shown.archived_at.is_none());
+    Ok(())
+}
+
 /// Commit `message` with mutation `mutation`'s trailer on top of the head straight into the
 /// workspace repository, its committer time `age_seconds` before now, and return it.
 fn commit_aged(
