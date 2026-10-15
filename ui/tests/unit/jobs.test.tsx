@@ -5,7 +5,13 @@
  */
 import { act, cleanup, fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Job, Workspace } from '../../src/api/generated/types.gen';
+import type {
+  AccessRoute,
+  Job,
+  SessionResponse,
+  Workspace,
+} from '../../src/api/generated/types.gen';
+import { sessionOptions } from '../../src/features/imports/limits';
 import { MAX_RECONNECT_MS, RECONNECT_MS } from '../../src/features/jobs/feed';
 import { JOB_ITEMS_STEP } from '../../src/features/jobs/JobRow';
 import { JOBS_POLL_MS, JOBS_SAFETY_POLL_MS } from '../../src/features/jobs/jobs';
@@ -910,6 +916,32 @@ describe('cancelling a job, and trying a failed one again', () => {
     await openJobs({ [JOBS]: () => listOf([purge]) }, withRights(['read', 'admin']));
     await listed();
     expect(button('Cancel')).not.toBeNull();
+  });
+
+  it('reads the session’s route: a job whose start needs a human session is controlled from none other', async () => {
+    const backup = jobOf('running', { kind: 'backup_workspace' });
+    const { queryClient } = await openJobs(
+      { [JOBS]: () => listOf([backup]) },
+      { ...writableWorkspace, permissions: ['read', 'write', 'admin'] },
+    );
+    await listed();
+    // The session not read yet: this page, a browser, is taken for a human session.
+    expect(button('Cancel')).not.toBeNull();
+    const sessionOf = (route: AccessRoute): SessionResponse => ({
+      csrf_required: false,
+      principal: { subject: 'ada', tenant_id: 'local', route },
+      limits: { upload_bytes: '1024', request_body_bytes: 1_048_576, item_text_bytes: 8 },
+    });
+    // The session as the import page reads it: a delegation, not a human session. `backup_workspace`
+    // needs a human session, so its job is not offered to this one.
+    act(() => {
+      queryClient.setQueryData(sessionOptions().queryKey, sessionOf('mcp_delegation'));
+    });
+    await eventually(() => expect(button('Cancel')).toBeNull());
+    act(() => {
+      queryClient.setQueryData(sessionOptions().queryKey, sessionOf('browser_session'));
+    });
+    await eventually(() => expect(button('Cancel')).not.toBeNull());
   });
 
   it('says when a job was accepted, started and ended, as the wire gives them', async () => {
