@@ -12,8 +12,11 @@
 //!   does. Every other operation goes to `ApplicationService`. Once M1.4a lands, that arm goes.
 //! - The purge's tenant job is carried out as ingest's purge handler does (`carry_out`): claimed,
 //!   its purge marked running, the purger called with the job's mutation, the report recorded
-//!   and the job completed. Storage's tests cannot depend on ingest, so the drain of ingest's
-//!   handler is not run here; the workspace has no job to drain.
+//!   and the job completed; or, when the purger fails, the purge recorded `Failed` with its
+//!   error and the job failed with it, retryable whatever its code (ingest's
+//!   `a_workspace_purge_that_fails_is_retryable_whatever_its_code` pins that the handler does
+//!   so). Storage's tests cannot depend on ingest, so the drain of ingest's handler is not run
+//!   here; the workspace has no job to drain.
 //!
 //! Authorization is held open (`OpenAccess`), as in `purge_ledger.rs`: the local access adapter
 //! refuses a purged workspace before the ledger is reached, and what these tests check is that
@@ -21,7 +24,7 @@
 //! comment scenarios of `purge_ledger.rs` are not repeated: `add_comment` is core M1.3a's.
 #![cfg(feature = "runtime")]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -103,6 +106,18 @@ struct RecordingQueue {
 
 /// No conversion runs in these tests.
 struct NoConverter;
+
+/// A purge recorded while a survivor's archive does not read (`unreadable_survivor`).
+struct Unreadable {
+    composed: Composed,
+    target: WorkspaceId,
+    survivor: WorkspaceId,
+    /// The survivor's archive in the pre-migration backup set.
+    archive: PathBuf,
+    /// Its bytes as written, before they were spoiled.
+    readable: Vec<u8>,
+    purge: Purge,
+}
 
 /// What the scenarios start from: the target purged, the survivor whole.
 struct Purged {
@@ -353,8 +368,10 @@ fn workspace_of(response: &Value) -> Fallible<WorkspaceId> {
 
 /// Carry out the purge's tenant job as ingest's purge handler does, with no job of the
 /// workspace to drain: claim it, mark the purge running, call the purger with the job's
-/// mutation, record the report as completed, and complete the job.
-async fn carry_out(storage: &Storage, purge: &Purge) -> TestResult {
+/// mutation, record the report as completed, and complete the job. When the purger fails, the
+/// purge is recorded `Failed` with its error and the job fails with that error, retryable
+/// whatever its code (core M1.4b fix round 1, ruling F1), and the purger's error is answered.
+async fn carry_out(storage: &Storage, purge: &Purge) -> Fallible<Result<(), ApiError>> {
     let records = storage.records();
     let tenant = tenant()?;
     let claimed = some(records.claim_job(purge.job_id).await?, "the purge's job")?;
@@ -369,10 +386,20 @@ async fn carry_out(storage: &Storage, purge: &Purge) -> TestResult {
     record.state = PurgeState::Running;
     record.error = None;
     let mut record = records.update_purge(&tenant, record).await?;
-    let report = storage
+    let report = match storage
         .purger()
         .purge_workspace(&tenant, claimed.mutation_id, purge_id, workspace_id)
-        .await?;
+        .await
+    {
+        Ok(report) => report,
+        Err(error) => {
+            record.state = PurgeState::Failed;
+            record.error = Some(error.clone());
+            records.update_purge(&tenant, record).await?;
+            records.fail_job(claimed.lease, error.clone(), true).await?;
+            return Ok(Err(error));
+        }
+    };
     record.report = Some(report);
     record.state = PurgeState::Completed;
     record.completed_at = None;
@@ -389,7 +416,7 @@ async fn carry_out(storage: &Storage, purge: &Purge) -> TestResult {
             warnings: Vec::new(),
         })
         .await?;
-    Ok(())
+    Ok(Ok(()))
 }
 
 /// Every file under `directory` whose bytes contain the marker.
@@ -496,7 +523,7 @@ async fn purged(directory: &Path) -> Fallible<Purged> {
     )
     .await?;
     let purge: Purge = serde_json::from_value(purge_request.1.clone())?;
-    carry_out(&composed.storage, &purge).await?;
+    carry_out(&composed.storage, &purge).await??;
     Ok(Purged {
         composed,
         target,
@@ -647,10 +674,152 @@ async fn purge_ledger_service_a_failed_purge_asked_for_again_is_resumed() -> Tes
             .clone(),
         vec![(jobs.clone(), purge.job_id); 2]
     );
-    carry_out(&composed.storage, &purge).await?;
+    carry_out(&composed.storage, &purge).await??;
     let completed = records.get_purge(&tenant, purge.id).await?;
     assert_eq!(completed.state, PurgeState::Completed);
     assert!(completed.error.is_none());
+    Ok(())
+}
+
+/// The target and a survivor whose archive in the pre-migration backup set `set-1` holds bytes
+/// that do not read, and the target's purge recorded through the service; the archive's
+/// readable bytes are kept, to repair it with.
+async fn unreadable_survivor(directory: &Path) -> Fallible<Unreadable> {
+    let composed = Composed::new(Storage::open(directory)?)?;
+    let created = call(
+        &composed,
+        "create_workspace",
+        json!({ "name": "Trip", "description": "", "idempotency_key": key(1) }),
+    )
+    .await?;
+    let target = workspace_of(&created)?;
+    let head = some(created.get("head"), "the head")?.clone();
+    let survivor = workspace_of(
+        &call(
+            &composed,
+            "create_workspace",
+            json!({ "name": "Garden", "description": "", "idempotency_key": key(2) }),
+        )
+        .await?,
+    )?;
+    let set = directory.join("backups/pre-migration/set-1");
+    let _written = composed
+        .storage
+        .backups()
+        .write_backup_set(&set, None)
+        .await?;
+    let archive = set
+        .join("workspaces/local")
+        .join(format!("{}.zip", survivor.0));
+    let readable = std::fs::read(&archive)?;
+    std::fs::write(&archive, b"not a zip")?;
+    let purge: Purge = serde_json::from_value(
+        call(
+            &composed,
+            "purge_workspace",
+            json!({ "workspace_id": target, "base_revision": head, "idempotency_key": key(3) }),
+        )
+        .await?,
+    )?;
+    Ok(Unreadable {
+        composed,
+        target,
+        survivor,
+        archive,
+        readable,
+        purge,
+    })
+}
+
+/// Core M1.4b fix round 1, ruling F1 (contract ruling 14), the review's probe through the
+/// service and real storage: a survivor's archive in a pre-migration backup set whose bytes do
+/// not read stops the purge. Its job fails retryable with the reader's code, the error naming
+/// the archive by identity and by no path, and the purge is recorded `Failed` with the same
+/// error. Asked for again while the archive is still bad, the `Failed` purge is answered with
+/// its job made runnable and queued again, and it stops the same way; once the archive is
+/// repaired, asking again resumes it and it completes.
+#[tokio::test]
+async fn purge_ledger_service_a_purge_stopped_by_a_survivors_unreadable_archive_resumes_once_it_is_repaired()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let Unreadable {
+        composed,
+        target,
+        survivor,
+        archive,
+        readable,
+        purge,
+    } = unreadable_survivor(directory.path()).await?;
+    let (records, tenant) = (composed.storage.records(), tenant()?);
+    let jobs = JobScope::Tenant(tenant.clone());
+    let stopped = err_of(carry_out(&composed.storage, &purge).await?)?;
+    assert_eq!(stopped.code, ErrorCode::InvalidInput, "{}", stopped.message);
+    assert!(
+        stopped.message.contains(&survivor.0.to_string()) && stopped.message.contains("set-1"),
+        "the survivor's archive is named by identity: {}",
+        stopped.message
+    );
+    assert!(
+        !stopped
+            .message
+            .contains(&directory.path().display().to_string()),
+        "{}",
+        stopped.message
+    );
+    let failed = records.get_purge(&tenant, purge.id).await?;
+    assert_eq!(failed.state, PurgeState::Failed);
+    assert_eq!(
+        failed
+            .error
+            .as_ref()
+            .map(|error| (&error.code, error.message.as_str())),
+        Some((&stopped.code, stopped.message.as_str()))
+    );
+    let job = records.get_job(&jobs, purge.job_id).await?;
+    assert_eq!((job.state, job.retryable), (JobState::Failed, Some(true)));
+    // Asked for again while the archive is still bad: answered, made runnable, queued again.
+    let ask = |n: u32| {
+        json!({
+            "workspace_id": target,
+            "base_revision": "f".repeat(40),
+            "idempotency_key": key(n)
+        })
+    };
+    let answered: Purge =
+        serde_json::from_value(call(&composed, "purge_workspace", ask(4)).await?)?;
+    assert_eq!(
+        (answered.id, answered.state),
+        (purge.id, PurgeState::Failed)
+    );
+    assert_eq!(
+        records.get_job(&jobs, purge.job_id).await?.state,
+        JobState::Queued
+    );
+    let again = err_of(carry_out(&composed.storage, &purge).await?)?;
+    assert_eq!((again.code, again.message), (stopped.code, stopped.message));
+    // Repaired: asked for again, it completes.
+    std::fs::write(&archive, readable)?;
+    let answered: Purge =
+        serde_json::from_value(call(&composed, "purge_workspace", ask(5)).await?)?;
+    assert_eq!(
+        (answered.id, answered.state),
+        (purge.id, PurgeState::Failed)
+    );
+    carry_out(&composed.storage, &purge).await??;
+    let completed = records.get_purge(&tenant, purge.id).await?;
+    assert_eq!(completed.state, PurgeState::Completed);
+    assert!(completed.error.is_none());
+    assert_eq!(
+        composed
+            .queue
+            .deliveries
+            .lock()
+            .map_err(|_| poisoned())?
+            .clone(),
+        vec![(jobs, purge.job_id); 3],
+        "queued by the request and by each request after a failure"
+    );
+    assert!(archive.is_file(), "the survivor's archive stays");
     Ok(())
 }
 
