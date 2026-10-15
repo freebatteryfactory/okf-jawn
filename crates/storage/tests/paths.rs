@@ -2100,5 +2100,37 @@ async fn restored_paths_spelling_a_server_name_another_way_are_refused() -> Test
     Ok(())
 }
 
+/// A restore of paths that leaves a folder `newdir/INDEX.md/` beside a note of `newdir/`, a
+/// folder the tree did not hold, is refused naming both spellings before the folder indexes are
+/// regenerated, on every system: on a filesystem that holds `INDEX.md` and `index.md` as one the
+/// new folder's index could not be written, and on one that holds them apart the commit would
+/// hold both. The staged copy is checked once, after the edits (the review's R1-d probe).
+#[tokio::test]
+async fn restored_paths_leaving_a_respelled_index_are_refused_before_the_indexes() -> TestResult {
+    let space = Workspace::new().await?;
+    space
+        .commit(2, &space.initial, vec![note(10, "a.md", "Ten.")?])
+        .await?;
+    let restored = ["newdir/a.md", "newdir/INDEX.md/x.json"];
+    let early = space.raw(
+        900,
+        &[],
+        &[
+            ("newdir/a.md", b"A plain note.".to_vec()),
+            ("newdir/INDEX.md/x.json", b"{}".to_vec()),
+        ],
+    )?;
+    let clean = space.raw(901, &restored, &[])?;
+    let error = space
+        .refused(3, &clean, vec![restore_paths(&early, &restored)?])
+        .await?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    assert_eq!(
+        error.message,
+        "newdir/INDEX.md collides with the server's newdir/index.md"
+    );
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;

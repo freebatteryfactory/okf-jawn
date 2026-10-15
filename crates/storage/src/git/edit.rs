@@ -12,11 +12,14 @@
 //! reserved name (`.okf/`, `index.md`, `log.md`) in any letter case: it is refused naming the
 //! path before anything is written. After the edits, no two paths, files or folders, may share
 //! a collision key, and no path may spell a name the server writes (`item::SERVER_NAMES`)
-//! another way (`Staged::refuse_collisions`; a tree that already holds either is refused when
-//! it is staged, `repo::materialize`, naming the repair); the folder indexes are regenerated,
-//! the change is appended to `log.md`, and the same refusal runs again on the result. The files a
-//! move rewrote besides the moved item's own (the referrers) are remembered, and the candidate
-//! check is told them (`Staged::rewritten`, `CandidateCheck::check`).
+//! another way (`Staged::refuse_collisions`; a tree that already holds either is refused when it
+//! is staged, `repo::materialize`, naming the repair); then the folder indexes are regenerated
+//! and the change is appended to `log.md`. The refusal does not run again after those: they
+//! write only `index.md` in the tree's folders and `log.md` at the root, and a tree that spells
+//! either another way is already refused, so nothing they write can make a collision the
+//! refusal passed (a second run after them was reached by no tree, and was dropped). The files
+//! a move rewrote besides the moved item's own (the referrers) are remembered, and the
+//! candidate check is told them (`Staged::rewritten`, `CandidateCheck::check`).
 //! Conformance is the `CandidateCheck`'s decision, not this module's.
 //!
 //! The staged tree is on the server's own filesystem, where Windows and macOS hold `Report.md`
@@ -170,9 +173,11 @@ impl Staged {
     /// way (`respelled`), so a tree never holds two files, or two spellings of one folder, that
     /// a case-insensitive filesystem would merge, whatever the edits did. On such a filesystem
     /// the staged copy cannot hold such a pair; the tree it was staged from is checked for one
-    /// when it is staged (`repo::materialize`). It runs after the edits and again after the
-    /// indexes and the log are written (`stage_and_commit`), so the rule holds on what is
-    /// committed.
+    /// when it is staged (`repo::materialize`). It runs once, after the edits and before the
+    /// indexes and the log are written (`stage_and_commit`), and the rule still holds on what is
+    /// committed: those writes are `index.md` in folders the tree holds and `log.md` at the root,
+    /// and a tree that spells either another way, as a file or a folder, is refused here as a
+    /// path the server writes spelled another way.
     pub(crate) fn refuse_collisions(&self) -> Result<(), ApiError> {
         for path in self.items.values() {
             WorkspacePath::try_from(path.clone()).map_err(|error| {
