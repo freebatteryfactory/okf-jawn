@@ -22,6 +22,17 @@
  * reading takes longer than a second is ended and is then a text that cannot be read: its
  * problem says that it is too complex, and the text stays in the box.
  *
+ * A stored rules file that cannot be read (`get_rules` answers it as `unreadable`, ruling 11) is
+ * repaired as text, never taken for "no rules": the YAML view opens on its text, no form is
+ * offered, each problem the service found is listed at its line and column and marked in the text
+ * (a JSON Pointer is placed by reading the text off the page's thread, `usePointerPlaces`), and
+ * the repaired text is saved with `set_rules`. Limit: the YAML view reads at most 16,384
+ * characters (`MAX_YAML_CHARS`, `lib/yaml.ts`). A stored file longer than that is still shown
+ * whole, and a problem the service placed at a line and column is still marked there; but its
+ * JSON Pointers cannot be placed (they read "At /rules/…"), and every edit of the text is refused
+ * as too long, so nothing can be saved, until the text is at most that long. Rules files that
+ * long are possible.
+ *
  * A preview writes nothing. It lists each item that would be renamed with its name now and its
  * name after, as a table (read row by row with a screen reader's table keys; the column it is in
  * scrolls from any control), with the service's warnings and the duplicate paths it observed, and

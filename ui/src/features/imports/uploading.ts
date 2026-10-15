@@ -50,6 +50,12 @@
  * and a removal that aborts `create_upload` in flight cannot know whether the service opened the
  * slot.
  *
+ * Limit: an upload started before the page was reloaded (or closed) cannot be resumed, only
+ * discarded. The list, its slot keys and the chosen files live only as long as the page: after a
+ * reload the browser does not hand the file back, so there is nothing to send the rest from. Its
+ * slot is listed under "Not finished" (`WaitingUploads.tsx`), where it can be discarded; the same
+ * file chosen again is uploaded into a new slot.
+ *
  * Progress is written to the list when the whole-percent value changes, not at every report of
  * the browser, so a large list is not redrawn many times a second.
  *
