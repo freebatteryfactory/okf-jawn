@@ -28,9 +28,11 @@
 //!
 //! Metadata is not a commit. `update_workspace` and `archive_workspace` take the request's
 //! `base_revision`, which is checked against the revision map first and must be the head when
-//! the catalog makes the change, in the catalog's own transaction: otherwise `Conflict` with
-//! `ErrorDetail::StaleBase` naming the head, on `/base_revision`, so a person who decided on an
-//! older state is told. `unarchive_workspace` takes no base. Each answers a `MutationResult`
+//! the catalog makes the change: the catalog compares it with the head and writes the change in
+//! one records transaction, under the workspace's write lock that every commit holds from its
+//! own head comparison to its new head, so no commit lands between the comparison and the
+//! change (`WorkspaceCatalog::update`). Otherwise `Conflict` with `ErrorDetail::StaleBase`
+//! naming the head, on `/base_revision`, so a person who decided on an older state is told. `unarchive_workspace` takes no base. Each answers a `MutationResult`
 //! whose `revision` is the head the catalog answered (no commit is written, so it is the head
 //! the change was made at), with a receipt and no warnings. A retry under the same mutation
 //! answers the catalog's first result and the first receipt.

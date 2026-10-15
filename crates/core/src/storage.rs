@@ -739,8 +739,10 @@ pub trait WorkspaceCatalog: Send + Sync {
     ///
     /// Fails with `Conflict` when the head is not `update.expected_head`, with
     /// `ErrorDetail::StaleBase` naming the head and no `field`: the caller names its request's.
-    /// A repeated `mutation_id` changes nothing and returns the workspace as the first call left
-    /// it.
+    /// The head is compared and the change made as one step against commits: under the
+    /// workspace's write lock that every commit holds from its own head comparison to its new
+    /// head, so no commit lands between the two (`archive` likewise). A repeated `mutation_id`
+    /// changes nothing and returns the workspace as the first call left it.
     fn update<'a>(
         &'a self,
         scope: &'a StorageScope,

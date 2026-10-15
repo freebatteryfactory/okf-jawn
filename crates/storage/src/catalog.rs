@@ -8,8 +8,11 @@
 //! retry finds that repository and adopts it, never allocating a second identity or leaving an
 //! unreachable repository. `update`, `archive` and `unarchive` record their
 //! result under their mutation id (primary key) in the same transaction as the change, so a
-//! repeated id changes nothing and returns the first result. The catalog never filters and
-//! returns `Workspace::permissions` empty.
+//! repeated id changes nothing and returns the first result. Each takes the workspace's write
+//! lock before that transaction, the lock every commit holds from its head comparison to its
+//! new head (`git`), in the same order as a commit takes the two: so a commit never lands
+//! between a change's comparison of `expected_head` with the head and its write. The catalog
+//! never filters and returns `Workspace::permissions` empty.
 //!
 //! An archived workspace runs no job that changes its content (contract ruling 25), held by two
 //! guards over the one records database: `archive` is refused with `Conflict` while an import,
@@ -81,70 +84,34 @@ impl GitCatalog {
     ) -> Result<Workspace, ApiError> {
         let scope = scope.clone();
         let repositories = self.repositories.clone();
-        self.db
-            .transaction(move |transaction| {
-                if let Some(prior) = prior(transaction, mutation_id)? {
-                    return Ok(prior);
-                }
-                let (tenant, id) = scope_key(&scope);
-                guard::refuse(transaction, &tenant, &id)?;
-                if matches!(change, Some(Change::Archive)) {
-                    refuse_archive_while_content_jobs(transaction, &tenant, &id)?;
-                }
-                let mut workspace = read(transaction, &repositories, &scope)?;
-                if let Some(expected) = expected
-                    && workspace.head != expected
-                {
-                    // Ruling 5: the refusal names the head; the caller names its request's field.
-                    return Err(conflict("the workspace head moved since it was shown")
-                        .with_detail(ErrorDetail::StaleBase {
-                            head: workspace.head.clone(),
-                        }));
-                }
-                if let Some((name, description)) = update {
-                    workspace.name = name;
-                    workspace.description = description;
-                }
-                match change {
-                    Some(Change::Archive) if workspace.archived_at.is_none() => {
-                        workspace.archived_at = Some(seam::now()?);
-                    }
-                    Some(Change::Unarchive) => workspace.archived_at = None,
-                    _ => {}
-                }
-                let (tenant, id) = scope_key(&scope);
-                transaction
-                    .execute(
-                        "UPDATE workspaces SET name = ?1, description = ?2, archived_at = ?3
-                         WHERE tenant_id = ?4 AND workspace_id = ?5",
-                        params![
-                            workspace.name,
-                            workspace.description,
-                            workspace
-                                .archived_at
-                                .as_ref()
-                                .map(|at| at.as_str().to_owned()),
-                            tenant,
-                            id
-                        ],
+        let db = self.db.clone();
+        let runtime = tokio::runtime::Handle::current();
+        // The workspace's write lock first, then the records transaction: the order every
+        // commit takes them in (`git`), so the two never wait on each other in a cycle.
+        tokio::task::spawn_blocking(move || {
+            let lock = repositories.clone();
+            let key = scope.clone();
+            lock.locked(&key, || {
+                runtime.block_on(db.transaction(move |transaction| {
+                    change_locked(
+                        transaction,
+                        &repositories,
+                        &scope,
+                        mutation_id,
+                        expected,
+                        update,
+                        change,
                     )
-                    .map_err(|error| sql(&error))?;
-                transaction
-                    .execute(
-                        "INSERT INTO workspace_mutations (mutation_id, tenant_id, workspace_id,
-                             action, result)
-                         VALUES (?1, ?2, ?3, 'change', ?4)",
-                        params![
-                            mutation_id.0.to_string(),
-                            tenant,
-                            id,
-                            serde_json::to_string(&workspace).map_err(|error| json(&error))?
-                        ],
-                    )
-                    .map_err(|error| sql(&error))?;
-                Ok(workspace)
+                }))
             })
-            .await
+        })
+        .await
+        .map_err(|error| {
+            ApiError::new(
+                ErrorCode::Internal,
+                format!("a catalog task stopped: {error}"),
+            )
+        })?
     }
 }
 
@@ -396,6 +363,103 @@ fn prior(
         .transpose()
 }
 
+/// The metadata change of `GitCatalog::change`, inside its records transaction and under the
+/// workspace's write lock, which every commit holds from its head comparison to its new head:
+/// no commit lands between this head comparison and the metadata write.
+fn change_locked(
+    transaction: &Transaction<'_>,
+    repositories: &Repositories,
+    scope: &StorageScope,
+    mutation_id: MutationId,
+    expected: Option<okf_jawn_contract::identity::Revision>,
+    update: Option<(String, String)>,
+    change: Option<Change>,
+) -> Result<Workspace, ApiError> {
+    if let Some(prior) = prior(transaction, mutation_id)? {
+        return Ok(prior);
+    }
+    let (tenant, id) = scope_key(scope);
+    guard::refuse(transaction, &tenant, &id)?;
+    if matches!(change, Some(Change::Archive)) {
+        refuse_archive_while_content_jobs(transaction, &tenant, &id)?;
+    }
+    let mut workspace = read(transaction, repositories, scope)?;
+    if let Some(expected) = expected
+        && workspace.head != expected
+    {
+        // Ruling 5: the refusal names the head; the caller names its request's field.
+        return Err(
+            conflict("the workspace head moved since it was shown").with_detail(
+                ErrorDetail::StaleBase {
+                    head: workspace.head.clone(),
+                },
+            ),
+        );
+    }
+    // A test holds the change here, its checks made and its write not yet: inside the
+    // transaction and under the workspace's lock (`crate::pause`).
+    #[cfg(test)]
+    tokio::runtime::Handle::current().block_on(crate::pause::point(&change_point(
+        repositories,
+        scope,
+        mutation_id,
+    )))?;
+    if let Some((name, description)) = update {
+        workspace.name = name;
+        workspace.description = description;
+    }
+    match change {
+        Some(Change::Archive) if workspace.archived_at.is_none() => {
+            workspace.archived_at = Some(seam::now()?);
+        }
+        Some(Change::Unarchive) => workspace.archived_at = None,
+        _ => {}
+    }
+    transaction
+        .execute(
+            "UPDATE workspaces SET name = ?1, description = ?2, archived_at = ?3
+             WHERE tenant_id = ?4 AND workspace_id = ?5",
+            params![
+                workspace.name,
+                workspace.description,
+                workspace
+                    .archived_at
+                    .as_ref()
+                    .map(|at| at.as_str().to_owned()),
+                tenant,
+                id
+            ],
+        )
+        .map_err(|error| sql(&error))?;
+    transaction
+        .execute(
+            "INSERT INTO workspace_mutations (mutation_id, tenant_id, workspace_id,
+                 action, result)
+             VALUES (?1, ?2, ?3, 'change', ?4)",
+            params![
+                mutation_id.0.to_string(),
+                tenant,
+                id,
+                serde_json::to_string(&workspace).map_err(|error| json(&error))?
+            ],
+        )
+        .map_err(|error| sql(&error))?;
+    Ok(workspace)
+}
+
+/// The name of the test-only pause point (`crate::pause`) of a metadata change under
+/// `mutation`: its checks made and its write not yet, holding the workspace's write lock and the
+/// records transaction. It names the workspace's repository path, unique to each test's data
+/// directory.
+#[cfg(test)]
+fn change_point(repositories: &Repositories, scope: &StorageScope, mutation: MutationId) -> String {
+    format!(
+        "catalog-change|{}|{}",
+        repositories.path(scope).display(),
+        mutation.0
+    )
+}
+
 /// Refuse to archive a workspace while an import, redigest or restore job of it is queued or
 /// running: such a job would change an archived workspace's content. Read in the archive's own
 /// transaction, from each unfinished job's stored record by its `kind`.
@@ -459,3 +523,6 @@ pub(crate) fn refuse_content_job_while_archived(
         None => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod tests;
