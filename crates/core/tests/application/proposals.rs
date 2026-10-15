@@ -1623,6 +1623,52 @@ async fn a_resumed_decline_finishes_after_a_failure_at_each_step() -> TestResult
     Ok(())
 }
 
+/// A resumed decline finds its own reason comment past the first page of its search (review
+/// N6): 200 earlier comments, one whole page of the search, come before it.
+#[tokio::test]
+async fn a_resumed_decline_finds_its_reason_past_the_first_page_of_comments() -> TestResult {
+    let world = proposal_world()?;
+    let proposal = open(&world, OPENED, vec![create("notes/new.md")?]).await?;
+    for number in 0..200_u128 {
+        let comment = serde_json::from_value(json!({
+            "id": format!("earlier-{number}"),
+            "author": ALICE,
+            "text": "An earlier remark.",
+            "created_at": "2026-10-09T12:00:00.000Z"
+        }))?;
+        world
+            .proposals
+            .add_comment(
+                &scope()?,
+                mutation(COMMENTING.saturating_add(number)),
+                proposal.id,
+                comment,
+            )
+            .await?;
+    }
+    // The decline wrote its comment and its status; its event failed.
+    world.events.fail_next(EventKind::ProposalUpdated)?;
+    let context = alice(OperationName::DeclineProposal, Some(mutation(DECLINING)))?;
+    err_of(
+        world
+            .service
+            .decline_proposal(&context, decline_request(&proposal)?)
+            .await,
+    )?;
+    assert_eq!(status(&world, proposal.id)?, ProposalStatus::Declined);
+    let declined = world
+        .service
+        .decline_proposal(&resumed(context), decline_request(&proposal)?)
+        .await?;
+    assert_eq!(declined.status, ProposalStatus::Declined);
+    assert_eq!(world.proposals.comments()?.len(), 201);
+    assert_eq!(
+        proposal_events(&world, proposal.id)?,
+        [Some(mutation(OPENED)), Some(mutation(DECLINING))]
+    );
+    Ok(())
+}
+
 /// The decline's stated limit (review probe P5, N4): a decline that failed after its reason
 /// comment and before its compare-and-set, retried after an acceptance landed, answers
 /// `conflict`, and its reason stays on the accepted proposal; no decline event is appended.
