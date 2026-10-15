@@ -3683,13 +3683,15 @@ async fn backup_an_import_refuses_an_archive_whose_reference_holds_a_respelling(
 /// Ruling B-R2 refuses an import only: a replacement restore puts back a workspace whose head
 /// holds two spellings as the installation held it, since the archive writer wrote that head
 /// and a refusal would make the set unrestorable; the workspace then refuses a commit as it
-/// did before the backup, naming the repair.
+/// did before the backup, naming the repair, and the repair it names (a whole-tree Rewind to a
+/// revision from before the respelling) lands, after which a commit lands again.
 #[tokio::test]
 async fn backup_a_replacement_restore_puts_back_a_head_holding_a_respelling() -> TestResult {
     let directory = tempfile::tempdir()?;
     let output = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;
     let workspace = notes_workspace(&storage).await?;
+    let clean = storage.versions().head(&workspace).await?;
     let respelled = respelled_at(&storage, &workspace, "refs/heads/main", "Notes/b.md")?;
     let respelled = Revision::try_from(respelled.to_string())?;
     storage
@@ -3722,11 +3724,42 @@ async fn backup_a_replacement_restore_puts_back_a_head_holding_a_respelling() ->
         )
         .await,
     )?;
+    let error = some(error.downcast_ref::<ApiError>(), "the store's refusal")?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    assert_eq!(
+        error.message,
+        "notes collides with Notes: the revision holds two spellings of one path, which Windows \
+         and macOS keep as one; the workspace can be restored to a revision from before they \
+         appeared"
+    );
+    assert_eq!(restored.versions().head(&workspace).await?, respelled);
+    let repaired = commit(
+        &restored,
+        &workspace,
+        93,
+        &respelled,
+        vec![TreeEdit::RestoreWorkspace {
+            from: clean.clone(),
+        }],
+    )
+    .await?;
+    let landed = commit(
+        &restored,
+        &workspace,
+        94,
+        &repaired,
+        vec![note(uuid!(14)?, "c.md", "Fourteen.")?],
+    )
+    .await?;
+    assert_eq!(restored.versions().head(&workspace).await?, landed);
+    let repository = repository_of(&restored, &workspace)?;
+    let tree = repository
+        .find_commit(git2::Oid::from_str(landed.as_str())?)?
+        .tree()?;
+    assert!(tree.get_path(Path::new("c.md")).is_ok(), "the note landed");
     assert!(
-        error
-            .to_string()
-            .contains("notes collides with Notes: the revision holds two spellings of one path"),
-        "{error}"
+        tree.get_path(Path::new("Notes")).is_err(),
+        "the respelling is gone"
     );
     Ok(())
 }
