@@ -10,7 +10,8 @@
 //!   repository): it refuses no purged identity and no archive while a job runs (both
 //!   storage's, tested there).
 //! - `FakeGrants` answers raw grants from a table that a test changes between calls, so a
-//!   lookup made fresh is told from a kept one; it counts every `authorize` by permission.
+//!   lookup made fresh is told from a kept one; it counts every `authorize` by permission, and
+//!   fails one `authorize` or one `grant_creator` on request.
 //! - `FakeJobs` is the fixture's `FakeRecords` (revision maps, receipts) with jobs: unique on
 //!   the mutation, and receipts read back within their workspace. It refuses no job for a purge
 //!   or an archive (storage's).
@@ -102,6 +103,7 @@ pub struct FakeGrants {
     table: Mutex<GrantState>,
     lookups: Mutex<Vec<Permission>>,
     unavailable_next: AtomicBool,
+    creator_fails_next: AtomicBool,
 }
 
 #[derive(Default)]
@@ -348,6 +350,11 @@ impl FakeGrants {
     /// Make the next `authorize` fail as an unreachable adapter does.
     pub fn unavailable_next(&self) {
         self.unavailable_next.store(true, Ordering::SeqCst);
+    }
+
+    /// Make the next `grant_creator` fail as an unreachable adapter does, recording nothing.
+    pub fn creator_fails_next(&self) {
+        self.creator_fails_next.store(true, Ordering::SeqCst);
     }
 
     /// The permission of every `authorize` so far, in order.
@@ -687,6 +694,12 @@ impl AccessControl for FakeGrants {
         workspace: WorkspaceId,
     ) -> PortFuture<'a, WorkspaceGrant> {
         Box::pin(async move {
+            if self.creator_fails_next.swap(false, Ordering::SeqCst) {
+                return Err(ApiError::new(
+                    ErrorCode::Unavailable,
+                    "the grants are offline",
+                ));
+            }
             let every = vec![
                 Permission::Read,
                 Permission::Write,

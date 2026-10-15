@@ -451,6 +451,50 @@ async fn a_retried_create_workspace_answers_the_same_workspace() -> TestResult {
     Ok(())
 }
 
+/// The case the retry exists for: the workspace was created and its creator's grant was not
+/// recorded. The resumed attempt records it, so the creator lists the one workspace.
+#[tokio::test]
+async fn a_create_workspace_resumed_after_its_creator_grant_failed_records_the_grant() -> TestResult
+{
+    let tenancy = Tenancy::new()?;
+    tenancy.access.creator_fails_next();
+    let failed = err_of(
+        tenancy
+            .service
+            .create_workspace(
+                &owner(OperationName::CreateWorkspace, Some(mutation(40)))?,
+                create_request()?,
+            )
+            .await,
+    )?;
+    assert_eq!(failed.code, ErrorCode::Unavailable);
+    let listed = tenancy
+        .service
+        .list_workspaces(
+            &owner(OperationName::ListWorkspaces, None)?,
+            listing(5, None, None),
+        )
+        .await?;
+    assert_eq!(ids(&listed), Vec::new(), "created, but not granted");
+    let mut resumed = owner(OperationName::CreateWorkspace, Some(mutation(40)))?;
+    resumed.attempt = Attempt::Resumed;
+    let created = tenancy
+        .service
+        .create_workspace(&resumed, create_request()?)
+        .await?;
+    assert_eq!(created.id, derive_workspace_id(mutation(40)));
+    assert_eq!(created.permissions, EVERY.to_vec());
+    let listed = tenancy
+        .service
+        .list_workspaces(
+            &owner(OperationName::ListWorkspaces, None)?,
+            listing(5, None, None),
+        )
+        .await?;
+    assert_eq!(ids(&listed), vec![created.id], "the grant is recorded");
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_catalog_that_names_a_new_workspace_otherwise_than_its_mutation_is_refused() -> TestResult
 {
@@ -778,6 +822,69 @@ async fn a_retried_metadata_change_answers_its_first_head_and_receipt() -> TestR
     assert_eq!(again.revision, first.revision);
     assert_eq!(again.receipt_id, first.receipt_id);
     assert_eq!(tenancy.world.records.receipts()?.len(), 1);
+    Ok(())
+}
+
+/// An archive retried after the head moved answers the catalog's first result and the first
+/// receipt, not the stale base the moved head now makes it.
+#[tokio::test]
+async fn a_retried_archive_answers_its_first_head_and_receipt() -> TestResult {
+    let tenancy = at_head_b()?;
+    let caller = owner(OperationName::ArchiveWorkspace, Some(mutation(42)))?;
+    let first = tenancy
+        .service
+        .archive_workspace(&caller, archive_request(revision('b')?)?)
+        .await?;
+    tenancy.catalog.set_head(&scope()?, revision('c')?)?;
+    let mut resumed = caller.clone();
+    resumed.attempt = Attempt::Resumed;
+    let again = tenancy
+        .service
+        .archive_workspace(&resumed, archive_request(revision('b')?)?)
+        .await?;
+    assert_eq!(again.revision, revision('b')?);
+    assert_eq!(again.revision, first.revision);
+    assert_eq!(again.receipt_id, first.receipt_id);
+    assert_eq!(tenancy.world.records.receipts()?.len(), 1);
+    assert!(tenancy.catalog.held(&scope()?)?.archived_at.is_some());
+    Ok(())
+}
+
+/// An unarchive retried after the head moved answers the catalog's first result and the first
+/// receipt.
+#[tokio::test]
+async fn a_retried_unarchive_answers_its_first_head_and_receipt() -> TestResult {
+    let tenancy = Tenancy::new()?;
+    tenancy
+        .catalog
+        .put(&scope()?.tenant_id, workspace(1, "home", 'b', true)?)?;
+    let caller = owner(OperationName::UnarchiveWorkspace, Some(mutation(43)))?;
+    let request = || -> Built<UnarchiveWorkspaceRequest> {
+        Ok(UnarchiveWorkspaceRequest {
+            workspace_id: id(1),
+            idempotency_key: key()?,
+        })
+    };
+    let first = tenancy
+        .service
+        .unarchive_workspace(&caller, request()?)
+        .await?;
+    assert_eq!(first.revision, revision('b')?);
+    tenancy.catalog.set_head(&scope()?, revision('c')?)?;
+    let mut resumed = caller.clone();
+    resumed.attempt = Attempt::Resumed;
+    let again = tenancy
+        .service
+        .unarchive_workspace(&resumed, request()?)
+        .await?;
+    assert_eq!(
+        again.revision,
+        revision('b')?,
+        "the first head, not the moved one"
+    );
+    assert_eq!(again.receipt_id, first.receipt_id);
+    assert_eq!(tenancy.world.records.receipts()?.len(), 1);
+    assert_eq!(tenancy.catalog.held(&scope()?)?.archived_at, None);
     Ok(())
 }
 
