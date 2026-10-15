@@ -13,10 +13,10 @@ import { readYaml, type YamlRead } from '../../../src/lib/yaml';
 import type { EngineReport, YamlEngine } from '../../../src/lib/yaml-reading';
 
 export const inlineEngine: YamlEngine = {
-  start(text, report) {
+  start(text, report, locate) {
     const timer = setTimeout(() => {
       report.began();
-      report.done(readYaml(text));
+      report.done(readYaml(text, locate));
     }, 0);
     return () => clearTimeout(timer);
   },
@@ -25,6 +25,8 @@ export const inlineEngine: YamlEngine = {
 /** One reading a held engine was asked for. */
 export interface HeldReading {
   text: string;
+  /** The places it was asked to find. */
+  locate: readonly string[];
   /** The page ended it. */
   ended: boolean;
   began: () => void;
@@ -36,12 +38,13 @@ export interface HeldReading {
 export function heldEngine(): { engine: YamlEngine; readings: HeldReading[] } {
   const readings: HeldReading[] = [];
   const engine: YamlEngine = {
-    start(text: string, report: EngineReport) {
+    start(text: string, report: EngineReport, locate: readonly string[]) {
       const reading: HeldReading = {
         text,
+        locate,
         ended: false,
         began: report.began,
-        done: (read) => report.done(read ?? readYaml(text)),
+        done: (read) => report.done(read ?? readYaml(text, locate)),
         failed: report.failed,
       };
       readings.push(reading);

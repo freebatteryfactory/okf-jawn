@@ -349,15 +349,66 @@ pub(super) fn computed_locations(
         .unwrap_or_default()
 }
 
+/// A citation a request asks the server to keep (a comment's or a review's `source`), checked as
+/// every citation is: its revision against the revision map first (`reading::check_revision`),
+/// then its item at that revision, its path as that revision holds the item, its digest, when it
+/// names one, as an object of that item revision (`reading::authorize_object`), and its
+/// locations by the citation rule (`reading::fill_locations`: omitted, the server fills them;
+/// present, they must equal the computed ones). Answers the checked citation and the cited
+/// item's document. The caller passes the scope of the citation's own workspace.
+///
+/// # Errors
+/// Returns the typed `NotFound` of an invalidated revision, `NotFound` for an item the revision
+/// does not hold, `InvalidInput` on `/source/path` for a path that is not the item's there,
+/// `NotFound` on `/source/digest` for a digest that is none of the revision's objects,
+/// `InvalidInput` on `/source/locations` for supplied locations that are not the computed ones,
+/// the section refusals of `server_locations`, or any port error.
+pub(super) async fn checked_citation(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    mut source: SourceReference,
+) -> Result<(SourceReference, ItemDocument), ApiError> {
+    check_named(service, scope, &source.revision).await?;
+    let ports = service.ports();
+    let document = ports
+        .versions
+        .show(scope, &source.revision, source.item_id)
+        .await?;
+    if document.summary.path != source.path {
+        return Err(invalid(
+            "the cited path is not the item's path at the cited revision",
+            "/source/path",
+        ));
+    }
+    if let Some(digest) = source.digest.as_ref() {
+        authorize_object(
+            ports.versions.as_ref(),
+            ports.blobs.as_ref(),
+            ports.records.as_ref(),
+            scope,
+            source.item_id,
+            &source.revision,
+            digest,
+        )
+        .await
+        .map_err(|error| {
+            if error.code == ErrorCode::NotFound {
+                error.with_field("/source/digest")
+            } else {
+                error
+            }
+        })?;
+    }
+    let computed = located_in(service, scope, &document, &source).await?;
+    fill_locations(&mut source, computed, "/source")?;
+    Ok((source, document))
+}
+
 /// The locations the server computes for a citation a request carries, read through the ports:
 /// the ones a response carries for the same citation (`computed_locations`).
 ///
-/// The conversion record is read only when the citation is not of the original, and a section
-/// is resolved to its lines through the outline of the shown text, as `read_item` resolves it.
-///
 /// # Errors
-/// Returns `NotFound` on `/source/selection/heading` for a section the text does not have,
-/// `InvalidInput` there for an ambiguous one, or any port error.
+/// As `located_in`, or any port error of reading the cited item.
 async fn server_locations(
     service: &ApplicationService,
     scope: &StorageScope,
@@ -368,6 +419,23 @@ async fn server_locations(
         .versions
         .show(scope, &source.revision, source.item_id)
         .await?;
+    located_in(service, scope, &document, source).await
+}
+
+/// The locations the server computes for `source`, a citation of `document`.
+///
+/// The conversion record is read only when the citation is not of the original, and a section
+/// is resolved to its lines through the outline of the shown text, as `read_item` resolves it.
+///
+/// # Errors
+/// Returns `NotFound` on `/source/selection/heading` for a section the text does not have,
+/// `InvalidInput` there for an ambiguous one, or any port error.
+async fn located_in(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    document: &ItemDocument,
+    source: &SourceReference,
+) -> Result<Vec<SourceLocation>, ApiError> {
     let Some(appearance) = document.source.as_ref() else {
         return Ok(Vec::new());
     };
@@ -377,7 +445,7 @@ async fn server_locations(
     let record = record_of(service, scope, Some(appearance)).await?;
     let located = match &source.selection {
         Selection::Section { heading } if source.digest == appearance.extraction.digest => {
-            let (_, outline) = shown_outline(&document, record.as_ref());
+            let (_, outline) = shown_outline(document, record.as_ref());
             Selection::Lines {
                 range: section_lines(&outline, heading)
                     .map_err(|error| error.with_field("/source/selection/heading"))?,

@@ -2,55 +2,109 @@
  * Starting the import of the uploaded files (`start_import`) into the folder the person chose.
  *
  * The request names the completed upload slots, the destination folder as it was typed, less the
- * spaces around it (empty for the top of the workspace), and the revision the workspace shows as
- * its base: the
- * service refuses a stale base as a `conflict`, and the page then says to refresh when the answer
- * names the base (`ImportStart.tsx`).
+ * spaces around it (empty for the top of the workspace), and the revision the import is based on.
+ * The contract states what that base is (ruling 26): the revision the import was prepared
+ * against, where card names are chosen. A head that moved since does not refuse the import; a card
+ * path taken since fails the job, which is not retried.
  *
  * The base. It is the revision the workspace shows, with one exception: once an import started
  * from this page, under the revision still shown, has finished and reports the revision it made,
  * the next import is based on that revision (`importBase`). The page's own import moved the head,
- * and the revision shown waits for Refresh as always; an import based on it would be refused as
- * stale every time. After a Refresh the base is the revision shown again. Converter
- * settings are left out, which means the deployment's own. Naming rules are not applied
+ * and the revision shown waits for Refresh as always; card names chosen at the older one would
+ * miss the files that import added. After a Refresh the base is the revision shown again.
+ * Converter settings are left out, which means the deployment's own. Naming rules are not applied
  * (`apply_naming_rules: false`): the wire applies them "after preview acceptance", and no preview
  * is part of this page, so files keep the names they came with.
  *
- * The answer is a job, not a finished import. It is told to the cache at once, in the state it
- * reports (`rememberJob`), and remembered as started here; the files it took leave the list, since
- * an upload is the input of one job.
+ * Parts. One request names at most `MAX_IMPORT_UPLOADS` uploads (ruling 15). More uploads are
+ * imported in parts of at most that many, in order, one `start_import` and one job each; the page
+ * says so before the person presses. A part that failed stops the rest; its retry starts that part
+ * again under its key, then the parts after it. Parts already answered are not asked again.
  *
- * Idempotency: the request is repeated under the key it had while it names the same uploads, the
- * same folder and the same base, so an import whose answer was lost is the same job, not a second.
+ * The answer of each part is a job, not a finished import. It is told to the cache at once, in the
+ * state it reports (`rememberJob`), and remembered as started here; the files it took leave the
+ * list, since an upload is the input of one job, the caller is told which uploads it took (so the
+ * uploads the service holds that the person included are no longer included), and the uploads the
+ * service holds are listed again (`held-uploads.ts`). All this as each part is answered, not once
+ * all are: after a later part failed, what is still to import is only what no part took.
+ *
+ * Idempotency: the request is repeated under the keys it had while it names the same uploads, the
+ * same folder and the same base, so an import whose answer was lost is the same jobs, not more.
+ * After a part failed, "the same uploads" are those of the parts not answered yet: the uploads
+ * still to import, which is all the page then offers. So pressing Import again then is the
+ * failed part again, under its key, as the notice's retry is.
  */
 import type { QueryClient } from '@tanstack/react-query';
 import { startImport } from '../../api/generated/sdk.gen';
 import type { Job, Revision } from '../../api/generated/types.gen';
 import { rememberJob } from '../jobs/jobs';
+import { heldUploadsChanged } from './held-uploads';
 import { useUploads } from './upload-list';
 
-/** One `start_import` request. */
-export interface ImportAttempt {
+/**
+ * The most uploads one `start_import` names: the contract's `MAX_IMPORT_UPLOADS` (ruling 15),
+ * the request schema's `maxItems` for `upload_ids` (a unit test holds the two equal).
+ */
+export const MAX_IMPORT_UPLOADS = 5_000;
+
+/** One `start_import` request of an import, and the job it answered once it has. */
+export interface ImportPart {
   key: string;
   uploadIds: string[];
+  job: Job | null;
+}
+
+/** One import: its uploads in parts, each one request. */
+export interface ImportAttempt {
+  parts: ImportPart[];
   destination: string;
   baseRevision: Revision;
 }
 
-/** The request for these uploads, this folder and this base: the last one again while the same. */
+/** The uploads of an attempt, in order. */
+export const uploadsOf = (attempt: ImportAttempt) =>
+  attempt.parts.flatMap((part) => part.uploadIds);
+
+/** The uploads of the parts of an attempt that no job has taken yet, in order. */
+const pendingOf = (attempt: ImportAttempt) =>
+  attempt.parts.flatMap((part) => (part.job === null ? part.uploadIds : []));
+
+/** `uploadIds` in parts of at most `MAX_IMPORT_UPLOADS`, in order. */
+export function partsOf(uploadIds: readonly string[]): string[][] {
+  const parts: string[][] = [];
+  for (let at = 0; at < uploadIds.length; at += MAX_IMPORT_UPLOADS) {
+    parts.push(uploadIds.slice(at, at + MAX_IMPORT_UPLOADS));
+  }
+  return parts;
+}
+
+/**
+ * The request for these uploads, this folder and this base: the last one again while the same,
+ * the uploads compared with those of its parts not answered yet.
+ */
 export function importAttempt(
   last: ImportAttempt | null,
   uploadIds: string[],
   destination: string,
   baseRevision: Revision,
 ): ImportAttempt {
+  const asked = last === null ? [] : pendingOf(last);
   const same =
     last !== null &&
     last.destination === destination &&
     last.baseRevision === baseRevision &&
-    last.uploadIds.length === uploadIds.length &&
-    last.uploadIds.every((id, index) => id === uploadIds[index]);
-  return same ? last : { key: crypto.randomUUID(), uploadIds, destination, baseRevision };
+    asked.length === uploadIds.length &&
+    asked.every((id, index) => id === uploadIds[index]);
+  if (same) return last;
+  return {
+    parts: partsOf(uploadIds).map((part) => ({
+      key: crypto.randomUUID(),
+      uploadIds: part,
+      job: null,
+    })),
+    destination,
+    baseRevision,
+  };
 }
 
 /**
@@ -66,38 +120,47 @@ export function importBase(shown: Revision, mine: ReadonlyArray<Job | undefined>
 }
 
 /**
- * Start the import. `shown` is the revision the workspace shows now. Resolves with the job as the
- * service answered it.
+ * Start the import, part by part: each part not answered yet, in order. `shown` is the revision
+ * the workspace shows now; `taken` is told the uploads of each part as soon as a job took them.
+ * Resolves with the job of every part. Rejects with what a part threw; the parts before it keep
+ * their jobs in the attempt, so its retry starts from that part.
  */
 export async function beginImport(
   client: QueryClient,
   workspaceId: string,
   attempt: ImportAttempt,
   shown: Revision,
-): Promise<Job> {
-  const { data: job } = await startImport({
-    body: {
-      workspace_id: workspaceId,
-      upload_ids: attempt.uploadIds,
-      destination: attempt.destination,
-      base_revision: attempt.baseRevision,
-      apply_naming_rules: false,
-      idempotency_key: attempt.key,
-    },
-    throwOnError: true,
-  });
-  rememberJob(client, workspaceId, job);
-  const uploads = useUploads.getState();
-  uploads.remove(
-    uploads.entries
-      .filter(
-        (entry) =>
-          entry.workspaceId === workspaceId &&
-          entry.uploadId !== null &&
-          attempt.uploadIds.includes(entry.uploadId),
-      )
-      .map((entry) => entry.id),
-  );
-  uploads.jobStarted(workspaceId, job.id, shown);
-  return job;
+  taken?: (uploadIds: readonly string[]) => void,
+): Promise<Job[]> {
+  for (const part of attempt.parts) {
+    if (part.job !== null) continue;
+    const { data: job } = await startImport({
+      body: {
+        workspace_id: workspaceId,
+        upload_ids: part.uploadIds,
+        destination: attempt.destination,
+        base_revision: attempt.baseRevision,
+        apply_naming_rules: false,
+        idempotency_key: part.key,
+      },
+      throwOnError: true,
+    });
+    part.job = job;
+    rememberJob(client, workspaceId, job);
+    const uploads = useUploads.getState();
+    uploads.remove(
+      uploads.entries
+        .filter(
+          (entry) =>
+            entry.workspaceId === workspaceId &&
+            entry.uploadId !== null &&
+            part.uploadIds.includes(entry.uploadId),
+        )
+        .map((entry) => entry.id),
+    );
+    uploads.jobStarted(workspaceId, job.id, shown);
+    taken?.(part.uploadIds);
+    heldUploadsChanged(client, workspaceId);
+  }
+  return attempt.parts.flatMap((part) => (part.job === null ? [] : [part.job]));
 }

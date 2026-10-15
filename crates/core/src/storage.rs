@@ -17,8 +17,8 @@ use okf_jawn_contract::{
     error::{ApiError, ErrorCode},
     history::{BlameResponse, DiffResponse, LogResponse},
     identity::{
-        Digest, ItemId, JobId, MutationId, ProposalId, PurgeId, Revision, TenantId, WorkspaceId,
-        WorkspacePath,
+        Digest, ItemId, JobId, MutationId, ProposalId, PurgeId, ReviewId, Revision, TenantId,
+        WorkspaceId, WorkspacePath,
     },
     item::{ItemDocument, ItemKind, ItemStatus, ItemSummary, TypeDefinition},
     proposal::Change,
@@ -620,9 +620,11 @@ pub trait VersionStore: Send + Sync {
     /// Accept a candidate: commit the candidate's exact tree on top of `expected_head`.
     ///
     /// Fails with `Conflict`, writing nothing, when the head is not `expected_head` (with
-    /// `ErrorDetail::StaleBase` naming the head and no `field`, as `commit`), when the
-    /// candidate's parent is not `expected_head`, or when `candidate` is not the revision the
-    /// proposal reference retains. The promoted tree is the tree that was checked when the
+    /// `ErrorDetail::StaleBase` naming the head and no `field`, as `commit`); when `candidate` is
+    /// not the revision the proposal reference retains (a plain `Conflict`: it is about no base);
+    /// and when the candidate's parent is not `expected_head`, which is then the head, also with
+    /// `StaleBase` naming the head and no `field`: by contract ruling 5 a candidate drafted on a
+    /// base that is not the head is stale. The promoted tree is the tree that was checked when the
     /// candidate was created, so no check runs here and the result has no warnings. Idempotent
     /// on `promotion.mutation_id` exactly as `commit` is: the store keeps that empty answer as it
     /// keeps a commit's warnings, so a replay answers no warnings either.
@@ -1147,6 +1149,25 @@ pub fn derive_workspace_id(mutation_id: MutationId) -> WorkspaceId {
 #[must_use]
 pub fn derive_proposal_id(mutation_id: MutationId) -> ProposalId {
     ProposalId(derived_uuid(b"proposal", mutation_id, 0))
+}
+
+/// The identity of the comment written under one mutation (`add_comment`, and the reason a
+/// `decline_proposal` records).
+///
+/// A resumed attempt derives the same identity, so a handler can tell the comment its first
+/// attempt wrote from every other comment of the proposal.
+#[must_use]
+pub fn derive_comment_id(mutation_id: MutationId) -> String {
+    derived_uuid(b"comment", mutation_id, 0).to_string()
+}
+
+/// The identity of the review recorded under one mutation.
+///
+/// A resumed attempt derives the same identity, so it finds among the item's reviews the one its
+/// first attempt recorded.
+#[must_use]
+pub fn derive_review_id(mutation_id: MutationId) -> ReviewId {
+    ReviewId(derived_uuid(b"review", mutation_id, 0))
 }
 
 /// The identity of the purge recorded under one mutation.

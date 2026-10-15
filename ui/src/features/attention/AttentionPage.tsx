@@ -9,23 +9,24 @@
  * answer included, with the failure in a notice beside it.
  *
  * Each warning says its kind in words, the service's own explanation, the item it names as a link
- * pinned to the revision that was inspected, and the next step the service suggests. The wire
- * gives no location inside an item, so the link goes to the item. An item's title is read with
- * `get_item` at that revision, one request for each row shown, so rows are shown `SHOWN_STEP` at a
- * time: "Show more warnings" brings the next rows, asking the service for a further page when the
- * listed ones are all shown, and moves keyboard focus to the first row it brought.
+ * pinned to the revision that was inspected, and the next step the service suggests. The item's
+ * title is the one the list carries (`AttentionItem.item`, ruling 7): nothing is read for a row.
+ * An item the list names and does not carry was purged: it is named by its identity, with no link.
+ * When the warning is about a place inside the item (`selection`), the link opens the item there
+ * and the row says which place. Warnings that uploads are waiting (`uploads_waiting`) link to the
+ * uploads the service holds, on the import page. Rows are shown `SHOWN_STEP` at a time: "Show more
+ * warnings" brings the next rows, asking the service for a further page when the listed ones are
+ * all shown, and moves keyboard focus to the first row it brought.
  *
  * "Check again" asks for the list again; the checks depend on more than the revision (reviews,
  * dates), so the same revision can answer differently later.
  */
-import { useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useEffect, useId, useRef, useState } from 'react';
 import type { AttentionItem, Revision } from '../../api/generated/types.gen';
 import { Instant } from '../../lib/instant';
 import { keyed } from '../../lib/keys';
-import { itemOptions } from '../documents/DocumentView';
-import { short } from '../documents/describe';
+import { describeSelection, short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
 import {
@@ -45,6 +46,9 @@ export interface AttentionPageProps {
 
 /** Rows shown at first, and added by each "Show more warnings". */
 export const SHOWN_STEP = 50;
+
+/** Where the import page lists the uploads the service holds (`WaitingUploads.tsx`). */
+export const HELD_UPLOADS = 'uploads-held';
 
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
@@ -187,44 +191,49 @@ function WarningRow({
   revision: Revision;
 }) {
   const itemId = warning.item_id ?? null;
+  const item = warning.item ?? null;
+  const selection = warning.selection ?? null;
   return (
     <li tabIndex={-1} className="attention-row">
       <p>
         <strong>{attentionKind(warning.kind)}</strong>
         {itemId === null ? (
           <span className="meta"> (the workspace as a whole)</span>
+        ) : item === null ? (
+          <span className="meta">
+            {' '}
+            in an item that is no longer there (item {itemId.slice(0, 8)})
+          </span>
         ) : (
           <>
             {' in '}
-            <ItemLink workspaceId={workspaceId} itemId={itemId} revision={revision} />
+            <Link
+              to="/w/$workspaceId/i/$itemId"
+              params={{ workspaceId, itemId }}
+              // The whole item is no place in it: no `sel`, as a search result's link.
+              search={{
+                rev: revision,
+                ...(selection === null || selection.kind === 'all' ? {} : { sel: selection }),
+              }}
+            >
+              {item.title || item.path}
+            </Link>
+            {selection === null || selection.kind === 'all' ? null : (
+              <span className="meta">, at {describeSelection(selection)}</span>
+            )}
           </>
         )}
       </p>
       <p>{warning.message}</p>
-      <p className="meta">Suggested next step: {nextStep(warning.action)}.</p>
+      {warning.kind === 'uploads_waiting' ? (
+        <p>
+          <Link to="/w/$workspaceId/import" params={{ workspaceId }} hash={HELD_UPLOADS}>
+            See the uploads waiting to be imported
+          </Link>
+        </p>
+      ) : (
+        <p className="meta">Suggested next step: {nextStep(warning.action)}.</p>
+      )}
     </li>
-  );
-}
-
-/** A link to the item a warning names, read at the revision the warnings were inspected at. */
-function ItemLink({
-  workspaceId,
-  itemId,
-  revision,
-}: {
-  workspaceId: string;
-  itemId: string;
-  revision: Revision;
-}) {
-  const item = useQuery(itemOptions(workspaceId, itemId, revision));
-  const summary = item.data?.summary;
-  return (
-    <Link
-      to="/w/$workspaceId/i/$itemId"
-      params={{ workspaceId, itemId }}
-      search={{ rev: revision }}
-    >
-      {summary ? summary.title || summary.path : `Item ${itemId.slice(0, 8)}`}
-    </Link>
   );
 }

@@ -26,14 +26,28 @@
  *
  * `YamlFindings` shows what reading the text found: each problem with its line and column, as an
  * alert, and each warning as a note. The text box is described by it.
+ *
+ * Marked places. The caller may mark places of the text the box started from (`marks`, each a
+ * line and a column of that text: where something found a problem in it). Each is underlined from
+ * its place to the end of its line, and follows the person's changes: the box keeps the text it
+ * started from and every change made since, so a place of that text is found in the text as it
+ * is now, wherever it moved. `handle.show` puts the caret at such a place and keyboard focus in
+ * the box. A mark is only drawn, not announced: the caller lists the places in words.
  */
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { yaml } from '@codemirror/lang-yaml';
-import { Compartment, EditorState } from '@codemirror/state';
-import { EditorView, keymap } from '@codemirror/view';
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import {
+  ChangeSet,
+  Compartment,
+  EditorState,
+  StateEffect,
+  StateField,
+  type Text,
+} from '@codemirror/state';
+import { Decoration, EditorView, keymap } from '@codemirror/view';
+import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { keyed } from './keys';
-import { describeProblem, YAML_PAUSE_MS, type YamlRead } from './yaml';
+import { describeProblem, YAML_PAUSE_MS, type YamlPlace, type YamlRead } from './yaml';
 import { readOffThread } from './yaml-reading';
 
 export interface YamlEditorProps {
@@ -51,6 +65,18 @@ export interface YamlEditorProps {
    * from `initialText`, in place: the caller does so only while the box holds nothing typed.
    */
   restarts?: number;
+  /** Places of the text the box last started from to mark; they may change at any time. */
+  marks?: readonly YamlPlace[];
+  /** Set, while the box is on the page, to what moves the caret to a place. */
+  handle?: RefObject<YamlEditorHandle | null>;
+}
+
+export interface YamlEditorHandle {
+  /**
+   * Put the caret at `place` of the text the box last started from, as it stands after the
+   * person's changes, and keyboard focus in the box.
+   */
+  show: (place: YamlPlace) => void;
 }
 
 export interface PausedReading {
@@ -137,7 +163,53 @@ const look = EditorView.theme({
   '.cm-content': { padding: '0.5rem', minHeight: '8rem' },
   // The text box itself shows keyboard focus, like every other control of the workspace.
   '.cm-content:focus-visible': { outline: '3px solid Highlight', outlineOffset: '-3px' },
+  // A marked place: underlined in the text's own color, no color added.
+  '.yaml-marked': { textDecoration: 'underline wavy', textDecorationSkipInk: 'none' },
 });
+
+/** The text the box started from, and every change made to it since. */
+interface StartedFrom {
+  doc: Text;
+  since: ChangeSet;
+}
+
+const startedFrom = StateField.define<StartedFrom>({
+  create: (state) => ({ doc: state.doc, since: ChangeSet.empty(state.doc.length) }),
+  update: (value, transaction) =>
+    transaction.docChanged
+      ? { doc: value.doc, since: value.since.compose(transaction.changes) }
+      : value,
+});
+
+/** Where `place` (a line and a column, from 1) of the text the box started from is now. */
+function whereNow(state: EditorState, place: YamlPlace): number {
+  const { doc, since } = state.field(startedFrom);
+  const line = doc.line(Math.min(Math.max(place.line, 1), doc.lines));
+  return since.mapPos(line.from + Math.min(Math.max(place.column - 1, 0), line.length));
+}
+
+const setMarks = StateEffect.define<readonly YamlPlace[]>();
+
+/** The places marked, as places of the text the box started from. */
+const markedPlaces = StateField.define<readonly YamlPlace[]>({
+  create: () => [],
+  update: (places, transaction) =>
+    transaction.effects.reduce((now, effect) => (effect.is(setMarks) ? effect.value : now), places),
+  provide: (field) =>
+    EditorView.decorations.compute([field, startedFrom], (state) => {
+      const marked = Decoration.mark({ class: 'yaml-marked' });
+      const starts = [...new Set(state.field(field).map((place) => whereNow(state, place)))];
+      return Decoration.set(
+        starts.flatMap((from) => {
+          const to = state.doc.lineAt(from).to;
+          return from < to ? [marked.range(from, to)] : [];
+        }),
+        true,
+      );
+    }),
+});
+
+const NO_MARKS: readonly YamlPlace[] = [];
 
 /** The text box’s name and description, as attributes of the box itself. */
 const named = (label: string, describedBy: string | undefined) =>
@@ -153,12 +225,16 @@ export function YamlEditor({
   describedBy,
   onBlur,
   restarts = 0,
+  marks = NO_MARKS,
+  handle,
 }: YamlEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const report = useRef(onChange);
   const left = useRef(onBlur);
   const naming = useRef(new Compartment());
+  // The places marked now: a box that starts (again) marks them from the first.
+  const marked = useRef(marks);
   // What the box starts from, as the last commit gave it: read when it mounts and when it starts
   // again, never in between.
   const start = useRef({ initialText, label, describedBy });
@@ -181,6 +257,8 @@ export function YamlEditor({
         keymap.of([...defaultKeymap, ...historyKeymap]),
         yaml(),
         look,
+        startedFrom,
+        markedPlaces.init(() => marked.current),
         naming.current.of(named(from.label, from.describedBy)),
         EditorView.domEventHandlers({
           blur: () => {
@@ -220,6 +298,29 @@ export function YamlEditor({
       effects: naming.current.reconfigure(named(label, describedBy)),
     });
   }, [label, describedBy]);
+
+  // The places to mark, by what they are: a new list of the same places changes nothing.
+  const marksKey = JSON.stringify(marks);
+  useEffect(() => {
+    const places: readonly YamlPlace[] = JSON.parse(marksKey);
+    marked.current = places;
+    viewRef.current?.dispatch({ effects: setMarks.of(places) });
+  }, [marksKey]);
+
+  useEffect(() => {
+    if (handle === undefined) return;
+    handle.current = {
+      show: (place) => {
+        const view = viewRef.current;
+        if (view === null) return;
+        view.dispatch({ selection: { anchor: whereNow(view.state, place) }, scrollIntoView: true });
+        view.focus();
+      },
+    };
+    return () => {
+      handle.current = null;
+    };
+  }, [handle]);
 
   return <div ref={hostRef} className="yaml-editor" />;
 }

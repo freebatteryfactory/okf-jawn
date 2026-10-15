@@ -1236,6 +1236,75 @@ async fn a_candidate_is_retained_off_the_head_and_promoted_exactly() -> TestResu
     Ok(())
 }
 
+/// Ruling R14 (core M1.3a fix round 1): a candidate drafted on a base that is not the head is
+/// stale (contract ruling 5), so its promotion onto the current head is refused with
+/// `StaleBase` naming that head and no field, and nothing lands.
+#[tokio::test]
+async fn a_candidate_not_drafted_on_the_head_is_refused_with_the_head() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let proposal = uuid!(50)?;
+    let candidate = versions
+        .create_candidate(
+            &scope,
+            proposal,
+            CandidateChanges {
+                mutation_id: uuid!(51)?,
+                base: initial.clone(),
+                author: person("agent"),
+                message: "Propose a note".to_owned(),
+                edits: vec![note(uuid!(10)?, "proposed.md", "Proposed.")?],
+            },
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    // Another change lands after the candidate was drafted, so its base is no longer the head.
+    let head = versions
+        .commit(
+            &scope,
+            changes(20, &initial, vec![note(uuid!(11)?, "other.md", "Other.")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let refused = err_of(
+        versions
+            .promote_candidate(
+                &scope,
+                Promotion {
+                    mutation_id: uuid!(52)?,
+                    proposal_id: proposal,
+                    expected_head: head.clone(),
+                    candidate,
+                    approver: person("ana"),
+                    message: "Accept the note".to_owned(),
+                },
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Conflict, "{}", refused.message);
+    assert!(
+        refused.message.contains("not drafted on the current head"),
+        "{}",
+        refused.message
+    );
+    assert_eq!(
+        refused.detail.as_deref(),
+        Some(&ErrorDetail::StaleBase { head: head.clone() })
+    );
+    assert_eq!(refused.field, None);
+    assert_eq!(versions.head(&scope).await?, head, "nothing landed");
+    assert!(
+        versions
+            .find_commit(&scope, uuid!(52)?, None)
+            .await?
+            .is_none()
+    );
+    Ok(())
+}
+
 /// Review N5: a candidate whose proposal's reference another write set while it was staged is
 /// refused with a plain `Conflict`: the refusal is about no base, so it carries no `StaleBase`.
 #[tokio::test]

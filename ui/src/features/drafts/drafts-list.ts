@@ -3,7 +3,9 @@
  * once it changes.
  *
  * `list_drafts` is paged through its cursor; the pages are one infinite query, most recently saved
- * first as the service orders them. A draft is not bound to a revision: `get_item` returns the
+ * first as the service orders them. Each row carries its item's summary as the service read it at
+ * the head of that listing (`DraftRow`, ruling 1), or none when the item is not there; nothing of
+ * the list reads an item by itself. A draft is not bound to a revision: `get_item` returns the
  * caller's draft beside the committed content at whatever revision was asked for. So when a draft
  * is saved, discarded or snapshotted, every cached `get_item` of that item is told, and the list
  * is listed again unless the change is one it can take in place (a later save of a draft it
@@ -22,16 +24,19 @@ import {
 import { z } from 'zod';
 import { listDraftsQueryKey } from '../../api/generated/@tanstack/react-query.gen';
 import { listDrafts } from '../../api/generated/sdk.gen';
-import type { Draft, DraftContent, ItemDocument } from '../../api/generated/types.gen';
+import type {
+  Draft,
+  DraftContent,
+  DraftRow,
+  ItemDocument,
+  ItemSummary,
+} from '../../api/generated/types.gen';
 
 /** Drafts requested per page: the most the operation allows. */
 export const DRAFTS_PAGE = 200;
 
-/**
- * One page of the list as this module keeps it: the drafts alone. `list_drafts` answers each draft
- * with its item's summary beside it (`DraftRow`); the panel still reads each item itself.
- */
-export type DraftsPage = { items: Draft[]; next_cursor?: string | null };
+/** One page of the list: each draft with its item's summary as the listing read it. */
+export type DraftsPage = { items: DraftRow[]; next_cursor?: string | null };
 
 type DraftPages = InfiniteData<DraftsPage, string | null>;
 
@@ -49,7 +54,7 @@ export function draftsOptions(workspaceId: string) {
         signal,
         throwOnError: true,
       });
-      const page: DraftsPage = { items: data.items.map((row) => row.draft) };
+      const page: DraftsPage = { items: data.items };
       if (data.next_cursor !== undefined) page.next_cursor = data.next_cursor;
       return page;
     },
@@ -65,9 +70,22 @@ export function useDrafts(workspaceId: string) {
 
 /** The listed drafts, by item. */
 export function draftsByItem(pages: readonly DraftsPage[] | undefined): Map<string, Draft> {
-  const drafts = new Map<string, Draft>();
-  for (const page of pages ?? []) for (const draft of page.items) drafts.set(draft.item_id, draft);
-  return drafts;
+  return new Map([...rowsByItem(pages)].map(([itemId, row]) => [itemId, row.draft]));
+}
+
+/**
+ * The listed rows, by item: each draft, and its item as the listing read it; `item` is null when
+ * the item was not there.
+ */
+export function rowsByItem(
+  pages: readonly DraftsPage[] | undefined,
+): Map<string, { draft: Draft; item: ItemSummary | null }> {
+  const rows = new Map<string, { draft: Draft; item: ItemSummary | null }>();
+  for (const page of pages ?? []) {
+    for (const row of page.items)
+      rows.set(row.draft.item_id, { draft: row.draft, item: row.item ?? null });
+  }
+  return rows;
 }
 
 /** The draft of an item as the list last answered it; undefined when it lists none. */
@@ -152,7 +170,9 @@ export function rememberDraft(
     ...listed,
     pages: listed.pages.map((page) => ({
       ...page,
-      items: page.items.map((entry) => (entry.item_id === itemId ? draft.draft : entry)),
+      items: page.items.map((row) =>
+        row.draft.item_id === itemId ? { ...row, draft: draft.draft } : row,
+      ),
     })),
   });
 }

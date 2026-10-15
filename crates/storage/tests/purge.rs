@@ -1922,7 +1922,9 @@ async fn refuse_discussion(
     let mut changed = open.clone();
     changed.status = ProposalStatus::Declined;
     refused(
-        proposals.update(target, changed).await,
+        proposals
+            .update(target, uuid!(28)?, changed, ProposalStatus::Open)
+            .await,
         &format!("a proposal update {when}"),
     )?;
     let comment: Comment = serde_json::from_value(json!({
