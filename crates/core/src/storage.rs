@@ -17,7 +17,7 @@ use okf_jawn_contract::{
     error::{ApiError, ErrorCode},
     history::{BlameResponse, DiffResponse, LogResponse},
     identity::{
-        Digest, ItemId, MutationId, ProposalId, PurgeId, Revision, TenantId, WorkspaceId,
+        Digest, ItemId, MutationId, ProposalId, PurgeId, ReviewId, Revision, TenantId, WorkspaceId,
         WorkspacePath,
     },
     item::{ItemDocument, ItemKind, ItemStatus, ItemSummary, TypeDefinition},
@@ -1140,6 +1140,25 @@ pub fn derive_workspace_id(mutation_id: MutationId) -> WorkspaceId {
 #[must_use]
 pub fn derive_proposal_id(mutation_id: MutationId) -> ProposalId {
     ProposalId(derived_uuid(b"proposal", mutation_id, 0))
+}
+
+/// The identity of the comment written under one mutation (`add_comment`, and the reason a
+/// `decline_proposal` records).
+///
+/// A resumed attempt derives the same identity, so a handler can tell the comment its first
+/// attempt wrote from every other comment of the proposal.
+#[must_use]
+pub fn derive_comment_id(mutation_id: MutationId) -> String {
+    derived_uuid(b"comment", mutation_id, 0).to_string()
+}
+
+/// The identity of the review recorded under one mutation.
+///
+/// A resumed attempt derives the same identity, so it finds among the item's reviews the one its
+/// first attempt recorded.
+#[must_use]
+pub fn derive_review_id(mutation_id: MutationId) -> ReviewId {
+    ReviewId(derived_uuid(b"review", mutation_id, 0))
 }
 
 /// The identity of the purge recorded under one mutation.
