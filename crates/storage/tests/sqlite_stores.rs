@@ -805,14 +805,49 @@ async fn of_two_identical_status_changes_by_different_mutations_the_second_is_re
     Ok(())
 }
 
-/// An accept and a decline of one open proposal, racing: exactly one is written and the other
-/// is refused with `Conflict`, and the stored status is the winner's. The spawn order alternates
-/// so both interleavings occur over the rounds.
+/// An accept and a decline of one open proposal: whichever is written first, the other is
+/// refused with `Conflict` and the stored status is the first one's.
+///
+/// Storage's records database is one connection behind a mutex, and each update runs in its own
+/// IMMEDIATE transaction, so two updates are serialized, never truly concurrent: what this pins
+/// is a compare-and-set that holds in either order, not a race inside a transaction. Each order
+/// is driven explicitly first. Then 300 rounds spawn the two updates at once and assert that
+/// each round wrote exactly one; which one comes first there is the store's choice, which the
+/// test neither controls nor counts on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_status_changes_racing_from_open_write_one_and_refuse_the_other() -> TestResult {
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;
     let workspace = scope(1)?;
+    for (id, first, second) in [
+        (1990_u32, ProposalStatus::Accepted, ProposalStatus::Declined),
+        (1991_u32, ProposalStatus::Declined, ProposalStatus::Accepted),
+    ] {
+        let proposals = storage.proposals();
+        proposals
+            .insert(&workspace, uuid!(id)?, proposal(id, &ProposalStatus::Open)?)
+            .await?;
+        proposals
+            .update(
+                &workspace,
+                uuid!(id.saturating_add(1000))?,
+                proposal(id, &first)?,
+                ProposalStatus::Open,
+            )
+            .await?;
+        let error = err_of(
+            proposals
+                .update(
+                    &workspace,
+                    uuid!(id.saturating_add(2000))?,
+                    proposal(id, &second)?,
+                    ProposalStatus::Open,
+                )
+                .await,
+        )?;
+        assert_eq!(error.code, ErrorCode::Conflict, "{first:?} first: {error}");
+        assert_eq!(stored_status(&storage, &workspace, id).await?, first);
+    }
     let (mut accepted_wins, mut declined_wins) = (0_u32, 0_u32);
     for round in 0..300_u32 {
         let id = round.saturating_add(2000);
