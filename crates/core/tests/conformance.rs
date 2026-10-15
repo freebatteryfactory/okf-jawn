@@ -470,6 +470,32 @@ fn candidate_check_never_finds_a_linked_file_outside_the_candidate() -> TestResu
     Ok(())
 }
 
+/// A link to a file whose extension starts with `md` but is not `md` (`sums.md5`, `page.mdx`)
+/// names a file, not a note (review N8): nothing when the candidate holds it, the missing-file
+/// warning when it does not, and never the validator's broken-link info.
+#[test]
+fn candidate_check_reads_an_extension_that_only_starts_with_md_as_a_file() -> TestResult {
+    let staged = Staged::new()?;
+    staged.write("notes/sums.md5", "d41d8cd98f00b204e9800998ecf8427e")?;
+    staged.write("notes/a.md", &note_with("A", "[s](sums.md5) [p](page.mdx)"))?;
+    let a = WorkspacePath::try_from("notes/a.md".to_owned())?;
+    for warnings in [
+        OkfConformance.check(&staged.0, &[])?,
+        EditCheck::new(std::slice::from_ref(&a), None).check(&staged.0, &[])?,
+    ] {
+        assert_eq!(broken_links(&warnings), Vec::new(), "{warnings:?}");
+        assert_eq!(
+            missing_files(&warnings),
+            [(
+                Some("notes/a.md".to_owned()),
+                "link to a missing file: page.mdx".to_owned()
+            )],
+            "{warnings:?}"
+        );
+    }
+    Ok(())
+}
+
 /// A broken link to a note, written with `.md` (with an anchor too) or with no extension (in a
 /// folder whose name has a dot too), keeps the validator's broken-link info as it is, beside
 /// core's warning for a missing file in the same note; and the validator's other findings about a
