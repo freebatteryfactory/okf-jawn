@@ -6,12 +6,19 @@
 //! answer carries the caller's effective permissions, from `AccessControl`: every permission of
 //! the caller's grant that `access::authorize_workspace` admits for the caller's route and
 //! delegation ceiling (SPEC section 11: list and open answer the caller's effective
-//! permissions). `list_workspaces` lists, in creation order, only the workspaces whose
-//! effective permissions include `read`, and archived ones only with `include_archived`. Its
-//! cursor names the last workspace a page listed and the tenant's workspace that came after it,
-//! so a workspace archived, unarchived or purged between two pages neither repeats an entry nor
-//! skips one. Known limit: when both of those are purged before the next page, the listing
-//! resumes at the place the second held, which skips as many entries as were purged before it.
+//! permissions). Both read the caller's grants one way (`caller_permissions`), from
+//! `AccessControl::grants`, which the hosted grant cache always forwards to its source, and
+//! never from the grant dispatch looked up for the `read` check: under that cache, the grant
+//! dispatch holds carries only `read`, `write` and `propose`. So list and open answer the same
+//! permissions, and a workspace the adapter authorized but lists no grant on is `Internal`,
+//! never shown with no permissions. Each call reads every grant of the caller (one adapter
+//! call; O(workspaces of the tenant) for the local adapter). `list_workspaces` lists, in
+//! creation order, only the workspaces whose effective permissions include `read`, and archived
+//! ones only with `include_archived`. Its cursor names the last workspace a page listed and the
+//! tenant's workspace that came after it, so a workspace archived, unarchived or purged between
+//! two pages neither repeats an entry nor skips one. Known limit: when both of those are purged
+//! before the next page, the listing resumes at the place the second held, which skips as many
+//! entries as were purged before it.
 //! `open_workspace` answers an archived workspace too, with its `archived_at`.
 //!
 //! Creation. `create_workspace` is the catalog's: blank, with no example content, named from
@@ -126,16 +133,8 @@ pub(super) async fn list_workspaces(
 ) -> Result<ListWorkspacesResponse, ApiError> {
     let principal = &context.principal;
     let ports = service.ports();
-    let mut readable: BTreeMap<WorkspaceId, Vec<Permission>> = BTreeMap::new();
-    for grant in ports.access.grants(principal).await? {
-        if grant.scope.tenant_id != principal.tenant_id {
-            return Err(foreign_grant());
-        }
-        let permissions = effective_permissions(principal, &grant);
-        if permissions.contains(&Permission::Read) {
-            readable.insert(grant.workspace_id(), permissions);
-        }
-    }
+    let mut readable = caller_permissions(service, principal).await?;
+    readable.retain(|_, permissions| permissions.contains(&Permission::Read));
     let include_archived = request.include_archived.unwrap_or(false);
     // Every workspace, archived ones included, so a cursor's position does not depend on what
     // was archived or unarchived since; archived ones are left out below unless asked for.
@@ -216,20 +215,28 @@ pub(super) async fn create_workspace(
     Ok(workspace_with_permissions(created, permissions))
 }
 
-/// One workspace, archived or not, with the caller's effective permissions.
+/// One workspace, archived or not, with the caller's effective permissions, read as
+/// `list_workspaces` reads them (`caller_permissions`).
 ///
 /// # Errors
-/// Returns any port error: `NotFound` for a workspace the tenant does not hold.
+/// Returns `Internal` when the access adapter lists no grant of the caller on the workspace it
+/// authorized, or a grant of another tenant; or any port error: `NotFound` for a workspace the
+/// tenant does not hold.
 pub(super) async fn open_workspace(
     service: &ApplicationService,
     context: &OperationContext,
     _request: OpenWorkspaceRequest,
 ) -> Result<Workspace, ApiError> {
     let scope = workspace_scope(context)?;
-    let permissions = context
-        .primary_workspace()
-        .map(|grant| effective_permissions(&context.principal, grant))
-        .unwrap_or_default();
+    let permissions = caller_permissions(service, &context.principal)
+        .await?
+        .remove(&scope.workspace_id)
+        .ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::Internal,
+                "The access adapter lists no grant of the caller on a workspace it authorized",
+            )
+        })?;
     let workspace = service.ports().catalog.open(&scope).await?;
     Ok(workspace_with_permissions(workspace, permissions))
 }
@@ -438,6 +445,34 @@ pub(super) async fn archived_at(
     scope: &StorageScope,
 ) -> Result<Option<Timestamp>, ApiError> {
     Ok(service.ports().catalog.open(scope).await?.archived_at)
+}
+
+/// The caller's effective permissions on each workspace its grants name: the one reading that
+/// `list_workspaces` and `open_workspace` share.
+///
+/// The grants come from `AccessControl::grants`, which a grant cache always forwards to its
+/// source, never from the grant dispatch looked up for the request's `read` check: under the
+/// hosted cache (`CachedAccess` in the server) a cached grant carries only `read`, `write` and
+/// `propose`, so it would show the caller fewer permissions than it holds.
+///
+/// # Errors
+/// Returns `Internal` when the access adapter answers a grant of another tenant, or any port
+/// error.
+async fn caller_permissions(
+    service: &ApplicationService,
+    principal: &Principal,
+) -> Result<BTreeMap<WorkspaceId, Vec<Permission>>, ApiError> {
+    let mut permissions = BTreeMap::new();
+    for grant in service.ports().access.grants(principal).await? {
+        if grant.scope.tenant_id != principal.tenant_id {
+            return Err(foreign_grant());
+        }
+        permissions.insert(
+            grant.workspace_id(),
+            effective_permissions(principal, &grant),
+        );
+    }
+    Ok(permissions)
 }
 
 /// The permissions of `grant` the caller can exercise: each one `access::authorize_workspace`

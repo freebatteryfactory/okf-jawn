@@ -262,7 +262,7 @@ async fn the_permissions_a_workspace_answers_follow_the_route_and_the_delegation
         .await?;
     let only = some(listed.items.first(), "the readable workspace")?;
     assert_eq!(only.permissions, vec![Permission::Read]);
-    // `open_workspace` applies the same rule to the grant dispatch looked up.
+    // `open_workspace` applies the same rule to the same grant, as the adapter lists it.
     let opened = tenancy
         .service
         .open_workspace(
@@ -492,6 +492,9 @@ async fn open_workspace_answers_an_archived_workspace_with_the_callers_permissio
     tenancy
         .catalog
         .put(&scope()?.tenant_id, workspace(1, "home", 'a', true)?)?;
+    tenancy
+        .access
+        .grant(ALICE, id(1), vec![Permission::Read, Permission::Write])?;
     let caller = context(
         principal(ALICE, AccessRoute::LocalOwner)?,
         OperationName::OpenWorkspace,
@@ -513,6 +516,94 @@ async fn open_workspace_answers_an_archived_workspace_with_the_callers_permissio
         opened.permissions,
         vec![Permission::Read, Permission::Write]
     );
+    Ok(())
+}
+
+/// SPEC section 11: list and open answer the caller's effective permissions. Under the hosted
+/// grant cache the grant dispatch looked up for open's `read` check carries only `read`,
+/// `write` and `propose`; open answers the caller's grant as the adapter lists it, as list
+/// does. (The server's `hosted_permissions` test composes the real cache.)
+#[tokio::test]
+async fn open_and_list_answer_the_same_permissions_whatever_grant_dispatch_holds() -> TestResult {
+    let tenancy = Tenancy::new()?;
+    tenancy
+        .catalog
+        .put(&scope()?.tenant_id, workspace(1, "home", 'a', false)?)?;
+    tenancy.access.grant(ALICE, id(1), EVERY.to_vec())?;
+    let listed = tenancy
+        .service
+        .list_workspaces(
+            &owner(OperationName::ListWorkspaces, None)?,
+            listing(5, None, None),
+        )
+        .await?;
+    let in_list = some(listed.items.first(), "the listed workspace")?;
+    assert_eq!(in_list.permissions, EVERY.to_vec());
+    // The grant a cache answers dispatch: its cacheable permissions only.
+    let cached = context(
+        principal(ALICE, AccessRoute::LocalOwner)?,
+        OperationName::OpenWorkspace,
+        false,
+        &[Permission::Read, Permission::Write, Permission::Propose],
+        None,
+    )?;
+    let opened = tenancy
+        .service
+        .open_workspace(
+            &cached,
+            OpenWorkspaceRequest {
+                workspace_id: id(1),
+            },
+        )
+        .await?;
+    assert_eq!(opened.permissions, in_list.permissions);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_open_of_a_workspace_the_adapter_lists_no_grant_on_is_internal() -> TestResult {
+    let tenancy = Tenancy::new()?;
+    tenancy
+        .catalog
+        .put(&scope()?.tenant_id, workspace(1, "home", 'a', false)?)?;
+    // Dispatch was answered a grant; the adapter's listing names none.
+    let caller = context(
+        principal(ALICE, AccessRoute::LocalOwner)?,
+        OperationName::OpenWorkspace,
+        false,
+        &[Permission::Read],
+        None,
+    )?;
+    let refused = err_of(
+        tenancy
+            .service
+            .open_workspace(
+                &caller,
+                OpenWorkspaceRequest {
+                    workspace_id: id(1),
+                },
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Internal, "never an empty list");
+    // A listed grant of another tenant is refused too.
+    tenancy.access.grant(ALICE, id(1), EVERY.to_vec())?;
+    tenancy.access.answer_for(StorageScope {
+        tenant_id: okf_jawn_contract::identity::TenantId::try_from("elsewhere".to_owned())?,
+        workspace_id: id(1),
+    })?;
+    let refused = err_of(
+        tenancy
+            .service
+            .open_workspace(
+                &caller,
+                OpenWorkspaceRequest {
+                    workspace_id: id(1),
+                },
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Internal);
     Ok(())
 }
 
