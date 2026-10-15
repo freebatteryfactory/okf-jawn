@@ -421,7 +421,7 @@ describe('an import of more uploads than one request names', () => {
         'One import takes at most 5,000 files, so these 5,001 are imported in 2 parts, one after another. Each part is a job of its own.',
       ),
     ).toBeDefined();
-    expect(importButton().textContent).toBe('Import 5001 uploaded files');
+    expect(importButton().textContent).toBe('Import 5,001 uploaded files');
   });
 
   /** ImportStart over uploads the service holds, as the import page keeps them included. */
@@ -494,7 +494,7 @@ describe('an import of more uploads than one request names', () => {
     expect(third).toEqual(second);
     expect(
       await screen.findByText(
-        /^Import of 5001 files into the top of the workspace was accepted in 2 parts/,
+        /^Import of 5,001 files into the top of the workspace was accepted in 2 parts/,
       ),
     ).toBeDefined();
     expect(importButton().textContent).toBe('Import 0 uploaded files');

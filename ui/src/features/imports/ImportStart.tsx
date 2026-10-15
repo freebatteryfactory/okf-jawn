@@ -50,7 +50,9 @@ import {
 } from './import-start';
 import { type UploadEntry, useUploads } from './upload-list';
 
-const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+/** `n` things, the number written as the page writes its numbers ("5,001"). */
+const count = (n: number, one: string, many: string) =>
+  `${n.toLocaleString('en')} ${n === 1 ? one : many}`;
 const NO_JOBS: readonly string[] = [];
 
 /**
