@@ -14,6 +14,7 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{MutationId, Revision};
 use okf_jawn_core::storage::{Provenance, StorageScope};
 
+use super::item::Holder;
 use crate::data::{DataDir, io_error};
 
 /// Repositories of every workspace, and their write locks.
@@ -379,8 +380,9 @@ pub(crate) fn materialize(
     repository: &Repository,
     tree: &Tree<'_>,
     root: &Path,
+    holder: Holder,
 ) -> Result<(), ApiError> {
-    materialize_at(repository, tree, root, "")
+    materialize_at(repository, tree, root, "", holder)
 }
 
 /// Write the files of `tree`, the folder at `at` of a workspace tree (empty for the whole
@@ -388,17 +390,19 @@ pub(crate) fn materialize(
 ///
 /// A tree that holds two paths sharing a collision key (two spellings of one file or folder),
 /// or a path the server writes spelled another way (`item::respelled`), is refused as
-/// `Conflict` before anything is written, naming both spellings and the repair (a whole-tree
-/// restore of a revision from before they appeared): on a case-insensitive filesystem the
-/// staged copy would merge the two, or the server's next write would land in the other
-/// spelling, so a commit made from it would silently respell, drop or hide a file. Git, and a
-/// case-sensitive filesystem, can hold such a tree (a commit of an earlier build, an archive);
-/// it is refused the same way on every system.
+/// `Conflict` before anything is written, naming both spellings and the repair
+/// (`Respelled::held`: for `holder`'s `Head`, a whole-tree restore of a revision from before
+/// they appeared; for a revision a Rewind restores, `Restored`, the choice of an earlier one):
+/// on a case-insensitive filesystem the staged copy would merge the two, or the server's next
+/// write would land in the other spelling, so a commit made from it would silently respell,
+/// drop or hide a file. Git, and a case-sensitive filesystem, can hold such a tree (a commit of
+/// an earlier build, an archive); it is refused the same way on every system.
 pub(crate) fn materialize_at(
     repository: &Repository,
     tree: &Tree<'_>,
     root: &Path,
     at: &str,
+    holder: Holder,
 ) -> Result<(), ApiError> {
     let paths: Vec<String> = files(repository, tree)?
         .into_iter()
@@ -411,9 +415,24 @@ pub(crate) fn materialize_at(
         })
         .collect();
     if let Some(found) = super::item::respelled(paths.iter().map(String::as_str)) {
-        return Err(found.held());
+        return Err(found.held(holder));
     }
     write_files(repository, tree, root)
+}
+
+/// What `materialize` would refuse in `tree`, a tree that an archive's reference `reference`
+/// names, in the words of a refused archive (`item::respelled`, `Respelled::archived`); `None`
+/// when the tree holds no such thing.
+pub(crate) fn respelled_in_archive(
+    repository: &Repository,
+    tree: &Tree<'_>,
+    reference: &str,
+) -> Result<Option<String>, ApiError> {
+    let paths = files(repository, tree)?;
+    Ok(
+        super::item::respelled(paths.iter().map(|(path, _)| path.as_str()))
+            .map(|found| found.archived(reference)),
+    )
 }
 
 /// Write the files of `tree` under `root`, as `materialize` does once the tree is checked.

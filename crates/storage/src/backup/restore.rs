@@ -8,9 +8,11 @@
 //! tenant, workspace and jobs, each `record` JSON; then that it holds every object its history
 //! and the rows the restore copies name, read structurally (`refuse_unheld`), so a caller who
 //! knows only a digest cannot make the restored workspace name an object the archive did not
-//! bring (SPEC section 4: hash possession does not authorize a read). Then the objects are put
-//! back, then the Git history (the pack is indexed and every reference set), then the records
-//! in one transaction.
+//! bring (SPEC section 4: hash possession does not authorize a read); and, for an import, that
+//! no tree its references name holds what the store refuses to stage (`refuse_respelled`: two
+//! spellings of one path, or a path the server writes spelled another way). Then the objects are
+//! put back, then the Git history (the pack is indexed and every reference set), then the
+//! records in one transaction.
 //! An import then writes one commit on the archive head carrying its mutation (same tree), so
 //! its revision is found by that mutation like any job's write. A resumed import finds the
 //! accepted head already at the archive's, or at that commit, and skips what is done; the
@@ -50,7 +52,9 @@ use super::snapshot::{WORKSPACE_TABLES, text};
 use crate::blobs::file_reader;
 use crate::data::io_error;
 use crate::db::{conflict, internal, sql};
-use crate::git::repo::{HEAD_REF, git, head, message_with_trailer, sync_directories, trailer_of};
+use crate::git::repo::{
+    HEAD_REF, git, head, message_with_trailer, respelled_in_archive, sync_directories, trailer_of,
+};
 use crate::pins::Pinned;
 use crate::purge::references::{self, Rows};
 use crate::puts;
@@ -218,7 +222,8 @@ pub(crate) fn check(
 ///   with;
 /// - that it holds every object its history names, and every object a row the restore copies
 ///   names (`refuse_unheld`; a `replacement` copies every workspace table, an import only
-///   `IMPORTED`).
+///   `IMPORTED`), and, for an import, that no tree its references name holds two spellings of
+///   one path or a path the server writes spelled another way (`refuse_respelled`).
 ///
 /// # Errors
 /// Returns `InvalidInput` for an archive that fails a check.
@@ -276,7 +281,8 @@ fn checked(
 ///   commits its manifest names (`references::history_from`): every card's original and
 ///   conversion record must be an `objects/` entry; then walked once more as the archive
 ///   writer packs a workspace (`refuse_unpackable`): every commit, tree and blob the history
-///   needs must be in the pack;
+///   needs must be in the pack; and, for an import, no tree its references name may hold what
+///   the store refuses to stage (`refuse_respelled`);
 /// - each such conversion record is read from its entry, streamed (`references::read_record`):
 ///   every structured export and asset it names must be one too;
 /// - and every object a row of `archive::ROW_OBJECTS` names, in the tables the restore copies:
@@ -326,6 +332,9 @@ fn refuse_unheld(
             .collect::<Result<Vec<_>, _>>()?;
         let history = references::history_from(&scratch, &tips, invalid)?;
         refuse_unpackable(&scratch, &tips)?;
+        if !replacement {
+            refuse_respelled(&scratch, manifest)?;
+        }
         history
     };
     let _ = std::fs::remove_dir_all(&scratch_path);
@@ -402,6 +411,32 @@ fn refuse_unpackable(scratch: &Repository, tips: &[Oid]) -> Result<(), ApiError>
             git(&error)
         }
     })
+}
+
+/// Refuse, for an import, an archive one of whose references names a tree the store refuses to
+/// stage (`git::repo::respelled_in_archive`: two spellings of one path, or a path the server
+/// writes spelled another way), before anything is written. Imported, such a workspace would
+/// refuse every write until a whole-tree Rewind to a revision without it, and one whose every
+/// revision holds it would have only its first, empty commit to go back to. An earlier
+/// revision is not read: a Rewind to it is refused when it is staged (`repo::materialize`).
+///
+/// A replacement restore does not refuse it: it puts back what the installation held, as the
+/// installation held it, and the archive writer writes such a tree, so refusing it there would
+/// make a backup set the installation wrote unrestorable.
+///
+/// # Errors
+/// Returns `InvalidInput` naming both spellings and the reference.
+fn refuse_respelled(scratch: &Repository, manifest: &WorkspaceManifest) -> Result<(), ApiError> {
+    for (name, commit) in &manifest.references {
+        let tree = scratch
+            .find_commit(oid(commit)?)
+            .and_then(|commit| commit.tree())
+            .map_err(|error| git(&error))?;
+        if let Some(found) = respelled_in_archive(scratch, &tree, name)? {
+            return Err(invalid(&found));
+        }
+    }
+    Ok(())
 }
 
 /// Refuse a manifest that lists a reference Git cannot name (`Reference::is_valid_name`), before

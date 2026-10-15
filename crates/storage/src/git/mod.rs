@@ -4,7 +4,8 @@
 //! after the expected head (a replay returns that commit), refuse a moved head, materialize the
 //! base tree in `<data>/staging/<tenant>/<workspace>/<mutation>` (refusing a tree that holds two
 //! spellings of one path, unless the first edit replaces the whole tree), apply the edits
-//! there, check path collisions, maintain the folder indexes and the change log, run the caller's
+//! there, check path collisions, then maintain the folder indexes and the change log (which
+//! cannot make a collision that check passed, `edit`'s header), run the caller's
 //! `CandidateCheck` on that directory, write the tree and the commit, and only then move the
 //! reference with a compare-and-set. The staging directory is removed when the call returns.
 //! The check's warnings are kept in the records database just before the reference moves, and a
@@ -39,6 +40,7 @@ pub(crate) use read::appearance as appearance_of;
 pub(crate) use read::items as items_of;
 
 use edit::{Staged, apply, maintain};
+use item::Holder;
 use repo::{
     HEAD_REF, Repositories, commit_of, find_on_line, find_trailer, git, head, internal,
     materialize, message_with_trailer, reference_target, revision_of, signature, staged_tree,
@@ -544,14 +546,14 @@ fn stage_and_commit(
     let candidate = || -> Result<(Oid, Vec<Warning>), ApiError> {
         let tree = base.tree().map_err(|error| git(&error))?;
         if !replaced {
-            materialize(repository, &tree, &staged_root)?;
+            materialize(repository, &tree, &staged_root, Holder::Head)?;
         }
         let mut staged = Staged::scan(&staged_root)?;
         apply(repository, &mut staged, write.edits)?;
+        // Before the indexes and the log are written: what they write cannot collide once this
+        // passes (`Staged::refuse_collisions`), so the rule holds on what is committed.
         staged.refuse_collisions()?;
         maintain(&staged_root, &write.message)?;
-        // The indexes and the log are written too, so the rule holds on what is committed.
-        staged.refuse_collisions()?;
         // The check is told the files the edits made the store rewrite on its own.
         let warnings = check.check(&staged_root, &staged.rewritten()?)?;
         Ok((staged_tree(repository, &staged_root)?, warnings))
