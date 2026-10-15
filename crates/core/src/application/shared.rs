@@ -273,11 +273,10 @@ pub(super) async fn commit(
 }
 
 /// Name the request's `/base_revision` on the store's refusal of a base that is not the head
-/// (`ErrorDetail::StaleBase`); every request this module commits names its base so.
+/// (`ErrorDetail::StaleBase`); every request this module commits names its base so. The store
+/// names no field on that refusal (`VersionStore::commit`): the field is the caller's to name.
 fn on_the_base(error: ApiError) -> ApiError {
-    if error.field.is_none()
-        && matches!(error.detail.as_deref(), Some(ErrorDetail::StaleBase { .. }))
-    {
+    if matches!(error.detail.as_deref(), Some(ErrorDetail::StaleBase { .. })) {
         error.with_field("/base_revision")
     } else {
         error
