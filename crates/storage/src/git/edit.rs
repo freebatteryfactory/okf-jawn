@@ -45,7 +45,14 @@
 //! move, rewritten with okf-core's own public functions as `move_concept` rewrites it but taking
 //! a relative link for a concept's only when the bundle holds that concept, the one condition
 //! of the upstream fix (`moved_body`); okf-core's frontmatter is kept as it wrote it. The
-//! workaround is removed when an okf-core release carries the fix.
+//! workaround is removed when an okf-core release carries the fix. The same rewrite makes the
+//! item's links to itself follow it, which `move_concept` does not (it writes a relative one as
+//! a link to the old name and keeps an absolute one): a link that resolves to the moved concept
+//! names the path the move ends at, a relative one as `compute_relative_path` gives it and an
+//! absolute one as `/<path>.md`, the form okf-core gives another note's absolute link to the
+//! moved item, each with its anchor; a pure anchor (`#sec`) is kept. A `sources` entry of the
+//! frontmatter that names the item itself is not covered: okf-core rebases it as a path, so it
+//! keeps naming the old one.
 //!
 //! For the same reason, every write that names a new path checks the folders it names against
 //! the staged tree's own spellings before that path is written there
@@ -611,7 +618,11 @@ fn move_back(
     }
     let mut parked = Vec::with_capacity(movers.len());
     for (item, current, destination) in movers {
-        let private = park(staged, item, &current, "rewind", None)?;
+        // `ends` is the hop's own target here: the next hop reads these bytes and takes a link to
+        // the private path for one to the item itself, and `restore_items` then writes the earlier
+        // revision's bytes over them. Named for the destination, a link of the item to itself
+        // would be taken for a link to another mover that is parked from that path after it.
+        let private = park(staged, item, &current, "rewind", None, None)?;
         parked.push((private, destination));
     }
     for item in destinations.keys() {
@@ -729,7 +740,17 @@ fn move_item(
     // hop would rewrite the item's own links once more, and okf-core's rewrite is not
     // idempotent (`../../a.pdf` becomes `../a.pdf`, then `../a.pdf.md`), so the first hop's
     // bytes are written at the destination after it.
-    let private = park(staged, item, &source, "recase", Some("/destination"))?;
+    // Those bytes are what lands, so the first hop's `ends` is the move's final destination,
+    // not the hop's own target: the item's links to itself name the destination. Named for the
+    // private path, they would carry the private name into the committed tree.
+    let private = park(
+        staged,
+        item,
+        &source,
+        "recase",
+        Some(destination),
+        Some("/destination"),
+    )?;
     let parked = staged.root.join(private.as_str());
     let bytes = std::fs::read(&parked).map_err(|error| io_error("read", &parked, &error))?;
     relink(
@@ -744,7 +765,11 @@ fn move_item(
 
 /// Move the item file at `current` to a private path beside it, with every link that points at
 /// it (`move_in`), and answer that path. The caller moves the item on from there within the
-/// same commit, so the private path reaches no commit's tree. `field` is passed to `move_in`.
+/// same commit, so the private path reaches no commit's tree. `ends` is where the bytes this
+/// hop writes end up, for the item's links to itself (`moved_body`): the destination of a
+/// rename by letter case, whose first hop's bytes are written there (`move_item`), or, when it
+/// is `None`, the private path, for a hop whose bytes the next hop moves on. `field` is passed
+/// to `move_in`.
 ///
 /// The private path is the first free one of `okf-jawn-<purpose>-<item id>.md`, then
 /// `okf-jawn-<purpose>-<item id>-1.md`, `-2` and so on, in `current`'s folder. Free means that
@@ -758,6 +783,7 @@ fn park(
     item: ItemId,
     current: &str,
     purpose: &str,
+    ends: Option<&WorkspacePath>,
     field: Option<&str>,
 ) -> Result<WorkspacePath, ApiError> {
     let bundle = load(&staged.root)?;
@@ -778,7 +804,15 @@ fn park(
         if linked.contains(&concept(private.as_str())?) || staged.occupied(&private, None)? {
             continue;
         }
-        move_in(staged, &bundle, current, private.as_str(), field)?;
+        let ends = ends.unwrap_or(&private);
+        move_in(
+            staged,
+            &bundle,
+            current,
+            private.as_str(),
+            ends.as_str(),
+            field,
+        )?;
         return Ok(private);
     }
     Err(internal(format!(
@@ -834,21 +868,26 @@ fn relink(
     field: Option<&str>,
 ) -> Result<(), ApiError> {
     let bundle = load(&staged.root)?;
-    move_in(staged, &bundle, source, destination, field)
+    // The hop is the whole move: its target is where it ends.
+    move_in(staged, &bundle, source, destination, destination, field)
 }
 
-/// `relink` on `bundle`, the staged tree as it is now. A refusal other than an existing target
-/// is `InvalidInput` on `field` for a caller's move, and `Internal` for the server's own
-/// (`field` is `None`).
+/// `relink` on `bundle`, the staged tree as it is now. `ends` is the item file's path when the
+/// whole move is done, which the item's links to itself name (`moved_body`): `destination`,
+/// except for the first hop of a rename by letter case (`park`). A refusal other than an
+/// existing target is `InvalidInput` on `field` for a caller's move, and `Internal` for the
+/// server's own (`field` is `None`).
 fn move_in(
     staged: &mut Staged,
     bundle: &Bundle,
     source: &str,
     destination: &str,
+    ends: &str,
     field: Option<&str>,
 ) -> Result<(), ApiError> {
     let from = concept(source)?;
     let to = concept(destination)?;
+    let ends = concept(ends)?;
     let options = MoveOptions {
         update_index: false,
         update_log: false,
@@ -864,7 +903,7 @@ fn move_in(
                 None => internal(format!("moving {source} to {destination} failed: {other}")),
             },
         })?;
-    keep_file_links(bundle, &from, &to, &moved.target_path)?;
+    keep_file_links(bundle, &from, &to, &ends, &moved.target_path)?;
     // Every file the move wrote besides the item's own two: the referrers it rewrote.
     for path in &moved.affected_files {
         if *path != moved.source_path
@@ -879,15 +918,17 @@ fn move_in(
 
 /// Write the body of the item okf-core just moved from `from` to `to` again (the module
 /// header's workaround for okf-core 0.2.7): its body in `bundle`, the staged tree before the
-/// move, rewritten for the move (`moved_body`), into the file okf-core wrote at `written`. The
-/// frontmatter is the one okf-core wrote there (its relative paths rebased), read back and
-/// written with okf-core's own parser and serializer: its emitter is built so that
-/// `parse(emit(v)) == v` (okf-core's `yaml::emitter`), so emitting the value read back writes
-/// the frontmatter okf-core wrote (pinned for a rebased `sources` entry by the file-links tests).
+/// move, rewritten for the move, its links to itself naming `ends` (`moved_body`), into the
+/// file okf-core wrote at `written`. The frontmatter is the one okf-core wrote there (its
+/// relative paths rebased), read back and written with okf-core's own parser and serializer:
+/// its emitter is built so that `parse(emit(v)) == v` (okf-core's `yaml::emitter`), so emitting
+/// the value read back writes the frontmatter okf-core wrote (pinned for a rebased `sources`
+/// entry by the file-links tests).
 fn keep_file_links(
     bundle: &Bundle,
     from: &ConceptId,
     to: &ConceptId,
+    ends: &ConceptId,
     written: &Path,
 ) -> Result<(), ApiError> {
     let before = bundle
@@ -898,17 +939,28 @@ fn keep_file_links(
             "the item okf-core moved to {to} does not parse: {error}"
         ))
     })?;
-    document.body = moved_body(bundle, &before.document.body, from, to);
+    document.body = moved_body(bundle, &before.document.body, from, to, ends);
     write_text(written, &document.serialize())
 }
 
 /// `body`, the body of the concept `from`, with its links rewritten for a move to `to` as
-/// `okf_core::move_concept` rewrites them, with one condition more, the upstream fix's: a
-/// relative link that resolves to a concept `bundle` holds becomes a link to that concept
-/// (`compute_relative_path`, then the link's anchor); any other relative link, such as one to
-/// an image or a file that is not Markdown, whether that file exists or not, is rebased as a
-/// path (`rebase_relative_path`), which keeps its name. Every other link is kept.
-fn moved_body(bundle: &Bundle, body: &str, from: &ConceptId, to: &ConceptId) -> String {
+/// `okf_core::move_concept` rewrites them, with two conditions more. First, a link to the
+/// concept itself (`link.resolve(from)` is `from`: the literal reading of a percent-encoded
+/// target, which okf-core's rewrite of other notes' links takes too) names `ends`, the concept
+/// the whole move ends at: a relative one as `compute_relative_path(to, ends)`, an absolute one
+/// as `/<ends>.md`, each followed by the link's anchor. A pure anchor (`#sec`) resolves to
+/// nothing and is kept. Then the upstream fix's: a relative link that resolves to a concept
+/// `bundle` holds becomes a link to that concept (`compute_relative_path`, then the link's
+/// anchor); any other relative link, such as one to an image or a file that is not Markdown,
+/// whether that file exists or not, is rebased as a path (`rebase_relative_path`), which keeps
+/// its name. Every other link is kept.
+fn moved_body(
+    bundle: &Bundle,
+    body: &str,
+    from: &ConceptId,
+    to: &ConceptId,
+    ends: &ConceptId,
+) -> String {
     let folder = |id: &ConceptId| {
         id.parent()
             .map(|parent| parent.segments().to_vec())
@@ -916,18 +968,23 @@ fn moved_body(bundle: &Bundle, body: &str, from: &ConceptId, to: &ConceptId) -> 
     };
     let (from_folder, to_folder) = (folder(from), folder(to));
     let (rewritten, _) = rewrite_markdown_links(body, |link, _| {
+        let anchor = link
+            .target
+            .find('#')
+            .and_then(|at| link.target.get(at..))
+            .unwrap_or_default();
+        let resolved = link.resolve(from);
+        if resolved.as_ref() == Some(from) {
+            return LinkRewriteAction::Rewrite(match link.kind {
+                LinkKind::Absolute => format!("/{ends}.md{anchor}"),
+                _ => format!("{}{anchor}", compute_relative_path(to, ends)),
+            });
+        }
         if link.kind != LinkKind::Relative {
             return LinkRewriteAction::Keep;
         }
-        LinkRewriteAction::Rewrite(match link.resolve(from).filter(|id| bundle.contains(id)) {
-            Some(concept) => {
-                let anchor = link
-                    .target
-                    .find('#')
-                    .and_then(|at| link.target.get(at..))
-                    .unwrap_or_default();
-                format!("{}{anchor}", compute_relative_path(to, &concept))
-            }
+        LinkRewriteAction::Rewrite(match resolved.filter(|id| bundle.contains(id)) {
+            Some(concept) => format!("{}{anchor}", compute_relative_path(to, &concept)),
             None => rebase_relative_path(&from_folder, &to_folder, &link.target),
         })
     });

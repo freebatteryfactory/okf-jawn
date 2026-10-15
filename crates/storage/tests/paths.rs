@@ -1,6 +1,6 @@
 //! Workspace paths against real Git repositories, on the filesystem the tests run on: what a
-//! note's file is, a rename that changes only letter case, a folder spelled two ways, and the
-//! links to files that a moved note keeps.
+//! note's file is, a rename that changes only letter case, a folder spelled two ways, the links
+//! to files that a moved note keeps, and its links to itself, which follow it.
 //!
 //! Windows and macOS treat `Report.md` and `report.md` as one file; Linux and Git treat them as
 //! two. Storage edits a staged copy of the tree on the disk it runs on, so every assertion here
@@ -90,17 +90,21 @@ const REFERRER_MOVED: &str = "Read [a](Notes/report.md), [b](Notes/report.md#sec
 /// file was printed whole and its body is kept here (the frontmatter is `NOTE_10`; the
 /// referrer's is `REFERRER_MOVED`). The first four were recorded at ad6415c (`let from = if
 /// false` in `move_item`), where a move was one `move_concept`; the last two with the file-links
-/// workaround (`moved_body`), which leaves those four as they were.
+/// workaround (`moved_body`), which leaves those four as they were but for the item's link to
+/// itself in "dot slash".
 const DIRECT_MOVES: [(&str, &str, &str); 6] = [
     (
         "above the root",
         "Up [a](../../outside.pdf) and [b](../../../x.md#t).",
         "Up [a](../outside.pdf) and [b](../x.md#t).",
     ),
+    // okf-core 0.2.7 writes the item's link to itself as a link to its old name, `Report.md`,
+    // which this value held until the self-link ruling: the link now follows the item to its
+    // new name, as a direct move writes it too (`moved_body`).
     (
         "dot slash",
         "Here [p](./plan.md) and [me](./Report.md).",
-        "Here [p](plan.md) and [me](Report.md).",
+        "Here [p](plan.md) and [me](report.md).",
     ),
     (
         "anchor",
@@ -139,6 +143,12 @@ const FILE_LINKS_NAMED: [&str; 3] = ["notes/pics/p.png", "files/a.pdf", "notes/s
 const FILE_LINKS_REFERRER: &str = "Back to [A]({to}). Logo: ![p](pics/p.png)";
 /// The body of `deep/x/far.md`, which links to two of those files and not to the moved note.
 const FILE_LINKS_FAR: &str = "Far [f](../../files/a.pdf) and ![p](../../notes/pics/p.png).";
+
+/// The body of the note `notes/a.md` that the self-link tests move: links to itself, relative
+/// (beside it, with an anchor, through `./`, through its folder from above, without `.md`),
+/// absolute with and without an anchor, and a pure anchor.
+const SELF_LINKS: &str = "Me [m](a.md), [s](a.md#sec), [d](./a.md#sec), [up](../notes/a.md), \
+                          [abs](/notes/a.md), [abs2](/notes/a.md#sec), [bare](a), [x](#sec).";
 
 impl CandidateCheck for Accept {
     fn check(&self, _root: &Path, _rewritten: &[WorkspacePath]) -> Result<Vec<Warning>, ApiError> {
@@ -1478,6 +1488,134 @@ async fn file_links_survive_a_rewind_of_a_move() -> TestResult {
                     "{file}"
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+// Self links: a moved note's links to itself follow it.
+
+/// Item 10 at `notes/a.md` with the body `SELF_LINKS`, and item 11 at `notes/other.md` linking
+/// to it, with item 10 moved to `to`. Item 10's file is the seeded one with the body `body`,
+/// byte for byte; item 11's link to it reads `link`; no private name is in the tree. Answers the
+/// workspace and the revisions before and after.
+async fn self_links_moved(
+    to: &str,
+    body: &str,
+    link: &str,
+) -> Fallible<(Workspace, Revision, Revision)> {
+    let space = Workspace::new().await?;
+    let seeded = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "notes/a.md", SELF_LINKS)?,
+                note(11, "notes/other.md", "Back to [A](a.md).")?,
+            ],
+        )
+        .await?;
+    let moved_on = space.commit(3, &seeded, vec![moved(10, to)?]).await?;
+    let before = String::from_utf8(some(space.file(&seeded, "notes/a.md")?, "item 10")?)?;
+    let after = String::from_utf8(some(space.file(&moved_on, to)?, "item 10 moved")?)?;
+    assert_eq!(after, before.replace(SELF_LINKS, body), "{to}");
+    assert_eq!(
+        space.body(&moved_on, 11).await?,
+        format!("Back to [A]({link}).")
+    );
+    let files = space.files(&moved_on)?;
+    assert!(
+        !files.iter().any(|file| file.contains("okf-jawn-")),
+        "{files:?}"
+    );
+    Ok((space, seeded, moved_on))
+}
+
+/// A move within the note's folder: every link to itself names its new name, the relative ones
+/// beside it, the absolute ones from the root, each with its anchor; the pure anchor is kept.
+#[tokio::test]
+async fn self_links_follow_a_move_within_its_folder() -> TestResult {
+    self_links_moved(
+        "notes/b.md",
+        "Me [m](b.md), [s](b.md#sec), [d](b.md#sec), [up](b.md), [abs](/notes/b.md), \
+         [abs2](/notes/b.md#sec), [bare](b.md), [x](#sec).",
+        "b.md",
+    )
+    .await?;
+    Ok(())
+}
+
+/// A move to another folder: every relative link to itself names the new file beside it, and
+/// every absolute one the new folder.
+#[tokio::test]
+async fn self_links_follow_a_move_to_another_folder() -> TestResult {
+    self_links_moved(
+        "archive/a.md",
+        "Me [m](a.md), [s](a.md#sec), [d](a.md#sec), [up](a.md), [abs](/archive/a.md), \
+         [abs2](/archive/a.md#sec), [bare](a.md), [x](#sec).",
+        "../archive/a.md",
+    )
+    .await?;
+    Ok(())
+}
+
+/// A rename that changes only letter case, which goes by a private name beside the note: every
+/// link to itself names the destination, never the private name its first hop moved it to.
+#[tokio::test]
+async fn self_links_follow_a_rename_by_letter_case() -> TestResult {
+    self_links_moved(
+        "notes/A.md",
+        "Me [m](A.md), [s](A.md#sec), [d](A.md#sec), [up](A.md), [abs](/notes/A.md), \
+         [abs2](/notes/A.md#sec), [bare](A.md), [x](#sec).",
+        "A.md",
+    )
+    .await?;
+    Ok(())
+}
+
+/// A Rewind of the move to another folder, and of the rename by letter case, puts item 10 back
+/// at `notes/a.md` with the bytes it held there (its links to `a.md`) and item 11's link back to
+/// it; a Rewind to the moved revision puts the moved bytes back. As in
+/// `file_links_survive_a_rewind_of_a_move`, the Rewind writes the earlier revision's bytes of
+/// the item after it moves the item back, so this pins the outcome; the moved bytes are pinned
+/// by the two moves it starts from.
+#[tokio::test]
+async fn self_links_follow_a_rewind_of_a_move() -> TestResult {
+    for (to, body, link) in [
+        (
+            "archive/a.md",
+            "Me [m](a.md), [s](a.md#sec), [d](a.md#sec), [up](a.md), [abs](/archive/a.md), \
+             [abs2](/archive/a.md#sec), [bare](a.md), [x](#sec).",
+            "../archive/a.md",
+        ),
+        (
+            "notes/A.md",
+            "Me [m](A.md), [s](A.md#sec), [d](A.md#sec), [up](A.md), [abs](/notes/A.md), \
+             [abs2](/notes/A.md#sec), [bare](A.md), [x](#sec).",
+            "A.md",
+        ),
+    ] {
+        let (space, seeded, moved_on) = self_links_moved(to, body, link).await?;
+        let back = space
+            .commit(4, &moved_on, vec![restore(10, &seeded)?])
+            .await?;
+        let forth = space
+            .commit(5, &back, vec![restore(10, &moved_on)?])
+            .await?;
+        for (revision, earlier, at) in [(&back, &seeded, "notes/a.md"), (&forth, &moved_on, to)] {
+            assert_eq!(space.item_at(revision, at).await?, Some(uuid!(10)?));
+            for file in [at, "notes/other.md"] {
+                assert_eq!(
+                    space.file(revision, file)?,
+                    space.file(earlier, file)?,
+                    "{to}: {file}"
+                );
+            }
+            let files = space.files(revision)?;
+            assert!(
+                !files.iter().any(|file| file.contains("okf-jawn-")),
+                "{files:?}"
+            );
         }
     }
     Ok(())
