@@ -102,7 +102,10 @@ pub struct Draft {
     pub editor: String,
     /// Head revision the draft is based on; a Snapshot conflicts if the item changed since.
     pub base_revision: crate::identity::Revision,
-    /// Digest of the drafted body and properties, computed as `ItemDocument::content_digest` is.
+    /// Digest of the drafted body and every property but the server-owned header, `aliases`
+    /// included, keys sorted. Unlike `ItemDocument::content_digest`, any edit changes it, one to
+    /// `aliases` alone included: it tells whether a draft is still the content a Snapshot
+    /// committed.
     pub content_digest: crate::identity::Digest,
     /// Time of the latest save.
     pub saved_at: crate::identity::Timestamp,

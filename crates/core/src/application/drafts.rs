@@ -23,7 +23,7 @@
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{ItemId, Revision};
 use okf_jawn_contract::item::{
-    DiscardDraftRequest, Draft, DraftContent, DraftRow, ItemDocument, ItemKind, ListDraftsRequest,
+    DiscardDraftRequest, Draft, DraftContent, DraftRow, ItemKind, ListDraftsRequest,
     ListDraftsResponse, SaveDraftRequest,
 };
 
@@ -32,7 +32,7 @@ use super::shared::{check_named, invalid, mutation_id, workspace_scope};
 use crate::context::OperationContext;
 use crate::drafts::DraftWrite;
 use crate::items::refuse_header_change;
-use crate::portable::item_content_digest;
+use crate::portable::draft_digest;
 use crate::storage::StorageScope;
 
 /// Save or replace the caller's draft of one item.
@@ -92,14 +92,9 @@ pub(super) async fn save_draft(
         // The draft holds the item's own text, not the request's spelling of it.
         body = at_base;
     }
-    // The digest of the drafted body and properties, computed as the item they would commit
-    // is, so a draft and that item compare.
-    let drafted = ItemDocument {
-        body,
-        properties: request.properties,
-        ..current
-    };
-    let content_digest = item_content_digest(&drafted)?;
+    // The digest of the whole drafted content, `aliases` included, as a Snapshot takes it from
+    // the item a commit holds (`portable::draft_digest`), so a draft and that item compare.
+    let content_digest = draft_digest(&body, &request.properties)?;
     ports
         .drafts
         .save(
@@ -109,8 +104,8 @@ pub(super) async fn save_draft(
                 item_id: request.item_id,
                 editor: editor.clone(),
                 base_revision,
-                body: drafted.body,
-                properties: drafted.properties,
+                body,
+                properties: request.properties,
                 content_digest,
             },
         )

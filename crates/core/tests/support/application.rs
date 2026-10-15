@@ -112,7 +112,7 @@ use okf_jawn_core::jobs::{
     NewArtifact, NewJob, NewPurge, RecordStore, RevisionMapping,
 };
 use okf_jawn_core::mutations::{BeginOutcome, MutationKey, MutationLease, MutationStore};
-use okf_jawn_core::portable::{content_digest, item_content_digest};
+use okf_jawn_core::portable::{draft_digest, item_content_digest};
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::proposals::{CommentPage, ProposalFilter, ProposalStore};
 use okf_jawn_core::readiness::ReadinessProbe;
@@ -2817,7 +2817,7 @@ pub fn draft_of(item: u128, editor: &str, base: &Revision, body: &str) -> Built<
             item_id: ItemId(Uuid::from_u128(item)),
             editor: editor.to_owned(),
             base_revision: base.clone(),
-            content_digest: content_digest(body, &properties)?,
+            content_digest: draft_digest(body, &properties)?,
             saved_at: instant()?,
         },
         body: body.to_owned(),

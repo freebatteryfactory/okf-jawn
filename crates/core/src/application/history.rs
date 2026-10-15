@@ -22,9 +22,10 @@
 //!
 //! A draft is removed only when it is still the content that was committed
 //! (`DraftStore::discard` with the expected digest): on a first attempt the digest of the draft
-//! read, and on a resumed attempt the digest of the item as the found commit holds it
-//! (`portable::item_content_digest`). A draft saved again in between, before or after a crash,
-//! stays in place. The draft store remembers what it removed under the mutation, so a resumed
+//! read, and on a resumed attempt the digest of the item as the found commit holds it. Both are
+//! `portable::draft_digest`, which covers the whole content, `aliases` included (the review
+//! fingerprint leaves them out), so a draft saved again in between, before or after a crash,
+//! stays in place even when only its `aliases` changed. The draft store remembers what it removed under the mutation, so a resumed
 //! attempt also completes the removals its earlier attempt made.
 //!
 //! An unrelated commit that lands between the Snapshot's check and its commit makes the store
@@ -72,7 +73,7 @@ use super::shared::{
 };
 use super::sources::{citation, record_of};
 use crate::context::{Attempt, OperationContext};
-use crate::portable::item_content_digest;
+use crate::portable::draft_digest;
 use crate::storage::{BlameQuery, Committed, DiffQuery, LogQuery, Page, StorageScope, TreeEdit};
 
 /// Which side of a comparison a citation is of.
@@ -265,7 +266,10 @@ pub(super) async fn commit_items(
         let mut committed = Vec::with_capacity(request.item_ids.len());
         for selected in &request.item_ids {
             let document = ports.versions.show(&scope, &revision, *selected).await?;
-            committed.push((*selected, item_content_digest(&document)?));
+            committed.push((
+                *selected,
+                draft_digest(&document.body, &document.properties)?,
+            ));
         }
         // The warnings are the ones the store kept when the first attempt committed.
         return finish(

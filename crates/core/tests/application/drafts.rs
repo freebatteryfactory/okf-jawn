@@ -13,7 +13,7 @@ use okf_jawn_contract::item::{
 };
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_core::jobs::RevisionMapping;
-use okf_jawn_core::portable::content_digest;
+use okf_jawn_core::portable::draft_digest;
 use okf_jawn_core::ports::Application;
 use okf_jawn_core::storage::{TreeEdit, VersionStore};
 use serde_json::json;
@@ -98,7 +98,7 @@ async fn a_first_save_bases_on_the_head_a_later_one_keeps_its_base_until_it_reba
     let (_, written) = some(saves.last(), "the rebase")?;
     assert_eq!(
         written.content_digest,
-        content_digest(&written.body, &written.properties)?
+        draft_digest(&written.body, &written.properties)?
     );
     assert!(world.versions.commits()?.is_empty());
     Ok(())
@@ -749,7 +749,7 @@ async fn a_draft_records_the_digest_of_its_own_body_and_properties() -> TestResu
     let world = World::new()?;
     stored_at(&world, 'a')?;
     let at = revision('a')?;
-    let properties = json!({ "type": "Note", "tags": ["draft"] });
+    let properties = json!({ "type": "Note", "tags": ["draft"], "aliases": ["notes/old.md"] });
     let request = save(at.clone(), properties.clone())?;
     // The item the draft would commit: the drafted body and properties.
     let drafted = note(NOTE, &at, "notes/plan.md", &request.body, properties)?;
@@ -760,8 +760,11 @@ async fn a_draft_records_the_digest_of_its_own_body_and_properties() -> TestResu
         "# Plan\n",
         json!({ "type": "Note" }),
     )?;
-    let expected = served_digest(&drafted)?;
-    assert_ne!(expected, served_digest(&stored)?);
+    // Review N1: the draft's digest is of its whole content, `aliases` included, which the
+    // review fingerprint leaves out.
+    let expected = draft_digest(&drafted.body, &drafted.properties)?;
+    assert_ne!(expected, draft_digest(&stored.body, &stored.properties)?);
+    assert_ne!(expected, served_digest(&drafted)?);
     let answered = world
         .service
         .save_draft(
