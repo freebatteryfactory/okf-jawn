@@ -1004,7 +1004,7 @@ async fn the_confirmation_is_consumed_before_anything_is_promoted() -> TestResul
     assert_eq!(error.code, ErrorCode::Forbidden);
     assert!(world.versions.promotions()?.is_empty());
     assert_eq!(status(&world, proposal.id)?, ProposalStatus::Open);
-    // A confirmation another mutation consumed is refused, and nothing is promoted.
+    // The same mutation, in the person's own session, then accepts with that confirmation.
     world
         .service
         .accept_proposal(
@@ -1012,6 +1012,8 @@ async fn the_confirmation_is_consumed_before_anything_is_promoted() -> TestResul
             accept_request(&proposal, &confirmation, 'a')?,
         )
         .await?;
+    // In a fresh world: a confirmation consumed by an attempt whose promotion then failed is
+    // refused to another mutation, and nothing is promoted.
     let world = proposal_world()?;
     let (proposal, confirmation) = opened_and_confirmed(&world).await?;
     world.versions.fail_next_promote();
