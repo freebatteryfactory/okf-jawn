@@ -396,6 +396,21 @@ async fn an_agent_route_holding_admin_is_shown_no_security_event() -> TestResult
 }
 
 #[tokio::test]
+async fn a_caller_the_adapter_now_grants_nothing_is_shown_no_security_event() -> TestResult {
+    // Dispatch authorized the read; the grant is gone when the admin lookup asks (`Forbidden`
+    // from the adapter means no grant), so the listing answers without the refusals.
+    let tenancy = three_events(vec![Permission::Read, Permission::Admin]).await?;
+    let mut gone = reader(OperationName::ListEvents, &[Permission::Read], false)?;
+    gone.principal.subject = "bob".to_owned();
+    let page = tenancy
+        .service
+        .list_events(&gone, events_request(None, None, 50)?)
+        .await?;
+    assert_eq!(kinds(&page), vec![EventKind::Changed, EventKind::Changed]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_page_whose_last_events_are_hidden_carries_the_cursor_after_them() -> TestResult {
     let tenancy = Tenancy::new()?;
     tenancy
