@@ -6,7 +6,7 @@ use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::{Digest, Revision, TenantId};
 use okf_jawn_contract::import::JobState;
 use okf_jawn_contract::purge::{PurgeState, PurgeTarget};
-use okf_jawn_contract::workspace::ArtifactKind;
+use okf_jawn_contract::workspace::{ArtifactKind, BackupReport};
 use okf_jawn_core::jobs::{
     DerivedKind, DerivedObject, JobCompletion, JobScope, JobSpec, NewArtifact, NewJob, NewPurge,
     RecordStore,
@@ -367,13 +367,20 @@ async fn a_jobs_failure_instants_and_retry_flag_follow_its_state() -> TestResult
     assert_eq!(queued.created_at.as_ref(), Some(&accepted));
     let claimed = some(records.claim_job(created.id).await?, "the second claim")?;
     assert!(claimed.job.started_at.is_some());
-    let done = records.complete_job(completion(claimed.lease)).await?;
+    let report = BackupReport { rows_left_out: 2 };
+    let done = records
+        .complete_job(JobCompletion {
+            backup: Some(report.clone()),
+            ..completion(claimed.lease)
+        })
+        .await?;
     assert_eq!(done.state, JobState::Succeeded);
     assert!(done.finished_at.is_some() && done.retryable.is_none());
-    assert_eq!(
-        records.get_job(&scope, created.id).await?.finished_at,
-        done.finished_at
-    );
+    // The completion's report is kept on the job.
+    assert_eq!(done.backup.as_ref(), Some(&report));
+    let stored = records.get_job(&scope, created.id).await?;
+    assert_eq!(stored.finished_at, done.finished_at);
+    assert_eq!(stored.backup, Some(report));
     // A released lease returns the job to waiting without its start.
     let lapsed = records
         .create_job(&scope, new_job(6, JobSpec::RebuildIndex)?)

@@ -1629,6 +1629,15 @@ mod job_handler {
         assert_eq!(entry.job.state, JobState::Failed);
         let (message, retryable) = some(entry.failures.first(), "the failure")?;
         assert!(message.contains("not complete"), "{message}");
+        assert_eq!(
+            entry
+                .job
+                .error
+                .as_ref()
+                .and_then(|error| error.field.as_deref()),
+            Some("/upload_ids/1"),
+            "the incomplete upload is the second of the request"
+        );
         // InvalidInput: not retried.
         assert!(!retryable);
         // The complete upload was not consumed, and nothing was written.
@@ -1661,6 +1670,15 @@ mod job_handler {
         let (message, retryable) = some(entry.failures.first(), "the failure")?;
         assert!(message.contains("another job"), "{message}");
         // Refused for good, like a collision: a retry would meet the same refusal.
+        assert_eq!(
+            entry
+                .job
+                .error
+                .as_ref()
+                .and_then(|error| error.field.as_deref()),
+            Some("/upload_ids/1"),
+            "the taken upload is the second of the request"
+        );
         assert!(!retryable);
         assert_eq!(entry.failures.len(), 1);
         assert_eq!(world.uploads.consumed()?, [(complete, taker)]);

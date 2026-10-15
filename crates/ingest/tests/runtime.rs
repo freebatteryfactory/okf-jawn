@@ -87,7 +87,10 @@ mod job_runtime {
                             .await?;
                         Ok(())
                     }
-                    Action::Fail => Err(ApiError::new(ErrorCode::Internal, "the worker broke")),
+                    Action::Fail => {
+                        Err(ApiError::new(ErrorCode::Internal, "the worker broke")
+                            .with_field("/spec"))
+                    }
                     Action::Abandon => Ok(()),
                 }
             })
@@ -228,6 +231,15 @@ mod job_runtime {
         let entry = records.entry(id)?;
         assert_eq!(entry.job.state, JobState::Failed);
         assert_eq!(entry.failures, [("the worker broke".to_owned(), true)]);
+        // The handler's error is kept as it gave it, its field included.
+        assert_eq!(
+            entry
+                .job
+                .error
+                .as_ref()
+                .and_then(|error| error.field.as_deref()),
+            Some("/spec")
+        );
         // The failure it wrote is announced, in the job's workspace log, with no mutation.
         let JobScope::Workspace(scope) = entry.scope else {
             return Err("a workspace job was expected".into());

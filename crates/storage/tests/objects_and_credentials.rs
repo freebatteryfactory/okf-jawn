@@ -453,6 +453,34 @@ async fn an_upload_is_received_verified_retained_and_consumed_once() -> TestResu
 
 /// Ruling 3: a workspace's slots are listed newest first, in each state (incomplete, waiting,
 /// consumed) or all of them, a page at a time; another workspace's slots are not listed.
+/// Ruling 5: a completion whose digest is not the one the slot announced is refused before any
+/// byte is hashed, naming the lengths and that the digest does not match; the announced one
+/// completes it.
+#[tokio::test]
+async fn a_completion_against_another_digest_than_announced_names_the_mismatch() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let uploads = storage.uploads();
+    let local = scope("local", 1)?;
+    let announce = NewUpload {
+        expected_sha256: Some(sha256(b"0123")?),
+        ..announced(4)
+    };
+    let slot = uploads.create(&local, uuid!(40)?, announce).await?;
+    uploads
+        .put_content(&local, slot.id, body(b"0123"), 1024)
+        .await?;
+    let error = err_of(uploads.complete(&local, slot.id, sha256(b"abcd")?).await)?;
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert_eq!(
+        error.detail.as_deref(),
+        Some(&mismatch("4", "4", Some(false)))
+    );
+    let complete = uploads.complete(&local, slot.id, sha256(b"0123")?).await?;
+    assert!(complete.object.is_some());
+    Ok(())
+}
+
 #[tokio::test]
 async fn uploads_are_listed_newest_first_by_state_and_paged() -> TestResult {
     let directory = tempfile::tempdir()?;

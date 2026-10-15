@@ -548,11 +548,28 @@ async fn only_the_session_cookie_of_the_origins_scheme_is_read() -> TestResult {
         Router::new(),
     )?;
     let http = harness.service(BearerAuth::Local)?;
+    let mixed = harness.serve(
+        Identity::new(
+            BearerAuth::Local,
+            harness.ports(),
+            vec![format!("https://{HOST}"), format!("http://{HOST}")],
+        ),
+        Router::new(),
+    )?;
+    let none = harness.serve(
+        Identity::new(BearerAuth::Local, harness.ports(), Vec::new()),
+        Router::new(),
+    )?;
     for (app, name, status) in [
         (&https, SESSION_COOKIE_HTTPS, StatusCode::OK),
         (&https, SESSION_COOKIE, StatusCode::UNAUTHORIZED),
         (&http, SESSION_COOKIE, StatusCode::OK),
         (&http, SESSION_COOKIE_HTTPS, StatusCode::UNAUTHORIZED),
+        // An origin that is not https: the browser would not send a `__Host-` cookie there.
+        (&mixed, SESSION_COOKIE, StatusCode::OK),
+        (&mixed, SESSION_COOKIE_HTTPS, StatusCode::UNAUTHORIZED),
+        (&none, SESSION_COOKIE, StatusCode::OK),
+        (&none, SESSION_COOKIE_HTTPS, StatusCode::UNAUTHORIZED),
     ] {
         let response = app
             .clone()
@@ -560,7 +577,7 @@ async fn only_the_session_cookie_of_the_origins_scheme_is_read() -> TestResult {
             .await?;
         assert_eq!(response.status(), status, "{name}");
     }
-    assert_eq!(harness.counting.call_count("list_drafts")?, 2);
+    assert_eq!(harness.counting.call_count("list_drafts")?, 4);
     Ok(())
 }
 
