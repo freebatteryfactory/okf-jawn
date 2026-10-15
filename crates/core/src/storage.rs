@@ -620,9 +620,11 @@ pub trait VersionStore: Send + Sync {
     /// Accept a candidate: commit the candidate's exact tree on top of `expected_head`.
     ///
     /// Fails with `Conflict`, writing nothing, when the head is not `expected_head` (with
-    /// `ErrorDetail::StaleBase` naming the head and no `field`, as `commit`), when the
-    /// candidate's parent is not `expected_head`, or when `candidate` is not the revision the
-    /// proposal reference retains. The promoted tree is the tree that was checked when the
+    /// `ErrorDetail::StaleBase` naming the head and no `field`, as `commit`); when `candidate` is
+    /// not the revision the proposal reference retains (a plain `Conflict`: it is about no base);
+    /// and when the candidate's parent is not `expected_head`, which is then the head, also with
+    /// `StaleBase` naming the head and no `field`: by contract ruling 5 a candidate drafted on a
+    /// base that is not the head is stale. The promoted tree is the tree that was checked when the
     /// candidate was created, so no check runs here and the result has no warnings. Idempotent
     /// on `promotion.mutation_id` exactly as `commit` is: the store keeps that empty answer as it
     /// keeps a commit's warnings, so a replay answers no warnings either.
