@@ -201,6 +201,9 @@ async fn is_admin(
 /// Resolve every stored citation of `receipt` through the revision map of its workspace, each
 /// (workspace, revision) looked up once.
 ///
+/// Review N3: core M1.3a remaps the citations of comments and reviews differently; the
+/// whole-core review unifies the two.
+///
 /// # Errors
 /// Returns any error of the record store.
 async fn resolve_citations(
