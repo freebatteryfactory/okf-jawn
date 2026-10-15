@@ -2222,7 +2222,9 @@ impl ProposalStore for Unused {
     fn update<'a>(
         &'a self,
         _scope: &'a StorageScope,
+        _mutation_id: MutationId,
         _proposal: Proposal,
+        _expected: okf_jawn_contract::proposal::ProposalStatus,
     ) -> PortFuture<'a, Proposal> {
         unused()
     }

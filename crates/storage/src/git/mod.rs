@@ -615,10 +615,15 @@ fn promote(
         .find_commit(candidate)
         .map_err(|error| git(&error))?;
     if candidate.parent_ids().collect::<Vec<_>>() != vec![expected] {
+        // Contract ruling 5: a base that is not the head is stale, so the refusal names the head,
+        // which is `expected` here (a head that moved was refused above).
         return Err(ApiError::new(
             ErrorCode::Conflict,
             "the candidate was not drafted on the current head",
-        ));
+        )
+        .with_detail(ErrorDetail::StaleBase {
+            head: revision_of(current)?,
+        }));
     }
     let parent = repository
         .find_commit(current)

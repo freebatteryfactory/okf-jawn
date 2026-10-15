@@ -11,7 +11,12 @@
 //!   workspace-relative path when the diagnostic names a file, or, when it names only a concept
 //!   (a broken link names the concept that holds it), at the file the validated bundle holds
 //!   that concept in. A finding that names neither, or a concept the bundle does not hold, has
-//!   no location.
+//!   no location;
+//! - the validator's broken-link info about a link to a file that is not Markdown is replaced
+//!   by core's own check of that file (okf-core 0.2.7 reads every such link as a link to a
+//!   concept): nothing when the candidate holds the file, a `MISSING_FILE_LINK` warning at the
+//!   note when it does not. A broken link to a Markdown target is reported as the validator
+//!   gives it.
 //!
 //! Lint is not conformance and never refuses: an edit's check (`EditCheck`) adds okf-validator's
 //! lint findings about the files the edit touched as warnings, and an import's
@@ -25,7 +30,7 @@
 //! judged by one policy.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
@@ -63,6 +68,15 @@ pub struct EditCheck {
 
 /// The prefix of the `Warning::code` of a validator diagnostic; the severity follows.
 const VALIDATOR_CODE: &str = "okf_validator";
+
+/// The `Warning::code` of core's own finding that a note links to a file the candidate does not
+/// hold; it replaces okf-validator's broken-link info for a link to a file that is not
+/// Markdown (`conformance`).
+pub const MISSING_FILE_LINK: &str = "missing_file_link";
+
+/// The text okf-validator 0.2.7 opens its broken-link info (V28, `validate.rs`) with; the
+/// link's raw target follows it.
+const BROKEN_LINK: &str = "link target does not resolve to a concept in the bundle: ";
 
 impl CandidateCheck for OkfConformance {
     fn check(&self, root: &Path, _rewritten: &[WorkspacePath]) -> Result<Vec<Warning>, ApiError> {
@@ -173,12 +187,76 @@ fn conformance(root: &Path, bundle: &okf_core::Bundle) -> Result<Vec<Warning>, A
     Ok(report
         .diagnostics
         .into_iter()
-        .map(|diagnostic| Warning {
-            code: format!("{VALIDATOR_CODE}_{}", diagnostic.severity.as_str()),
-            location: location(root, bundle, &diagnostic),
-            message: diagnostic.message,
+        .filter_map(|diagnostic| {
+            let location = location(root, bundle, &diagnostic);
+            // okf-validator 0.2.7 reports every link to a file that is not Markdown as a broken
+            // link to a concept (V28), whether the file is there or not, because okf-core
+            // 0.2.7's `Link::resolve` makes any relative target a concept id. Such a finding is
+            // replaced by core's own check of the file, so it is never dropped unseen: nothing
+            // when the candidate holds the file, `MISSING_FILE_LINK` at the note when it does
+            // not. A V28 about a Markdown target is kept as it is. This goes when an okf-core
+            // release fixes `Link::resolve`, together with storage's workaround for the same
+            // cause in a move (`git/edit.rs`, `moved_body`).
+            if let Some((source, target)) = linked_file(&diagnostic) {
+                return (!holds_file(bundle, source, target)).then(|| Warning {
+                    code: MISSING_FILE_LINK.to_owned(),
+                    message: format!("link to a missing file: {target}"),
+                    location,
+                });
+            }
+            Some(Warning {
+                code: format!("{VALIDATOR_CODE}_{}", diagnostic.severity.as_str()),
+                location,
+                message: diagnostic.message,
+            })
         })
         .collect())
+}
+
+/// The concept that holds the link and the link's target, when `diagnostic` is okf-validator's
+/// broken-link info (V28, `validate.rs`: the holding concept, and `BROKEN_LINK` followed by
+/// the raw target; no other finding opens with that text) about a target that is not a
+/// Markdown path. A Markdown path is one whose last segment, without its anchor, ends in `.md`
+/// or has no extension at all, as an OKF link to a concept is written; every other target names
+/// a file.
+fn linked_file(diagnostic: &okf_validator::Diagnostic) -> Option<(&okf_core::ConceptId, &str)> {
+    let source = diagnostic.concept.as_ref()?;
+    let target = diagnostic.message.strip_prefix(BROKEN_LINK)?;
+    let without_anchor = target.split('#').next().unwrap_or_default();
+    let name = without_anchor.rsplit('/').next().unwrap_or_default();
+    let markdown = match name.rsplit_once('.') {
+        None => true,
+        Some((_, extension)) => extension == "md",
+    };
+    (!markdown).then_some((source, target))
+}
+
+/// Whether the loaded candidate holds a file at what the link `target` written in `source`
+/// names: each path okf-core reads the target as (`Link::resolve_all`: relative to the note's
+/// folder, or from the root for `/`; the literal spelling, then the percent-decoded one), looked
+/// up from the bundle's root by okf-core itself (`Bundle::resolve_path_field` of that path
+/// written from the root), so core reads no file of its own. A segment that is not one plain
+/// path component (`C:` on Windows) names nothing the candidate holds, so the lookup never
+/// leaves the bundle's root.
+fn holds_file(bundle: &okf_core::Bundle, source: &okf_core::ConceptId, target: &str) -> bool {
+    let link = okf_core::Link {
+        text: String::new(),
+        target: target.to_owned(),
+        kind: okf_core::Link::classify(target),
+    };
+    link.resolve_all(source).iter().any(|named| {
+        let plain = named.segments().iter().all(|segment| {
+            let mut components = Path::new(segment).components();
+            matches!(
+                (components.next(), components.next()),
+                (Some(Component::Normal(plain)), None) if plain == segment.as_str()
+            )
+        });
+        plain
+            && bundle
+                .resolve_path_field(source, &format!("/{}", named.segments().join("/")))
+                .is_some()
+    })
 }
 
 /// Where a validator finding is located: the file it names, else the file of the concept it
