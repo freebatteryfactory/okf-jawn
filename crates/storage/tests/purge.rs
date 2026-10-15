@@ -1862,7 +1862,7 @@ async fn refuse_discussion(
     changed.status = ProposalStatus::Declined;
     refused(
         proposals
-            .update(target, changed, ProposalStatus::Open)
+            .update(target, uuid!(28)?, changed, ProposalStatus::Open)
             .await,
         &format!("a proposal update {when}"),
     )?;

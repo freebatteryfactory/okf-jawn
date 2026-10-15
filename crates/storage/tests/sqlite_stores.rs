@@ -557,7 +557,7 @@ async fn proposals_and_comments_are_unique_on_their_mutation_and_page() -> TestR
     let mut declined = first.clone();
     declined.status = ProposalStatus::Declined;
     proposals
-        .update(&workspace, declined, ProposalStatus::Open)
+        .update(&workspace, uuid!(54)?, declined, ProposalStatus::Open)
         .await?;
     let open = proposals
         .list(
@@ -612,7 +612,8 @@ async fn stored_status(
 
 /// `ProposalStore::update` is a compare-and-set on the stored status: written only from the
 /// expected status, refused with `Conflict` and nothing written otherwise, a no-op when the
-/// stored record is written again, and `NotFound` for a proposal the workspace does not hold.
+/// mutation that wrote the stored record writes it again, and `NotFound` for a proposal the
+/// workspace does not hold.
 #[tokio::test]
 async fn a_proposal_status_change_is_written_only_from_the_expected_status() -> TestResult {
     let directory = tempfile::tempdir()?;
@@ -625,6 +626,7 @@ async fn a_proposal_status_change_is_written_only_from_the_expected_status() -> 
     let declined = proposals
         .update(
             &workspace,
+            uuid!(72)?,
             proposal(71, &ProposalStatus::Declined)?,
             ProposalStatus::Open,
         )
@@ -635,6 +637,7 @@ async fn a_proposal_status_change_is_written_only_from_the_expected_status() -> 
         proposals
             .update(
                 &workspace,
+                uuid!(73)?,
                 proposal(71, &ProposalStatus::Accepted)?,
                 ProposalStatus::Open,
             )
@@ -645,10 +648,12 @@ async fn a_proposal_status_change_is_written_only_from_the_expected_status() -> 
         stored_status(&storage, &workspace, 71).await?,
         ProposalStatus::Declined
     );
-    // A retry of the decline: the stored record again, accepted whatever was expected.
+    // A retry of the decline: the stored record again under its mutation, accepted whatever
+    // was expected.
     let again = proposals
         .update(
             &workspace,
+            uuid!(72)?,
             proposal(71, &ProposalStatus::Declined)?,
             ProposalStatus::Open,
         )
@@ -659,7 +664,12 @@ async fn a_proposal_status_change_is_written_only_from_the_expected_status() -> 
     retitled.title = "another title".to_owned();
     let error = err_of(
         proposals
-            .update(&workspace, retitled.clone(), ProposalStatus::Open)
+            .update(
+                &workspace,
+                uuid!(72)?,
+                retitled.clone(),
+                ProposalStatus::Open,
+            )
             .await,
     )?;
     assert_eq!(error.code, ErrorCode::Conflict, "{error}");
@@ -669,7 +679,7 @@ async fn a_proposal_status_change_is_written_only_from_the_expected_status() -> 
     );
     // From the stored status it is written.
     let written = proposals
-        .update(&workspace, retitled, ProposalStatus::Declined)
+        .update(&workspace, uuid!(74)?, retitled, ProposalStatus::Declined)
         .await?;
     assert_eq!(written.title, "another title");
     assert_eq!(
@@ -680,12 +690,118 @@ async fn a_proposal_status_change_is_written_only_from_the_expected_status() -> 
         proposals
             .update(
                 &scope(2)?,
+                uuid!(75)?,
                 proposal(71, &ProposalStatus::Accepted)?,
                 ProposalStatus::Declined,
             )
             .await,
     )?;
     assert_eq!(error.code, ErrorCode::NotFound, "{error}");
+    Ok(())
+}
+
+/// A proposal record shaped as `open_proposal` stores one (review probe P2): an edit whose
+/// properties nest unsorted keys, non-ASCII and escaped text, floats, `-0.0`, nulls and `1e21`;
+/// a create; and kept warnings.
+fn rich_proposal(id: u32, status: &ProposalStatus) -> Fallible<Proposal> {
+    let mut rich = proposal(id, status)?;
+    rich.changes = serde_json::from_value(json!([
+        {
+            "kind": "edit",
+            "item_id": uuid_text(3),
+            "body": "Zürich: \"quoted\"\n\ttab \\ backslash \u{1F642}",
+            "properties": {
+                "zeta": { "b": 1.5, "a": [null, -0.0, 1e21, "ü"] },
+                "alpha": null,
+                "title": "Ünïcode \u{2028} line"
+            }
+        },
+        {
+            "kind": "create",
+            "path": "notes/new.md",
+            "type_name": "Note",
+            "body": "# New\n",
+            "properties": { "title": "New", "description": "A new note." }
+        }
+    ]))?;
+    rich.warnings = serde_json::from_value(json!([
+        {
+            "code": "okf_validator_info",
+            "message": "link target does not resolve to a concept in the bundle: gone.md",
+            "location": "notes/new.md"
+        }
+    ]))?;
+    Ok(rich)
+}
+
+/// Review N3 (fix round 1, F4): two declines of one open proposal by different mutations write
+/// the same record, and the second is refused, because only the mutation that wrote a change
+/// may write it again as a retry; a retry of the first answers its result. The record is shaped
+/// as `open_proposal` stores one, so the retry is told by the stored text of a real record.
+#[tokio::test]
+async fn of_two_identical_status_changes_by_different_mutations_the_second_is_refused() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let proposals = storage.proposals();
+    let workspace = scope(1)?;
+    let open = proposals
+        .insert(
+            &workspace,
+            uuid!(80)?,
+            rich_proposal(81, &ProposalStatus::Open)?,
+        )
+        .await?;
+    // Both declines read the proposal open, and each writes it declined.
+    let declined = Proposal {
+        status: ProposalStatus::Declined,
+        ..open
+    };
+    let first = proposals
+        .update(
+            &workspace,
+            uuid!(82)?,
+            declined.clone(),
+            ProposalStatus::Open,
+        )
+        .await?;
+    let error = err_of(
+        proposals
+            .update(
+                &workspace,
+                uuid!(83)?,
+                declined.clone(),
+                ProposalStatus::Open,
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    // The first decline, retried under its mutation, answers its result.
+    let again = proposals
+        .update(
+            &workspace,
+            uuid!(82)?,
+            declined.clone(),
+            ProposalStatus::Open,
+        )
+        .await?;
+    assert_eq!(serde_json::to_value(&again)?, serde_json::to_value(&first)?);
+    // The second, retried, is refused again; the stored record is the first decline's.
+    let error = err_of(
+        proposals
+            .update(
+                &workspace,
+                uuid!(83)?,
+                declined.clone(),
+                ProposalStatus::Open,
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    assert_eq!(
+        serde_json::to_value(proposals.get(&workspace, uuid!(81)?).await?)?,
+        serde_json::to_value(&declined)?
+    );
     Ok(())
 }
 
@@ -708,14 +824,18 @@ async fn two_status_changes_racing_from_open_write_one_and_refuse_the_other() ->
         let (accept_scope, decline_scope) = (workspace.clone(), workspace.clone());
         let accepted = proposal(id, &ProposalStatus::Accepted)?;
         let declined = proposal(id, &ProposalStatus::Declined)?;
+        let (accepting, declining) = (
+            uuid!(id.saturating_add(1000))?,
+            uuid!(id.saturating_add(2000))?,
+        );
         let accept = async move {
             to_accept
-                .update(&accept_scope, accepted, ProposalStatus::Open)
+                .update(&accept_scope, accepting, accepted, ProposalStatus::Open)
                 .await
         };
         let decline = async move {
             to_decline
-                .update(&decline_scope, declined, ProposalStatus::Open)
+                .update(&decline_scope, declining, declined, ProposalStatus::Open)
                 .await
         };
         let (accept, decline) = if round % 2 == 0 {

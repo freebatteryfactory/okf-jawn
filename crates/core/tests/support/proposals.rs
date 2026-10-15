@@ -59,6 +59,8 @@ struct ProposalRows {
     comments: Vec<(StorageScope, MutationId, ProposalId, Comment)>,
     /// Every `update` call that wrote, in order: the status written.
     writes: Vec<ProposalStatus>,
+    /// The mutation that wrote each proposal's stored status, with its scope.
+    writers: Vec<(StorageScope, ProposalId, MutationId)>,
 }
 
 /// `EventLog` over the fixture's `FakeEvents`, that can fail the next append of one kind.
@@ -265,19 +267,23 @@ impl ProposalStore for FakeProposals {
     }
 
     // "Replace a proposal's status and retained fields ... only while its stored status is
-    // `expected` ... Fails with `Conflict`, writing nothing, when the stored status is not
-    // `expected`, and with `NotFound` when the workspace has no such proposal. Writing again
-    // exactly the record that is stored (its status and every field) changes nothing and
-    // returns it, whatever `expected` says".
+    // `expected` ... The store keeps the mutation that wrote each change. Fails with `Conflict`,
+    // writing nothing, when the stored status is not `expected`, and with `NotFound` when the
+    // workspace has no such proposal. Writing again exactly the record that is stored (its
+    // status and every field) under the mutation that wrote it changes nothing and returns it,
+    // whatever `expected` says ... The same record under another mutation is a change like any
+    // other, refused when the stored status is not `expected`".
     fn update<'a>(
         &'a self,
         scope: &'a StorageScope,
+        mutation_id: MutationId,
         proposal: Proposal,
         expected: ProposalStatus,
     ) -> PortFuture<'a, Proposal> {
         Box::pin(async move {
             self.injected(ProposalCall::Update)?;
-            let mut state = lock_api(&self.state)?;
+            let mut guard = lock_api(&self.state)?;
+            let state = &mut *guard;
             let written = proposal.status.clone();
             let record = serde_json::to_value(&proposal).map_err(internal)?;
             let row = state
@@ -285,7 +291,10 @@ impl ProposalStore for FakeProposals {
                 .iter_mut()
                 .find(|(held, _, row)| held == scope && row.id == proposal.id)
                 .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such proposal"))?;
-            if serde_json::to_value(&row.2).map_err(internal)? == record {
+            let wrote = state.writers.iter().any(|(held, id, writer)| {
+                held == scope && *id == proposal.id && *writer == mutation_id
+            });
+            if wrote && serde_json::to_value(&row.2).map_err(internal)? == record {
                 return Ok(proposal);
             }
             if row.2.status != expected {
@@ -296,6 +305,9 @@ impl ProposalStore for FakeProposals {
             }
             row.2 = proposal.clone();
             state.writes.push(written);
+            state
+                .writers
+                .push((scope.clone(), proposal.id, mutation_id));
             Ok(proposal)
         })
     }

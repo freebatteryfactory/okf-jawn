@@ -76,6 +76,9 @@ const DECLINING: u128 = 900;
 /// The mutation that comments on the fixture proposal.
 const COMMENTING: u128 = 1000;
 
+/// The mutation under which a test sets a proposal's status in the store itself.
+const SETTING: u128 = 90;
+
 fn key() -> IdempotencyKey {
     IdempotencyKey(Uuid::from_u128(77))
 }
@@ -715,6 +718,7 @@ async fn proposals_are_listed_newest_first_by_state_and_read_by_identity_in_thei
         .proposals
         .update(
             &scope()?,
+            mutation(SETTING),
             Proposal {
                 status: ProposalStatus::Declined,
                 ..second.clone()
@@ -945,6 +949,7 @@ async fn accepting_refuses_a_proposal_that_is_not_open_or_not_the_one_shown() ->
             .proposals
             .update(
                 &scope()?,
+                mutation(SETTING),
                 Proposal {
                     status: stored.clone(),
                     ..proposal.clone()
@@ -1387,6 +1392,7 @@ async fn declining_refuses_a_proposal_that_is_not_open() -> TestResult {
             .proposals
             .update(
                 &scope()?,
+                mutation(SETTING),
                 Proposal {
                     status: stored.clone(),
                     ..proposal.clone()

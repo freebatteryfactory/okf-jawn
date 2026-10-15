@@ -345,7 +345,15 @@ pub(super) async fn accept_proposal(
         Err(error) => match error.detail.as_deref() {
             Some(ErrorDetail::StaleBase { head }) if error.code == ErrorCode::Conflict => {
                 let head = head.clone();
-                Err(stale(service, &scope, proposal, &request.expected_head, head).await)
+                Err(stale(
+                    service,
+                    &scope,
+                    mutation,
+                    proposal,
+                    &request.expected_head,
+                    head,
+                )
+                .await)
             }
             _ => Err(error),
         },
@@ -404,6 +412,7 @@ pub(super) async fn decline_proposal(
         .proposals
         .update(
             &scope,
+            mutation,
             Proposal {
                 status: ProposalStatus::Declined,
                 ..proposal
@@ -640,6 +649,7 @@ async fn accepted(
         .proposals
         .update(
             scope,
+            mutation,
             Proposal {
                 status: ProposalStatus::Accepted,
                 ..proposal
@@ -664,6 +674,7 @@ async fn accepted(
 async fn stale(
     service: &ApplicationService,
     scope: &StorageScope,
+    mutation: MutationId,
     proposal: Proposal,
     expected_head: &Revision,
     head: Revision,
@@ -673,6 +684,7 @@ async fn stale(
         .proposals
         .update(
             scope,
+            mutation,
             Proposal {
                 status: ProposalStatus::Conflict,
                 ..proposal

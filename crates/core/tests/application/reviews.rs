@@ -319,6 +319,7 @@ async fn a_confirmation_of_a_proposal_binds_its_revision_and_digest_while_it_is_
         .proposals
         .update(
             &scope()?,
+            mutation(900),
             Proposal {
                 status: ProposalStatus::Declined,
                 ..proposal
