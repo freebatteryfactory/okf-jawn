@@ -396,6 +396,50 @@ async fn confirmation_single_use_is_consumed_by_one_mutation_only() -> TestResul
     Ok(())
 }
 
+/// An expired confirmation is refused even to the mutation that consumed it, as
+/// `ConfirmationStore::consume`'s doc says (review probe P3): before its expiry that mutation
+/// consumes it again; after it, the same mutation is refused `Conflict` "expired", and another
+/// mutation `Conflict` "already used".
+#[tokio::test]
+async fn confirmation_single_use_expires_even_for_the_mutation_that_consumed_it() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let confirmations = storage.confirmations();
+    let workspace = scope(1)?;
+    let issued = confirmations
+        .create(&workspace, uuid!(20)?, challenge(FUTURE)?)
+        .await?;
+    for _ in 0..2 {
+        confirmations
+            .consume(&workspace, uuid!(21)?, presented(issued.id)?)
+            .await?;
+    }
+    // Its expiry passes: the stored expiry is written directly, as only time would move it.
+    let changed = rusqlite::Connection::open(storage.data().records_path())?.execute(
+        "UPDATE confirmations SET expires_at = ?1 WHERE confirmation_id = ?2",
+        [
+            "2020-01-01T00:00:00.000Z".to_owned(),
+            issued.id.0.to_string(),
+        ],
+    )?;
+    assert_eq!(changed, 1);
+    let error = err_of(
+        confirmations
+            .consume(&workspace, uuid!(21)?, presented(issued.id)?)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    assert!(error.message.contains("expired"), "{}", error.message);
+    let error = err_of(
+        confirmations
+            .consume(&workspace, uuid!(22)?, presented(issued.id)?)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    assert!(error.message.contains("already used"), "{}", error.message);
+    Ok(())
+}
+
 #[tokio::test]
 async fn confirmation_single_use_refuses_another_revision_digest_action_or_target() -> TestResult {
     let directory = tempfile::tempdir()?;
