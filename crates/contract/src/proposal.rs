@@ -18,6 +18,10 @@ pub enum Change {
         body: String,
         #[doc = "Properties."]
         properties: std::collections::BTreeMap<String, serde_json::Value>,
+        #[doc = "The new item's rendering role. Absent means a note; `source` is refused: a source"]
+        #[doc = "comes only from an import."]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item_kind: Option<crate::item::ItemKind>,
     },
     /// Replace authored content with preconditions.
     Edit {
@@ -283,6 +287,41 @@ impl Change {
                 crate::item::check_item_text(markdown, &format!("{pointer}/markdown"))
             }
             Self::Move { .. } | Self::Archive { .. } => Ok(()),
+        }
+    }
+
+    /// The rendering role a `create` change gives its new item: the `item_kind` it names, a note
+    /// when it names none. `None` for every other change, which creates no item.
+    #[must_use]
+    pub fn created_kind(&self) -> Option<crate::item::ItemKind> {
+        match self {
+            Self::Create { item_kind, .. } => {
+                Some(item_kind.clone().unwrap_or(crate::item::ItemKind::Note))
+            }
+            Self::Edit { .. }
+            | Self::Move { .. }
+            | Self::Archive { .. }
+            | Self::SupplyExtraction { .. } => None,
+        }
+    }
+
+    /// Refuse a `create` change that names the `source` role: a source comes only from an import.
+    ///
+    /// `pointer` is this change's JSON Pointer inside its request, such as `/changes/0`.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` on `<pointer>/item_kind` when a `create` change names `source`.
+    pub fn check_kind(&self, pointer: &str) -> Result<(), crate::error::ApiError> {
+        match self {
+            Self::Create {
+                item_kind: Some(crate::item::ItemKind::Source),
+                ..
+            } => Err(crate::error::ApiError::new(
+                crate::error::ErrorCode::InvalidInput,
+                "a proposal cannot create a source: a source comes only from an import",
+            )
+            .with_field(format!("{pointer}/item_kind"))),
+            _ => Ok(()),
         }
     }
 }

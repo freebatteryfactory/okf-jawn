@@ -335,12 +335,14 @@ impl RequestScope for OpenProposalRequest {
     fn idempotency_key(&self) -> Option<&IdempotencyKey> {
         Some(&self.idempotency_key)
     }
-    /// A supply proposal holds only supply changes, each for a different item, and no change
-    /// carries an item text over the bound.
+    /// A supply proposal holds only supply changes, each for a different item, no change
+    /// carries an item text over the bound, and no `create` change names the `source` role.
     fn check_rules(&self) -> Result<(), ApiError> {
         ProposalKind::of(&self.changes)?;
         for (index, change) in self.changes.iter().enumerate() {
-            change.check_text(&format!("/changes/{index}"))?;
+            let pointer = format!("/changes/{index}");
+            change.check_text(&pointer)?;
+            change.check_kind(&pointer)?;
         }
         Ok(())
     }

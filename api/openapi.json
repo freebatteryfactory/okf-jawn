@@ -708,6 +708,17 @@
                 "maxLength": 8388608,
                 "type": "string"
               },
+              "item_kind": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ItemKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The new item's rendering role. Absent means a note; `source` is refused: a source\ncomes only from an import."
+              },
               "kind": {
                 "const": "create",
                 "type": "string"

@@ -12,6 +12,7 @@
 use check::{TestResult, some};
 use okf_jawn_contract::events::Event;
 use okf_jawn_contract::import::{Job, Upload};
+use okf_jawn_contract::item::ItemKind;
 use okf_jawn_contract::proposal::{Change, Comment, Proposal};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -173,6 +174,19 @@ fn a_proposal_stored_before_its_warnings_reads_unchanged_with_its_changes() -> T
         &json!([{"code": "missing_description", "message": "no description"}]),
     )?;
     assert_eq!(warned.warnings.len(), 1);
+    Ok(())
+}
+
+/// Ruling 29: a `create` change stored before `item_kind` reads as a note and is written back
+/// without the field; one naming a View keeps it.
+#[test]
+fn a_create_change_stored_before_its_item_kind_reads_as_a_note() -> TestResult {
+    let before = json!({"kind": "create", "path": "notes/a.md", "type_name": "note",
+        "body": "# A", "properties": {}});
+    let change: Change = reads_unchanged(&before)?;
+    assert_eq!(change.created_kind(), Some(ItemKind::Note));
+    let view: Change = carries(&before, "item_kind", &json!("view"))?;
+    assert_eq!(view.created_kind(), Some(ItemKind::View));
     Ok(())
 }
 

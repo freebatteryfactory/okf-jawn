@@ -2376,6 +2376,7 @@ export const zWorkspacePath = z.string().min(1).max(4096).regex(/^[^\/\\:<>"|?*\
 export const zChange = z.union([
     z.object({
         body: z.string().max(8388608),
+        item_kind: zItemKind.nullish(),
         kind: z.literal('create'),
         path: zWorkspacePath,
         properties: z.record(z.string(), z.unknown()),

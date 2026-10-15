@@ -7012,6 +7012,17 @@
                     "maxLength": 8388608,
                     "type": "string"
                   },
+                  "item_kind": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/ItemKind"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The new item's rendering role. Absent means a note; `source` is refused: a source\ncomes only from an import."
+                  },
                   "kind": {
                     "const": "create",
                     "type": "string"
@@ -7172,6 +7183,26 @@
             "format": "uuid",
             "type": "string"
           },
+          "ItemKind": {
+            "description": "Built-in presentation roles; user-defined OKF type names remain unrestricted.",
+            "oneOf": [
+              {
+                "const": "note",
+                "description": "Human or agent-authored Markdown knowledge.",
+                "type": "string"
+              },
+              {
+                "const": "source",
+                "description": "An appearance of immutable source bytes.",
+                "type": "string"
+              },
+              {
+                "const": "view",
+                "description": "A source-bound declarative visual artifact.",
+                "type": "string"
+              }
+            ]
+          },
           "PageRange": {
             "additionalProperties": false,
             "description": "A one-based inclusive document page range.",
@@ -7293,6 +7324,17 @@
                     "description": "Body, at most 8 MiB in UTF-8.",
                     "maxLength": 8388608,
                     "type": "string"
+                  },
+                  "item_kind": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/ItemKind"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The new item's rendering role. Absent means a note; `source` is refused: a source\ncomes only from an import."
                   },
                   "kind": {
                     "const": "create",
@@ -7448,6 +7490,26 @@
             "description": "Stable item identity independent of its current relative path.",
             "format": "uuid",
             "type": "string"
+          },
+          "ItemKind": {
+            "description": "Built-in presentation roles; user-defined OKF type names remain unrestricted.",
+            "oneOf": [
+              {
+                "const": "note",
+                "description": "Human or agent-authored Markdown knowledge.",
+                "type": "string"
+              },
+              {
+                "const": "source",
+                "description": "An appearance of immutable source bytes.",
+                "type": "string"
+              },
+              {
+                "const": "view",
+                "description": "A source-bound declarative visual artifact.",
+                "type": "string"
+              }
+            ]
           },
           "PageRange": {
             "additionalProperties": false,

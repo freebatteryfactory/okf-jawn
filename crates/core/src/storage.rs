@@ -304,7 +304,8 @@ pub struct SourceCard {
 pub struct ChangeContext {
     /// Identity for a `Change::Create`, which carries none.
     pub new_item_id: ItemId,
-    /// Rendering role for a `Change::Create`, which carries none.
+    /// Rendering role for a `Change::Create`: the role its `item_kind` names, a note when it
+    /// names none (`ChangeContext::for_change` fills it so).
     pub new_item_kind: ItemKind,
     /// Proposal the change belongs to.
     pub proposal_id: ProposalId,
@@ -928,12 +929,32 @@ pub trait Backups: Send + Sync {
 /// it (`VersionStore::commit`); see `replay_warnings_unavailable`.
 pub const REPLAY_WARNINGS_UNAVAILABLE: &str = "replay_warnings_unavailable";
 
+impl ChangeContext {
+    /// The context of `change`, with `new_item_kind` filled from it: the role its `item_kind`
+    /// names, a note when it names none (`Change::created_kind`). A change that creates no item
+    /// leaves it a note, which `TreeEdit::from_change` does not read.
+    #[must_use]
+    pub fn for_change(
+        change: &Change,
+        new_item_id: ItemId,
+        proposal_id: ProposalId,
+        proposer: Provenance,
+    ) -> Self {
+        Self {
+            new_item_id,
+            new_item_kind: change.created_kind().unwrap_or(ItemKind::Note),
+            proposal_id,
+            proposer,
+        }
+    }
+}
+
 impl TreeEdit {
     /// The tree edit a proposed change stands for.
     ///
     /// `context.new_item_id` and `context.new_item_kind` are used only for `Change::Create`,
-    /// which carries neither an identity nor a rendering role; the proposal and proposer only
-    /// for `Change::SupplyExtraction`.
+    /// which carries no identity and whose role the context holds (`ChangeContext::for_change`
+    /// fills it from the change); the proposal and proposer only for `Change::SupplyExtraction`.
     #[must_use]
     pub fn from_change(change: Change, context: &ChangeContext) -> Self {
         match change {
@@ -942,6 +963,7 @@ impl TreeEdit {
                 type_name,
                 body,
                 properties,
+                item_kind: _,
             } => Self::CreateItem {
                 item_id: context.new_item_id,
                 path,

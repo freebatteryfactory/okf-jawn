@@ -415,6 +415,11 @@ export type Change = {
      * Body, at most 8 MiB in UTF-8.
      */
     body: string;
+    /**
+     * The new item's rendering role. Absent means a note; `source` is refused: a source
+     * comes only from an import.
+     */
+    item_kind?: ItemKind | null;
     kind: 'create';
     /**
      * Path.

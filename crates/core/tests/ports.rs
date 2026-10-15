@@ -945,6 +945,7 @@ fn a_proposed_change_becomes_the_matching_tree_edit() -> TestResult {
             type_name: "Note".to_owned(),
             body: "# Plan\n".to_owned(),
             properties: BTreeMap::new(),
+            item_kind: None,
         },
         &view,
     );
@@ -995,6 +996,44 @@ fn a_proposed_change_becomes_the_matching_tree_edit() -> TestResult {
         TreeEdit::SupplyExtraction { item_id, proposal_id, supplier, .. }
             if item_id == existing && proposal_id == note.proposal_id && supplier == initiator()
     ));
+    Ok(())
+}
+
+fn create_change(item_kind: Option<ItemKind>) -> Result<Change, Box<dyn Error>> {
+    Ok(Change::Create {
+        path: WorkspacePath::try_from("notes/v.md".to_owned())?,
+        type_name: "Note".to_owned(),
+        body: "# V\n".to_owned(),
+        properties: BTreeMap::new(),
+        item_kind,
+    })
+}
+
+/// Ruling 29: a proposed create names its new item's role in `item_kind`, a note when it names
+/// none, and the change's context carries that role into the tree edit.
+#[test]
+fn a_change_context_takes_the_new_items_role_from_its_change() -> TestResult {
+    let item = ItemId(Uuid::from_u128(10));
+    let proposal = ProposalId(Uuid::from_u128(12));
+    for (named, role) in [
+        (None, ItemKind::Note),
+        (Some(ItemKind::Note), ItemKind::Note),
+        (Some(ItemKind::View), ItemKind::View),
+    ] {
+        let change = create_change(named)?;
+        let context = ChangeContext::for_change(&change, item, proposal, initiator());
+        assert_eq!(context.new_item_kind, role);
+        assert!(matches!(
+            TreeEdit::from_change(change, &context),
+            TreeEdit::CreateItem { item_id, kind, .. } if item_id == item && kind == role
+        ));
+    }
+    let archive = Change::Archive {
+        item_id: ItemId(Uuid::from_u128(11)),
+    };
+    assert_eq!(archive.created_kind(), None);
+    let context = ChangeContext::for_change(&archive, item, proposal, initiator());
+    assert_eq!(context.new_item_kind, ItemKind::Note);
     Ok(())
 }
 

@@ -807,6 +807,43 @@ fn a_supply_proposal_holds_only_supply_changes() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Ruling 29: a `create` change names its role in `item_kind`. Absent means a note, a View is
+/// taken, and a source is refused on the change's own field.
+#[test]
+fn a_proposal_cannot_create_a_source() -> Result<(), Box<dyn Error>> {
+    let create = |kind: Option<&str>| {
+        let mut change = json!({"kind": "create", "path": "notes/a.md", "type_name": "Note",
+            "body": "# A", "properties": {}});
+        if let (Some(kind), Some(fields)) = (kind, change.as_object_mut()) {
+            fields.insert("item_kind".to_owned(), json!(kind));
+        }
+        change
+    };
+    let archive = json!({"kind": "archive", "item_id": "22222222-2222-4222-8222-222222222222"});
+    for (kind, accepted) in [
+        (None, true),
+        (Some("note"), true),
+        (Some("view"), true),
+        (Some("source"), false),
+    ] {
+        let changes = json!([archive.clone(), create(kind)]);
+        let request: OpenProposalRequest = edited(|request| {
+            request.insert("changes".to_owned(), changes.clone());
+        })?;
+        let checked = request.check_rules();
+        if accepted {
+            assert!(checked.is_ok(), "{changes}: {checked:?}");
+        } else {
+            assert!(
+                matches!(&checked, Err(error) if error.code == ErrorCode::InvalidInput
+                    && error.field.as_deref() == Some("/changes/1/item_kind")),
+                "{changes}: {checked:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn set_lifecycle_needs_status_or_archived() -> Result<(), Box<dyn Error>> {
     let neither: SetLifecycleRequest = edited(|request| {
