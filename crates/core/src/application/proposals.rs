@@ -56,9 +56,10 @@
 //! 4. The status becomes `accepted`, a compare-and-set from `open`. When that is refused and the
 //!    proposal is `conflict`, it becomes `accepted` from `conflict` instead: this mutation's
 //!    promotion landed (step 3 answered it, or a resumed attempt found it by the mutation), so
-//!    the mark is false. It was set by a second acceptance in the window after this promotion
-//!    landed and before this step, which the store refused as stale because this promotion had
-//!    moved the head off the proposal's base.
+//!    the mark is false. It was set by another acceptance that the store refused as stale while
+//!    this one was under way, either after this promotion landed (which moved the head off the
+//!    proposal's base) or before it (that acceptance named a head that was not the head, while
+//!    the proposal's base still was).
 //! 5. The new revision is indexed and a `changed` event appended (`shared::announce`); it names
 //!    no item, because a proposal may change several.
 //! 6. A `proposal_updated` event naming the proposal.
@@ -671,8 +672,9 @@ async fn accepted(
     let stored = match marked {
         Ok(stored) => stored,
         Err(refused) if refused.code == ErrorCode::Conflict => {
-            // `committed` is this mutation's promotion, so a `conflict` mark set meanwhile (by an
-            // acceptance the store refused because this promotion moved the head) is false.
+            // `committed` is this mutation's promotion, so a `conflict` mark set meanwhile (by
+            // another acceptance the store refused as stale, before or after this promotion
+            // landed) is false.
             let now = proposals.get(scope, id).await?;
             if now.status != ProposalStatus::Conflict {
                 return Err(refused);
