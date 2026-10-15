@@ -13,10 +13,21 @@
  * under that key while it is the same upload, so a discard whose answer was lost is not a second.
  * Once it is answered, and once an import has started (which consumes the uploads it names), both
  * lists are asked again.
+ *
+ * Both lists are asked again, too, whenever this page's own list lets go of a slot the service
+ * still holds (`useHeldUploadsFollow`): a file removed from the list after bytes were sent, or a
+ * slot left for a new one. The import page leaves out of these lists the slots its own list holds,
+ * so their pages, read before the slot was opened, lack it without showing that; once the page
+ * lets it go, the slot is listed, as the page then says, and can be discarded, with no reload.
+ * Opening a slot needs no asking: while the page's list holds it, these lists leave it out anyway.
+ * Limit: removing a file whose `create_upload` is in flight aborts it, and the page never learns
+ * whether the service opened the slot (`uploading.ts`); such a slot is listed at the next listing.
  */
-import { infiniteQueryOptions, type QueryClient } from '@tanstack/react-query';
+import { infiniteQueryOptions, type QueryClient, useQueryClient } from '@tanstack/react-query';
+import { useEffect } from 'react';
 import { discardUpload, listUploads } from '../../api/generated/sdk.gen';
 import type { Upload } from '../../api/generated/types.gen';
+import { type UploadEntry, useUploads } from './upload-list';
 
 /** Uploads requested per page. */
 export const UPLOADS_PAGE = 50;
@@ -58,6 +69,49 @@ export function heldUploadsChanged(client: QueryClient, workspaceId: string) {
   for (const state of ['waiting', 'incomplete'] as const) {
     void client.invalidateQueries({ queryKey: heldUploadsKey(workspaceId, state) });
   }
+}
+
+/**
+ * The workspaces where a slot the page's list held in `before` (an entry's slot or its verified
+ * upload) is held by no entry in `now`: removed, or left for a new slot.
+ */
+export function slotsLetGo(
+  before: readonly UploadEntry[],
+  now: readonly UploadEntry[],
+): ReadonlySet<string> {
+  const workspaces = new Set<string>();
+  if (before === now) return workspaces;
+  const kept = new Set<string>();
+  for (const entry of now) {
+    if (entry.slotId !== null) kept.add(entry.slotId);
+    if (entry.uploadId !== null) kept.add(entry.uploadId);
+  }
+  for (const entry of before) {
+    for (const id of [entry.slotId, entry.uploadId]) {
+      if (id !== null && !kept.has(id)) workspaces.add(entry.workspaceId);
+    }
+  }
+  return workspaces;
+}
+
+/**
+ * Ask the uploads the service holds again whenever the page's list lets a slot go. Mounted with the
+ * application's root (`routes/__root.tsx`), as the uploads run outside the import page: a slot left
+ * while the person looks at something else is listed when the import page is shown again, not
+ * only once its lists are older than the cache keeps them. An import also lets slots go (they are
+ * consumed); `beginImport` asks both lists again itself, for the held uploads it took as well.
+ */
+export function useHeldUploadsFollow() {
+  const client = useQueryClient();
+  useEffect(
+    () =>
+      useUploads.subscribe((now, before) => {
+        for (const workspaceId of slotsLetGo(before.entries, now.entries)) {
+          heldUploadsChanged(client, workspaceId);
+        }
+      }),
+    [client],
+  );
 }
 
 /** Discard an upload the service holds: its slot and its bytes. Resolves with its last state. */
