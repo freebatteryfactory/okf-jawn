@@ -75,7 +75,7 @@ use okf_jawn_core::items::{ApplicationHeader, refuse_header_change, refuse_heade
 use okf_jawn_core::storage::{SourceCard, TreeEdit};
 
 use super::item::{
-    CORRECTIONS_DIR, INDEX_FILE, ItemFile, LOG_FILE, RULES_FILE, SOURCES_DIR, SUPPLIED_DIR,
+    CORRECTIONS_DIR, Holder, INDEX_FILE, ItemFile, LOG_FILE, RULES_FILE, SOURCES_DIR, SUPPLIED_DIR,
     TYPES_FILE, bare_header, check_item_path, collision_key, is_item_path, is_reserved, new_item,
     respelled,
 };
@@ -381,7 +381,7 @@ fn apply_one(repository: &Repository, staged: &mut Staged, edit: TreeEdit) -> Re
             let commit = commit_of(repository, &from)?;
             let tree = commit.tree().map_err(|error| super::repo::git(&error))?;
             clear_directory(&staged.root)?;
-            materialize(repository, &tree, &staged.root)?;
+            materialize(repository, &tree, &staged.root, Holder::Restored)?;
             staged.rescan()
         }
     }
@@ -684,7 +684,7 @@ fn restore_folder(
                 .map_err(|error| super::repo::git(&error))?;
             std::fs::create_dir_all(&target)
                 .map_err(|error| io_error("create", &target, &error))?;
-            materialize_at(repository, &folder, &target, path)
+            materialize_at(repository, &folder, &target, path, Holder::Restored)
         }
         Ok(_) => Ok(()),
         Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(()),

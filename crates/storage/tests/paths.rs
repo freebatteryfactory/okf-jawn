@@ -1848,34 +1848,103 @@ async fn a_tree_with_two_spellings_of_a_file_refuses_every_commit_but_a_whole_re
 
 /// A tree built in Git with two files whose names differ only in Unicode normalization (`café`
 /// with a precomposed `é`, and `cafe` with a combining accent, as macOS merges them) refuses
-/// every commit naming both, as two spellings of one path.
+/// every commit naming both, escaped so that they do not print alike, and saying that the names
+/// differ in how their characters are encoded and that macOS keeps them as one (Windows keeps
+/// them apart); two names that differ in letter case as well are said to differ in both. A
+/// whole-tree Rewind repairs either.
 #[tokio::test]
 async fn a_tree_with_two_normalizations_of_a_name_refuses_every_commit() -> TestResult {
+    for (composed, decomposed, clash, what) in [
+        (
+            "notes/caf\u{e9}.txt",
+            "notes/cafe\u{301}.txt",
+            "notes/caf\\u{e9}.txt collides with notes/cafe\\u{301}.txt",
+            "two names that differ only in how their characters are encoded, which macOS keeps as \
+             one",
+        ),
+        (
+            "notes/Caf\u{e9}.txt",
+            "notes/cafe\u{301}.txt",
+            "notes/cafe\\u{301}.txt collides with notes/Caf\\u{e9}.txt",
+            "two names that differ in letter case and in how their characters are encoded, which \
+             macOS keeps as one",
+        ),
+    ] {
+        let space = Workspace::new().await?;
+        let seeded = space
+            .commit(2, &space.initial, vec![note(10, "notes/a.md", "Ten.")?])
+            .await?;
+        let spelled = space.raw(
+            900,
+            &[],
+            &[(composed, b"one".to_vec()), (decomposed, b"two".to_vec())],
+        )?;
+        for (mutation, edit) in [(3, edited(10, "Changed.")?), (4, set_type("Memo"))] {
+            let error = space.refused(mutation, &spelled, vec![edit]).await?;
+            assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+            assert_eq!(
+                error.message,
+                format!(
+                    "{clash}: the revision holds {what}; the workspace can be restored to a \
+                     revision from before they appeared"
+                )
+            );
+        }
+        let repaired = space
+            .commit(
+                5,
+                &spelled,
+                vec![TreeEdit::RestoreWorkspace {
+                    from: seeded.clone(),
+                }],
+            )
+            .await?;
+        assert_eq!(space.files(&repaired)?, space.files(&seeded)?);
+    }
+    Ok(())
+}
+
+/// A whole-tree Rewind to a revision that holds two spellings of one path, from a head that
+/// holds neither, is refused saying that the revision being restored holds them and that an
+/// earlier one can be chosen, not that the workspace's own revision does.
+#[tokio::test]
+async fn a_rewind_to_a_revision_with_two_spellings_says_it_is_the_restored_one() -> TestResult {
     let space = Workspace::new().await?;
     let seeded = space
-        .commit(2, &space.initial, vec![note(10, "notes/a.md", "Ten.")?])
-        .await?;
-    let composed = "notes/caf\u{e9}.txt";
-    let decomposed = "notes/cafe\u{301}.txt";
-    let spelled = space.raw(
-        900,
-        &[],
-        &[(composed, b"one".to_vec()), (decomposed, b"two".to_vec())],
-    )?;
-    for (mutation, edit) in [(3, edited(10, "Changed.")?), (4, set_type("Memo"))] {
-        let error = space.refused(mutation, &spelled, vec![edit]).await?;
-        assert_conflict_naming(&error, &[composed, decomposed, "collides with"]);
-    }
-    let repaired = space
         .commit(
-            5,
+            2,
+            &space.initial,
+            vec![
+                note(10, "Notes/a.md", "Ten.")?,
+                note(11, "b.md", "Eleven.")?,
+            ],
+        )
+        .await?;
+    let spelled = two_spellings(&space, &seeded, "notes/b.md")?;
+    let clean = space
+        .commit(
+            3,
             &spelled,
             vec![TreeEdit::RestoreWorkspace {
                 from: seeded.clone(),
             }],
         )
         .await?;
-    assert_eq!(space.files(&repaired)?, space.files(&seeded)?);
+    let error = space
+        .refused(
+            4,
+            &clean,
+            vec![TreeEdit::RestoreWorkspace {
+                from: spelled.clone(),
+            }],
+        )
+        .await?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    assert_eq!(
+        error.message,
+        "notes collides with Notes: the revision being restored holds two spellings of one path, \
+         which Windows and macOS keep as one; choose a revision from before they appeared"
+    );
     Ok(())
 }
 
@@ -2044,9 +2113,9 @@ async fn a_revision_spelling_a_server_name_another_way_is_refused_naming_the_rep
 }
 
 /// A Rewind of an item to a revision whose corrections of it spell a digest's name another way
-/// is refused like a revision that holds it, naming the corrections' workspace path, the
-/// server's spelling and the repair: the corrections folder is checked by its workspace paths
-/// before it is written.
+/// is refused naming the corrections' workspace path, the server's spelling, that the revision
+/// being restored holds it, and the repair: the corrections folder is checked by its workspace
+/// paths before it is written.
 #[tokio::test]
 async fn a_rewind_to_respelled_corrections_is_refused_naming_the_repair() -> TestResult {
     let space = Workspace::new().await?;
@@ -2073,9 +2142,9 @@ async fn a_rewind_to_respelled_corrections_is_refused_naming_the_repair() -> Tes
         error.message,
         format!(
             "{respelled} collides with the server's .okf/corrections/{LETTERED}/{digest}.json: \
-             the revision spells a path the server writes another way, which Windows and macOS \
-             would merge with it; the workspace can be restored to a revision from before \
-             {respelled} appeared"
+             the revision being restored spells a path the server writes another way, which \
+             Windows and macOS would merge with it; choose a revision from before {respelled} \
+             appeared"
         )
     );
     Ok(())

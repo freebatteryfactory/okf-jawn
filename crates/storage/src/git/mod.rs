@@ -40,6 +40,7 @@ pub(crate) use read::appearance as appearance_of;
 pub(crate) use read::items as items_of;
 
 use edit::{Staged, apply, maintain};
+use item::Holder;
 use repo::{
     HEAD_REF, Repositories, commit_of, find_on_line, find_trailer, git, head, internal,
     materialize, message_with_trailer, reference_target, revision_of, signature, staged_tree,
@@ -536,7 +537,7 @@ fn stage_and_commit(
     let candidate = || -> Result<(Oid, Vec<Warning>), ApiError> {
         let tree = base.tree().map_err(|error| git(&error))?;
         if !replaced {
-            materialize(repository, &tree, &staged_root)?;
+            materialize(repository, &tree, &staged_root, Holder::Head)?;
         }
         let mut staged = Staged::scan(&staged_root)?;
         apply(repository, &mut staged, write.edits)?;
