@@ -256,6 +256,42 @@ async fn an_unfinished_purge_is_answered_before_the_base_and_its_job_queued_agai
     Ok(())
 }
 
+/// Review N1: the purge asked for again while its job runs, the most common resumption, is
+/// answered, not refused: a running job is not made runnable again (the store would answer
+/// `conflict`, "a running job cannot be retried"), only delivered again, and a delivery of a
+/// running job finds nothing to claim. A purge already recorded `Failed` whose job still runs
+/// (the moment between the handler's `Failed` write and the job's failure) is answered the same
+/// way.
+#[tokio::test]
+async fn a_purge_asked_for_again_while_its_job_runs_is_answered_and_its_job_not_retried()
+-> TestResult {
+    for state in [PurgeState::Running, PurgeState::Failed] {
+        let world = PurgeWorld::new()?;
+        let running = recorded(92, state)?;
+        world
+            .records
+            .put(&tenant()?, running.clone(), JobState::Running)?;
+        let context = admin(OperationName::PurgeWorkspace, Some(62))?;
+        let answered = world
+            .service
+            .purge_workspace(&context, request('f', 62)?)
+            .await?;
+        assert_eq!((answered.id, answered.state), (running.id, state));
+        assert!(
+            !world.records.calls()?.contains(&"retry_job"),
+            "{state:?}: a running job is not retried"
+        );
+        assert_eq!(world.records.retries()?, Vec::new(), "{state:?}");
+        assert_eq!(
+            world.records.job(running.job_id)?.state,
+            JobState::Running,
+            "{state:?}"
+        );
+        assert_delivered(&world, running.job_id, 1)?;
+    }
+    Ok(())
+}
+
 /// Contract ruling 24: a completed purge of the workspace is answered as it is, whatever the
 /// key and the base, and nothing is queued or retried.
 #[tokio::test]
