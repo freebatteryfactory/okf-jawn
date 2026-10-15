@@ -7,10 +7,10 @@
 //!    one batch the store takes whole or not at all (`UploadStore::consume_batch`), so a
 //!    refused batch consumes none. An upload another job took refuses the job for good.
 //! 2. Each card is named `conventions::source_card_name` of its file name, with the
-//!    numbered-suffix rule (`report-pdf-2.md`) against the destination folder at the base
-//!    revision and against the other cards of the job. Both fit one path segment
-//!    (`conventions::fit_segment`): a long name is shortened, never refused for its
-//!    length.
+//!    numbered-suffix rule (`conventions::numbered_source_card_name`: `report-pdf-2.md`, the
+//!    number after the extension marker) against the destination folder at the base revision
+//!    and against the other cards of the job. Both fit one path segment: the stem is
+//!    shortened and the tail kept whole, so a long name is never refused for its length.
 //! 3. All cards are committed first with outcome `pending`, through `portable::ImportCheck`
 //!    (the injected `CandidateCheck`, then OKF lint of the imported files) over every card's
 //!    path. A commit's check reports what that commit wrote: each card's own commit (step 4)
@@ -88,7 +88,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use okf_jawn_contract::common::{PageRange, Warning};
-use okf_jawn_contract::conventions::{fit_segment, source_card_name};
+use okf_jawn_contract::conventions::numbered_source_card_name;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::EventKind;
 use okf_jawn_contract::extraction::{
@@ -1111,22 +1111,17 @@ async fn taken_keys(
 }
 
 /// The card path for `file_name` in `destination`, with the numbered-suffix rule against the
-/// keys already taken; the chosen key is taken too. A numbered name is built with
-/// `conventions::fit_segment`, so `-<n>.md` is never cut and the name fits one path segment.
+/// keys already taken; the chosen key is taken too. A later card is named by
+/// `conventions::numbered_source_card_name`, so its extension marker and number (`-pdf-2.md`)
+/// are never cut and the name fits one path segment.
 fn free_path(
     destination: Option<&WorkspacePath>,
     file_name: &str,
     field: &str,
     taken: &mut BTreeSet<String>,
 ) -> Result<WorkspacePath, ApiError> {
-    let name = source_card_name(file_name);
-    let stem = name.strip_suffix(".md").unwrap_or(&name).to_owned();
     for number in 1_u32.. {
-        let candidate = if number == 1 {
-            name.clone()
-        } else {
-            fit_segment(&stem, &format!("-{number}.md"))
-        };
+        let candidate = numbered_source_card_name(file_name, number);
         let full = match destination {
             Some(folder) => format!("{}/{candidate}", folder.as_str()),
             None => candidate,

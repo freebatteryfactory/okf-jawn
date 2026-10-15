@@ -3,7 +3,8 @@
 
 use check::{TestResult, err_of, some};
 use okf_jawn_contract::conventions::{
-    GetRulesResponse, NamingRules, PreviewNamesRequest, fit_segment, source_card_name,
+    GetRulesResponse, NamingRules, PreviewNamesRequest, fit_segment, numbered_source_card_name,
+    source_card_name,
 };
 use okf_jawn_contract::error::ErrorCode;
 use okf_jawn_contract::identity::{MAX_PATH_SEGMENT_UTF16_UNITS, WorkspacePath};
@@ -236,6 +237,67 @@ fn a_fitted_segment_keeps_its_tail_whole() -> TestResult {
         assert_eq!(name.encode_utf16().count(), MAX_PATH_SEGMENT_UTF16_UNITS);
     }
     assert_eq!(fit_segment("report-pdf", "-2.md"), "report-pdf-2.md");
+    Ok(())
+}
+
+/// Review N6: the extension's tail is kept while it fits beside one stem character, exactly up
+/// to one segment, and one unit more makes the whole name the stem.
+#[test]
+fn an_extension_tail_is_kept_while_it_fits_beside_one_stem_character() -> TestResult {
+    // One stem character and `-<250 e>.md` are 255 units: the tail is kept.
+    let fits = format!("q.{}", "e".repeat(250));
+    let card = source_card_name(&fits);
+    assert_one_segment(&card)?;
+    assert_eq!(card, format!("q-{}.md", "e".repeat(250)));
+    assert_eq!(card.encode_utf16().count(), MAX_PATH_SEGMENT_UTF16_UNITS);
+    // One more unit of extension: the whole name is the stem and `.md` the tail.
+    let over = format!("q.{}", "e".repeat(251));
+    let card = source_card_name(&over);
+    assert_one_segment(&card)?;
+    assert_eq!(card, format!("q.{}.md", "e".repeat(250)));
+    Ok(())
+}
+
+/// Review N8: a numbered card keeps the source-card tail `-<ext>-<n>` whole, so a long name
+/// stays `…-pdf-2.md`, never `…-p-2.md`; a name with no extension keeps `-<n>.md`.
+#[test]
+fn a_numbered_card_keeps_its_extension_marker_and_number_whole() -> TestResult {
+    let long = format!("{}.pdf", "q".repeat(296));
+    assert_eq!(long.chars().count(), 300);
+    assert_eq!(
+        numbered_source_card_name(&long, 1),
+        format!("{}-pdf.md", "q".repeat(248))
+    );
+    let second = numbered_source_card_name(&long, 2);
+    assert_one_segment(&second)?;
+    assert_eq!(second, format!("{}-pdf-2.md", "q".repeat(246)));
+    let bare = "q".repeat(300);
+    assert_eq!(
+        numbered_source_card_name(&bare, 1),
+        format!("{}.md", "q".repeat(252))
+    );
+    let second = numbered_source_card_name(&bare, 2);
+    assert_one_segment(&second)?;
+    assert_eq!(second, format!("{}-2.md", "q".repeat(250)));
+    for (original, number, card) in [
+        ("report.pdf", 2, "report-pdf-2.md"),
+        ("report.pdf", 10, "report-pdf-10.md"),
+        ("Q3 Results.XLSX", 3, "Q3 Results-XLSX-3.md"),
+        ("README", 2, "README-2.md"),
+        (".env", 2, ".env-2.md"),
+        ("report.pdf", 0, "report-pdf.md"),
+    ] {
+        assert_eq!(
+            numbered_source_card_name(original, number),
+            card,
+            "{original} {number}"
+        );
+    }
+    // An extension too long to keep beside a numbered tail: the whole name is the stem.
+    let wide = format!("q.{}", "e".repeat(250));
+    let card = numbered_source_card_name(&wide, 2);
+    assert_one_segment(&card)?;
+    assert_eq!(card, format!("q.{}-2.md", "e".repeat(248)));
     Ok(())
 }
 

@@ -328,8 +328,8 @@ impl NameSelection {
 /// `report-pdf.md`, `v1.2.notes.txt` gives `v1.2.notes-txt.md`). A name with no `.`, or whose
 /// only `.` is its first character, gets `.md` alone (`README` gives `README.md`, `.env` gives
 /// `.env.md`). Case is kept. A collision then takes the numbered-suffix rule
-/// (`report-pdf-2.md`, built with `fit_segment`) and the naming rules apply; the original name
-/// is kept exactly as supplied in the card's application header.
+/// (`numbered_source_card_name`: `report-pdf-2.md`) and the naming rules apply; the original
+/// name is kept exactly as supplied in the card's application header.
 ///
 /// The card's name always fits one path segment (`fit_segment`): a long stem is shortened and
 /// `-<extension>.md` is kept whole. When that tail cannot fit beside a stem of at least one
@@ -337,26 +337,36 @@ impl NameSelection {
 /// an original's name is long.
 #[must_use]
 pub fn source_card_name(original: &str) -> String {
-    if let Some((stem, extension)) = original.rsplit_once('.')
-        && let Some(first) = stem.chars().next()
-    {
-        let tail = format!("-{extension}.md");
-        let first: String = std::iter::once(first).nfc().collect();
-        if units(&first).saturating_add(units_nfc(&tail)) <= MAX_PATH_SEGMENT_UTF16_UNITS {
-            return fit_segment(stem, &tail);
-        }
+    card_name(original, "")
+}
+
+/// The file name of a later source card for an original named `original` in one folder, taken
+/// when the earlier names are: the numbered-suffix rule puts `-<number>` after the extension
+/// marker, so the card still says what it came from (`report.pdf` gives `report-pdf-2.md`,
+/// `README` gives `README-2.md`). That is the source-card tail `-<ext>-<n>` the naming rules
+/// read back.
+///
+/// Like `source_card_name`'s, the name fits one path segment: the stem is shortened and
+/// `-<extension>-<number>.md` is kept whole; when that tail cannot fit beside a stem of at least
+/// one character, the whole name is the stem and the tail is `-<number>.md`. A `number` below 2
+/// names the first card, which carries no number: `source_card_name`'s.
+#[must_use]
+pub fn numbered_source_card_name(original: &str, number: u32) -> String {
+    if number < 2 {
+        return source_card_name(original);
     }
-    fit_segment(original, ".md")
+    card_name(original, &format!("-{number}"))
 }
 
 /// `stem` and `tail` as one path segment of at most `identity::MAX_PATH_SEGMENT_UTF16_UNITS`
 /// UTF-16 code units, measured on their NFC forms.
 ///
-/// `tail` is kept whole (a card's `-pdf.md`, a numbered `-2.md`); `stem` is shortened at a
-/// character boundary, so a surrogate pair is never split, and the trailing dots and spaces a cut
-/// leaves are trimmed, since a segment may not end in either. A stem that fits is kept as it is.
+/// `tail` is kept whole (a card's `-pdf.md`, a numbered card's `-pdf-2.md`); `stem` is
+/// shortened at a character boundary, so a surrogate pair is never split, and the trailing dots
+/// and spaces a cut leaves are trimmed, since a segment may not end in either. A stem that fits
+/// is kept as it is.
 /// The result is in NFC. A tail longer than the bound is the caller's to avoid
-/// (`source_card_name` does).
+/// (`source_card_name` and `numbered_source_card_name` do).
 #[must_use]
 pub fn fit_segment(stem: &str, tail: &str) -> String {
     let stem: String = stem.nfc().collect();
@@ -377,6 +387,21 @@ pub fn fit_segment(stem: &str, tail: &str) -> String {
     }
     let kept = kept.trim_end_matches(['.', ' ']);
     format!("{kept}{tail}")
+}
+
+/// A source card's name with `count` (empty, or `-<n>`) after its extension marker, as
+/// `source_card_name` and `numbered_source_card_name` describe it.
+fn card_name(original: &str, count: &str) -> String {
+    if let Some((stem, extension)) = original.rsplit_once('.')
+        && let Some(first) = stem.chars().next()
+    {
+        let tail = format!("-{extension}{count}.md");
+        let first: String = std::iter::once(first).nfc().collect();
+        if units(&first).saturating_add(units_nfc(&tail)) <= MAX_PATH_SEGMENT_UTF16_UNITS {
+            return fit_segment(stem, &tail);
+        }
+    }
+    fit_segment(original, &format!("{count}.md"))
 }
 
 /// The UTF-16 code units of `text`.

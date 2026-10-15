@@ -1805,13 +1805,42 @@ mod job_handler {
             pending,
             [
                 &format!("{}-pdf.md", "q".repeat(248)),
-                // The numbered name keeps `-2.md` whole and cuts the card's own stem to fit.
-                &format!("{}-p-2.md", "q".repeat(248))
+                // The numbered name keeps the source-card tail `-pdf-2` whole and cuts the stem
+                // before it to fit (review N8).
+                &format!("{}-pdf-2.md", "q".repeat(246))
             ]
         );
         for name in &names {
             assert!(name.encode_utf16().count() <= 255, "{name}");
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_second_file_of_a_long_name_with_no_extension_is_numbered_within_one_segment()
+    -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let long = "q".repeat(300);
+        let first = upload(&world, 160, &long, b"%PDF first")?;
+        let second = upload(&world, 161, &long, b"%PDF second")?;
+        let id = job(
+            &world,
+            157,
+            workspace_scope()?,
+            import_spec(vec![first, second], false)?,
+        )?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let names = card_names(&world)?;
+        let pending: Vec<&String> = names.iter().take(2).collect();
+        assert_eq!(
+            pending,
+            [
+                &format!("{}.md", "q".repeat(252)),
+                &format!("{}-2.md", "q".repeat(250))
+            ]
+        );
         Ok(())
     }
 
