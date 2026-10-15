@@ -235,6 +235,104 @@ describe('the uploads the service holds', () => {
     expect(second).toEqual(first);
   });
 
+  describe('a slot this page’s list lets go, listed before it was opened', () => {
+    /** Choose files with the page's own picker, and press Upload. */
+    const uploadNow = (files: File[]) => {
+      const opened = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(function open(
+        this: HTMLInputElement,
+      ) {
+        Object.defineProperty(this, 'files', { configurable: true, value: files });
+        fireEvent.change(this);
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
+      opened.mockRestore();
+      fireEvent.click(screen.getByRole('button', { name: /^Upload \d+ files?$/ }));
+    };
+    /** A turn of the event loop: a request started by what happened has been sent after it. */
+    const turn = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+    const uploadRow = (name: string) =>
+      within(screen.getByRole('list', { name: /^Files to import/ }))
+        .getAllByRole('listitem')
+        .find((row) => row.textContent?.startsWith(name));
+
+    it('lists a partly sent upload removed from the page’s list, at once, and it can be discarded', async () => {
+      const service = uploadService();
+      // The service keeps two of the six bytes, and says so: the slot is not finished.
+      service.script.put.push((transfer) => {
+        const slot = service.slots.find((each) => transfer.path.includes(each.id));
+        slot?.parts.push(transfer.bytes.slice(0, 2));
+        return ok({
+          id: slot?.id,
+          workspace_id: WS,
+          upload_path: transfer.path,
+          received_bytes: '2',
+          complete: false,
+        });
+      });
+      const { api } = await openWith([older], {}, service);
+      // The service's lists are read before the upload is opened.
+      await within(section()).findByRole('list', { name: /^Uploaded and not imported/ });
+      expect(within(section()).getByText('None.')).toBeDefined();
+      const listed = api.callsTo(LIST_UPLOADS).length;
+      uploadNow([fileOf('part.txt', 'abcdef')]);
+      await waitFor(() =>
+        expect(uploadRow('part.txt')?.textContent).toContain(
+          'The service did not keep the whole file.',
+        ),
+      );
+      const part = service.slots.find((slot) => slot.filename === 'part.txt');
+      expect(part?.complete).toBe(false);
+      // Opening and filling the slot asked nothing of the lists: the page's list holds it.
+      expect(api.callsTo(LIST_UPLOADS)).toHaveLength(listed);
+      fireEvent.click(screen.getByRole('button', { name: 'Remove part.txt' }));
+      expect(screen.getByText(/“part.txt” was removed from the list\./)).toBeDefined();
+      // Both lists are asked again at once, with no reload, and the slot is listed.
+      await turn();
+      expect(api.callsTo(LIST_UPLOADS)).toHaveLength(listed + 2);
+      const row = await within(section()).findByRole('button', { name: 'Discard “part.txt”' });
+      expect(within(unfinishedList()).getByRole('listitem').textContent).toContain(
+        '2 bytes of 6 bytes sent',
+      );
+      fireEvent.click(row);
+      fireEvent.click(within(section()).getByRole('button', { name: 'Discard it' }));
+      await waitFor(() =>
+        expect(within(section()).getByRole('status').textContent).toBe(
+          'The upload of “part.txt” was discarded: the service no longer holds it.',
+        ),
+      );
+      expect(api.callsTo(DISCARD_UPLOAD).map((body) => body.upload_id)).toEqual([part?.id]);
+      expect(service.slots.map((slot) => slot.id)).toEqual([older.id]);
+      expect(api.violations).toEqual([]);
+    });
+
+    it('lists a slot the page left for a new one, as the file’s row says', async () => {
+      const service = uploadService();
+      // The finish is refused: the slot cannot take this file, and the next try opens another.
+      service.script.complete.push(() =>
+        fail(409, 'conflict', 'the digest differs from the one announced'),
+      );
+      const { api } = await openWith([], {}, service);
+      await within(section()).findByRole('heading', { name: 'Not finished (0)' });
+      const listed = api.callsTo(LIST_UPLOADS).length;
+      uploadNow([fileOf('left.txt', 'abc')]);
+      await waitFor(() =>
+        expect(uploadRow('left.txt')?.textContent).toContain(
+          'What was sent of it before stays with the service: it is listed under “Uploads the service holds”',
+        ),
+      );
+      // The slot was let go in the change that says so: both lists were asked again then.
+      await turn();
+      expect(api.callsTo(LIST_UPLOADS)).toHaveLength(listed + 2);
+      // The file is still on the page's list; the slot it left is the service's, and listed.
+      await waitFor(() =>
+        expect(within(unfinishedList()).getByRole('listitem').textContent).toContain(
+          '3 bytes of 3 bytes sent',
+        ),
+      );
+      expect(within(section()).getByRole('button', { name: 'Discard “left.txt”' })).toBeDefined();
+    });
+  });
+
   it('reads "not available in this build" where the listing is not built, never "none"', async () => {
     await openWith([], { [LIST_UPLOADS]: () => fail(501, 'not_implemented', 'not built') });
     expect(
