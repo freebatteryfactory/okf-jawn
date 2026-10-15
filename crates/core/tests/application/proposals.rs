@@ -1710,6 +1710,46 @@ async fn a_resumed_decline_after_another_persons_decline_answers_conflict() -> T
     Ok(())
 }
 
+/// Review R1-N2: of two declines by different mutations the second is refused, and a retry of
+/// the first answers its result again (the declined proposal, its one event), because the store
+/// takes the declined record as a retry only under the mutation that wrote it.
+#[tokio::test]
+async fn of_two_declines_the_second_is_refused_and_a_retry_of_the_first_answers_it() -> TestResult {
+    let world = proposal_world()?;
+    let proposal = open(&world, OPENED, vec![create("notes/new.md")?]).await?;
+    let first = decline(&world, DECLINING).await?;
+    let second = alice(
+        OperationName::DeclineProposal,
+        Some(mutation(DECLINING.saturating_add(1))),
+    )?;
+    for context in [second.clone(), resumed(second)] {
+        let error = err_of(
+            world
+                .service
+                .decline_proposal(&context, decline_request(&proposal)?)
+                .await,
+        )?;
+        assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    }
+    let again = world
+        .service
+        .decline_proposal(
+            &resumed(alice(
+                OperationName::DeclineProposal,
+                Some(mutation(DECLINING)),
+            )?),
+            decline_request(&proposal)?,
+        )
+        .await?;
+    assert_eq!(same(&again)?, same(&first)?);
+    assert_eq!(world.proposals.writes()?, [ProposalStatus::Declined]);
+    assert_eq!(
+        proposal_events(&world, proposal.id)?,
+        [Some(mutation(OPENED)), Some(mutation(DECLINING))]
+    );
+    Ok(())
+}
+
 /// The decline's stated limit (review probe P5, N4): a decline that failed after its reason
 /// comment and before its compare-and-set, retried after an acceptance landed, answers
 /// `conflict`, and its reason stays on the accepted proposal; no decline event is appended.
