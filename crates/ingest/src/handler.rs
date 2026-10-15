@@ -579,9 +579,10 @@ impl IngestHandler {
             Ok(done) => return Ok(done),
             Err(error) => error,
         };
+        // The record as read, which holds no report: a report is written only with `Completed`,
+        // which returned above, and `remove` sets one only on its own copy.
         purge.state = PurgeState::Failed;
         purge.error = Some(error.clone());
-        purge.report = None;
         purge.completed_at = None;
         match records.update_purge(tenant, purge).await {
             Ok(_failed) => Err(error),
