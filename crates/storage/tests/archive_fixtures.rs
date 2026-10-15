@@ -111,6 +111,8 @@ struct Archived {
 const OUT: &str = "OKF_JAWN_FIXTURE_OUT";
 /// The directory of the fixtures the last build at records schema 2 wrote.
 const SCHEMA_2: &str = "records-schema-2";
+/// The directory of the fixtures the last build at records schema 3 wrote.
+const SCHEMA_3: &str = "records-schema-3";
 /// The tenant whose blank workspace the import test fills.
 const IMPORT_TENANT: &str = "import-tenant";
 /// The tenant of everything in the fixtures.
@@ -1198,14 +1200,54 @@ fn a_missing_archive_fixture_is_reported_by_name() -> TestResult {
     Ok(())
 }
 
+/// The fixture of the last build at records schema 3 is what its README says: records at
+/// `user_version` 3, with the table of kept warnings.
+#[test]
+fn the_schema_3_workspace_archive_holds_records_at_schema_3() -> TestResult {
+    let archived = archived(SCHEMA_3)?;
+    assert_eq!(archived_schema(&archived.workspace)?, (3, 1));
+    Ok(())
+}
+
 /// The archives the build at records schema 2 wrote restore by replacement into an empty data
 /// directory on this build: the installation archive, then the workspace archive of its
 /// tenant, with everything they hold.
 #[tokio::test]
 async fn the_schema_2_archives_restore_by_replacement_into_an_empty_directory() -> TestResult {
-    let archived = archived(SCHEMA_2)?;
+    restores_by_replacement(SCHEMA_2, 2).await
+}
+
+/// The archives the build at records schema 3 wrote restore by replacement, as schema 2's do.
+#[tokio::test]
+async fn the_schema_3_archives_restore_by_replacement_into_an_empty_directory() -> TestResult {
+    restores_by_replacement(SCHEMA_3, 3).await
+}
+
+/// The workspace archive the build at records schema 2 wrote restores by import into a blank
+/// workspace of another tenant, in another data directory, on this build. An import carries
+/// the content and the records about it; it gives a draft back only to an editor it is told
+/// of, and carries no job.
+#[tokio::test]
+async fn the_schema_2_workspace_archive_restores_by_import_into_a_blank_workspace() -> TestResult {
+    restores_by_import(SCHEMA_2).await
+}
+
+/// The workspace archive the build at records schema 3 wrote restores by import, as schema 2's
+/// does.
+#[tokio::test]
+async fn the_schema_3_workspace_archive_restores_by_import_into_a_blank_workspace() -> TestResult {
+    restores_by_import(SCHEMA_3).await
+}
+
+/// The archives of `schema`, written at records `user_version` `version`, restore by
+/// replacement into an empty data directory on this build: the installation archive, then the
+/// workspace archive of its tenant, with everything they hold.
+async fn restores_by_replacement(schema: &str, version: i64) -> TestResult {
+    let archived = archived(schema)?;
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;
+    // This build's schema: a new data directory is created at it.
+    let latest = count(&storage.data().records_path(), "PRAGMA user_version")?;
     let reports = storage
         .backups()
         .restore_replacement(
@@ -1235,9 +1277,11 @@ async fn the_schema_2_archives_restore_by_replacement_into_an_empty_directory() 
     assert_replaced_records(&storage, scope).await?;
     assert_installation(&storage, &archived).await?;
     let live = storage.data().records_path();
-    assert!(
-        count(&live, "PRAGMA user_version")? >= 3,
-        "the restored records are at this build's schema, past the archive's 2"
+    assert!(latest >= version, "this build reads schema {version}");
+    assert_eq!(
+        count(&live, "PRAGMA user_version")?,
+        latest,
+        "the restored records are at this build's schema, whatever the archive's ({version})"
     );
     assert_eq!(
         count(&live, "SELECT count(*) FROM commit_warnings")?,
@@ -1247,13 +1291,12 @@ async fn the_schema_2_archives_restore_by_replacement_into_an_empty_directory() 
     Ok(())
 }
 
-/// The workspace archive the build at records schema 2 wrote restores by import into a blank
-/// workspace of another tenant, in another data directory, on this build. An import carries
-/// the content and the records about it; it gives a draft back only to an editor it is told
-/// of, and carries no job.
-#[tokio::test]
-async fn the_schema_2_workspace_archive_restores_by_import_into_a_blank_workspace() -> TestResult {
-    let archived = archived(SCHEMA_2)?;
+/// The workspace archive of `schema` restores by import into a blank workspace of another
+/// tenant, in another data directory, on this build. An import carries the content and the
+/// records about it; it gives a draft back only to an editor it is told of, and carries no
+/// job.
+async fn restores_by_import(schema: &str) -> TestResult {
+    let archived = archived(schema)?;
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;
     let (target, _) = create(&storage, IMPORT_TENANT, 80, "Imported", "").await?;
