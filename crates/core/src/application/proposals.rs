@@ -85,14 +85,17 @@
 //! Declining (`decline_proposal`) needs no confirmation (the contract has none). The proposal must
 //! be `open`; the request's reason is recorded as a comment by the person who declines, under the
 //! decline's own mutation, before the status becomes `declined` (a compare-and-set from `open`),
-//! then a `proposal_updated` event; the answer is the declined proposal. The comment comes first
-//! because it is the mark of this decline: an already `declined` proposal answers the stored
-//! proposal when the comment of this mutation (`derive_comment_id`) is among its comments, and
-//! `conflict` otherwise. The candidate reference stays: it is history. Known limit: a change of
-//! the status by someone else between this decline's check and its compare-and-set (an accept
-//! that lands then, or another person's decline: the store takes an identical change as a retry
-//! only from the mutation that wrote it) leaves the reason comment on that proposal, and the
-//! decline answers the compare-and-set's `conflict`.
+//! then a `proposal_updated` event; the answer is the declined proposal. A resumed attempt that
+//! finds the proposal `declined` writes the declined record again under its mutation, which the
+//! store takes as a retry only from the mutation that wrote it: then this mutation declined it,
+//! and the attempt appends its event and answers the declined proposal; otherwise it answers
+//! `conflict`, as a first attempt that finds the proposal `declined` does. The comment comes
+//! first so that a declined status always has its reason: a resumed attempt does not write the
+//! comment again. The candidate reference stays: it is history. Known limit: when the status
+//! changes after this decline's check and before its compare-and-set (another person's accept
+//! or decline lands then, also between two attempts of this decline), the decline answers
+//! `conflict`, on its first attempt and on every retry, and its reason comment stays on that
+//! proposal.
 //!
 //! Comments (`add_comment`) are allowed on a proposal in any status. A comment's source is
 //! checked as every citation is, in its own workspace (`sources::checked_citation`), and kept
@@ -137,12 +140,9 @@ use crate::items::{refuse_header_change, refuse_supplied_header};
 use crate::mutations::request_digest;
 use crate::proposals::ProposalFilter;
 use crate::storage::{
-    CandidateChanges, ChangeContext, Committed, Page, Promotion, Provenance, StorageScope,
-    TreeEdit, derive_comment_id, derive_item_id, derive_proposal_id,
+    CandidateChanges, ChangeContext, Committed, Promotion, Provenance, StorageScope, TreeEdit,
+    derive_comment_id, derive_item_id, derive_proposal_id,
 };
-
-/// How many comments one page of the search for a decline's own comment asks for.
-const COMMENT_SEARCH_PAGE: u16 = 200;
 
 /// Open a proposal: a candidate commit off the accepted line and its row, then a
 /// `proposal_updated` event. See the module header for every rule.
@@ -392,15 +392,10 @@ pub(super) async fn decline_proposal(
     let proposal = ports.proposals.get(&scope, request.proposal_id).await?;
     match proposal.status {
         ProposalStatus::Open => {}
-        ProposalStatus::Declined
-            if context.attempt == Attempt::Resumed
-                && has_comment(service, &scope, proposal.id, &derive_comment_id(mutation))
-                    .await? =>
-        {
-            proposal_updated(service, &scope, mutation, proposal.id).await?;
-            return Ok(proposal);
+        ProposalStatus::Declined if context.attempt == Attempt::Resumed => {
+            return declined_again(service, &scope, mutation, proposal).await;
         }
-        ProposalStatus::Declined => return Err(conflict("this proposal was already declined")),
+        ProposalStatus::Declined => return Err(already_declined()),
         ProposalStatus::Accepted => return Err(conflict("this proposal was accepted")),
         ProposalStatus::Conflict => {
             return Err(conflict(
@@ -796,38 +791,36 @@ fn stale_refusal(expected_head: &Revision, head: Revision) -> ApiError {
     }
 }
 
-/// Whether the proposal's discussion holds the comment `id`, read page by page, oldest first.
+/// A resumed decline of a proposal read `declined`: the declined record is written again under
+/// this mutation, which the store takes as a retry only from the mutation that wrote it. Taken,
+/// this mutation declined it, so the attempt appends its `proposal_updated` event and answers
+/// the declined proposal; refused, another mutation declined it, and the answer is `conflict`.
 ///
 /// # Errors
-/// Returns any port error.
-async fn has_comment(
+/// Returns `Conflict` when another mutation declined the proposal, or any port error.
+async fn declined_again(
     service: &ApplicationService,
     scope: &StorageScope,
-    proposal: ProposalId,
-    id: &str,
-) -> Result<bool, ApiError> {
-    let mut cursor = None;
-    loop {
-        let page = service
-            .ports()
-            .proposals
-            .list_comments(
-                scope,
-                proposal,
-                Page {
-                    cursor,
-                    limit: COMMENT_SEARCH_PAGE,
-                },
-            )
-            .await?;
-        if page.items.iter().any(|comment| comment.id == id) {
-            return Ok(true);
-        }
-        match page.next_cursor {
-            Some(next) => cursor = Some(next),
-            None => return Ok(false),
-        }
-    }
+    mutation: MutationId,
+    proposal: Proposal,
+) -> Result<Proposal, ApiError> {
+    let rewritten = service
+        .ports()
+        .proposals
+        .update(scope, mutation, proposal, ProposalStatus::Open)
+        .await;
+    let declined = match rewritten {
+        Ok(declined) => declined,
+        Err(error) if error.code == ErrorCode::Conflict => return Err(already_declined()),
+        Err(error) => return Err(error),
+    };
+    proposal_updated(service, scope, mutation, declined.id).await?;
+    Ok(declined)
+}
+
+/// The refusal of a decline of a proposal another mutation declined.
+fn already_declined() -> ApiError {
+    conflict("this proposal was already declined")
 }
 
 /// The storage scope of a workspace dispatch authorized for this request (a comment's source).

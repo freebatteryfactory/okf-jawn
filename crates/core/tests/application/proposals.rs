@@ -1625,10 +1625,11 @@ async fn a_resumed_decline_finishes_after_a_failure_at_each_step() -> TestResult
     Ok(())
 }
 
-/// A resumed decline finds its own reason comment past the first page of its search (review
-/// N6): 200 earlier comments, one whole page of the search, come before it.
+/// A resumed decline with 200 earlier comments on the proposal answers its own decline: it is
+/// told by the store's writer rule, not by a search of the discussion (review N6 pinned the
+/// search this replaced, `has_comment`, past its first page of 200).
 #[tokio::test]
-async fn a_resumed_decline_finds_its_reason_past_the_first_page_of_comments() -> TestResult {
+async fn a_resumed_decline_answers_its_own_decline_after_many_earlier_comments() -> TestResult {
     let world = proposal_world()?;
     let proposal = open(&world, OPENED, vec![create("notes/new.md")?]).await?;
     for number in 0..200_u128 {
@@ -1668,6 +1669,44 @@ async fn a_resumed_decline_finds_its_reason_past_the_first_page_of_comments() ->
         proposal_events(&world, proposal.id)?,
         [Some(mutation(OPENED)), Some(mutation(DECLINING))]
     );
+    Ok(())
+}
+
+/// Review probe P8 (R1-N1): a decline whose first attempt wrote its reason comment and failed
+/// before its status change, retried after another person's decline landed, answers `conflict`
+/// and appends no event: the store refuses its declined record, which another mutation wrote.
+/// One `declined` write is recorded, the other decline's.
+#[tokio::test]
+async fn a_resumed_decline_after_another_persons_decline_answers_conflict() -> TestResult {
+    let world = proposal_world()?;
+    let proposal = open(&world, OPENED, vec![create("notes/new.md")?]).await?;
+    world.proposals.fail_next(ProposalCall::Update)?;
+    let late = alice(
+        OperationName::DeclineProposal,
+        Some(mutation(DECLINING.saturating_add(1))),
+    )?;
+    err_of(
+        world
+            .service
+            .decline_proposal(&late, decline_request(&proposal)?)
+            .await,
+    )?;
+    assert_eq!(status(&world, proposal.id)?, ProposalStatus::Open);
+    decline(&world, DECLINING).await?;
+    let error = err_of(
+        world
+            .service
+            .decline_proposal(&resumed(late), decline_request(&proposal)?)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    assert_eq!(world.proposals.writes()?, [ProposalStatus::Declined]);
+    assert_eq!(
+        proposal_events(&world, proposal.id)?,
+        [Some(mutation(OPENED)), Some(mutation(DECLINING))]
+    );
+    // Both reasons stay: the late decline's comment is the stated limit.
+    assert_eq!(world.proposals.comments()?.len(), 2);
     Ok(())
 }
 
