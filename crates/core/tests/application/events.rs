@@ -6,8 +6,8 @@ use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
 use okf_jawn_contract::common::PageRequest;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::{
-    EventKind, GetReceiptRequest, ListEventsRequest, ListEventsResponse, ListTenantEventsRequest,
-    Receipt, ReceiptAudience,
+    EventActor, EventKind, GetReceiptRequest, ListEventsRequest, ListEventsResponse,
+    ListTenantEventsRequest, Receipt, ReceiptAudience,
 };
 use okf_jawn_contract::identity::{ItemId, MutationId, PurgeId, ReceiptId, Revision, WorkspaceId};
 use okf_jawn_contract::metadata::OperationName;
@@ -222,6 +222,31 @@ async fn a_citation_storage_already_scrubbed_is_shown_as_it_is() -> TestResult {
     let shown = some(read.sources.first(), "the citation")?;
     assert_eq!(shown.revision, revision('b')?);
     assert_eq!(read.invalidated_by, Some(PurgeId(Uuid::from_u128(PURGE))));
+    Ok(())
+}
+
+/// A receipt that already names the purge that invalidated it keeps that purge when a later
+/// purge invalidates another of its citations on read: the stored `invalidated_by` is never
+/// overwritten.
+#[tokio::test]
+async fn a_read_time_invalidation_never_overwrites_the_receipts_stored_invalidated_by() -> TestResult
+{
+    let tenancy = Tenancy::new()?;
+    let earlier = PurgeId(Uuid::from_u128(7));
+    tenancy.world.records.put_mapping(
+        revision('b')?,
+        RevisionMapping {
+            purge_id: PurgeId(Uuid::from_u128(PURGE)),
+            replacement: None,
+        },
+    )?;
+    let mut stored = receipt(vec![source(scope()?.workspace_id, 'b')?])?;
+    stored.invalidated_by = Some(earlier);
+    tenancy.jobs.put_receipt(&scope()?, stored)?;
+    let read = read_receipt(&tenancy).await??;
+    let shown = some(read.sources.first(), "the citation")?;
+    assert_eq!(shown.selection, Selection::All, "invalidated on read");
+    assert_eq!(read.invalidated_by, Some(earlier));
     Ok(())
 }
 
@@ -562,12 +587,24 @@ async fn record_sign_in_appends_signed_in_to_the_tenants_log() -> TestResult {
     let (log, under, event) = some(appended.first(), "the sign-in")?;
     assert_eq!(*log, EventScope::Tenant(owner.tenant_id.clone()));
     assert_eq!(*under, None, "every sign-in is its own event");
-    assert_eq!(*event, NewEvent::signed_in(&owner));
-    assert_eq!(event.kind, EventKind::SignedIn);
-    let actor = some(event.actor.as_ref(), "the actor")?;
-    assert_eq!(actor.subject, ALICE);
-    assert_eq!(actor.route, AccessRoute::LocalOwner);
-    assert_eq!(actor.client_id.as_deref(), Some("browser"));
+    // Every field, written out: the event names its actor and nothing else (the contract keeps
+    // `operation` for `permission_denied`).
+    let expected = NewEvent {
+        kind: EventKind::SignedIn,
+        revision: None,
+        item_id: None,
+        job_id: None,
+        connector_id: None,
+        actor: Some(EventActor {
+            subject: ALICE.to_owned(),
+            route: AccessRoute::LocalOwner,
+            client_id: Some("browser".to_owned()),
+        }),
+        operation: None,
+        proposal_id: None,
+        count: None,
+    };
+    assert_eq!(*event, expected);
     Ok(())
 }
 
