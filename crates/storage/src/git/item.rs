@@ -239,11 +239,14 @@ impl Respelled {
     }
 
     /// What is wrong with the two spellings, after "the revision": a path the server writes
-    /// spelled another way, two spellings that differ only in letter case (Windows and macOS
-    /// keep them as one), or two names that differ in how their characters are encoded, Unicode
-    /// normalization (only macOS keeps those as one), alone or with letter case.
+    /// spelled another way (one that differs from it in how its characters are encoded only
+    /// macOS would merge with it), two spellings that differ only in letter case (Windows and
+    /// macOS keep them as one), or two names that differ in how their characters are encoded,
+    /// Unicode normalization (only macOS keeps those as one), alone or with letter case.
     fn what(&self) -> &'static str {
-        if self.server {
+        if self.server && self.encoded() {
+            "spells a path the server writes another way, which macOS would merge with it"
+        } else if self.server {
             "spells a path the server writes another way, which Windows and macOS would merge with \
              it"
         } else if !self.encoded() {
@@ -258,9 +261,12 @@ impl Respelled {
     }
 
     /// Whether the two spellings differ beyond letter case: in how their characters are
-    /// encoded, which only normalization makes one (they share a collision key).
+    /// encoded, which only normalization makes one (they share a collision key). That is so
+    /// when either is not in NFC (`nfc`), even where lower-casing alone would make them one:
+    /// the Kelvin sign (U+212A) lower-cases to `k` but is `K` in NFC, and NTFS keeps it apart
+    /// from both, so `\u{212A}` beside `k` is not a pair that Windows keeps as one.
     fn encoded(&self) -> bool {
-        self.path.to_lowercase() != self.other.to_lowercase()
+        nfc(&self.path) != self.path || nfc(&self.other) != self.other
     }
 }
 

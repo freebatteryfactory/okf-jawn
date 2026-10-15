@@ -2106,6 +2106,70 @@ async fn a_tree_with_two_normalizations_of_a_name_refuses_every_commit() -> Test
     Ok(())
 }
 
+/// The Kelvin sign (U+212A) lower-cases to `k`, but NFC makes it `K`: a name holding it is not
+/// in NFC, so beside `k` or `K` it is a pair that differs in how its characters are encoded,
+/// which macOS keeps as one and NTFS keeps apart, never a pair Windows keeps as one. Beside `k`
+/// the two differ in letter case too; beside `K`, only in encoding. Alone, as the `k` of
+/// `.okf`, it spells a name the server writes in a way only macOS would merge with it. Each
+/// refuses every commit naming both spellings escaped, and a whole-tree Rewind repairs it.
+#[tokio::test]
+async fn a_name_with_the_kelvin_sign_differs_in_encoding_not_only_in_letter_case() -> TestResult {
+    let then = "the workspace can be restored to a revision from before";
+    for (written, message) in [
+        (
+            ["notes/\u{212A}.txt", "notes/k.txt"],
+            format!(
+                "notes/\\u{{212a}}.txt collides with notes/k.txt: the revision holds two names \
+                 that differ in letter case and in how their characters are encoded, which \
+                 macOS keeps as one; {then} they appeared"
+            ),
+        ),
+        (
+            ["notes/\u{212A}.txt", "notes/K.txt"],
+            format!(
+                "notes/\\u{{212a}}.txt collides with notes/K.txt: the revision holds two names \
+                 that differ only in how their characters are encoded, which macOS keeps as one; \
+                 {then} they appeared"
+            ),
+        ),
+        (
+            [".o\u{212A}f/x.json", "notes/b.txt"],
+            format!(
+                ".o\\u{{212a}}f collides with the server's .okf: the revision spells a path the \
+                 server writes another way, which macOS would merge with it; {then} \
+                 .o\\u{{212a}}f appeared"
+            ),
+        ),
+    ] {
+        let space = Workspace::new().await?;
+        let seeded = space
+            .commit(2, &space.initial, vec![note(10, "notes/a.md", "Ten.")?])
+            .await?;
+        let [first, second] = written;
+        let spelled = space.raw(
+            900,
+            &[],
+            &[(first, b"one".to_vec()), (second, b"two".to_vec())],
+        )?;
+        let error = space
+            .refused(3, &spelled, vec![edited(10, "Changed.")?])
+            .await?;
+        assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+        assert_eq!(error.message, message);
+        let repaired = space
+            .commit(
+                4,
+                &spelled,
+                vec![TreeEdit::RestoreWorkspace {
+                    from: seeded.clone(),
+                }],
+            )
+            .await?;
+        assert_eq!(space.files(&repaired)?, space.files(&seeded)?);
+    }
+    Ok(())
+}
+
 /// A whole-tree Rewind to a revision that holds two spellings of one path, from a head that
 /// holds neither, is refused saying that the revision being restored holds them and that an
 /// earlier one can be chosen, not that the workspace's own revision does.
