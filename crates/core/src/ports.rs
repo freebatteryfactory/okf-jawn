@@ -28,10 +28,11 @@ macro_rules! application_port {
             /// Dispatch asks this once, after authorization and before the mutation ledger, for
             /// a mutation that writes a workspace and is not in
             /// `operations::ALLOWED_WHILE_ARCHIVED`, and refuses it while the answer is `Some`
-            /// (contract ruling 25). `ApplicationService` reads its workspace catalog. The
-            /// provided answer, `None`, is for an implementation that keeps no workspaces of its
-            /// own, such as a binding's scripted test double: such an implementation applies no
-            /// archive rule, so production composes `ApplicationService`, which overrides it.
+            /// (contract ruling 25). `ApplicationService` reads its workspace catalog. Every
+            /// implementation in the crates answers it explicitly. The provided answer, `None`,
+            /// which applies no archive rule, is kept only for the bindings' shared response
+            /// fixture at the repository root, which this lane may not edit; it goes once that
+            /// fixture answers too.
             ///
             /// # Errors
             /// Returns the catalog's error: `NotFound` for a workspace the tenant does not hold.

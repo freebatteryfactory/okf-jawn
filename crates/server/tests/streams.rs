@@ -21,7 +21,7 @@ use okf_jawn_contract::import::Upload;
 use okf_jawn_core::context::OperationContext;
 use okf_jawn_core::credentials::{CredentialStore, SessionRecord};
 use okf_jawn_core::ports::{Application, PortFuture};
-use okf_jawn_core::storage::ByteReader;
+use okf_jawn_core::storage::{ByteReader, StorageScope};
 use okf_jawn_server::app::{ServiceParts, service};
 use okf_jawn_server::cookies::CrateCookies;
 use okf_jawn_server::events::{EventStreams, last_event_id};
@@ -54,6 +54,13 @@ macro_rules! scripted_operations {
                         .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))
                 })
             })*
+
+            /// Refused like every operation but `list_events`: no mutation is scripted, and a
+            /// read never asks it.
+            fn archived_at<'a>(&'a self, _scope: &'a StorageScope)
+                -> PortFuture<'a, Option<Timestamp>> {
+                Box::pin(async { Err(ApiError::new(ErrorCode::NotImplemented, "not scripted")) })
+            }
         }
     };
 }
