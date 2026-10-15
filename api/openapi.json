@@ -9937,13 +9937,13 @@
         "tags": [
           "conventions"
         ],
-        "x-agent-alias": "",
-        "x-agent-tool": false,
+        "x-agent-alias": "rules",
+        "x-agent-tool": true,
         "x-allowed-while-archived": true,
         "x-cli-alias": null,
         "x-human-session-only": false,
         "x-local-owner-only": false,
-        "x-mcp-tool": false,
+        "x-mcp-tool": true,
         "x-operator-label": "Conventions",
         "x-permission": "read",
         "x-starts-job": null,
@@ -9953,7 +9953,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "x-tool-visibility": "",
+        "x-tool-visibility": "model",
         "x-ui-resource": null
       }
     },

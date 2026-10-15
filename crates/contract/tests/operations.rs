@@ -96,6 +96,7 @@ const MODEL_TOOLS: &[&str] = &[
     "diff",
     "blame",
     "propose",
+    "rules",
     "present",
     "catalog",
 ];
@@ -126,7 +127,7 @@ fn declared(id: &str) -> Result<OperationInfo, Box<dyn Error>> {
 }
 
 #[test]
-fn the_surface_is_83_operations_12_model_tools_and_1_app_tool() {
+fn the_surface_is_83_operations_13_model_tools_and_1_app_tool() {
     let table = operations();
     assert_eq!(table.len(), 83);
     let model: Vec<&str> = table
@@ -280,6 +281,13 @@ fn no_new_operation_is_an_agent_tool() -> Result<(), Box<dyn Error>> {
         );
         assert_eq!(operation.permission, permission, "{id}");
     }
+    // The one existing row the owner admitted as a model tool (2026-10-14; SPEC section 9:
+    // "Model tools cover ... naming rules"): agents read the rules their paths are judged by.
+    let rules = declared("get_rules")?;
+    assert_eq!(
+        (rules.alias, rules.visibility, rules.permission),
+        ("rules", "model", Permission::Read)
+    );
     Ok(())
 }
 

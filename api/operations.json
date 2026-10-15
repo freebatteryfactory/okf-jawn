@@ -1071,7 +1071,7 @@
     "visibility": ""
   },
   {
-    "alias": "",
+    "alias": "rules",
     "allowed_while_archived": true,
     "description": "Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with `set_rules`.",
     "destructive": false,
@@ -1085,7 +1085,7 @@
     "starts_job": null,
     "success_status": 200,
     "ui": "",
-    "visibility": ""
+    "visibility": "model"
   },
   {
     "alias": "",

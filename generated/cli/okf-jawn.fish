@@ -112,6 +112,7 @@ complete -c okf-jawn -n "__fish_okf_jawn_needs_command" -f -a "cancel_job" -d 'C
 complete -c okf-jawn -n "__fish_okf_jawn_needs_command" -f -a "redigest_item" -d 'Re-run extraction with declared settings; preserve prior digests and separate corrections.'
 complete -c okf-jawn -n "__fish_okf_jawn_needs_command" -f -a "correct_digest" -d 'Save a correction separately from generated extraction.'
 complete -c okf-jawn -n "__fish_okf_jawn_needs_command" -f -a "get_rules" -d 'Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with `set_rules`.'
+complete -c okf-jawn -n "__fish_okf_jawn_needs_command" -f -a "rules" -d 'Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with `set_rules`.'
 complete -c okf-jawn -n "__fish_okf_jawn_needs_command" -f -a "set_rules" -d 'Save explicit rules as versioned context.'
 complete -c okf-jawn -n "__fish_okf_jawn_needs_command" -f -a "preview_names" -d 'Compute before and after naming changes without mutating content.'
 complete -c okf-jawn -n "__fish_okf_jawn_needs_command" -f -a "apply_names" -d 'Apply the checked preview and rewrite references in one versioned action.'
@@ -391,6 +392,9 @@ complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand correct_digest" -s h -
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_rules" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_rules" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand get_rules" -s h -l help -d 'Print help'
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand rules" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand rules" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
+complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand rules" -s h -l help -d 'Print help'
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand set_rules" -l json -d 'The operation\'s JSON input: inline, @file, or - for standard input' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand set_rules" -l server -d 'The service address: HTTPS, or HTTP for a loopback address' -r
 complete -c okf-jawn -n "__fish_okf_jawn_using_subcommand set_rules" -s h -l help -d 'Print help'

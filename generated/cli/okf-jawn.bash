@@ -298,6 +298,9 @@ _okf__jawn() {
             okf__jawn,rewind)
                 cmd="okf__jawn__subcmd__restore_items"
                 ;;
+            okf__jawn,rules)
+                cmd="okf__jawn__subcmd__get_rules"
+                ;;
             okf__jawn,save_draft)
                 cmd="okf__jawn__subcmd__save_draft"
                 ;;
@@ -605,7 +608,7 @@ _okf__jawn() {
 
     case "${cmd}" in
         okf__jawn)
-            opts="-h -V --server --help --version list_workspaces workspaces create_workspace open_workspace update_workspace archive_workspace unarchive_workspace purge_workspace get_purge export_workspace export backup_workspace restore_workspace backup_installation list_items ls get_item create_item save_draft list_drafts discard_draft move_item set_lifecycle delete_item purge_item create_folder move_folder delete_folder list_types set_type read_item show get_sources sources get_object read_object create_sandbox_capability search_items grep get_links links get_graph log_items log timeline diff_items diff changes commit_items snapshot restore_items rewind blame_item blame who open_proposal propose list_proposals get_proposal accept_proposal approve decline_proposal decline add_comment list_comments create_confirmation create_review verify list_reviews create_upload complete_upload get_upload list_uploads discard_upload start_import import get_job list_jobs get_tenant_job list_tenant_jobs retry_job cancel_job redigest_item correct_digest get_rules set_rules preview_names apply_names get_attention attention rebuild_index get_view present_view present resolve_view export_view get_catalog catalog get_receipt list_events list_tenant_events get_session create_connector list_connectors revoke_connector get_health get_readiness mcp help"
+            opts="-h -V --server --help --version list_workspaces workspaces create_workspace open_workspace update_workspace archive_workspace unarchive_workspace purge_workspace get_purge export_workspace export backup_workspace restore_workspace backup_installation list_items ls get_item create_item save_draft list_drafts discard_draft move_item set_lifecycle delete_item purge_item create_folder move_folder delete_folder list_types set_type read_item show get_sources sources get_object read_object create_sandbox_capability search_items grep get_links links get_graph log_items log timeline diff_items diff changes commit_items snapshot restore_items rewind blame_item blame who open_proposal propose list_proposals get_proposal accept_proposal approve decline_proposal decline add_comment list_comments create_confirmation create_review verify list_reviews create_upload complete_upload get_upload list_uploads discard_upload start_import import get_job list_jobs get_tenant_job list_tenant_jobs retry_job cancel_job redigest_item correct_digest get_rules rules set_rules preview_names apply_names get_attention attention rebuild_index get_view present_view present resolve_view export_view get_catalog catalog get_receipt list_events list_tenant_events get_session create_connector list_connectors revoke_connector get_health get_readiness mcp help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

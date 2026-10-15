@@ -709,6 +709,14 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help]' \
 && ret=0
 ;;
+(rules)
+_arguments "${_arguments_options[@]}" : \
+'--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
+'--server=[The service address\: HTTPS, or HTTP for a loopback address]:URL:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
 (set_rules)
 _arguments "${_arguments_options[@]}" : \
 '--json=[The operation'\''s JSON input\: inline, @file, or - for standard input]:JSON:_default' \
@@ -1344,6 +1352,7 @@ _okf-jawn_commands() {
 'redigest_item:Re-run extraction with declared settings; preserve prior digests and separate corrections.' \
 'correct_digest:Save a correction separately from generated extraction.' \
 'get_rules:Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with \`set_rules\`.' \
+'rules:Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with \`set_rules\`.' \
 'set_rules:Save explicit rules as versioned context.' \
 'preview_names:Compute before and after naming changes without mutating content.' \
 'apply_names:Apply the checked preview and rewrite references in one versioned action.' \

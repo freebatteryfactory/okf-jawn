@@ -7661,6 +7661,422 @@
     {
       "_meta": {
         "ui": {
+          "visibility": [
+            "model",
+            "app"
+          ]
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with `set_rules`.",
+      "inputSchema": {
+        "$defs": {
+          "At": {
+            "description": "A requested version selector; resolved responses contain a `Revision` instead.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Resolve the current accepted workspace head exactly once.",
+                "properties": {
+                  "kind": {
+                    "const": "latest",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Read an explicitly identified historical snapshot.",
+                "properties": {
+                  "kind": {
+                    "const": "revision",
+                    "type": "string"
+                  },
+                  "revision": {
+                    "$ref": "#/$defs/Revision",
+                    "description": "Exact resolved commit identity."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "revision"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "WorkspaceId": {
+            "description": "Stable application identity for one user-organized workspace.",
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Read the workspace conventions at one version.",
+        "properties": {
+          "at": {
+            "$ref": "#/$defs/At",
+            "description": "Requested revision selector; latest is resolved once before reading."
+          },
+          "workspace_id": {
+            "$ref": "#/$defs/WorkspaceId",
+            "description": "Workspace whose permissions and storage scope apply."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "at"
+        ],
+        "title": "GetRulesRequest",
+        "type": "object"
+      },
+      "name": "rules",
+      "outputSchema": {
+        "$defs": {
+          "CollisionPolicy": {
+            "description": "How proposed naming collisions are handled.",
+            "oneOf": [
+              {
+                "const": "reject",
+                "description": "Require an explicit decision.",
+                "title": "Ask for a decision",
+                "type": "string"
+              },
+              {
+                "const": "suffix",
+                "description": "Add a deterministic suffix.",
+                "title": "Add a number",
+                "type": "string"
+              },
+              {
+                "const": "keep_existing",
+                "description": "Keep the original name and report the collision.",
+                "title": "Keep the existing name",
+                "type": "string"
+              }
+            ]
+          },
+          "DateOrder": {
+            "description": "Declared date interpretation; ambiguous input is not guessed.",
+            "oneOf": [
+              {
+                "const": "ymd",
+                "description": "Year, month, day.",
+                "title": "Year, month, day",
+                "type": "string"
+              },
+              {
+                "const": "mdy",
+                "description": "Month, day, year.",
+                "title": "Month, day, year",
+                "type": "string"
+              },
+              {
+                "const": "dmy",
+                "description": "Day, month, year.",
+                "title": "Day, month, year",
+                "type": "string"
+              },
+              {
+                "const": "reject_ambiguous",
+                "description": "Require unambiguous dates or a human choice.",
+                "title": "Ask when unclear",
+                "type": "string"
+              }
+            ]
+          },
+          "ExtensionPolicy": {
+            "description": "How filename extensions are handled when applying a naming rule.",
+            "oneOf": [
+              {
+                "const": "preserve",
+                "description": "Leave the extension unchanged.",
+                "title": "Keep",
+                "type": "string"
+              },
+              {
+                "const": "lowercase",
+                "description": "Lower-case the extension.",
+                "title": "Lower case",
+                "type": "string"
+              },
+              {
+                "const": "strip",
+                "description": "Drop the extension from the normalized note path (never from originals).",
+                "title": "Remove",
+                "type": "string"
+              }
+            ]
+          },
+          "LetterCase": {
+            "description": "Supported case transformations.",
+            "oneOf": [
+              {
+                "const": "preserve",
+                "description": "Preserve case.",
+                "title": "Keep as written",
+                "type": "string"
+              },
+              {
+                "const": "lower",
+                "description": "Lower case.",
+                "title": "Lower case",
+                "type": "string"
+              },
+              {
+                "const": "upper",
+                "description": "Upper case.",
+                "title": "Upper case",
+                "type": "string"
+              },
+              {
+                "const": "title",
+                "description": "Title case.",
+                "title": "Title case",
+                "type": "string"
+              },
+              {
+                "const": "snake",
+                "description": "Snake case.",
+                "title": "Snake case",
+                "type": "string"
+              },
+              {
+                "const": "kebab",
+                "description": "Kebab case.",
+                "title": "Kebab case",
+                "type": "string"
+              }
+            ]
+          },
+          "NamingRule": {
+            "additionalProperties": false,
+            "description": "A typed rule scoped by glob and optional OKF type.",
+            "properties": {
+              "alias_preservation": {
+                "description": "When true, preserve existing path aliases while renaming the primary path.",
+                "title": "Keep old paths as aliases",
+                "type": "boolean"
+              },
+              "case": {
+                "$ref": "#/$defs/LetterCase",
+                "description": "Case transformation.",
+                "title": "Letter case"
+              },
+              "collision": {
+                "$ref": "#/$defs/CollisionPolicy",
+                "description": "Collision behavior.",
+                "title": "When names collide"
+              },
+              "date_format": {
+                "description": "Explicit output format.",
+                "title": "Date format",
+                "type": "string"
+              },
+              "date_order": {
+                "$ref": "#/$defs/DateOrder",
+                "description": "Declared incoming date convention.",
+                "title": "Date order"
+              },
+              "destination": {
+                "description": "Relative destination template.",
+                "title": "Destination folder",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "extension_policy": {
+                "$ref": "#/$defs/ExtensionPolicy",
+                "description": "How the filename extension is transformed on normalized notes.",
+                "title": "File extension"
+              },
+              "glob": {
+                "description": "Match against the supplied relative path.",
+                "title": "Applies to paths",
+                "type": "string"
+              },
+              "prefix": {
+                "description": "Optional literal prefix.",
+                "title": "Prefix",
+                "type": "string"
+              },
+              "separator": {
+                "description": "Word separator.",
+                "title": "Word separator",
+                "type": "string"
+              },
+              "strip_version_suffix": {
+                "description": "Remove filename suffixes only from normalized notes, never originals.",
+                "title": "Remove version suffixes",
+                "type": "boolean"
+              },
+              "suffix": {
+                "description": "Optional literal suffix applied to the normalized base name.",
+                "title": "Suffix",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type_name": {
+                "description": "Optional OKF type selector.",
+                "title": "Applies to type",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "glob",
+              "case",
+              "separator",
+              "prefix",
+              "date_order",
+              "date_format",
+              "strip_version_suffix",
+              "extension_policy",
+              "alias_preservation",
+              "collision"
+            ],
+            "type": "object"
+          },
+          "NamingRules": {
+            "additionalProperties": false,
+            "description": "Versioned naming rules rendered as a form and editable as YAML.",
+            "properties": {
+              "rules": {
+                "description": "Rules applied in explicit list order.",
+                "items": {
+                  "$ref": "#/$defs/NamingRule"
+                },
+                "title": "Rules",
+                "type": "array"
+              },
+              "schema_version": {
+                "description": "Format version; this release emits 1.",
+                "format": "uint32",
+                "minimum": 0,
+                "title": "Format version",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "schema_version",
+              "rules"
+            ],
+            "type": "object"
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "UnreadableRules": {
+            "additionalProperties": false,
+            "description": "A stored rules file this build cannot read as rules.",
+            "properties": {
+              "problems": {
+                "description": "What was wrong; a `schema_version` this build does not know is one such problem.",
+                "items": {
+                  "$ref": "#/$defs/Warning"
+                },
+                "type": "array"
+              },
+              "text": {
+                "description": "The file's text as stored, at most `item::MAX_ITEM_TEXT_BYTES`; a longer file is\n`too_large`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "text",
+              "problems"
+            ],
+            "type": "object"
+          },
+          "Warning": {
+            "additionalProperties": false,
+            "description": "A diagnostic that does not silently discard usable input.",
+            "properties": {
+              "code": {
+                "description": "Stable diagnostic identifier.",
+                "type": "string"
+              },
+              "location": {
+                "description": "Page, cell, path, or field locator.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "message": {
+                "description": "Human-readable explanation.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "The naming rules at one revision, or the stored file when it cannot be read as rules.\n\nNever `internal` for a file a person or an import wrote: a file this build cannot read is\nanswered as `unreadable`, so a person can repair it in the YAML editor and save typed rules\nwith `set_rules`, which replaces the file whatever it held.",
+        "properties": {
+          "revision": {
+            "$ref": "#/$defs/Revision",
+            "description": "The revision the rules were read at."
+          },
+          "rules": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/NamingRules"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The rules; absent when no rules were saved at `revision`, and when the stored file\ncannot be read as this build's rules (then `unreadable` is present)."
+          },
+          "unreadable": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/UnreadableRules"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The stored file and what was wrong with it; present exactly when a file is stored at\n`revision` and it cannot be read as this build's rules."
+          }
+        },
+        "required": [
+          "revision"
+        ],
+        "title": "GetRulesResponse",
+        "type": "object"
+      },
+      "title": "Conventions"
+    },
+    {
+      "_meta": {
+        "ui": {
           "resourceUri": "ui://okf-jawn/app.html",
           "visibility": [
             "model",

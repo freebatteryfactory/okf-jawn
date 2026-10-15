@@ -111,6 +111,7 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('redigest_item', 'redigest_item', [CompletionResultType]::ParameterValue, 'Re-run extraction with declared settings; preserve prior digests and separate corrections.')
             [CompletionResult]::new('correct_digest', 'correct_digest', [CompletionResultType]::ParameterValue, 'Save a correction separately from generated extraction.')
             [CompletionResult]::new('get_rules', 'get_rules', [CompletionResultType]::ParameterValue, 'Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with `set_rules`.')
+            [CompletionResult]::new('rules', 'rules', [CompletionResultType]::ParameterValue, 'Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with `set_rules`.')
             [CompletionResult]::new('set_rules', 'set_rules', [CompletionResultType]::ParameterValue, 'Save explicit rules as versioned context.')
             [CompletionResult]::new('preview_names', 'preview_names', [CompletionResultType]::ParameterValue, 'Compute before and after naming changes without mutating content.')
             [CompletionResult]::new('apply_names', 'apply_names', [CompletionResultType]::ParameterValue, 'Apply the checked preview and rewrite references in one versioned action.')
@@ -726,6 +727,13 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             break
         }
         'okf-jawn;get_rules' {
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'okf-jawn;rules' {
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'The operation''s JSON input: inline, @file, or - for standard input')
             [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'The service address: HTTPS, or HTTP for a loopback address')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
