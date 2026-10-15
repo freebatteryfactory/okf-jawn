@@ -1,9 +1,11 @@
 //! Dispatch's two rules of core M1.4: a mutation that `operations::ALLOWED_WHILE_ARCHIVED` does
 //! not list is refused before its handler and before the ledger while any workspace it names is
-//! archived (contract ruling 25), and the connector operations run only for the local owner
-//! (`operations::LOCAL_OWNER_ONLY`, contract ruling 22), with a refused `create_connector`
-//! naming the listed workspace that refused it. Every case goes through `dispatch` with the
-//! fixture grants and ledger, and fails when the rule it names is removed.
+//! archived (contract ruling 25), whatever its table permission and whichever of its targets
+//! names the workspace; and the connector operations run only for the local owner
+//! (`operations::LOCAL_OWNER_ONLY`, contract ruling 22), checked before any grant is looked up,
+//! with a refused `create_connector` naming the listed workspace that refused it only when the
+//! refusal is `Forbidden`. Every case goes through `dispatch` with the fixture grants and ledger,
+//! and fails when the rule it names is removed.
 
 use std::collections::BTreeSet;
 
@@ -37,6 +39,17 @@ macro_rules! mutation_ids {
             )*
             Ok(found)
         }
+
+        /// Every operation whose table permission is not `write`.
+        fn not_write() -> BTreeSet<&'static str> {
+            let mut found = BTreeSet::new();
+            $(
+                if Permission::$permission != Permission::Write {
+                    found.insert(stringify!($id));
+                }
+            )*
+            found
+        }
     };
 }
 
@@ -49,6 +62,8 @@ const JOB: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const UPLOAD: &str = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const CONNECTOR: &str = "ffffffff-ffff-4fff-8fff-ffffffffffff";
 const PROPOSAL: &str = "99999999-9999-4999-8999-999999999999";
+const CONFIRMATION: &str = "88888888-8888-4888-8888-888888888888";
+const DIGEST: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
 /// The mutations an archived workspace allows that name it in their targets or body, each sent
 /// to the archived workspace.
@@ -62,6 +77,25 @@ const ALLOWED_MUTATIONS: [&str; 9] = [
     "cancel_job",
     "rebuild_index",
     "export_view",
+];
+
+/// Mutations of a workspace an archived workspace refuses whose table permission is not
+/// `write`: a restore, the proposal operations, a confirmation and a review.
+const REFUSED_NOT_WRITE: [&str; 6] = [
+    "restore_workspace",
+    "open_proposal",
+    "accept_proposal",
+    "decline_proposal",
+    "create_confirmation",
+    "create_review",
+];
+
+/// The refused mutations authorized at the tenant: their table target names no workspace.
+const AT_THE_TENANT: [&str; 4] = [
+    "create_workspace",
+    "backup_installation",
+    "create_connector",
+    "revoke_connector",
 ];
 
 /// Mutations of a workspace an archived workspace refuses: a commit, a draft, an upload, an
@@ -179,6 +213,33 @@ fn body(operation: &str, workspace_id: &str) -> Result<Value, String> {
         }),
         "list_connectors" => json!({ "include_revoked": false }),
         "revoke_connector" => json!({ "connector_id": CONNECTOR, "idempotency_key": KEY }),
+        "restore_workspace" => json!({
+            "workspace_id": workspace_id, "upload_id": UPLOAD, "sha256": DIGEST,
+            "idempotency_key": KEY
+        }),
+        "open_proposal" => json!({
+            "workspace_id": workspace_id, "base_revision": REVISION, "title": "t",
+            "description": "d", "idempotency_key": KEY,
+            "changes": [{ "kind": "edit", "item_id": ITEM, "body": "text", "properties": {} }]
+        }),
+        "accept_proposal" => json!({
+            "workspace_id": workspace_id, "proposal_id": PROPOSAL, "proposal_revision": REVISION,
+            "expected_head": REVISION, "confirmation_id": CONFIRMATION, "idempotency_key": KEY
+        }),
+        "decline_proposal" => json!({
+            "workspace_id": workspace_id, "proposal_id": PROPOSAL, "reason": "r",
+            "idempotency_key": KEY
+        }),
+        "create_confirmation" => json!({
+            "workspace_id": workspace_id, "action": "review",
+            "target": { "kind": "item", "item_id": ITEM }, "revision": REVISION,
+            "content_digest": DIGEST, "idempotency_key": KEY
+        }),
+        "create_review" => json!({
+            "source": cited(workspace_id), "confirmation_id": CONFIRMATION,
+            "content_digest": DIGEST, "idempotency_key": KEY
+        }),
+        "add_comment" => comment(workspace_id, None),
         other => return Err(format!("no test body for {other}")),
     };
     Ok(body)
@@ -212,6 +273,24 @@ fn assert_archived(refused: &ApiError, what: &str) -> TestResult {
         matches!(detail, ErrorDetail::WorkspaceArchived { archived_at: at } if *at == archived_at()?),
         "{what}: {detail:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn every_refused_mutation_whose_permission_is_not_write_is_sent_by_these_tests() -> TestResult {
+    let mutations = mutations()?;
+    let not_write: BTreeSet<&str> = not_write()
+        .into_iter()
+        .filter(|operation| mutations.contains(operation))
+        .filter(|operation| {
+            !ALLOWED_WHILE_ARCHIVED
+                .iter()
+                .any(|allowed| allowed.as_str() == *operation)
+        })
+        .filter(|operation| !AT_THE_TENANT.contains(operation))
+        .collect();
+    let sent: BTreeSet<&str> = REFUSED_NOT_WRITE.into_iter().collect();
+    assert_eq!(not_write, sent);
     Ok(())
 }
 
@@ -268,6 +347,27 @@ async fn a_mutation_of_an_archived_workspace_is_refused_before_its_handler_and_i
         let contexts = app.handlers.contexts(operation)?;
         let context = some(contexts.first(), "the handler's run")?;
         assert_eq!(context.attempt, Attempt::First, "{operation}");
+    }
+    Ok(())
+}
+
+/// Ruling 25 names a proposal: the rule is not a `write` rule. Each refused mutation of
+/// another table permission is refused in the archived workspace as a write is.
+#[tokio::test]
+async fn a_refused_mutation_of_every_table_permission_is_refused_in_an_archived_workspace()
+-> TestResult {
+    for operation in REFUSED_NOT_WRITE {
+        let (app, ports) = world()?;
+        let alice = principal("alice", AccessRoute::LocalOwner)?;
+        let refused =
+            err_of(call(&app, &ports, &alice, operation, body(operation, ARCHIVED)?).await)?;
+        assert_archived(&refused, operation)?;
+        assert_eq!(app.handlers.call_count(operation)?, 0, "{operation}");
+        assert!(ports.events.appended()?.is_empty(), "{operation}");
+        assert_eq!(app.asked()?.len(), 1, "{operation}");
+        // The same request runs in a live workspace.
+        let _ran = call(&app, &ports, &alice, operation, body(operation, LIVE)?).await;
+        assert_eq!(app.handlers.call_count(operation)?, 1, "{operation} runs");
     }
     Ok(())
 }
@@ -511,6 +611,58 @@ async fn a_connector_operation_on_any_route_but_the_local_owners_is_refused_and_
             "the local owner runs {operation}"
         );
     }
+    Ok(())
+}
+
+/// The route rule refuses before any grant is looked up: no lookup, whatever the grants.
+#[tokio::test]
+async fn the_connector_route_rule_runs_before_any_grant_is_looked_up() -> TestResult {
+    for operation in ["create_connector", "list_connectors", "revoke_connector"] {
+        for route in [
+            AccessRoute::BrowserSession,
+            AccessRoute::McpDelegation,
+            AccessRoute::Service,
+        ] {
+            let (app, ports) = world()?;
+            let caller = principal("alice", route.clone())?;
+            let refused =
+                err_of(call(&app, &ports, &caller, operation, body(operation, LIVE)?).await)?;
+            assert_eq!(
+                refused.code,
+                ErrorCode::Forbidden,
+                "{operation} on {route:?}"
+            );
+            assert_eq!(ports.access.lookups(), 0, "{operation} on {route:?}");
+        }
+    }
+    Ok(())
+}
+
+/// Only a `Forbidden` refusal at a listed workspace names its entry: an adapter answering a
+/// grant of another workspace there is `Internal`, our fault, and names no field.
+#[tokio::test]
+async fn a_refusal_at_a_listed_workspace_that_is_not_forbidden_names_no_entry() -> TestResult {
+    let (app, ports) = world()?;
+    ports
+        .access
+        .answer_workspaces_as(okf_jawn_core::storage::StorageScope {
+            tenant_id: tenant("tenant-local")?,
+            workspace_id: workspace(ARCHIVED)?,
+        })?;
+    let owner = principal("alice", AccessRoute::LocalOwner)?;
+    let refused = err_of(
+        call(
+            &app,
+            &ports,
+            &owner,
+            "create_connector",
+            body("create_connector", LIVE)?,
+        )
+        .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Internal);
+    assert_eq!(refused.field, None);
+    assert_eq!(app.handlers.call_count("create_connector")?, 0);
     Ok(())
 }
 
