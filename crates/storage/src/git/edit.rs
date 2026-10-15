@@ -52,7 +52,10 @@
 //! absolute one as `/<path>.md`, the form okf-core gives another note's absolute link to the
 //! moved item, each with its anchor; a pure anchor (`#sec`) is kept. A `sources` entry of the
 //! frontmatter that names the item itself is not covered: okf-core rebases it as a path, so it
-//! keeps naming the old one.
+//! keeps naming the old one. Reference-style links and their definitions (`[t][ref]`,
+//! `[ref]: pics/p.png`) and raw HTML (`<img src="pics/p.png">`) are not links that
+//! `rewrite_markdown_links` sees, so a move to another folder leaves them naming the old
+//! folder, as okf-core 0.2.7 and the upstream fix do.
 //!
 //! For the same reason, every write that names a new path checks the folders it names against
 //! the staged tree's own spellings before that path is written there
