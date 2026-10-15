@@ -210,7 +210,11 @@ function WarningRow({
             <Link
               to="/w/$workspaceId/i/$itemId"
               params={{ workspaceId, itemId }}
-              search={{ rev: revision, ...(selection === null ? {} : { sel: selection }) }}
+              // The whole item is no place in it: no `sel`, as a search result's link.
+              search={{
+                rev: revision,
+                ...(selection === null || selection.kind === 'all' ? {} : { sel: selection }),
+              }}
             >
               {item.title || item.path}
             </Link>

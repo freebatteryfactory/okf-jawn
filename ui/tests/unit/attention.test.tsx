@@ -184,6 +184,25 @@ describe('the list of warnings', () => {
     expect(rows().at(0)?.textContent).toContain('in Meeting notes, at line 12');
   });
 
+  it('opens the whole item, with no place in its link, for a warning about all of it', async () => {
+    setup(() =>
+      answer([
+        {
+          ...warning('unprocessed', 'The format is not supported.', SOURCE, 'redigest_item'),
+          selection: { kind: 'all' },
+        },
+      ]),
+    );
+    await openAttention();
+    const link = await screen.findByRole('link', { name: 'Annual report' });
+    const href = new URL(link.getAttribute('href') ?? '', 'http://page');
+    expect(href.pathname).toBe(`/w/${WS}/i/${SOURCE}`);
+    expect(href.searchParams.get('rev')).toBe(HEAD);
+    // As a search result's link: the whole item is the item itself, not a place in it.
+    expect(href.searchParams.has('sel')).toBe(false);
+    expect(rows().at(0)?.textContent).not.toContain(', at ');
+  });
+
   it('names an item the list does not carry by its identity, with no link: it was purged', async () => {
     const purged: AttentionItem = {
       kind: 'invalidated',
