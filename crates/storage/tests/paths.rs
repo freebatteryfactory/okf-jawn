@@ -1176,27 +1176,49 @@ async fn an_item_named_like_its_private_name_is_renamed_by_case() -> TestResult 
 }
 
 /// Item 10 at `Notes/Report.md`, `Notes/other.md` (item 12) linking to it, and a reference to
-/// item 10's first private name while nothing holds that name: with `cited`, a `sources` entry
-/// of `Notes/cited.md`; otherwise Markdown links in `Notes/other.md` and `Notes/bystander.md`.
-/// A rename by letter case parks the item elsewhere, so the broken reference stays as it was,
-/// only the link to the item follows it, and the check is told only `Notes/other.md`.
-async fn renamed_beside_a_broken_reference(cited: bool) -> TestResult {
+/// item 10's first private name while nothing holds that name, of one `style` alone: `cited`, a
+/// `sources` entry of `Notes/cited.md`; `absolute`, an absolute link in `Notes/bystander.md`;
+/// `far`, a relative link from another folder, `elsewhere/far.md`; otherwise relative links
+/// beside it in `Notes/other.md` and `Notes/bystander.md`. A rename by letter case parks the
+/// item elsewhere, so the broken reference stays as it was, only the link to the item follows
+/// it, and the check is told only `Notes/other.md`.
+async fn renamed_beside_a_broken_reference(style: &str) -> TestResult {
     let space = Workspace::new().await?;
     let ghost = parked_name("recase", 10);
-    let (other, at, reference) = if cited {
-        let sources = BTreeMap::from([("sources".to_owned(), json!([{ "resource": ghost }]))]);
-        (
-            "Only [real](Report.md).".to_owned(),
-            "Notes/cited.md",
-            note_with(14, "Notes/cited.md", "Cites it.", sources)?,
-        )
-    } else {
-        let only = format!("Only [ghost]({ghost}).");
-        (
-            format!("[ghost]({ghost}) and [real](Report.md)."),
-            "Notes/bystander.md",
-            note(14, "Notes/bystander.md", &only)?,
-        )
+    let only_real = "Only [real](Report.md).".to_owned();
+    let (other, at, reference) = match style {
+        "cited" => {
+            let sources = BTreeMap::from([("sources".to_owned(), json!([{ "resource": ghost }]))]);
+            (
+                only_real,
+                "Notes/cited.md",
+                note_with(14, "Notes/cited.md", "Cites it.", sources)?,
+            )
+        }
+        "absolute" => {
+            let only = format!("Only [ghost](/Notes/{ghost}).");
+            (
+                only_real,
+                "Notes/bystander.md",
+                note(14, "Notes/bystander.md", &only)?,
+            )
+        }
+        "far" => {
+            let only = format!("Only [ghost](../Notes/{ghost}).");
+            (
+                only_real,
+                "elsewhere/far.md",
+                note(14, "elsewhere/far.md", &only)?,
+            )
+        }
+        _ => {
+            let only = format!("Only [ghost]({ghost}).");
+            (
+                format!("[ghost]({ghost}) and [real](Report.md)."),
+                "Notes/bystander.md",
+                note(14, "Notes/bystander.md", &only)?,
+            )
+        }
     };
     let seeded = space
         .commit(
@@ -1228,12 +1250,15 @@ async fn renamed_beside_a_broken_reference(cited: bool) -> TestResult {
     Ok(())
 }
 
-/// A link, or a `sources` entry, that points at the first private name while nothing holds it
-/// is a broken reference that a rename by letter case leaves alone.
+/// A link beside it, an absolute link, a link from another folder, or a `sources` entry, that
+/// points at the first private name while nothing holds it is a broken reference that a rename
+/// by letter case leaves alone.
 #[tokio::test]
 async fn a_link_to_the_private_name_is_not_rewritten_by_a_case_only_rename() -> TestResult {
-    renamed_beside_a_broken_reference(false).await?;
-    renamed_beside_a_broken_reference(true).await
+    for style in ["beside", "absolute", "far", "cited"] {
+        renamed_beside_a_broken_reference(style).await?;
+    }
+    Ok(())
 }
 
 /// Item 20 moved from `a/x.md` to `b/c/x.md`, then rewound. With `plain`, a plain file holds
@@ -1660,19 +1685,30 @@ async fn restored_paths_spelled_another_way_are_refused() -> TestResult {
 }
 
 /// `RestorePaths` of a path below a folder the tree now holds as a file, in another spelling
-/// or the same, is refused alike on every system, before anything below the file is read:
-/// `Conflict` on the listing's field, naming the path and the file.
+/// or the same, at the root or below another folder, is refused alike on every system, before
+/// anything below the file is read: `Conflict` on the listing's field, naming the path and the
+/// file.
 #[tokio::test]
 async fn restored_paths_below_a_file_are_refused_naming_it() -> TestResult {
-    for file in ["NOTES", "notes"] {
+    for (folder, file) in [
+        ("notes", "NOTES"),
+        ("notes", "notes"),
+        ("docs/notes", "docs/NOTES"),
+    ] {
         let space = Workspace::new().await?;
+        let restored = format!("{folder}/a.md");
         let early = space
-            .commit(2, &space.initial, vec![note(10, "notes/a.md", "Ten.")?])
+            .commit(2, &space.initial, vec![note(10, &restored, "Ten.")?])
             .await?;
-        space.raw(900, &["notes/a.md", "notes/index.md"], &[])?;
+        let index = format!("{folder}/index.md");
+        space.raw(900, &[restored.as_str(), index.as_str()], &[])?;
         let filed = space.raw(901, &[], &[(file, b"plain".to_vec())])?;
         let error = space
-            .refused(3, &filed, vec![restore_paths(&early, &["notes/a.md"])?])
+            .refused(
+                3,
+                &filed,
+                vec![restore_paths(&early, &[restored.as_str()])?],
+            )
             .await?;
         assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
         assert_eq!(
@@ -1683,7 +1719,7 @@ async fn restored_paths_below_a_file_are_refused_naming_it() -> TestResult {
         );
         assert_eq!(
             error.message,
-            format!("notes/a.md: {file} is a file, not a folder")
+            format!("{restored}: {file} is a file, not a folder")
         );
     }
     Ok(())
