@@ -143,6 +143,18 @@ const FILE_LINKS_NAMED: [&str; 3] = ["notes/pics/p.png", "files/a.pdf", "notes/s
 const FILE_LINKS_REFERRER: &str = "Back to [A]({to}). Logo: ![p](pics/p.png)";
 /// The body of `deep/x/far.md`, which links to two of those files and not to the moved note.
 const FILE_LINKS_FAR: &str = "Far [f](../../files/a.pdf) and ![p](../../notes/pics/p.png).";
+/// What the moves to `archive/` add to `FILE_LINKS` (`file_links_seeded`, `wider`): a link to
+/// `notes/other.md` without `.md`, and a percent-encoded link to the note `notes/my note.md`.
+const FILE_LINKS_WIDER: &str = "\n[o](other)\n[n](my%20note.md)";
+/// `FILE_LINKS` and `FILE_LINKS_WIDER` after a move to `archive/a.md`: each link resolved from
+/// the note's old folder, so `[o](other)` names `notes/other.md` and not the `archive/other.md`
+/// beside the new file, and the percent-encoded link taken literally, as okf-core takes it, so it
+/// is rebased as a path and keeps its spelling.
+const FILE_LINKS_ARCHIVED: &str = "See [Other](../notes/other.md) and \
+                                   [part](../notes/other.md#part).\n\n\
+                                   ![p](../notes/pics/p.png)\n[a](../files/a.pdf)\n\
+                                   [s](../notes/sub/notes.txt)\n[abs](/files/a.pdf)\n\
+                                   [o](../notes/other.md)\n[n](../notes/my%20note.md)";
 
 /// The body of the note `notes/a.md` that the self-link tests move: links to itself, relative
 /// (beside it, with an anchor, through `./`, through its folder from above, without `.md`),
@@ -1326,31 +1338,42 @@ async fn a_rewind_parks_past_a_taken_private_name_and_leaves_links_to_it() -> Te
 
 // File links: a moved note keeps its links to files that are not Markdown.
 
+/// The body of item 10 as `file_links_seeded` writes it: `FILE_LINKS`, and with `wider`
+/// `FILE_LINKS_WIDER` after it.
+fn file_links_body(wider: bool) -> String {
+    if wider {
+        format!("{FILE_LINKS}{FILE_LINKS_WIDER}")
+    } else {
+        FILE_LINKS.to_owned()
+    }
+}
+
 /// Item 10 at `notes/a.md`, with a `sources` entry naming the image (`FILE_LINKS_SOURCE`) and
-/// the body `FILE_LINKS`; item 11 at `notes/other.md` (`FILE_LINKS_REFERRER`); item 12 at
-/// `deep/x/far.md` (`FILE_LINKS_FAR`). With `files`, the files the links name
-/// (`FILE_LINKS_NAMED`) are committed beside them straight through Git; without, none of them
-/// exists.
-async fn file_links_seeded(space: &Workspace, files: bool) -> Fallible<Revision> {
+/// the body `file_links_body(wider)`; item 11 at `notes/other.md` (`FILE_LINKS_REFERRER`); item
+/// 12 at `deep/x/far.md` (`FILE_LINKS_FAR`). With `wider`, also item 13 at `archive/other.md`,
+/// a note beside the destination named like the one item 10 links to, and item 14 at
+/// `notes/my note.md`, which item 10's percent-encoded link names. With `files`, the files the
+/// links name (`FILE_LINKS_NAMED`) are committed beside them straight through Git; without, none
+/// of them exists.
+async fn file_links_seeded(space: &Workspace, files: bool, wider: bool) -> Fallible<Revision> {
     let sources = BTreeMap::from([(
         "sources".to_owned(),
         json!([{ "resource": FILE_LINKS_SOURCE }]),
     )]);
-    let seeded = space
-        .commit(
-            2,
-            &space.initial,
-            vec![
-                note_with(10, "notes/a.md", FILE_LINKS, sources)?,
-                note(
-                    11,
-                    "notes/other.md",
-                    &FILE_LINKS_REFERRER.replace("{to}", "a.md"),
-                )?,
-                note(12, "deep/x/far.md", FILE_LINKS_FAR)?,
-            ],
-        )
-        .await?;
+    let mut edits = vec![
+        note_with(10, "notes/a.md", &file_links_body(wider), sources)?,
+        note(
+            11,
+            "notes/other.md",
+            &FILE_LINKS_REFERRER.replace("{to}", "a.md"),
+        )?,
+        note(12, "deep/x/far.md", FILE_LINKS_FAR)?,
+    ];
+    if wider {
+        edits.push(note(13, "archive/other.md", "Another note named other.")?);
+        edits.push(note(14, "notes/my note.md", "Mine.")?);
+    }
+    let seeded = space.commit(2, &space.initial, edits).await?;
     if !files {
         return Ok(seeded);
     }
@@ -1361,28 +1384,30 @@ async fn file_links_seeded(space: &Workspace, files: bool) -> Fallible<Revision>
     space.raw(900, &[], &written)
 }
 
-/// Item 10 (`file_links_seeded`, with and without the files its links name) moved to `to`. Its
-/// file is the seeded one with the body `body` and okf-core's rebase of its `sources` entry,
-/// `source`, whether the named files exist or not; item 11's link to it reads `link` and its
-/// image link is untouched; item 12, which links only to files, keeps its bytes; and the check
-/// is told only item 11's file. Answers the workspace and the revisions before and after.
+/// Item 10 (`file_links_seeded`, with and without the files its links name, and `wider`)
+/// moved to `to`. Its file is the seeded one with the body `body` and okf-core's rebase of its
+/// `sources` entry, `source`, whether the named files exist or not; item 11's link to it reads
+/// `link` and its image link is untouched; item 12, which links only to files, keeps its bytes;
+/// and the check is told only item 11's file. Answers the workspace and the revisions before
+/// and after.
 async fn file_links_moved(
     to: &str,
     body: &str,
     source: &str,
     link: &str,
+    wider: bool,
 ) -> Fallible<Vec<(Workspace, Revision, Revision)>> {
     let mut spaces = Vec::new();
     for files in [true, false] {
         let space = Workspace::new().await?;
-        let seeded = file_links_seeded(&space, files).await?;
+        let seeded = file_links_seeded(&space, files, wider).await?;
         let recording = Arc::new(Recording::default());
         let moved_on = space
             .commit_with(3, &seeded, vec![moved(10, to)?], recording.clone())
             .await?
             .revision;
         let before = String::from_utf8(some(space.file(&seeded, "notes/a.md")?, "item 10")?)?;
-        let expected = before.replace(FILE_LINKS, body).replace(
+        let expected = before.replace(&file_links_body(wider), body).replace(
             &format!("resource: {FILE_LINKS_SOURCE}"),
             &format!("resource: {source}"),
         );
@@ -1408,22 +1433,25 @@ async fn file_links_moved(
 /// to an image or another file that is not Markdown.
 #[tokio::test]
 async fn file_links_survive_a_move_within_its_folder() -> TestResult {
-    file_links_moved("notes/b.md", FILE_LINKS, FILE_LINKS_SOURCE, "b.md").await?;
+    file_links_moved("notes/b.md", FILE_LINKS, FILE_LINKS_SOURCE, "b.md", false).await?;
     Ok(())
 }
 
 /// A move to another folder rebases every relative link and keeps each file's name: the image
 /// and the text file below the note's old folder are reached from the new one, the pdf above
 /// it keeps its path, the links to the note keep their anchor, and the absolute link is kept.
+/// Every link is resolved from the note's old folder: a link to a note without `.md` names that
+/// note, with `.md`, and not the note of the same name that the destination folder holds
+/// (`archive/other.md`). A percent-encoded link to a note is read literally, as okf-core reads
+/// it, so it is rebased as a path and keeps its encoding (`FILE_LINKS_ARCHIVED`).
 #[tokio::test]
 async fn file_links_survive_a_move_to_another_folder() -> TestResult {
     file_links_moved(
         "archive/a.md",
-        "See [Other](../notes/other.md) and [part](../notes/other.md#part).\n\n\
-         ![p](../notes/pics/p.png)\n[a](../files/a.pdf)\n[s](../notes/sub/notes.txt)\n\
-         [abs](/files/a.pdf)",
+        FILE_LINKS_ARCHIVED,
         "../notes/pics/p.png",
         "../archive/a.md",
+        true,
     )
     .await?;
     Ok(())
@@ -1439,6 +1467,7 @@ async fn file_links_survive_a_move_deeper() -> TestResult {
          [s](../../../notes/sub/notes.txt)\n[abs](/files/a.pdf)",
         "../../../notes/pics/p.png",
         "../archive/2026/q3/a.md",
+        false,
     )
     .await?;
     Ok(())
@@ -1448,7 +1477,7 @@ async fn file_links_survive_a_move_deeper() -> TestResult {
 /// every link as it was.
 #[tokio::test]
 async fn file_links_survive_a_rename_by_letter_case() -> TestResult {
-    file_links_moved("notes/A.md", FILE_LINKS, FILE_LINKS_SOURCE, "A.md").await?;
+    file_links_moved("notes/A.md", FILE_LINKS, FILE_LINKS_SOURCE, "A.md", false).await?;
     Ok(())
 }
 
@@ -1462,11 +1491,10 @@ async fn file_links_survive_a_rename_by_letter_case() -> TestResult {
 async fn file_links_survive_a_rewind_of_a_move() -> TestResult {
     let moves = file_links_moved(
         "archive/a.md",
-        "See [Other](../notes/other.md) and [part](../notes/other.md#part).\n\n\
-         ![p](../notes/pics/p.png)\n[a](../files/a.pdf)\n[s](../notes/sub/notes.txt)\n\
-         [abs](/files/a.pdf)",
+        FILE_LINKS_ARCHIVED,
         "../notes/pics/p.png",
         "../archive/a.md",
+        true,
     )
     .await?;
     for (space, seeded, moved_on) in moves {
