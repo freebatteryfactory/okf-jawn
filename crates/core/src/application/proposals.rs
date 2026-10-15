@@ -44,13 +44,14 @@
 //! 2. The confirmation is consumed for this mutation (`accept_proposal`, the proposal, its
 //!    revision and content digest, the caller's session and subject), before anything is
 //!    promoted, so no promotion happens without a consumed confirmation.
-//! 3. The candidate is promoted onto `expected_head`. A stale precondition makes the proposal
-//!    `conflict` (it needs reconciliation) and answers `conflict` with `StaleBase { head }` on
-//!    `/expected_head`: the store's refusal of a head that moved (it carries `StaleBase`), and a
-//!    candidate that does not sit on `expected_head`, which this module tells from the proposal's
-//!    own base before it promotes (the store answers that case as a plain `conflict`). Any other
-//!    refusal, the store's plain `conflict` of a candidate reference that is not the proposal's
-//!    included, leaves the status as it was and is answered as given.
+//! 3. The candidate is promoted onto `expected_head`. The store's stale refusal, a `conflict`
+//!    with `StaleBase { head }` (the head moved, or the candidate was not drafted on the head,
+//!    which by contract ruling 5 is a stale base too), makes the proposal `conflict` (it needs
+//!    reconciliation) and answers `conflict` with that `StaleBase`: on `/expected_head` when the
+//!    head is not the request's `expected_head`, and with no field when it is, because then the
+//!    request named the head and the proposal is what is stale. Any other refusal, the store's
+//!    plain `conflict` of a candidate reference that is not the proposal's included, leaves the
+//!    status as it was and is answered as given.
 //! 4. The status becomes `accepted`, a compare-and-set from `open`.
 //! 5. The new revision is indexed and a `changed` event appended (`shared::announce`); it names
 //!    no item, because a proposal may change several.
@@ -266,8 +267,8 @@ pub(super) async fn get_proposal(
 /// Returns `Forbidden` without a browser session, `NotFound` for a proposal the workspace does
 /// not hold, `Conflict` for a proposal that is not open (or accepted by another mutation), on
 /// `/proposal_revision` for another revision, the confirmation store's refusal, `Conflict` with
-/// `StaleBase` on `/expected_head` for a stale precondition, the store's other refusals of the
-/// promotion as given, or any port error.
+/// `StaleBase` for a stale precondition (on `/expected_head` when the head moved), the store's
+/// other refusals of the promotion as given, or any port error.
 pub(super) async fn accept_proposal(
     service: &ApplicationService,
     context: &OperationContext,
@@ -325,12 +326,6 @@ pub(super) async fn accept_proposal(
             },
         )
         .await?;
-    // The candidate sits on the proposal's base; on any other head it cannot be promoted, and
-    // the store answers that case without `StaleBase`, so it is told here, from the proposal.
-    if proposal.base_revision != request.expected_head {
-        let head = ports.versions.head(&scope).await?;
-        return Err(stale(service, &scope, proposal, head).await);
-    }
     let promoted = ports
         .versions
         .promote_candidate(
@@ -338,7 +333,7 @@ pub(super) async fn accept_proposal(
             Promotion {
                 mutation_id: mutation,
                 proposal_id: proposal.id,
-                expected_head: request.expected_head,
+                expected_head: request.expected_head.clone(),
                 candidate: proposal.proposal_revision.clone(),
                 approver: Provenance::from_principal(&context.principal),
                 message: format!("Accept proposal: {}", proposal.title),
@@ -350,7 +345,7 @@ pub(super) async fn accept_proposal(
         Err(error) => match error.detail.as_deref() {
             Some(ErrorDetail::StaleBase { head }) if error.code == ErrorCode::Conflict => {
                 let head = head.clone();
-                Err(stale(service, &scope, proposal, head).await)
+                Err(stale(service, &scope, proposal, &request.expected_head, head).await)
             }
             _ => Err(error),
         },
@@ -663,11 +658,14 @@ async fn accepted(
 }
 
 /// The answer to a stale acceptance, after the proposal is marked `conflict`: `Conflict` with
-/// `StaleBase { head }` on `/expected_head`; or the error of marking it, when that fails.
+/// `StaleBase { head }`, on `/expected_head` when `head` is not the request's `expected_head`
+/// (the head moved) and with no field when it is (the candidate was not drafted on the head the
+/// request named); or the error of marking it, when that fails.
 async fn stale(
     service: &ApplicationService,
     scope: &StorageScope,
     proposal: Proposal,
+    expected_head: &Revision,
     head: Revision,
 ) -> ApiError {
     let marked = service
@@ -683,13 +681,24 @@ async fn stale(
         )
         .await;
     match marked {
-        Ok(_) => conflict(
-            "the workspace head is not the one the proposal was drafted on; it needs \
-             reconciliation",
-        )
-        .with_detail(ErrorDetail::StaleBase { head })
-        .with_field("/expected_head"),
+        Ok(_) => stale_refusal(expected_head, head),
         Err(error) => error,
+    }
+}
+
+/// `Conflict` with `StaleBase { head }`: on `/expected_head` when `head` is not the request's
+/// `expected_head`, the request field that is stale; with no field when it is, because then the
+/// request named the head and the proposal's base is what is stale.
+fn stale_refusal(expected_head: &Revision, head: Revision) -> ApiError {
+    let moved = head != *expected_head;
+    let refusal = conflict(
+        "the workspace head is not the one the proposal was drafted on; it needs reconciliation",
+    )
+    .with_detail(ErrorDetail::StaleBase { head });
+    if moved {
+        refusal.with_field("/expected_head")
+    } else {
+        refusal
     }
 }
 

@@ -57,6 +57,8 @@ struct CandidateState {
     candidates: Vec<CandidateChanges>,
     /// Every promotion that landed, with the revision it produced.
     promotions: Vec<(Promotion, Revision)>,
+    /// Every `promote_candidate` call, refused or not, in order.
+    attempts: Vec<Promotion>,
     /// How many candidate checks ran.
     checks: usize,
 }
@@ -95,6 +97,14 @@ impl CandidateVersions {
     /// Returns when the lock is poisoned.
     pub fn promotions(&self) -> Built<Vec<(Promotion, Revision)>> {
         Ok(lock(&self.state)?.promotions.clone())
+    }
+
+    /// Every promotion asked for, refused or not, in order.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn attempts(&self) -> Built<Vec<Promotion>> {
+        Ok(lock(&self.state)?.attempts.clone())
     }
 
     /// The candidate revision `proposal`'s reference retains, if any.
@@ -344,6 +354,7 @@ impl VersionStore for CandidateVersions {
         promotion: Promotion,
     ) -> PortFuture<'a, Committed> {
         Box::pin(async move {
+            lock_api(&self.state)?.attempts.push(promotion.clone());
             if self.fail_next_promote.swap(false, Ordering::SeqCst) {
                 return Err(ApiError::new(ErrorCode::Unavailable, "the store failed"));
             }
@@ -380,12 +391,15 @@ impl VersionStore for CandidateVersions {
                     "the candidate is not the revision this proposal retains",
                 ));
             }
-            // "... when the candidate's parent is not `expected_head`".
+            // "... and when the candidate's parent is not `expected_head`, which is then the head,
+            // also with `StaleBase` naming the head and no `field`: by contract ruling 5 a
+            // candidate drafted on a base that is not the head is stale."
             if base != promotion.expected_head {
                 return Err(ApiError::new(
                     ErrorCode::Conflict,
                     "the candidate was not drafted on the current head",
-                ));
+                )
+                .with_detail(ErrorDetail::StaleBase { head }));
             }
             if state.queued.is_empty() {
                 return Err(ApiError::new(ErrorCode::Internal, "no revision queued"));

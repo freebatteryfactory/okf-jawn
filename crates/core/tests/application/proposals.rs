@@ -1034,10 +1034,10 @@ async fn the_confirmation_is_consumed_before_anything_is_promoted() -> TestResul
     Ok(())
 }
 
-/// The refusal of a stale acceptance: `Conflict` with `StaleBase { head }` on `/expected_head`.
-fn assert_stale(error: &ApiError, head: &Revision) {
+/// The refusal of a stale acceptance: `Conflict` with `StaleBase { head }` on `field`.
+fn assert_stale(error: &ApiError, head: &Revision, field: Option<&str>) {
     assert_eq!(error.code, ErrorCode::Conflict, "{error}");
-    assert_eq!(error.field.as_deref(), Some("/expected_head"));
+    assert_eq!(error.field.as_deref(), field);
     assert_eq!(
         error.detail.as_deref(),
         Some(&ErrorDetail::StaleBase { head: head.clone() })
@@ -1058,7 +1058,8 @@ async fn a_head_that_moved_makes_the_proposal_conflict_with_the_head() -> TestRe
             )
             .await,
     )?;
-    assert_stale(&error, &revision('e')?);
+    // The head moved: the request's `expected_head` is the stale field.
+    assert_stale(&error, &revision('e')?, Some("/expected_head"));
     assert_eq!(status(&world, proposal.id)?, ProposalStatus::Conflict);
     assert!(world.versions.promotions()?.is_empty());
     assert_eq!(world.world.search.indexed()?, Vec::<Revision>::new());
@@ -1080,8 +1081,17 @@ async fn a_candidate_drafted_on_an_earlier_head_makes_the_proposal_conflict() ->
             )
             .await,
     )?;
-    assert_stale(&error, &revision('e')?);
+    // The store refuses it with the head (contract ruling 5: a base that is not the head is
+    // stale); the request named the head, so no request field is stale.
+    assert_stale(&error, &revision('e')?, None);
     assert_eq!(status(&world, proposal.id)?, ProposalStatus::Conflict);
+    // The promotion was asked for onto the head shown, and the store refused it: nothing landed.
+    let attempts = world.versions.attempts()?;
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        some(attempts.first(), "the promotion asked for")?.expected_head,
+        revision('e')?
+    );
     assert!(world.versions.promotions()?.is_empty());
     Ok(())
 }
