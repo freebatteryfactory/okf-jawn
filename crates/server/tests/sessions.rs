@@ -225,6 +225,9 @@ async fn the_launch_token_opens_a_strict_http_only_session_and_records_the_sign_
         event.actor.as_ref().map(|actor| actor.route.clone()),
         Some(AccessRoute::LocalOwner)
     );
+    // Recorded by core's one rule for a sign-in, exactly as it builds the event.
+    assert_eq!(event, &NewEvent::signed_in(&stored.principal));
+    assert_eq!(appended.len(), 1, "one event for one sign-in");
     Ok(())
 }
 
