@@ -420,6 +420,21 @@ pub(crate) fn materialize_at(
     write_files(repository, tree, root)
 }
 
+/// What `materialize` would refuse in `tree`, a tree that an archive's reference `reference`
+/// names, in the words of a refused archive (`item::respelled`, `Respelled::archived`); `None`
+/// when the tree holds no such thing.
+pub(crate) fn respelled_in_archive(
+    repository: &Repository,
+    tree: &Tree<'_>,
+    reference: &str,
+) -> Result<Option<String>, ApiError> {
+    let paths = files(repository, tree)?;
+    Ok(
+        super::item::respelled(paths.iter().map(|(path, _)| path.as_str()))
+            .map(|found| found.archived(reference)),
+    )
+}
+
 /// Write the files of `tree` under `root`, as `materialize` does once the tree is checked.
 fn write_files(repository: &Repository, tree: &Tree<'_>, root: &Path) -> Result<(), ApiError> {
     for entry in tree {

@@ -3594,6 +3594,178 @@ async fn assert_import_refused(
     Ok(())
 }
 
+/// Point `reference` of `scope`'s repository at a new commit on its target whose tree also holds
+/// the file `written`, straight through Git, as no store edit can (an earlier build, a
+/// case-sensitive filesystem or a crafted archive can leave such a tree); answers the commit.
+fn respelled_at(
+    storage: &Storage,
+    scope: &StorageScope,
+    reference: &str,
+    written: &str,
+) -> Fallible<git2::Oid> {
+    let repository = repository_of(storage, scope)?;
+    let parent = repository.find_commit(repository.refname_to_id(reference)?)?;
+    let mut update = git2::build::TreeUpdateBuilder::new();
+    update.upsert(
+        written,
+        repository.blob(b"respelled")?,
+        git2::FileMode::Blob,
+    );
+    let tree = repository.find_tree(update.create_updated(&repository, &parent.tree()?)?)?;
+    let who = git2::Signature::now("raw", "raw@example.invalid")?;
+    Ok(repository.commit(
+        Some(reference),
+        &who,
+        &who,
+        &format!("raw\n\nOkf-Jawn-Mutation: {}\n", uuid_text(90)),
+        &tree,
+        &[&parent],
+    )?)
+}
+
+/// Storage-paths re-review note (c), ruling B-R2: an import refuses, before anything is
+/// written, an archive one of whose references names a tree the store would refuse to stage:
+/// two spellings of one path, or a path the server writes spelled another way. The refusal
+/// names both spellings and the reference: the head (`refs/heads/main`), and a proposal's
+/// candidate. Each archive is written by the store's own archive writer from a workspace whose
+/// reference was moved to such a tree through Git.
+#[tokio::test]
+async fn backup_an_import_refuses_an_archive_whose_reference_holds_a_respelling() -> TestResult {
+    let main = "refs/heads/main";
+    for (written, what) in [
+        (
+            "Notes/b.md",
+            "notes collides with Notes: its refs/heads/main holds two spellings of one path, \
+             which Windows and macOS keep as one",
+        ),
+        (
+            ".OKF/x.json",
+            ".OKF collides with the server's .okf: its refs/heads/main spells a path the server \
+             writes another way, which Windows and macOS would merge with it",
+        ),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let storage = Storage::open(directory.path())?;
+        let source = notes_workspace(&storage).await?;
+        respelled_at(&storage, &source, main, written)?;
+        let bytes = archive_bytes(&storage, &source).await?;
+        let imported = import_crafted(&storage, bytes).await?;
+        assert_import_refused(
+            &storage,
+            imported,
+            &format!("the archive cannot be restored: {what}"),
+        )
+        .await?;
+    }
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let storage = &fixture.storage;
+    let candidate = some(
+        other_references(&repository_of(storage, &fixture.workspace)?)?
+            .first()
+            .map(|(name, _)| name.clone()),
+        "the archive's candidate reference",
+    )?;
+    respelled_at(storage, &fixture.workspace, &candidate, "Notes/x.md")?;
+    let bytes = archive_bytes(storage, &fixture.workspace).await?;
+    let imported = import_crafted(storage, bytes).await?;
+    assert_import_refused(
+        storage,
+        imported,
+        &format!(
+            "the archive cannot be restored: notes collides with Notes: its {candidate} holds two \
+             spellings of one path, which Windows and macOS keep as one"
+        ),
+    )
+    .await
+}
+
+/// Ruling B-R2 refuses an import only: a replacement restore puts back a workspace whose head
+/// holds two spellings as the installation held it, since the archive writer wrote that head
+/// and a refusal would make the set unrestorable; the workspace then refuses a commit as it
+/// did before the backup, naming the repair.
+#[tokio::test]
+async fn backup_a_replacement_restore_puts_back_a_head_holding_a_respelling() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let workspace = notes_workspace(&storage).await?;
+    let respelled = respelled_at(&storage, &workspace, "refs/heads/main", "Notes/b.md")?;
+    let respelled = Revision::try_from(respelled.to_string())?;
+    storage
+        .backups()
+        .write_backup_set(output.path(), None)
+        .await?;
+    drop(storage);
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    let installation = output.path().join("installation").join("local.zip");
+    let archives = vec![
+        output
+            .path()
+            .join("workspaces")
+            .join("local")
+            .join(format!("{}.zip", workspace.workspace_id.0)),
+    ];
+    restored
+        .backups()
+        .restore_replacement(&installation, &archives)
+        .await?;
+    assert_eq!(restored.versions().head(&workspace).await?, respelled);
+    let error = err_of(
+        commit(
+            &restored,
+            &workspace,
+            92,
+            &respelled,
+            vec![note(uuid!(14)?, "c.md", "Fourteen.")?],
+        )
+        .await,
+    )?;
+    assert!(
+        error
+            .to_string()
+            .contains("notes collides with Notes: the revision holds two spellings of one path"),
+        "{error}"
+    );
+    Ok(())
+}
+
+/// Ruling B-R2's other side: an archive whose respelling is only in an earlier revision, behind
+/// a head repaired by a whole-tree Rewind, imports with that head. Only a Rewind to the earlier
+/// revision meets it, and is refused then (`Holder::Restored`).
+#[tokio::test]
+async fn backup_an_import_takes_an_archive_with_a_respelling_only_in_its_history() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let clean = storage.versions().head(&source).await?;
+    let respelled = respelled_at(&storage, &source, "refs/heads/main", "Notes/b.md")?;
+    let repaired = commit(
+        &storage,
+        &source,
+        91,
+        &Revision::try_from(respelled.to_string())?,
+        vec![TreeEdit::RestoreWorkspace {
+            from: clean.clone(),
+        }],
+    )
+    .await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let (target, _, result) = import_crafted(&storage, bytes).await?;
+    result?;
+    let repository = repository_of(&storage, &target)?;
+    let head = repository.find_commit(repository.refname_to_id("refs/heads/main")?)?;
+    let source_repository = repository_of(&storage, &source)?;
+    let archived = source_repository.find_commit(git2::Oid::from_str(repaired.as_str())?)?;
+    assert_eq!(
+        head.tree_id(),
+        archived.tree_id(),
+        "the repaired head's tree"
+    );
+    Ok(())
+}
+
 /// PR #20 Codex P2 (`archive.rs:145`): an uploaded archive whose manifest decompresses past the
 /// 64 MiB cap (a small deflated entry; the archive carries 10 MiB of incompressible padding, so
 /// the cap and not the expansion bound refuses it) is refused before anything is written. The

@@ -221,6 +221,12 @@ impl Respelled {
         ApiError::new(ErrorCode::Conflict, message)
     }
 
+    /// The words of the refusal of an archive whose reference `reference` names a tree that
+    /// holds this (`repo::respelled_in_archive`): both spellings and what is wrong with them.
+    pub(crate) fn archived(&self, reference: &str) -> String {
+        format!("{}: its {reference} {}", self.clash(), self.what())
+    }
+
     /// Both spellings, each escaped when they differ beyond letter case (`shown`).
     fn clash(&self) -> String {
         let encoded = self.encoded();
