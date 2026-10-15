@@ -1623,6 +1623,49 @@ async fn a_resumed_decline_finishes_after_a_failure_at_each_step() -> TestResult
     Ok(())
 }
 
+/// The decline's stated limit (review probe P5, N4): a decline that failed after its reason
+/// comment and before its compare-and-set, retried after an acceptance landed, answers
+/// `conflict`, and its reason stays on the accepted proposal; no decline event is appended.
+#[tokio::test]
+async fn a_decline_that_loses_to_an_acceptance_leaves_its_reason_on_the_accepted_proposal()
+-> TestResult {
+    let world = proposal_world()?;
+    let (proposal, confirmation) = opened_and_confirmed(&world).await?;
+    world.proposals.fail_next(ProposalCall::Update)?;
+    let context = alice(OperationName::DeclineProposal, Some(mutation(DECLINING)))?;
+    err_of(
+        world
+            .service
+            .decline_proposal(&context, decline_request(&proposal)?)
+            .await,
+    )?;
+    world
+        .service
+        .accept_proposal(
+            &accepting(ACCEPTING)?,
+            accept_request(&proposal, &confirmation, 'a')?,
+        )
+        .await?;
+    let error = err_of(
+        world
+            .service
+            .decline_proposal(&resumed(context), decline_request(&proposal)?)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    assert_eq!(status(&world, proposal.id)?, ProposalStatus::Accepted);
+    let comments = world.proposals.comments()?;
+    let (under, reason) = some(comments.first(), "the reason")?;
+    assert_eq!(comments.len(), 1);
+    assert_eq!(*under, mutation(DECLINING));
+    assert_eq!(reason.text, "Not what we need.");
+    assert_eq!(
+        proposal_events(&world, proposal.id)?,
+        [Some(mutation(OPENED)), Some(mutation(ACCEPTING))]
+    );
+    Ok(())
+}
+
 /// A citation of the whole plan note at `a` in workspace `workspace`.
 fn plan_citation(workspace: u128) -> Built<SourceReference> {
     Ok(SourceReference {

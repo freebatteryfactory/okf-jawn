@@ -77,6 +77,10 @@
 //! `conflict`, and the accepted content stays on the line under a proposal shown as declined.
 //! (The decliner was already answered, so the decline is not overwritten.)
 //!
+//! `conflict` is terminal: reconciliation opens a new proposal on the current head. A proposal
+//! in `conflict` cannot be accepted, declined or confirmed again; the one exception is the false
+//! mark of step 4, which gives way to the acceptance whose promotion landed.
+//!
 //! Declining (`decline_proposal`) needs no confirmation (the contract has none). The proposal must
 //! be `open`; the request's reason is recorded as a comment by the person who declines, under the
 //! decline's own mutation, before the status becomes `declined` (a compare-and-set from `open`),
