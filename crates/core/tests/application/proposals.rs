@@ -1263,6 +1263,45 @@ async fn a_resumed_stale_acceptance_announces_its_mark_after_a_failure_at_the_ev
     Ok(())
 }
 
+/// Review R1-N5: of two stale acceptances that both read the proposal `open`, the second's mark
+/// is refused because the first marked it in between; the second still answers the store's
+/// stale refusal (`StaleBase { head }` on `/expected_head`), not the store's plain refusal of
+/// its mark, and it marks and announces nothing of its own.
+#[tokio::test]
+async fn a_stale_acceptance_whose_mark_another_won_still_answers_stale() -> TestResult {
+    let world = proposal_world()?;
+    let (proposal, confirmation) = opened_and_confirmed(&world).await?;
+    world.world.versions.set_head(revision('e')?)?;
+    // The other stale acceptance's mark lands after this one read the proposal `open`.
+    world.proposals.land_before_next_update(
+        &scope()?,
+        mutation(ACCEPTING.saturating_add(1)),
+        Proposal {
+            status: ProposalStatus::Conflict,
+            ..proposal.clone()
+        },
+        ProposalStatus::Open,
+    )?;
+    let error = err_of(
+        world
+            .service
+            .accept_proposal(
+                &accepting(ACCEPTING)?,
+                accept_request(&proposal, &confirmation, 'a')?,
+            )
+            .await,
+    )?;
+    assert_stale(&error, &revision('e')?, Some("/expected_head"));
+    assert_eq!(status(&world, proposal.id)?, ProposalStatus::Conflict);
+    // The only status written is the other acceptance's mark, and this one announced nothing.
+    assert_eq!(world.proposals.writes()?, [ProposalStatus::Conflict]);
+    assert_eq!(
+        proposal_events(&world, proposal.id)?,
+        [Some(mutation(OPENED))]
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_plain_conflict_of_the_promotion_leaves_the_proposal_open() -> TestResult {
     let world = proposal_world()?;

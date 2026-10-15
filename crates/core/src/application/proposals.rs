@@ -50,9 +50,11 @@
 //!    reconciliation; a compare-and-set from `open`), appends a `proposal_updated` event naming
 //!    it, and answers `conflict` with that `StaleBase`: on `/expected_head` when the head is not
 //!    the request's `expected_head`, and with no field when it is, because then the request
-//!    named the head and the proposal is what is stale. Any other refusal, the store's
-//!    plain `conflict` of a candidate reference that is not the proposal's included, leaves the
-//!    status as it was and is answered as given.
+//!    named the head and the proposal is what is stale. When the mark is refused because the
+//!    status changed since it was read (another stale acceptance marked it first), nothing is
+//!    marked or announced, and the answer is the same stale refusal. Any other refusal of the
+//!    promotion, the store's plain `conflict` of a candidate reference that is not the
+//!    proposal's included, leaves the status as it was and is answered as given.
 //! 4. The status becomes `accepted`, a compare-and-set from `open`. When that is refused and the
 //!    proposal is `conflict`, it becomes `accepted` from `conflict` instead: this mutation's
 //!    promotion landed (step 3 answered it, or a resumed attempt found it by the mutation), so
@@ -707,7 +709,9 @@ async fn accepted(
 /// `proposal_updated` event naming it is appended under the mutation: `Conflict` with
 /// `StaleBase { head }`, on `/expected_head` when `head` is not the request's `expected_head`
 /// (the head moved) and with no field when it is (the candidate was not drafted on the head the
-/// request named); or the error of marking it or of the event, when one fails.
+/// request named). A mark refused with `Conflict` (the status changed since this acceptance read
+/// it) is answered with the same refusal and no event; any other error of the mark or of the
+/// event is answered as given.
 async fn stale(
     service: &ApplicationService,
     scope: &StorageScope,
@@ -731,6 +735,12 @@ async fn stale(
         .await;
     let marked = match marked {
         Ok(marked) => marked,
+        // The status changed since this acceptance read it `open` (another stale acceptance
+        // marked it, or another decision landed): this one marks nothing and announces nothing,
+        // but the refusal it reports is still the store's stale one.
+        Err(error) if error.code == ErrorCode::Conflict => {
+            return stale_refusal(expected_head, head);
+        }
         Err(error) => return error,
     };
     match proposal_updated(service, scope, mutation, marked.id).await {

@@ -5,7 +5,9 @@
 //! the reader's grants on other workspaces. Not production adapters.
 //!
 //! `FakeProposals` encodes what `ProposalStore`'s doc states, each rule quoted above the code
-//! that keeps it. Where it is kinder than storage's `SqliteProposals`: its cursor is a decimal
+//! that keeps it. A test can land another writer's status change just before the next `update`
+//! is judged (`land_before_next_update`), to place a race between a handler's read of a proposal
+//! and its write. Where it is kinder than storage's `SqliteProposals`: its cursor is a decimal
 //! offset into the listing rather than a row number, so a row inserted between two pages shifts
 //! the next page (storage's does not); and it refuses nothing while a purge names the workspace
 //! (storage refuses every write then).
@@ -48,7 +50,12 @@ pub enum ProposalCall {
 pub struct FakeProposals {
     state: Mutex<ProposalRows>,
     failing: Mutex<Vec<ProposalCall>>,
+    /// Another writer's status change that lands just before the next `update` call is judged.
+    interloper: Mutex<Option<StatusChange>>,
 }
+
+/// A status change as `update` is called with it: scope, mutation, record, expected status.
+type StatusChange = (StorageScope, MutationId, Proposal, ProposalStatus);
 
 #[derive(Default)]
 struct ProposalRows {
@@ -144,6 +151,23 @@ impl FakeProposals {
         Ok(())
     }
 
+    /// Land another writer's status change (`update` under `mutation`, from `expected`) just
+    /// before the next `update` call is judged, as if that writer had won a race between the
+    /// handler's read of the proposal and its write. The change itself follows the doc's rules.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn land_before_next_update(
+        &self,
+        scope: &StorageScope,
+        mutation: MutationId,
+        proposal: Proposal,
+        expected: ProposalStatus,
+    ) -> Built<()> {
+        *lock(&self.interloper)? = Some((scope.clone(), mutation, proposal, expected));
+        Ok(())
+    }
+
     /// Hold `proposal` in `scope` as if `mutation` had inserted it.
     ///
     /// # Errors
@@ -194,6 +218,41 @@ impl FakeProposals {
             return Err(ApiError::new(ErrorCode::Unavailable, "the store failed"));
         }
         Ok(())
+    }
+}
+
+impl ProposalRows {
+    /// `ProposalStore::update` as its doc states it (quoted above `FakeProposals::update`).
+    fn update(
+        &mut self,
+        scope: &StorageScope,
+        mutation_id: MutationId,
+        proposal: Proposal,
+        expected: &ProposalStatus,
+    ) -> Result<Proposal, ApiError> {
+        let written = proposal.status.clone();
+        let record = serde_json::to_value(&proposal).map_err(internal)?;
+        let row = self
+            .proposals
+            .iter_mut()
+            .find(|(held, _, row)| held == scope && row.id == proposal.id)
+            .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such proposal"))?;
+        let wrote = self.writers.iter().any(|(held, id, writer)| {
+            held == scope && *id == proposal.id && *writer == mutation_id
+        });
+        if wrote && serde_json::to_value(&row.2).map_err(internal)? == record {
+            return Ok(proposal);
+        }
+        if row.2.status != *expected {
+            return Err(ApiError::new(
+                ErrorCode::Conflict,
+                "the proposal's status is not the expected one",
+            ));
+        }
+        row.2 = proposal.clone();
+        self.writes.push(written);
+        self.writers.push((scope.clone(), proposal.id, mutation_id));
+        Ok(proposal)
     }
 }
 
@@ -281,33 +340,12 @@ impl ProposalStore for FakeProposals {
     ) -> PortFuture<'a, Proposal> {
         Box::pin(async move {
             self.injected(ProposalCall::Update)?;
-            let mut guard = lock_api(&self.state)?;
-            let state = &mut *guard;
-            let written = proposal.status.clone();
-            let record = serde_json::to_value(&proposal).map_err(internal)?;
-            let row = state
-                .proposals
-                .iter_mut()
-                .find(|(held, _, row)| held == scope && row.id == proposal.id)
-                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such proposal"))?;
-            let wrote = state.writers.iter().any(|(held, id, writer)| {
-                held == scope && *id == proposal.id && *writer == mutation_id
-            });
-            if wrote && serde_json::to_value(&row.2).map_err(internal)? == record {
-                return Ok(proposal);
+            let interloper = lock_api(&self.interloper)?.take();
+            let mut state = lock_api(&self.state)?;
+            if let Some((held, writer, landed, from)) = interloper {
+                state.update(&held, writer, landed, &from)?;
             }
-            if row.2.status != expected {
-                return Err(ApiError::new(
-                    ErrorCode::Conflict,
-                    "the proposal's status is not the expected one",
-                ));
-            }
-            row.2 = proposal.clone();
-            state.writes.push(written);
-            state
-                .writers
-                .push((scope.clone(), proposal.id, mutation_id));
-            Ok(proposal)
+            state.update(scope, mutation_id, proposal, &expected)
         })
     }
 
