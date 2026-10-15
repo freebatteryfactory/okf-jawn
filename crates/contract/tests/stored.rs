@@ -8,11 +8,14 @@
 //! shape the type had before the field, decoded, checked to hold nothing for the new fields,
 //! and serialized again to the very same JSON. Each new field is then shown on the wire under
 //! its name when it is present.
+//!
+//! The one stored answer whose shape changed, `create_item`'s (an `ItemDocument` before
+//! `CreatedItem`), is read in the current shape by `CreatedItem::from_stored`.
 
 use check::{TestResult, some};
 use okf_jawn_contract::events::Event;
 use okf_jawn_contract::import::{Job, Upload};
-use okf_jawn_contract::item::ItemKind;
+use okf_jawn_contract::item::{CreatedItem, ItemKind};
 use okf_jawn_contract::proposal::{Change, Comment, Proposal};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -223,6 +226,51 @@ fn an_upload_answer_kept_in_the_ledger_before_its_new_fields_reads_unchanged() -
     ] {
         let _upload: Upload = carries(&upload_before(), field, &value)?;
     }
+    Ok(())
+}
+
+/// A committed item as `create_item` answered it before `CreatedItem` existed.
+fn item_document_before() -> Value {
+    json!({
+        "summary": {
+            "id": ITEM,
+            "path": "notes/a.md",
+            "title": "a",
+            "description": "",
+            "type_name": "note",
+            "kind": "note",
+            "revision": revision(),
+            "status": "stable",
+            "archived": false
+        },
+        "body": "# A\n",
+        "properties": { "type": "note" },
+        "content_digest": "c".repeat(64)
+    })
+}
+
+/// Review N2: a `create_item` answer kept in the ledger before `CreatedItem` existed is the
+/// `ItemDocument` alone; it reads as that document with no findings and no receipt, the
+/// receipt left out on the wire. An answer in the current shape reads as it is, and a body in
+/// neither shape is refused.
+#[test]
+fn a_create_item_answer_kept_before_created_item_reads_in_the_current_shape() -> TestResult {
+    let before = item_document_before();
+    let created = CreatedItem::from_stored(before.clone())?;
+    assert!(created.receipt_id.is_none() && created.warnings.is_empty());
+    assert_eq!(
+        serde_json::to_value(&created)?,
+        json!({ "item": before, "warnings": [] })
+    );
+    let current = json!({
+        "item": item_document_before(),
+        "receipt_id": UPLOAD,
+        "warnings": [{ "code": "okf_lint", "message": "no heading" }]
+    });
+    let read = CreatedItem::from_stored(current.clone())?;
+    assert_eq!(serde_json::to_value(&read)?, current);
+    assert!(CreatedItem::from_stored(json!({ "unknown": true })).is_err());
+    assert!(CreatedItem::from_stored(json!({ "item": {}, "warnings": [] })).is_err());
     Ok(())
 }
 

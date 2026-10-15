@@ -36,7 +36,7 @@ use crate::import::{
     StartImportRequest,
 };
 use crate::item::{
-    CreateFolderRequest, CreateItemRequest, DeleteFolderRequest, DeleteItemRequest,
+    CreateFolderRequest, CreateItemRequest, CreatedItem, DeleteFolderRequest, DeleteItemRequest,
     DiscardDraftRequest, GetItemRequest, ItemStatus, ListDraftsRequest, ListItemsRequest,
     ListTypesRequest, MoveFolderRequest, MoveItemRequest, SaveDraftRequest, SetLifecycleRequest,
     SetTypeRequest, check_item_text,
@@ -169,6 +169,20 @@ pub trait RequestScope {
 
     /// Every resource that must be authorized, first the one named by the table permission.
     fn targets(&self) -> Vec<Target>;
+
+    /// A completed mutation's stored response, in the shape this build answers.
+    ///
+    /// The mutation ledger keeps a response for its retention, and a restored archive brings
+    /// older ones, so the response of an operation whose answer changed shape is read here from
+    /// the shape it was stored in. Every other response is answered as stored: a type that only
+    /// gained optional fields reads its earlier bodies as they are (the general rule for stored
+    /// wire types).
+    ///
+    /// # Errors
+    /// Returns `Internal` when the stored body is in no shape this operation ever answered.
+    fn replayed(stored: serde_json::Value) -> Result<serde_json::Value, ApiError> {
+        Ok(stored)
+    }
 
     /// Caller-chosen retry identity; present exactly when the request is a mutation.
     fn idempotency_key(&self) -> Option<&IdempotencyKey>;
@@ -354,6 +368,19 @@ impl RequestScope for CreateItemRequest {
     }
     fn idempotency_key(&self) -> Option<&IdempotencyKey> {
         Some(&self.idempotency_key)
+    }
+    /// A creation answered before `CreatedItem` existed was stored as its `ItemDocument` alone
+    /// (`CreatedItem::from_stored`).
+    fn replayed(stored: serde_json::Value) -> Result<serde_json::Value, ApiError> {
+        let unreadable = |error: serde_json::Error| {
+            ApiError::new(
+                ErrorCode::Internal,
+                format!("a stored create_item answer is in no shape this build reads: {error}"),
+            )
+        };
+        CreatedItem::from_stored(stored)
+            .and_then(serde_json::to_value)
+            .map_err(unreadable)
     }
     fn check_rules(&self) -> Result<(), ApiError> {
         check_item_text(&self.body, "/body")

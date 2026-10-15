@@ -402,6 +402,31 @@ impl FixtureMutations {
         Ok(Some(body.clone()))
     }
 
+    /// Replace the response a completed mutation retains with `body`, as a row an earlier build
+    /// stored in an earlier shape of the response reads.
+    ///
+    /// # Errors
+    /// Returns `NotFound` for a mutation that has not completed, or when the lock is poisoned.
+    pub fn store_body_of_an_earlier_build(
+        &self,
+        mutation_id: MutationId,
+        body: Value,
+    ) -> Result<(), ApiError> {
+        let mut ledger = lock(&self.ledger, "mutation ledger")?;
+        let key = ledger
+            .by_id
+            .get(&mutation_id)
+            .cloned()
+            .ok_or_else(unknown_mutation)?;
+        match ledger.by_key.get_mut(&key).map(|row| &mut row.phase) {
+            Some(Phase::Completed { body: stored }) => {
+                *stored = body;
+                Ok(())
+            }
+            _ => Err(unknown_mutation()),
+        }
+    }
+
     /// The workspace the ledger records for a mutation: what its first `begin` was given, or
     /// else what its `complete` was given.
     ///
@@ -771,6 +796,18 @@ mod tests {
         };
         assert_eq!(stored.mutation_id, id);
         assert_eq!(stored.body, json!({ "done": true }));
+
+        // A body an earlier build stored is what the next replay reads; a mutation that has not
+        // completed has no body to replace.
+        ledger.store_body_of_an_earlier_build(id, json!({ "earlier": true }))?;
+        let BeginOutcome::Replay(stored) = ledger.begin(&key, &digest, home).await? else {
+            return Err("a completed mutation must replay".into());
+        };
+        assert_eq!(stored.body, json!({ "earlier": true }));
+        let unknown = err_of(
+            ledger.store_body_of_an_earlier_build(new_mutation_id(), json!({ "earlier": true })),
+        )?;
+        assert_eq!(unknown.code, ErrorCode::NotFound);
         Ok(())
     }
 

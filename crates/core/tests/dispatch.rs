@@ -782,6 +782,37 @@ async fn replay_returns_the_stored_response_and_the_handler_runs_once() -> TestR
     Ok(())
 }
 
+/// Review N2: a `create_item` answer a build before `CreatedItem` stored in the ledger is the
+/// `ItemDocument` alone. Its repeat answers the current shape: that document as `item`, no
+/// findings, and no receipt, which that build never recorded. The handler does not run again.
+#[tokio::test]
+async fn a_create_item_answer_stored_in_its_earlier_shape_replays_as_a_created_item() -> TestResult
+{
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response("create_item", created_item("hello")?)?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+    call(&app, &ports, &alice, "create_item", body.clone()).await?;
+    let mutation = handled_mutation(&app, "create_item")?;
+    let earlier = item_document("hello")?;
+    ports
+        .mutations
+        .store_body_of_an_earlier_build(mutation, earlier.clone())?;
+    let replayed = call(&app, &ports, &alice, "create_item", body).await?;
+    assert_eq!(replayed, json!({ "item": earlier, "warnings": [] }));
+    assert_eq!(app.call_count("create_item")?, 1);
+    // A body in neither shape is our fault, not the caller's.
+    ports
+        .mutations
+        .store_body_of_an_earlier_build(mutation, json!({ "unknown": true }))?;
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+    let refused = err_of(call(&app, &ports, &alice, "create_item", body).await)?;
+    assert_eq!(refused.code, ErrorCode::Internal);
+    assert_eq!(app.call_count("create_item")?, 1);
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_same_key_with_a_different_body_conflicts() -> TestResult {
     let ports = ports_admin_a_read_b()?;

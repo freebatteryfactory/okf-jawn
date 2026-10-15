@@ -217,7 +217,7 @@ pub(super) async fn create_item(
     )?;
     Ok(CreatedItem {
         item,
-        receipt_id: committed.receipt_id,
+        receipt_id: Some(committed.receipt_id),
         warnings: committed.warnings,
     })
 }

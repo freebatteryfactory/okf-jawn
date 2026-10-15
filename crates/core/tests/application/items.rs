@@ -632,7 +632,7 @@ async fn create_item_commits_a_note_on_its_base_and_returns_it_as_committed() ->
     let receipts = world.records.receipts()?;
     let (under, receipt) = some(receipts.first(), "the create's receipt")?;
     assert_eq!(*under, Some(id));
-    assert_eq!(receipt.id, created.receipt_id);
+    assert_eq!(Some(receipt.id), created.receipt_id);
     assert_eq!(receipt.operation_id, OperationName::CreateItem);
     assert!(
         created.warnings.iter().any(|warning| {

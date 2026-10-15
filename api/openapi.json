@@ -1952,15 +1952,22 @@
       },
       "CreatedItem": {
         "additionalProperties": false,
-        "description": "A created item, with the receipt of its commit and the findings of the commit's check.",
+        "description": "A created item, with the receipt of its commit and the findings of the commit's check.\n\nA creation answered before this type existed is kept in the mutation ledger as the\n`ItemDocument` alone; a repeat of it answers that document here with no findings and no\nreceipt (`CreatedItem::from_stored`), since the build that answered it recorded none.",
         "properties": {
           "item": {
             "$ref": "#/components/schemas/ItemDocument",
             "description": "The item as committed."
           },
           "receipt_id": {
-            "$ref": "#/components/schemas/ReceiptId",
-            "description": "Durable application operation receipt."
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReceiptId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Durable application operation receipt; absent only on the repeat of a creation answered\nbefore its receipt was recorded."
           },
           "warnings": {
             "description": "Non-fatal issues recorded during the operation.",
@@ -1972,7 +1979,6 @@
         },
         "required": [
           "item",
-          "receipt_id",
           "warnings"
         ],
         "type": "object"

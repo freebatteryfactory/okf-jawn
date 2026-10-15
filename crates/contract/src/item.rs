@@ -194,13 +194,19 @@ pub struct CreateItemRequest {
 }
 
 /// A created item, with the receipt of its commit and the findings of the commit's check.
+///
+/// A creation answered before this type existed is kept in the mutation ledger as the
+/// `ItemDocument` alone; a repeat of it answers that document here with no findings and no
+/// receipt (`CreatedItem::from_stored`), since the build that answered it recorded none.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreatedItem {
     /// The item as committed.
     pub item: ItemDocument,
-    /// Durable application operation receipt.
-    pub receipt_id: crate::identity::ReceiptId,
+    /// Durable application operation receipt; absent only on the repeat of a creation answered
+    /// before its receipt was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_id: Option<crate::identity::ReceiptId>,
     /// Non-fatal issues recorded during the operation.
     pub warnings: Vec<crate::common::Warning>,
 }
@@ -452,6 +458,27 @@ pub const APP_HEADER_KEY: &str = "okf_jawn";
 /// `too_large`, naming the field.
 /// The request body as a whole is bounded by `transport::MAX_REQUEST_BODY_BYTES`.
 pub const MAX_ITEM_TEXT_BYTES: usize = 8 * 1024 * 1024;
+
+impl CreatedItem {
+    /// A `create_item` answer as the mutation ledger stored it, in this build's shape.
+    ///
+    /// A body in the shape answered before `CreatedItem` existed, the `ItemDocument` alone (it
+    /// has no `item` key), is that document with no findings and no receipt: the build that
+    /// answered it recorded none. A body in this shape is read as it is.
+    ///
+    /// # Errors
+    /// Returns the decoding error of a body in neither shape.
+    pub fn from_stored(stored: serde_json::Value) -> Result<Self, serde_json::Error> {
+        if stored.get("item").is_some() {
+            return serde_json::from_value(stored);
+        }
+        Ok(Self {
+            item: serde_json::from_value(stored)?,
+            receipt_id: None,
+            warnings: Vec::new(),
+        })
+    }
+}
 
 /// Refuse an item text longer than [`MAX_ITEM_TEXT_BYTES`] UTF-8 bytes.
 ///

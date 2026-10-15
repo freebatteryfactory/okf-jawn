@@ -2529,10 +2529,14 @@ export const zItemDocument = z.object({
 
 /**
  * A created item, with the receipt of its commit and the findings of the commit's check.
+ *
+ * A creation answered before this type existed is kept in the mutation ledger as the
+ * `ItemDocument` alone; a repeat of it answers that document here with no findings and no
+ * receipt (`CreatedItem::from_stored`), since the build that answered it recorded none.
  */
 export const zCreatedItem = z.object({
     item: zItemDocument,
-    receipt_id: zReceiptId,
+    receipt_id: zReceiptId.nullish(),
     warnings: z.array(zWarning)
 });
 
