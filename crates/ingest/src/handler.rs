@@ -5,7 +5,9 @@
 //! the rules are core's; this module only sequences them and writes the completion through the
 //! claim's lease. A job found cancelled while it runs stops and writes no completion. A job
 //! refused for good (an import colliding with what the workspace holds now, R-I8) writes its
-//! failure through the lease as not retryable; any other error is the runtime's to record.
+//! failure through the lease as not retryable, and a workspace purge writes any failure through
+//! the lease as retryable, whatever its code (`purge_job`); any other error is the runtime's to
+//! record, which classes it by its code.
 //!
 //! A long storage call runs under the same heartbeat as a conversion, so its lease stays live:
 //! the index rebuild, both archive writes, the restore and both purges each renew the lease
@@ -21,9 +23,12 @@
 //!
 //! A workspace purge job is the `Purger`'s caller: before it calls the purger it drains the
 //! workspace's jobs, cancelling each queued or running one and waiting, at most
-//! `HandlerLimits::drain`, until none runs (`drain`). A purge job that fails records its
-//! purge `Failed`, with the error, before the runtime records the job's failure; asking for
-//! the purge again resumes it (contract ruling 24).
+//! `HandlerLimits::drain`, until none runs (`drain`). A workspace purge job that fails records
+//! its purge `Failed` with the error, and then writes the job's failure itself, retryable
+//! whatever the error's code, keeping its code and message: a purge was accepted and its
+//! precondition holds, so whatever stopped it (a survivor's archive that does not read, an I/O
+//! error, the drain's bound) is a state to repair, after which asking for the purge again
+//! resumes it (contract rulings 14 and 24).
 //!
 //! What a job commits is announced as core's `announce` does for a request (core
 //! `application::shared::commit`): every revision an ingest job lands (each import commit, the
@@ -134,6 +139,9 @@ pub(crate) struct Done {
     /// The job was refused for good (an import that collides with what the workspace holds
     /// now): its failure is written as not retryable, and no completion.
     pub(crate) refused: Option<ApiError>,
+    /// The job failed in a way that asking for it again repairs (a workspace purge): its
+    /// failure is written as retryable, whatever its code, and no completion.
+    pub(crate) resumable: Option<ApiError>,
 }
 
 /// Runs claimed jobs of every kind.
@@ -190,11 +198,16 @@ impl IngestHandler {
         if done.cancelled {
             return Ok(());
         }
-        if let Some(refusal) = done.refused {
+        let failure = match (done.refused, done.resumable) {
+            (Some(refusal), _) => Some((refusal, false)),
+            (None, Some(failure)) => Some((failure, true)),
+            (None, None) => None,
+        };
+        if let Some((error, retryable)) = failure {
             let _job = self
                 .ports
                 .records
-                .fail_job(claimed.lease.clone(), refusal, false)
+                .fail_job(claimed.lease.clone(), error, retryable)
                 .await?;
             return announce_job(self.ports.events.as_ref(), claimed).await;
         }
@@ -504,6 +517,17 @@ impl IngestHandler {
     /// Run a purge job of the tenant: a workspace purge, which drains the workspace's jobs
     /// first, or an item purge, which storage has not built (its purger answers
     /// `NotImplemented`) and which drains nothing until it is built.
+    ///
+    /// A workspace purge's failure is always retryable (core M1.4b fix round 1, ruling F1): the
+    /// purge was accepted and its precondition holds, so whatever stops it is a state to repair,
+    /// after which asking for the purge again makes its job runnable and resumes it (contract
+    /// rulings 14 and 24). Its failure is written here as `purge` returned it, code and message
+    /// kept (the error the purge was recorded `Failed` with, that error saying the record could
+    /// not be written, or the store's error when the purge's record could not be read), and
+    /// never left to the runtime, which would class `InvalidInput`, `Forbidden`, `Unsupported`
+    /// and `NotImplemented` as not retryable. An item purge's failure is still the runtime's:
+    /// storage answers it `NotImplemented`, which no repair changes, and core records no item
+    /// purge yet.
     async fn purge_job(&self, attempt: &Attempt<'_>, tenant: &TenantId) -> Result<Done, ApiError> {
         let claimed = attempt.claimed;
         match &claimed.spec {
@@ -512,10 +536,17 @@ impl IngestHandler {
                 workspace_id,
             } => {
                 let drained = item_scope(tenant, *workspace_id);
-                self.purge(attempt, tenant, *purge_id, Some(drained), |purger| {
-                    purger.purge_workspace(tenant, claimed.mutation_id, *purge_id, *workspace_id)
-                })
-                .await
+                let ran = self
+                    .purge(attempt, tenant, *purge_id, Some(drained), |purger| {
+                        purger.purge_workspace(
+                            tenant,
+                            claimed.mutation_id,
+                            *purge_id,
+                            *workspace_id,
+                        )
+                    })
+                    .await;
+                Ok(ran.unwrap_or_else(Done::resumable))
             }
             JobSpec::PurgeItem {
                 purge_id,
@@ -550,11 +581,15 @@ impl IngestHandler {
     /// removal then runs under the heartbeat and is never dropped; its report is recorded even
     /// when the job was cancelled meanwhile, since the purge record states what was removed, and
     /// the job then stops without a completion. Any error once the record was read is the purge
-    /// job's failure, which the runtime records and which no attempt repeats by itself: the
-    /// purge is first recorded `Failed` with that error (contract ruling 24; repeating the
-    /// request resumes it). An attempt that had lost its lease records the same; the attempt
-    /// that runs the job next records `Running` over it. When the failed state cannot be
-    /// recorded either, the error returned says so and the purge stays as it was.
+    /// job's failure, which no attempt repeats by itself: the purge is first recorded `Failed`
+    /// with that error (contract ruling 24; repeating the request resumes it), and the error is
+    /// returned for the job's failure (a workspace purge's is written retryable, `purge_job`).
+    /// An attempt that had lost its lease records the same; the attempt that runs the job next
+    /// records `Running` over it. When the failed state cannot be recorded either, the error
+    /// returned says so and the purge stays as it was. The `Failed` write and the job's failure
+    /// are two writes: a request for the purge that lands between them finds the job still
+    /// running and only queues it (the delivery finds nothing to claim), the job then fails, and
+    /// nothing runs until the purge is asked for again; the person sees `Failed` and asks again.
     async fn purge<'a, F, Fut>(
         &'a self,
         attempt: &'a Attempt<'a>,
@@ -775,6 +810,15 @@ impl Done {
     fn stopped() -> Self {
         Self {
             cancelled: true,
+            ..Self::default()
+        }
+    }
+
+    /// A job that failed with `error` in a way that asking for it again repairs: its failure is
+    /// written as retryable, with `error` as it is.
+    fn resumable(error: ApiError) -> Self {
+        Self {
+            resumable: Some(error),
             ..Self::default()
         }
     }

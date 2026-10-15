@@ -3543,6 +3543,60 @@ mod job_handler {
         Ok(())
     }
 
+    /// Core M1.4b fix round 1, ruling F1 (contract rulings 14 and 24): whatever stops a
+    /// workspace purge is a state to repair, so the handler writes the job's failure as
+    /// retryable whatever its code, each code the runtime alone holds not retryable included,
+    /// keeping the code and the message that names what failed. The purge is recorded `Failed`
+    /// with the same error, and the failure is announced once.
+    #[tokio::test]
+    async fn a_workspace_purge_that_fails_is_retryable_whatever_its_code() -> TestResult {
+        let codes = [
+            ErrorCode::InvalidInput,
+            ErrorCode::Forbidden,
+            ErrorCode::Unsupported,
+            ErrorCode::NotImplemented,
+        ];
+        let kept = |error: Option<&ApiError>| {
+            error.map(|error| (error.code.clone(), error.message.clone()))
+        };
+        for (number, code) in (390_u128..).zip(codes) {
+            let world = world()?;
+            let refusal = ApiError::new(
+                code.clone(),
+                "the purge cannot read workspace bb's archive in pre-migration backup set set-1",
+            );
+            world.purger.fail_next(refusal.clone())?;
+            let (id, _, purge_id) = workspace_purge(&world, number)?;
+            assert!(run(&world, id).await?);
+            let entry = world.records.entry(id)?;
+            assert_eq!(entry.job.state, JobState::Failed, "{code:?}");
+            assert!(entry.completions.is_empty(), "{code:?}");
+            assert_eq!(
+                entry.failures,
+                [(refusal.message.clone(), true)],
+                "{code:?}: retryable, its message kept"
+            );
+            assert_eq!(
+                kept(entry.job.error.as_ref()),
+                Some((code.clone(), refusal.message.clone())),
+                "the code is kept"
+            );
+            let failed = world.records.purge(purge_id)?;
+            assert_eq!(failed.state, PurgeState::Failed, "{code:?}");
+            assert_eq!(
+                kept(failed.error.as_ref()),
+                kept(entry.job.error.as_ref()),
+                "{code:?}: the purge keeps the job's error"
+            );
+            assert_eq!(
+                events_of(&world, &EventKind::JobUpdated)?.len(),
+                1,
+                "{code:?}"
+            );
+        }
+        Ok(())
+    }
+
     /// An item purge drains nothing until storage's item purge is built (its purger answers
     /// `NotImplemented` today): no job of the workspace is cancelled.
     #[tokio::test]
@@ -3575,6 +3629,48 @@ mod job_handler {
         assert!(run(&world, id).await?);
         assert_eq!(world.records.cancel_calls()?, Vec::new());
         assert_eq!(world.records.entry(queued)?.job.state, JobState::Queued);
+        Ok(())
+    }
+
+    /// Ruling F1 is a workspace purge's: an item purge's failure is still the runtime's to
+    /// class, and storage's `NotImplemented` (item purge is not built) is not retryable, since
+    /// no repair changes it.
+    #[tokio::test]
+    async fn an_item_purge_that_is_not_built_fails_not_retryable() -> TestResult {
+        let world = world()?;
+        world.purger.fail_next(ApiError::new(
+            ErrorCode::NotImplemented,
+            "item purge is not built yet",
+        ))?;
+        let purge_id =
+            serde_json::from_value::<PurgeId>(json!("00000000-0000-0000-0000-0000000003ea"))?;
+        let item = "00000000-0000-0000-0000-0000000000dd";
+        let id = job(
+            &world,
+            382,
+            JobScope::Tenant(tenant()?),
+            JobSpec::PurgeItem {
+                purge_id,
+                workspace_id: serde_json::from_value(json!(WORKSPACE))?,
+                item_id: serde_json::from_value(json!(item))?,
+            },
+        )?;
+        world
+            .records
+            .insert_purge(serde_json::from_value::<Purge>(json!({
+                "id": purge_id,
+                "target": { "kind": "item", "workspace_id": WORKSPACE, "item_id": item },
+                "state": "requested",
+                "job_id": serde_json::to_value(id)?,
+                "requested_by": "admin",
+                "requested_at": "2026-10-09T00:00:00.000Z",
+            }))?)?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        let (message, retryable) = some(entry.failures.first(), "the failure")?;
+        assert!(!retryable, "{message}");
+        assert_eq!(world.records.purge(purge_id)?.state, PurgeState::Failed);
         Ok(())
     }
 }

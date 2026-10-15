@@ -29,8 +29,12 @@
 //! attempt finds the purge its first attempt recorded in step 1 and answers it. A failed job is
 //! retried at most once per mutation (the store's rule): a resumed attempt that finds it failed
 //! again since queues it without making it runnable, and a repeat under another key resumes
-//! it. A job whose failure the store holds as not retryable cannot be made runnable: the
-//! store's `conflict` is the answer. The work, the drain of the workspace's jobs and the
+//! it. Ingest's purge handler writes every failure of a workspace purge's job as retryable,
+//! whatever its code: the purge was accepted and its precondition holds, so whatever stopped it
+//! (a survivor's archive that does not read, an I/O error, the drain's bound) is a state to
+//! repair, after which asking again resumes it (contract ruling 14). A job the store holds as
+//! not retryable (a failure some other writer recorded so) cannot be made runnable: the store's
+//! `conflict` is then the answer. The work, the drain of the workspace's jobs and the
 //! removal, is the tenant job's (ingest's purge handler); a purge is never cancelled. No event
 //! is appended here: the job's own writes are announced by its handler.
 //!
