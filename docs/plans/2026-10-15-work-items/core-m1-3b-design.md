@@ -318,9 +318,12 @@ dates that way and no declared order changes it.
 other text literally: `[year]`, `[month]` and `[day]` only, as numbers, with the padding modifiers
 (`[day padding:none]`, `[month padding:zero]`); `\[`, `\]` and `\\` escape. A month name
 (`[month repr:short]`), a two-digit year (`[year repr:last_two]`, which section 4.4 does not read as a
-date) or any other component is refused (rulings: a date format writes numbers only, so the
-formatted date is read again as the same date). Examples:
-`"[year]-[month]-[day]"` gives `2025-03-04`; `"[day].[month].[year]"` gives `04.03.2025`;
+date) or any other component is refused. A format holds each of `[year]`, `[month]` and `[day]`
+exactly once, year first (`[year]` `[month]` `[day]`, which section 4.4 reads under every `date_order`)
+or in the order `date_order` names (`dmy`: day, month, year; `mdy`: month, day, year); any other
+format is refused (rulings: the formatted date is read again as the same date, so a second
+preview leaves the name as it is). Examples:
+`"[year]-[month]-[day]"` gives `2025-03-04`; `"[day].[month].[year]"` (with `date_order dmy`) gives `04.03.2025`;
 `"[year][month][day]"` gives `20250304`. Empty means "keep dates as written" (never "delete
 them"). Validation (section 6): it must parse; formatting the probe dates 2025-03-04,
 1999-12-31 and 0001-01-01 with it must succeed (a time-of-day or offset component cannot format
@@ -348,14 +351,16 @@ Vectors (`date_format`):
 | # | path | rule change | result |
 |---|---|---|---|
 | F1 | `Minutes 2025.3.4.md` | `date_format ""` | `minutes-2025.3.4.md` (kept as written, not split by kebab) |
-| F2 | `Minutes 2025-03-04.md` | `"[day].[month].[year]"` | `minutes-04.03.2025.md`; previewed again under `ymd`: unchanged + plan `W(date_not_read)` |
+| F2 | `Minutes 2025-03-04.md` | `date_order dmy`, `"[day].[month].[year]"` | `minutes-04.03.2025.md` (a year-first date is read under every order); previewed again: unchanged |
 | F3 | `Report 2025-3-4 final.md` | `"[year][month][day]"` | `report-20250304-final.md`; previewed again: unchanged |
 | F4 | any | `"[month repr:short] [year]"` | `invalid_input /rules/rules/0/date_format "a date format writes only numbers: [year], [month], [day]"` (ruling: a formatted date must read again as the same date, so a second preview leaves it as it is) |
-| F7 | `Report 2025-03-04.md`, previewed twice | `"[year]-[month]-[day]"` | first preview `report-2025-03-04.md`; second preview: unchanged |
 | F5 | any | `"[year]-[month"` | `invalid_input /rules/rules/0/date_format "not a date format: unclosed [ (at 7)"` |
 | F6 | any | `"[hour]"` | `invalid_input /rules/rules/0/date_format "names a part a date does not have"` |
 | F7 | any | `"[year]/[month]"` | `invalid_input /rules/rules/0/date_format "the date would hold /"` |
 | F8 | any | `"[invalid]"` | `invalid_input /rules/rules/0/date_format "not a date format: invalid component name invalid (at 1)"` |
+| F9 | `Report 2025-03-04.md`, previewed twice | `"[year]-[month]-[day]"` | first preview `report-2025-03-04.md`; second preview: unchanged |
+| F10 | any | `"[year]"` | `invalid_input /rules/rules/0/date_format "a date format writes [year], [month] and [day], each once"` |
+| F11 | any | `date_order ymd`, `"[day].[month].[year]"` | `invalid_input /rules/rules/0/date_format "a date format puts the year first, or follows date_order"` |
 
 ### 4.5 Words: `case` and `separator`
 
@@ -1175,7 +1180,7 @@ Concerns (found while designing; not this package's to fix):
 | Q9 | An ambiguous date: leave the whole item unchanged, or rename the rest and keep the date text? | The whole item unchanged, flagged in the plan's warnings. |
 | Q10 | `date_format` syntax and meaning of empty; are dates protected from the word rules? | `time` format descriptions v3 (`[year]-[month]-[day]`), not strftime; empty keeps dates as written; a date is always one protected word. |
 | Q11 | Destination: placeholders, empty, the root. | Date parts only (time v3 syntax); no `{type}` (a rule per type) and no original-folder placeholder; empty refused, so the root is not a destination; a missing date keeps the folder with a warning. |
-| Q12 | `alias_preservation`: where is the old path kept? | Frontmatter `aliases` (list of former paths), written by storage during the move (P2); it changes the content digest, so reviews of renamed items show `changed`. Alternatives: the application header (no digest change, not portable OKF) or no record (links and history only). |
+| Q12 | `alias_preservation`: where is the old path kept? | Decided by the owner: frontmatter `aliases` (list of former paths), written by storage during the move (P2). `content_digest` leaves `aliases` out (contract ruling 31), so a pure rename keeps reviews current. |
 | Q13 | `extension_policy` and source cards: what is the extension, and is a card's input its current name? | Only the card's original-extension tail (`-pdf`, `-pdf-2`) is affected; `.md` is always lower case; a card's input is its current name (a person's rename is respected), read in `source_card_name`'s shape. |
 | Q14 | Collision meanings; and at import, what `keep_existing`/`reject` do. | `suffix`: `-2, -3` before `.md`, case-only renames first then `from` order; `keep_existing`: the holder or first claimant keeps the name; `reject`: nobody gets a contested name. At import both fall back to the un-ruled numbered name with a warning; an import never fails on a naming collision. |
 | Q15 | Limits. | At most 256 rules, 1,024 bytes per text field, 1,000 entries per apply (until a batch move, K5). |
