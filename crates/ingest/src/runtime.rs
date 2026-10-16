@@ -5,8 +5,10 @@
 //! returns `None` (already claimed, finished or cancelled) is dropped without effect. The
 //! handler runs only under the lease `claim_job` returned, and writes completion through it. A
 //! handler that returns `Err` is at fault as a worker, and the runtime records the failure
-//! through the same lease, as retryable, then announces it as a `job_updated` event (the
-//! failure is a durable job write ingest makes).
+//! through the same lease, retryable unless its code is `invalid_input`, `forbidden`,
+//! `unsupported` or `not_implemented` (a request no retry can change), then announces it as a
+//! `job_updated` event (the failure is a durable job write ingest makes). A workspace purge
+//! records its own failure first, always retryable, so this classing never reaches it.
 //!
 //! Reconciliation runs at start and then on every sweep: `expire_leases()` releases the claims
 //! of attempts that died, and `pending_jobs()` re-delivers every unfinished job. A job already

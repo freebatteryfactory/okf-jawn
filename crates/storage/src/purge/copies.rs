@@ -20,6 +20,12 @@
 //!
 //! The purge reads these again on every attempt and once more before it completes, so a copy
 //! written after the purge started (an upgrade after a failed attempt) is reached too.
+//!
+//! Another workspace's archive whose records cannot be read stops the purge (contract ruling
+//! 14): guessing past it could leave a citation of the purged workspace in it. The error keeps
+//! the reader's code and names the archive by identity, its workspace and its backup set or
+//! object digest, never by path; asking for the purge again once the archive is repaired
+//! resumes it (ingest records every failure of a workspace purge as retryable).
 
 use std::path::{Path, PathBuf};
 
@@ -40,6 +46,15 @@ pub(crate) struct CopyPlan {
     pub(crate) rewrite: Vec<String>,
     /// Copies and archives to delete.
     pub(crate) remove: Vec<String>,
+}
+
+/// Another workspace's archive in a pre-migration backup set.
+#[derive(Debug)]
+pub(crate) struct OtherArchive {
+    /// Its path relative to the pre-migration directory.
+    pub(crate) name: String,
+    /// What names it by identity in an error: its workspace and its backup set.
+    pub(crate) survivor: String,
 }
 
 /// Find the pre-migration backups under `directory` that hold the workspace. Blocking.
@@ -74,12 +89,12 @@ pub(crate) fn plan(directory: &Path, tenant: &str, workspace: &str) -> Result<Co
 }
 
 /// The archives of the tenant's other workspaces in every pre-migration backup set under
-/// `directory`, relative to it. Blocking.
+/// `directory`. Blocking.
 pub(crate) fn other_archives(
     directory: &Path,
     tenant: &str,
     workspace: &str,
-) -> Result<Vec<String>, ApiError> {
+) -> Result<Vec<OtherArchive>, ApiError> {
     let mut found = Vec::new();
     for (name, path) in entries(directory)? {
         if !path.is_dir() {
@@ -87,13 +102,18 @@ pub(crate) fn other_archives(
         }
         let archives = path.join(PRE_MIGRATION_WORKSPACES).join(tenant);
         for (archive, file) in entries(&archives)? {
+            // `entries` lists names that are UTF-8 only, so a listed file has a stem.
             if file.is_file()
                 && file.extension().is_some_and(|extension| extension == "zip")
-                && file.file_stem().and_then(std::ffi::OsStr::to_str) != Some(workspace)
+                && let Some(owner) = file.file_stem().and_then(std::ffi::OsStr::to_str)
+                && owner != workspace
             {
-                found.push(format!(
-                    "{name}/{PRE_MIGRATION_WORKSPACES}/{tenant}/{archive}"
-                ));
+                found.push(OtherArchive {
+                    name: format!("{name}/{PRE_MIGRATION_WORKSPACES}/{tenant}/{archive}"),
+                    survivor: format!(
+                        "workspace {owner}'s archive in pre-migration backup set {name}"
+                    ),
+                });
             }
         }
     }
@@ -104,7 +124,9 @@ pub(crate) fn other_archives(
 /// workspace exactly as the live records are (`rewrite`), when those records still hold
 /// anything of it (a citation, a ledger response); returns whether it did. Another workspace's
 /// archive holds no row of the purged one, so this scrubs citations: restoring the archive must
-/// not bring back a citation of purged content. `staging` is a private directory. Blocking.
+/// not bring back a citation of purged content. `staging` is a private directory. `survivor`
+/// names the archive by identity: when its records cannot be read (opened, extracted or
+/// queried), the purge stops with `unreadable`. Blocking.
 pub(crate) fn rewrite_archive(
     archive: &Path,
     rewritten: &Path,
@@ -112,22 +134,46 @@ pub(crate) fn rewrite_archive(
     tenant: &str,
     workspace: &str,
     purge: PurgeId,
+    survivor: &str,
 ) -> Result<bool, ApiError> {
     std::fs::create_dir_all(staging).map_err(|error| io_error("create", staging, &error))?;
     let records = staging.join(RECORDS);
     remove(&records)?;
-    Opened::open(archive)?.extract(RECORDS, &records)?;
-    let holds = {
-        let connection = Connection::open_with_flags(&records, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|error| sql(&error))?;
-        rows::holds(&connection, tenant, workspace)?
-    };
+    let holds = archive_holds(archive, &records, tenant, workspace)
+        .map_err(|error| unreadable(survivor, &error))?;
     if holds {
         rewrite(&records, tenant, workspace, purge)?;
         replace_records(archive, &records, rewritten)?;
     }
     remove(&records)?;
     Ok(holds)
+}
+
+/// Extract the records of `archive` to `records` and say whether they hold anything of the
+/// workspace. Blocking.
+fn archive_holds(
+    archive: &Path,
+    records: &Path,
+    tenant: &str,
+    workspace: &str,
+) -> Result<bool, ApiError> {
+    Opened::open(archive)?.extract(RECORDS, records)?;
+    let connection = Connection::open_with_flags(records, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| sql(&error))?;
+    rows::holds(&connection, tenant, workspace)
+}
+
+/// The error a purge stops with when another workspace's archive cannot be read (contract
+/// ruling 14): the reader's code kept, the archive named by `survivor`, its identity, and
+/// neither the reader's message nor a path, which could name a file of the data directory.
+fn unreadable(survivor: &str, error: &ApiError) -> ApiError {
+    ApiError::new(
+        error.code.clone(),
+        format!(
+            "the purge cannot read the records of {survivor}; repair that archive, then ask for \
+             the purge again"
+        ),
+    )
 }
 
 /// Rewrite one records copy without the workspace, vacuum it and check it. Blocking.

@@ -16,7 +16,7 @@ use okf_jawn_contract::identity::{
     ArtifactId, Digest, ItemId, JobId, MutationId, PurgeId, ReceiptId, Revision, TenantId,
 };
 use okf_jawn_contract::import::{Job, ListJobsResponse};
-use okf_jawn_contract::purge::Purge;
+use okf_jawn_contract::purge::{Purge, PurgeTarget};
 use okf_jawn_contract::review::Review;
 use okf_jawn_core::jobs::{
     ArtifactRecord, ClaimedJob, DerivedObject, JobCompletion, JobLease, JobScope, NewArtifact,
@@ -113,6 +113,9 @@ impl RecordStore for ReviewRecords {
     fn fail_job(&self, lease: JobLease, error: ApiError, retryable: bool) -> PortFuture<'_, Job> {
         self.inner.fail_job(lease, error, retryable)
     }
+    fn seal<'a>(&'a self, lease: &'a JobLease) -> PortFuture<'a, Job> {
+        self.inner.seal(lease)
+    }
     fn cancel_job<'a>(
         &'a self,
         scope: &'a JobScope,
@@ -160,6 +163,13 @@ impl RecordStore for ReviewRecords {
     }
     fn get_purge<'a>(&'a self, tenant: &'a TenantId, purge: PurgeId) -> PortFuture<'a, Purge> {
         self.inner.get_purge(tenant, purge)
+    }
+    fn find_purge<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        target: &'a PurgeTarget,
+    ) -> PortFuture<'a, Option<Purge>> {
+        self.inner.find_purge(tenant, target)
     }
     fn update_purge<'a>(&'a self, tenant: &'a TenantId, purge: Purge) -> PortFuture<'a, Purge> {
         self.inner.update_purge(tenant, purge)

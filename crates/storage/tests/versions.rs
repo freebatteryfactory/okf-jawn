@@ -2712,8 +2712,10 @@ async fn a_replay_of_a_commit_without_kept_warnings_answers_the_one_unavailable_
         .await?;
     let records = storage.data().records_path();
     drop(storage);
-    rusqlite::Connection::open(&records)?
-        .execute_batch("DROP TABLE commit_warnings; PRAGMA user_version = 2;")?;
+    rusqlite::Connection::open(&records)?.execute_batch(
+        "DROP TABLE commit_warnings; ALTER TABLE jobs DROP COLUMN sealed;
+             PRAGMA user_version = 2;",
+    )?;
     let storage = Storage::open(directory.path())?;
     let versions = storage.versions();
     assert_eq!(
