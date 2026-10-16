@@ -315,8 +315,11 @@ dates that way and no declared order changes it.
 
 **`date_format` syntax**: the `time` crate's format description, version 3
 (`time::format_description::parse_owned::<3>`). A person writes components in brackets and any
-other text literally: `[year]`, `[month]`, `[day]`, with modifiers such as `[month repr:short]`,
-`[day padding:none]`, `[year repr:last_two]`; `\[`, `\]` and `\\` escape. Examples:
+other text literally: `[year]`, `[month]` and `[day]` only, as numbers, with the padding modifiers
+(`[day padding:none]`, `[month padding:zero]`); `\[`, `\]` and `\\` escape. A month name
+(`[month repr:short]`), a two-digit year (`[year repr:last_two]`, which section 4.4 does not read as a
+date) or any other component is refused (rulings: a date format writes numbers only, so the
+formatted date is read again as the same date). Examples:
 `"[year]-[month]-[day]"` gives `2025-03-04`; `"[day].[month].[year]"` gives `04.03.2025`;
 `"[year][month][day]"` gives `20250304`. Empty means "keep dates as written" (never "delete
 them"). Validation (section 6): it must parse; formatting the probe dates 2025-03-04,
@@ -803,7 +806,7 @@ Vectors (`preview_names`):
 | PN3 | `Items [A, A]` | `invalid_input /selection/item_ids/1` |
 | PN4 | `Folder notes` with `notes/a.md`, `notes/sub/b.md`: `recursive` false; true | `considered` 1; 2 |
 | PN5 | `Folder nowhere` | `not_found /selection/folder` |
-| PN6 | `Workspace` with 3 items, one archived and matching | `considered 3, archived_left_out 1` |
+| PN6 | `Workspace` with 3 items, one archived and matching | `considered 2, archived_left_out 1` (`considered` counts the selected items that are not archived) |
 | PN7 | rules with glob `notes/**x` | `invalid_input /rules/rules/0/glob`; no port read |
 | PN8 | any preview | head, events and receipts unchanged |
 | PN9 | `at` a purged revision | `not_found` of `resolve` |
@@ -833,8 +836,10 @@ Vectors (`preview_names`):
 7. **Edits**, in three phases, each in entry order:
    1. *direct*: every entry whose `to` key is held at the base by no item: `MoveItem { item_id,
       destination: to, keep_alias }`;
-   2. *to temporary*: every other entry (its `to` key is held at the base by itself, a case-only
-      rename, or by another entry, a chain or a swap): `MoveItem` to
+   A case-only rename (its `to` key is held at the base by itself) is a *direct* move: storage
+   moves it through a parked name of its own (PR #34), so `apply_names` does not.
+   2. *to temporary*: every other entry (its `to` key is held at the base by another entry, a
+      chain or a swap): `MoveItem` to
       `<folder of from>/okf-jawn-renaming-<item id>.md` (at the root if that is not a
       `WorkspacePath`; numbered with `numbered` in the unlikely case its key is held by an item
       or folder at the base or by another entry's `to`), with `keep_alias`;
@@ -931,9 +936,12 @@ card the job named before (the function adds the key it chooses).
 1. `propose`. `Unmatched`, `Unchanged`, `Flagged`: the candidate is `subject.path` (with the
    proposal's warnings). `Renamed`: the candidate is its path.
 2. Candidate key free: take it.
-3. Taken, `Renamed` with `suffix`: the first free `numbered(candidate, n)`, n >= 2.
-4. Taken otherwise (`keep_existing`, `reject`, or no rule): fall back to `subject.path`, then
-   `numbered(subject.path, n)` for n >= 2: exactly today's `free_path` rule; a ruled candidate that
+3. Taken, `Renamed` with `suffix`: the first free numbered candidate, n >= 2, built with the
+   contract's shortening helpers (`numbered_source_card_name` for a source card's `-<ext>-<n>.md`
+   tail, `fit_segment` otherwise), so a name already at the 255-unit segment limit is shortened,
+   never refused, and naming never fails an import (Q14).
+4. Taken otherwise (`keep_existing`, `reject`, or no rule): fall back to `subject.path`, then its
+   numbered form for n >= 2, built with the same helpers: exactly today's `free_path` rule; a ruled candidate that
    lost adds `W(collision_kept)` / `W(collision_rejected)` (section 11, Q14).
 5. A path that is no `WorkspacePath` is `invalid_input /upload_ids/{i}` as today.
 
