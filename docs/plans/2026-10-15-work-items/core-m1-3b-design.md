@@ -347,7 +347,8 @@ Vectors (`date_format`):
 | F1 | `Minutes 2025.3.4.md` | `date_format ""` | `minutes-2025.3.4.md` (kept as written, not split by kebab) |
 | F2 | `Minutes 2025-03-04.md` | `"[day].[month].[year]"` | `minutes-04.03.2025.md`; previewed again under `ymd`: unchanged + plan `W(date_not_read)` |
 | F3 | `Report 2025-3-4 final.md` | `"[year][month][day]"` | `report-20250304-final.md`; previewed again: unchanged |
-| F4 | `Report 2025-03-04.md` | `"[month repr:short] [year]"` | `report-Mar 2025.md` (the output is one protected word) |
+| F4 | any | `"[month repr:short] [year]"` | `invalid_input /rules/rules/0/date_format "a date format writes only numbers: [year], [month], [day]"` (ruling: a formatted date must read again as the same date, so a second preview leaves it as it is) |
+| F7 | `Report 2025-03-04.md`, previewed twice | `"[year]-[month]-[day]"` | first preview `report-2025-03-04.md`; second preview: unchanged |
 | F5 | any | `"[year]-[month"` | `invalid_input /rules/rules/0/date_format "not a date format: unclosed [ (at 7)"` |
 | F6 | any | `"[hour]"` | `invalid_input /rules/rules/0/date_format "names a part a date does not have"` |
 | F7 | any | `"[year]/[month]"` | `invalid_input /rules/rules/0/date_format "the date would hold /"` |
@@ -440,7 +441,7 @@ Vectors (`suffix`):
 | X1 | `Board meeting.md` | `snake`, `_`, suffix `_notes` | `board_meeting_notes.md` |
 | X2 | `board_meeting_notes.md` | `snake`, `_`, suffix `_notes` | unchanged |
 | X3 | `report-pdf.md` [source; `report.pdf`] | suffix `-ed` | `report-ed-pdf.md` (the suffix belongs to the base, before the card tail) |
-| X4 | any | suffix `x|` | `invalid_input /rules/rules/0/suffix "path segment holds a character Windows refuses ..."` |
+| X4 | any | suffix `x\|` | `invalid_input /rules/rules/0/suffix "path segment holds a character Windows refuses ..."` |
 
 ### 4.7 The extension: `extension_policy`, and how a source card's name is read
 
@@ -625,9 +626,10 @@ left as it is.
    incoming link and rebases the moved item's own relative links, and storage tells the check the
    referrers it rewrote (`CandidateCheck::check`, `rewritten`). The alias is for references
    outside the bundle (bookmarks, other tools).
-4. Writing `aliases` changes the item's properties, so its content digest changes and a review
-   of it shows `changed` (a move that rebases relative links already does that). This is the main
-   reason the field is an open question.
+4. Writing `aliases` does not change the review fingerprint: `ItemDocument.content_digest` leaves
+   `aliases` out (contract ruling 31, the owner's decision), so a pure rename never turns a
+   reviewed item to `changed`. A move that rebases relative links in the item's body still
+   changes it, as any content change does.
 5. Where it is written: by storage, during the move (request P2, section 10). Core cannot add it
    cheaply or safely itself: an `EditItem` needs the item's whole body and properties (one
    `show` each, and `show` scans every item in storage today), and it must run before every move
@@ -685,7 +687,7 @@ every problem collected instead of the first). Checks in this order; the first f
 | 1 | `/schema_version` | `invalid_input`: not 1 ("this build reads naming rules of schema version 1") |
 | 2 | `/rules` | `too_large`: more than 256 rules |
 | 3 | `/rules/{i}/glob` | `invalid_input`: empty; leading `/`; trailing `/`; holds `\`; `too_large` over 1,024 bytes; `glob::Pattern::new` error (its `msg`, at its `pos`) |
-| 4 | `/rules/{i}/type_name` | `invalid_input`: empty string |
+| 4 | `/rules/{i}/type_name` | `invalid_input`: empty string; `too_large` over 1,024 bytes |
 | 5 | `/rules/{i}/separator` | `invalid_input`: holds `/`; `a{sep}b` not a `WorkspacePath` (the contract's message); `snake` without `_`, `kebab` without `-`; `too_large` over 1,024 bytes |
 | 6 | `/rules/{i}/prefix` | `invalid_input`: holds `/`; `{prefix}a.md` not a `WorkspacePath`; `too_large` over 1,024 bytes |
 | 7 | `/rules/{i}/suffix` | same as prefix, probe `a{suffix}.md` |
@@ -776,9 +778,10 @@ unreadable file (GR3): accepted; `get_rules` then answers `rules`.
    - `Workspace`: every item.
 5. Run sections 4.1 to 4.10 over the selected items, against the whole tree.
 6. Answer `RenamePlan { base_revision, rules_digest, entries, duplicate_observations, warnings,
-   considered, unchanged, archived_left_out }` with `considered` = selected items,
-   `archived_left_out` = archived among them, `unchanged = considered - archived_left_out -
-   entries.len()`.
+   considered, unchanged, refused, archived_left_out }` with `considered` = the selected items that
+   are not archived, `archived_left_out` = the archived ones (never renamed), `refused` = the
+   considered items whose rules give a refused name (each named in `warnings`), and
+   `considered = entries.len() + unchanged + refused`.
 7. Nothing is written: no commit, no event, no receipt (it answers paths, as `list_items` does).
 
 Why the whole tree even for a small selection: a destination can move an item into any folder,
@@ -1108,8 +1111,8 @@ Requests (each blocks the part named; phase 2 builds the rest):
   revision) -> WorkspaceTree { items: Vec<TreeItem { summary: ItemSummary, original_name:
   Option<String> }>, folders: Vec<WorkspacePath> }`: every item and folder in one pass, path
   order, including items under folders whose name starts with `.` (which `list` does not show,
-  `read.rs:127-131`). Fallback if refused: a recursive `list` walk plus one `show` per selected
-  source card (correct; slow at the envelope; items under dot-folders not seen).
+  `read.rs:127-131`). No fallback: P1 is built in phase 2 (rulings), because a walk that misses items
+  under dot-folders would give an incomplete selection and collision set.
 - **P2 (core port, storage implements; only if Q12 is accepted).** `TreeEdit::MoveItem` gains
   `keep_alias: bool`: before the move, append the item's current path to its frontmatter
   `aliases` as section 4.11 says, in the staged tree. Until then, an apply whose entries need an
@@ -1131,9 +1134,9 @@ Concerns (found while designing; not this package's to fix):
   `collect_markdown` takes only `e == "md"`, `ConceptId::to_path` appends `.md`, and storage's
   `concept()` trims `.md` case-sensitively. Such an item is invisible to okf-core (moves, links,
   validation).
-- **K4. Segment length.** `WorkspacePath` bounds the whole path (4,096 bytes) but not one segment;
-  NTFS refuses a name over 255 UTF-16 units. A rule (prefix, date format) can produce such a name;
-  this design follows the contract and does not refuse it.
+- **K4. Segment length.** NTFS refuses a name over 255 UTF-16 units; at design time `WorkspacePath`
+  bounded only the whole path. Contract ruling 30 now refuses such a segment, so an entry whose
+  result breaks it gets a warning and no rename (rulings, K4).
 - **K5. Apply cost.** Each `MoveItem` re-loads the whole staged bundle (`relink` calls
   `Bundle::load`), so an apply of M entries reads O(M x N) files: at 1,000 entries and 10,000
   items, ten million file reads. A batch move in storage (one load for consecutive moves) would

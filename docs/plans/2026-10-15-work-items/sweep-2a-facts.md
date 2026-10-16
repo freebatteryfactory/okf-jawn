@@ -466,7 +466,7 @@ numbering (`sweep-1-review.md:208`, `:214`). Every label was found; none is miss
    The rebuild: remove everything the target owns except what a surviving item still references, never
    reading the target; if a survivor's own records cannot be read, the purge does not complete
    (`PurgeState::Failed`, naming the survivor by identity, never a path or content) and resumes once
-   repaired. The builder first states how objects and their references are laid out. Test: a target with
+   repaired. The builder first states how objects and their references are laid out. (Integration owner, PR #39 review: "surviving" means every root that is not the target's: other workspaces' items and cards, uploads, workspace and installation archives, history exports, artifacts, job outputs, pending puts and pins; the purge keeps an object any of them references.) Test: a target with
    an unreadable history file whose objects are all gone after the purge.
 3. Current code: still applies, not started. `contract/src/purge.rs:70-80` already has
    `PurgeState::Failed` ("repeating the request resumes it"). The purge today is

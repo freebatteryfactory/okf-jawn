@@ -5,9 +5,10 @@ You are a builder. Storage's reviews through Wave 1 left items that were ruled "
 The other items of sweep 2a (the purge rebuilt by reachability, `discard_upload`'s storage side, the ledger's "purged" state, the managed-backup refusal, and the purge and archive bookkeeping) are a separate package. Do not touch them.
 
 ## Read first (in this folder where the file is here; the other notes named are the integration owner's local notes, outside git)
-1. sweep-2a-facts.md: the summary table and "Facts that cut across several items", then the section of each item you build. Each section cites where the item was defined; read that source too, because the reviewers' exact words matter.
-2. lane-shared.md and core-builder-checklist.md (read it before you code; answer each class in one line in your report).
-3. In the worktree: the root AGENTS.md (the Rust test idiom), crates/storage/AGENTS.md, and the code each item cites.
+1. The repository's README.md, SPEC.md and verification.json, as AGENTS.md asks.
+2. sweep-2a-facts.md: the summary table and "Facts that cut across several items", then the section of each item you build. Each section cites where the item was defined and quotes it; those review files are the integration owner's local notes, outside git, so the quotes are what you work from. The r1 to r11 probe source is sweep-1-review-probes.rs.txt in this folder.
+3. lane-shared.md and core-builder-checklist.md, both in this folder (read the checklist before you code; answer each class in one line in your report).
+4. In the worktree: the root AGENTS.md (the Rust test idiom), crates/storage/AGENTS.md, and the code each item cites.
 
 ## Where
 - **Location.** The integration owner names the worktree, branch and target in the message that sends you this brief.
@@ -43,7 +44,7 @@ The other items of sweep 2a (the purge rebuilt by reachability, `discard_upload`
     - Test each place it can arrive: `commit_of`, `oid` (held head) and a cursor.
 13. **A Rewind of two notes that traded paths** (section 25). Write the test the file-links reviewer described (`probe_rewind_traded_self_links`). Its source was not kept.
     - Two notes trade paths, each with a self-link, and both are rewound.
-    - Assert the bytes come back exactly, and that the check is told exactly `["notes/ref.md"]`.
+    - Assert the bytes come back exactly, and that the check is told exactly `["notes/ref.md"]` for the Rewind's commit (the probe records each call's list, so its whole recording reads `[["notes/ref.md"]]`).
     - Show the mutant F1-f (a Rewind's first hop ending at the destination, edit.rs:628) red.
 14. **Storage's `collision_key` fallback uses `collision_key_of`** (section 26; contract ruling 33).
     - `git/item.rs`'s fallback for a string that is not a valid `WorkspacePath` uses the contract's `collision_key_of`, so NFC applies to it too.
