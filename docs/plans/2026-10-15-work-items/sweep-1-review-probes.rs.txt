@@ -1,0 +1,2077 @@
+// ===== Reviewer's probes for sweep part 1 (never committed). =====
+// 1. crates/storage/tests/zz_review_probe.rs (untracked; run and deleted)
+//    cargo test --locked --all-features -p okf-jawn-storage --test zz_review_probe -- --nocapture --test-threads=1
+
+//! Reviewer's scratch probe (sweep part 1), never committed: the edits core's `item_restore`
+//! composes for a Rewind of a deleted item, and the cursors core's `resolve_page` hands back,
+//! applied by real storage. `core_edits`, `path_at` and `taken` are copies of
+//! `crates/core/src/application/history.rs:410-526` over the public ports.
+#![cfg(feature = "runtime")]
+
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Instant;
+
+use git2::Repository;
+use okf_jawn_contract::access::AccessRoute;
+use okf_jawn_contract::common::Warning;
+use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::identity::{Digest, ItemId, Revision, TenantId, WorkspacePath};
+use okf_jawn_contract::item::ItemKind;
+use okf_jawn_contract::search::LinkDirection;
+use okf_jawn_core::search::{LinkQuery, SearchIndex, SearchQuery};
+use okf_jawn_core::storage::{
+    CandidateChanges, CandidateCheck, CommitChanges, LogQuery, NewWorkspace, Page, Provenance,
+    SourceCard, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
+};
+use okf_jawn_storage::Storage;
+use serde_json::json;
+
+use check::{TestResult, err_of, some};
+
+type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
+
+/// Accepts every candidate.
+struct Accept;
+
+/// Refuses every candidate.
+struct Reject;
+
+/// A data directory with one blank workspace.
+struct Workspace {
+    directory: tempfile::TempDir,
+    storage: Storage,
+    scope: StorageScope,
+    initial: Revision,
+}
+
+impl CandidateCheck for Accept {
+    fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
+        Ok(Vec::new())
+    }
+}
+
+impl CandidateCheck for Reject {
+    fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
+        Err(ApiError::new(ErrorCode::InvalidInput, "the check refuses"))
+    }
+}
+
+impl Workspace {
+    async fn new() -> Fallible<Self> {
+        let directory = tempfile::tempdir()?;
+        let storage = Storage::open(directory.path())?;
+        let tenant = TenantId::try_from("local".to_owned())?;
+        let created = storage
+            .catalog()
+            .create(
+                &tenant,
+                serde_json::from_value(json!(uuid_text(1)))?,
+                NewWorkspace {
+                    name: "Research".to_owned(),
+                    description: String::new(),
+                    creator: person(),
+                },
+            )
+            .await?;
+        Ok(Self {
+            directory,
+            storage,
+            scope: StorageScope {
+                tenant_id: tenant,
+                workspace_id: created.id,
+            },
+            initial: created.head,
+        })
+    }
+
+    async fn commit(
+        &self,
+        mutation: u32,
+        expected: &Revision,
+        edits: Vec<TreeEdit>,
+    ) -> Result<Revision, ApiError> {
+        let changes = CommitChanges {
+            mutation_id: serde_json::from_value(json!(uuid_text(mutation)))
+                .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?,
+            expected_head: expected.clone(),
+            author: person(),
+            message: format!("change {mutation}"),
+            edits,
+        };
+        Ok(self
+            .storage
+            .versions()
+            .commit(&self.scope, changes, Arc::new(Accept))
+            .await?
+            .revision)
+    }
+
+    fn repository(&self) -> Fallible<Repository> {
+        Ok(Repository::open_bare(
+            self.directory
+                .path()
+                .join("repositories")
+                .join(self.scope.tenant_id.as_str())
+                .join(format!("{}.git", self.scope.workspace_id.0)),
+        )?)
+    }
+
+    fn text(&self, revision: &Revision, at: &str) -> Fallible<Option<String>> {
+        let repository = self.repository()?;
+        let tree = repository
+            .find_commit(git2::Oid::from_str(revision.as_str())?)?
+            .tree()?;
+        match tree.get_path(Path::new(at)) {
+            Ok(entry) => Ok(Some(String::from_utf8(
+                repository.find_blob(entry.id())?.content().to_vec(),
+            )?)),
+            Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Every file path of `revision`.
+    fn files(&self, revision: &Revision) -> Fallible<Vec<String>> {
+        let repository = self.repository()?;
+        let tree = repository
+            .find_commit(git2::Oid::from_str(revision.as_str())?)?
+            .tree()?;
+        let mut found = Vec::new();
+        tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
+            if entry.kind() == Some(git2::ObjectType::Blob)
+                && let Ok(name) = entry.name()
+            {
+                found.push(format!("{root}{name}"));
+            }
+            git2::TreeWalkResult::Ok
+        })?;
+        Ok(found)
+    }
+
+    async fn head(&self) -> Result<Revision, ApiError> {
+        self.storage.versions().head(&self.scope).await
+    }
+
+    /// The body `revision` holds of item `n`.
+    async fn body(&self, revision: &Revision, n: u32) -> Fallible<String> {
+        Ok(self
+            .storage
+            .versions()
+            .show(&self.scope, revision, item(n)?)
+            .await?
+            .body)
+    }
+}
+
+fn uuid_text(n: u32) -> String {
+    format!("00000000-0000-4000-8000-{n:012}")
+}
+
+fn item(n: u32) -> Fallible<ItemId> {
+    Ok(serde_json::from_value(json!(uuid_text(n)))?)
+}
+
+fn person() -> Provenance {
+    Provenance {
+        subject: "ana".to_owned(),
+        route: AccessRoute::LocalOwner,
+        client_id: None,
+    }
+}
+
+fn path(text: &str) -> Fallible<WorkspacePath> {
+    Ok(WorkspacePath::try_from(text.to_owned())?)
+}
+
+fn digest(fill: char) -> Fallible<Digest> {
+    Ok(Digest::try_from(fill.to_string().repeat(64))?)
+}
+
+fn note(n: u32, at: &str, body: &str) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::CreateItem {
+        item_id: item(n)?,
+        path: path(at)?,
+        title: Some(format!("Note at {at}")),
+        type_name: "Note".to_owned(),
+        kind: ItemKind::Note,
+        body: body.to_owned(),
+        properties: BTreeMap::new(),
+    })
+}
+
+fn moved(n: u32, to: &str) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::MoveItem {
+        item_id: item(n)?,
+        destination: path(to)?,
+    })
+}
+
+fn deleted(n: u32) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::DeleteItem { item_id: item(n)? })
+}
+
+fn restore(n: u32, from: &Revision) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::RestoreItem {
+        item_id: item(n)?,
+        from: from.clone(),
+    })
+}
+
+fn card(n: u32, shown: char) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::WriteSourceCard(Box::new(SourceCard {
+        item_id: item(n)?,
+        path: path("sources/scan-pdf.md")?,
+        title: "scan.pdf".to_owned(),
+        type_name: "Source".to_owned(),
+        body: format!("Converted {shown}."),
+        properties: BTreeMap::new(),
+        appearance: serde_json::from_value(json!({
+            "object": "d".repeat(64),
+            "names": [{
+                "filename": "scan.pdf",
+                "folder": "sources",
+                "observed_at": "2026-10-09T12:00:00.000Z",
+                "supplied_by": "ana"
+            }],
+            "media_type": "application/pdf",
+            "size": "10",
+            "metadata": {},
+            "extraction": {
+                "outcome": { "status": "unsupported" },
+                "digest": shown.to_string().repeat(64),
+                "text_origin": "none",
+                "corrected": false,
+                "warnings": []
+            }
+        }))?,
+    })))
+}
+
+/// `history.rs:469`, `path_at`.
+async fn path_at(
+    space: &Workspace,
+    revision: &Revision,
+    id: ItemId,
+) -> Result<Option<WorkspacePath>, ApiError> {
+    match space
+        .storage
+        .versions()
+        .show(&space.scope, revision, id)
+        .await
+    {
+        Ok(document) => Ok(Some(document.summary.path)),
+        Err(error) if error.code == ErrorCode::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// `history.rs:486`, `taken`.
+async fn taken(
+    space: &Workspace,
+    revision: &Revision,
+    at: &WorkspacePath,
+) -> Result<bool, ApiError> {
+    let key = at.collision_key();
+    let folder = match at.as_str().rsplit_once('/') {
+        Some((folder, _)) => Some(
+            WorkspacePath::try_from(folder.to_owned())
+                .map_err(|error| ApiError::new(ErrorCode::Internal, error.0))?,
+        ),
+        None => None,
+    };
+    let versions = space.storage.versions();
+    let mut cursor = None;
+    loop {
+        let page = Page {
+            cursor: cursor.take(),
+            limit: 500,
+        };
+        let listing = match versions
+            .list(&space.scope, revision, folder.as_ref(), page)
+            .await
+        {
+            Ok(listing) => listing,
+            Err(error) if error.code == ErrorCode::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let collides = listing
+            .items
+            .iter()
+            .map(|held| &held.path)
+            .chain(&listing.folders)
+            .any(|held| held.collision_key() == key);
+        if collides {
+            return Ok(true);
+        }
+        match listing.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => return Ok(false),
+        }
+    }
+}
+
+/// `history.rs:410`, `item_restore`: the edits core commits for a Rewind of `id` from `base` to
+/// `target`.
+async fn core_edits(
+    space: &Workspace,
+    id: ItemId,
+    base: &Revision,
+    target: &Revision,
+) -> Result<Vec<TreeEdit>, ApiError> {
+    let restore = TreeEdit::RestoreItem {
+        item_id: id,
+        from: target.clone(),
+    };
+    if path_at(space, base, id).await?.is_some() {
+        return Ok(vec![restore]);
+    }
+    let Some(destination) = path_at(space, target, id).await? else {
+        return Ok(vec![restore]);
+    };
+    let newest = space
+        .storage
+        .versions()
+        .log(
+            &space.scope,
+            LogQuery {
+                tip: base.clone(),
+                item_id: Some(id),
+                page: Page {
+                    cursor: None,
+                    limit: 1,
+                },
+            },
+        )
+        .await?
+        .commits
+        .into_iter()
+        .next();
+    let Some(last) = newest.and_then(|commit| commit.parents.into_iter().next()) else {
+        return Ok(vec![restore]);
+    };
+    let Some(last_path) = path_at(space, &last, id).await? else {
+        return Ok(vec![restore]);
+    };
+    if last_path == destination || taken(space, base, &last_path).await? {
+        return Ok(vec![restore]);
+    }
+    Ok(vec![
+        TreeEdit::RestoreItem {
+            item_id: id,
+            from: last,
+        },
+        TreeEdit::MoveItem {
+            item_id: id,
+            destination,
+        },
+        restore,
+    ])
+}
+
+/// A short spelling of `edits`.
+fn shape(edits: &[TreeEdit]) -> String {
+    edits
+        .iter()
+        .map(|edit| match edit {
+            TreeEdit::RestoreItem { from, .. } => {
+                format!("Restore({})", from.as_str().get(..7).unwrap_or_default())
+            }
+            TreeEdit::MoveItem { destination, .. } => format!("Move({})", destination.as_str()),
+            _ => "Other".to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn told(result: &Result<Revision, ApiError>) -> String {
+    match result {
+        Ok(revision) => format!("Ok({})", revision.as_str().get(..7).unwrap_or_default()),
+        Err(error) => format!(
+            "Err({:?}, field {:?}, {:?})",
+            error.code, error.field, error.message
+        ),
+    }
+}
+
+#[tokio::test]
+async fn r1_moved_several_times_then_deleted_and_unrelated_commits_since() -> TestResult {
+    let space = Workspace::new().await?;
+    let c2 = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "a.md", "# The item\n\nOne.\n")?,
+                note(11, "notes/ref.md", "See [it](../a.md#the-item).\n")?,
+            ],
+        )
+        .await?;
+    let c3 = space.commit(3, &c2, vec![moved(10, "b.md")?]).await?;
+    let c4 = space.commit(4, &c3, vec![moved(10, "deep/c.md")?]).await?;
+    let c5 = space.commit(5, &c4, vec![deleted(10)?]).await?;
+    let c6 = space
+        .commit(6, &c5, vec![note(12, "other.md", "Unrelated.\n")?])
+        .await?;
+    eprintln!("PROBE r1 files after delete: {:?}", space.files(&c6)?);
+    let newest = space
+        .storage
+        .versions()
+        .log(
+            &space.scope,
+            LogQuery {
+                tip: c6.clone(),
+                item_id: Some(item(10)?),
+                page: Page {
+                    cursor: None,
+                    limit: 1,
+                },
+            },
+        )
+        .await?;
+    let commit = some(newest.commits.first(), "the newest item commit")?;
+    assert_eq!(commit.revision, c5, "the newest commit that changed it removed it");
+    assert_eq!(commit.parents, vec![c4.clone()]);
+    eprintln!("PROBE r1 log next_cursor at limit 1: {:?}", newest.next_cursor);
+    let edits = core_edits(&space, item(10)?, &c6, &c2).await?;
+    eprintln!("PROBE r1 edits: {}", shape(&edits));
+    assert_eq!(edits.len(), 3);
+    let c7 = space.commit(7, &c6, edits).await?;
+    assert_eq!(space.text(&c7, "a.md")?, space.text(&c2, "a.md")?);
+    assert!(space.text(&c7, "a.md")?.is_some());
+    assert_eq!(space.text(&c7, "b.md")?, None);
+    assert_eq!(space.text(&c7, "deep/c.md")?, None);
+    assert_eq!(
+        space.text(&c7, "notes/ref.md")?,
+        space.text(&c2, "notes/ref.md")?
+    );
+    let files = space.files(&c7)?;
+    eprintln!("PROBE r1 files after rewind: {files:?}");
+    assert!(files.iter().all(|file| !file.contains("okf-jawn-rewind")));
+
+    // The target is the last holder itself: one edit, and the links are right as they are.
+    let last_holder = core_edits(&space, item(10)?, &c6, &c4).await?;
+    eprintln!("PROBE r3 target is the last holder: {}", shape(&last_holder));
+    assert_eq!(last_holder.len(), 1);
+    let space2 = Workspace::new().await?;
+    let d2 = space2
+        .commit(
+            2,
+            &space2.initial,
+            vec![
+                note(10, "a.md", "# The item\n\nOne.\n")?,
+                note(11, "notes/ref.md", "See [it](../a.md#the-item).\n")?,
+            ],
+        )
+        .await?;
+    let d3 = space2.commit(3, &d2, vec![moved(10, "deep/c.md")?]).await?;
+    let d4 = space2.commit(4, &d3, vec![deleted(10)?]).await?;
+    let again = core_edits(&space2, item(10)?, &d4, &d3).await?;
+    assert_eq!(again.len(), 1);
+    let d5 = space2.commit(5, &d4, again).await?;
+    assert_eq!(space2.text(&d5, "deep/c.md")?, space2.text(&d3, "deep/c.md")?);
+    assert_eq!(
+        space2.text(&d5, "notes/ref.md")?,
+        space2.text(&d3, "notes/ref.md")?
+    );
+
+    // Deleted, rewound, deleted again: the newest item commit is the second delete.
+    let d6 = space2.commit(6, &d5, vec![moved(10, "third.md")?]).await?;
+    let d7 = space2.commit(7, &d6, vec![deleted(10)?]).await?;
+    let twice = core_edits(&space2, item(10)?, &d7, &d2).await?;
+    eprintln!("PROBE r1 deleted twice: {}", shape(&twice));
+    let d8 = space2.commit(8, &d7, twice).await?;
+    assert_eq!(
+        space2.text(&d8, "notes/ref.md")?,
+        space2.text(&d2, "notes/ref.md")?
+    );
+    assert_eq!(space2.text(&d8, "third.md")?, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn r2_deleted_with_its_folder_in_a_commit_shared_with_other_changes() -> TestResult {
+    let space = Workspace::new().await?;
+    let c2 = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "box/x.md", "# X\n")?,
+                note(12, "box/y.md", "# Y\n")?,
+                note(11, "ref.md", "[x](box/x.md) and [y](box/y.md).\n")?,
+            ],
+        )
+        .await?;
+    let c3 = space.commit(3, &c2, vec![moved(10, "crate/x2.md")?]).await?;
+    eprintln!("PROBE r2 ref after move: {:?}", space.body(&c3, 11).await?);
+    let c4 = space
+        .commit(
+            4,
+            &c3,
+            vec![
+                deleted(10)?,
+                deleted(12)?,
+                TreeEdit::EditItem {
+                    item_id: item(11)?,
+                    body: "Edited. [x](crate/x2.md) and [y](box/y.md).\n".to_owned(),
+                    properties: BTreeMap::new(),
+                },
+            ],
+        )
+        .await?;
+    eprintln!("PROBE r2 files after the shared delete: {:?}", space.files(&c4)?);
+    // A folder the revision holds nothing in: the real listing, as core's `taken` asks it.
+    let listing = space
+        .storage
+        .versions()
+        .list(
+            &space.scope,
+            &c4,
+            Some(&path("nowhere")?),
+            Page {
+                cursor: None,
+                limit: 500,
+            },
+        )
+        .await;
+    eprintln!(
+        "PROBE r2 list of a folder that does not exist: {:?}",
+        listing.map(|listing| (listing.items.len(), listing.folders.len(), listing.next_cursor))
+    );
+    let edits = core_edits(&space, item(10)?, &c4, &c2).await?;
+    eprintln!("PROBE r2 edits: {}", shape(&edits));
+    assert_eq!(edits.len(), 3);
+    let c5 = space.commit(5, &c4, edits).await?;
+    let referrer = space.body(&c5, 11).await?;
+    eprintln!("PROBE r2 ref after rewind: {referrer:?}");
+    assert!(referrer.contains("[x](box/x.md)"), "{referrer}");
+    assert!(referrer.contains("Edited."), "{referrer}");
+    assert_eq!(space.text(&c5, "box/x.md")?, space.text(&c2, "box/x.md")?);
+    eprintln!("PROBE r2 files after rewind: {:?}", space.files(&c5)?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn r4_referrers_moved_edited_and_deleted_since() -> TestResult {
+    let space = Workspace::new().await?;
+    let c2 = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "old.md", "# The item\n")?,
+                note(11, "notes/moved.md", "Moved [it](../old.md).\n")?,
+                note(12, "notes/edited.md", "Edited [it](../old.md).\n")?,
+                note(13, "notes/gone.md", "Gone [it](../old.md).\n")?,
+            ],
+        )
+        .await?;
+    let c3 = space.commit(3, &c2, vec![moved(10, "new.md")?]).await?;
+    let c4 = space.commit(4, &c3, vec![deleted(10)?]).await?;
+    let c5 = space
+        .commit(
+            5,
+            &c4,
+            vec![
+                moved(11, "elsewhere/deep/moved.md")?,
+                TreeEdit::EditItem {
+                    item_id: item(12)?,
+                    body: "Changed since. [it](../new.md).\n".to_owned(),
+                    properties: BTreeMap::new(),
+                },
+                deleted(13)?,
+            ],
+        )
+        .await?;
+    eprintln!("PROBE r4 moved referrer at base: {:?}", space.body(&c5, 11).await?);
+    let edits = core_edits(&space, item(10)?, &c5, &c2).await?;
+    assert_eq!(edits.len(), 3, "{}", shape(&edits));
+    let c6 = space.commit(6, &c5, edits).await?;
+    let moved_referrer = space.body(&c6, 11).await?;
+    let edited_referrer = space.body(&c6, 12).await?;
+    eprintln!("PROBE r4 moved referrer after rewind: {moved_referrer:?}");
+    eprintln!("PROBE r4 edited referrer after rewind: {edited_referrer:?}");
+    assert!(moved_referrer.contains("](../../old.md)"), "{moved_referrer}");
+    assert!(edited_referrer.contains("Changed since. [it](../old.md)"), "{edited_referrer}");
+    assert_eq!(space.text(&c6, "notes/gone.md")?, None);
+    assert_eq!(space.text(&c6, "old.md")?, space.text(&c2, "old.md")?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn r5_an_item_that_links_to_itself() -> TestResult {
+    let space = Workspace::new().await?;
+    let c2 = space
+        .commit(
+            2,
+            &space.initial,
+            vec![note(
+                10,
+                "old.md",
+                "# Me\n\n[self](old.md#me), [dot](./old.md) and [bare](#me).\n",
+            )?],
+        )
+        .await?;
+    let c3 = space.commit(3, &c2, vec![moved(10, "sub/new.md")?]).await?;
+    eprintln!("PROBE r5 body after move: {:?}", space.body(&c3, 10).await?);
+    let c4 = space.commit(4, &c3, vec![deleted(10)?]).await?;
+    let edits = core_edits(&space, item(10)?, &c4, &c2).await?;
+    assert_eq!(edits.len(), 3, "{}", shape(&edits));
+    let c5 = space.commit(5, &c4, edits).await?;
+    assert_eq!(space.text(&c5, "old.md")?, space.text(&c2, "old.md")?);
+    assert_eq!(space.text(&c5, "sub/new.md")?, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn r6_link_forms() -> TestResult {
+    let forms = "Inline [a](../old.md).\n\
+                 Fragment [b](../old.md#the-item).\n\
+                 Angle [c](<../old.md>).\n\
+                 Titled [d](../old.md \"The title\").\n\
+                 Reference [e][target].\n\
+                 Image ![f](../old.md).\n\
+                 \n\
+                 [target]: ../old.md\n";
+    let space = Workspace::new().await?;
+    let c2 = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "old.md", "# The item\n")?,
+                note(11, "notes/ref.md", forms)?,
+            ],
+        )
+        .await?;
+    let c3 = space.commit(3, &c2, vec![moved(10, "new.md")?]).await?;
+    let c4 = space.commit(4, &c3, vec![deleted(10)?]).await?;
+    let at_target = space.body(&c2, 11).await?;
+    let after_move = space.body(&c3, 11).await?;
+    let edits = core_edits(&space, item(10)?, &c4, &c2).await?;
+    assert_eq!(edits.len(), 3, "{}", shape(&edits));
+    let c5 = space.commit(5, &c4, edits).await?;
+    let after_rewind = space.body(&c5, 11).await?;
+    for ((target, mid), end) in at_target
+        .lines()
+        .zip(after_move.lines())
+        .zip(after_rewind.lines())
+    {
+        eprintln!(
+            "PROBE r6 {} | target {target:?} | moved {mid:?} | rewound {end:?}",
+            if target == end { "same" } else { "DIFFERS" }
+        );
+    }
+    // One plain RestoreItem, for contrast.
+    let plain = space.commit(6, &c4, vec![restore(10, &c2)?]).await;
+    eprintln!("PROBE r6 a plain restore on the same base: {}", told(&plain));
+    assert!(after_rewind.contains("Inline [a](../old.md)"), "{after_rewind}");
+    assert!(
+        after_rewind.contains("Fragment [b](../old.md#the-item)"),
+        "{after_rewind}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn r7_an_item_with_companions() -> TestResult {
+    let space = Workspace::new().await?;
+    let appearance = format!(".okf/sources/{}.json", uuid_text(20));
+    let supplied = format!(".okf/supplied/{}.json", uuid_text(20));
+    let correction = format!(
+        ".okf/corrections/{}/{}.json",
+        uuid_text(20),
+        "a".repeat(64)
+    );
+    let c2 = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                card(20, 'a')?,
+                note(11, "ref.md", "[scan](sources/scan-pdf.md).\n")?,
+            ],
+        )
+        .await?;
+    let c3 = space
+        .commit(
+            3,
+            &c2,
+            vec![TreeEdit::CorrectDigest {
+                item_id: item(20)?,
+                digest: digest('a')?,
+                corrected_markdown: "Fixed A.".to_owned(),
+                adopts: None,
+            }],
+        )
+        .await?;
+    let c4 = space
+        .commit(4, &c3, vec![moved(20, "sources/renamed.md")?])
+        .await?;
+    let c5 = space
+        .commit(
+            5,
+            &c4,
+            vec![TreeEdit::SupplyExtraction {
+                item_id: item(20)?,
+                based_on: Some(digest('a')?),
+                pages: Vec::new(),
+                markdown: "Supplied text.".to_owned(),
+                proposal_id: serde_json::from_value(json!(uuid_text(60)))?,
+                supplier: person(),
+            }],
+        )
+        .await?;
+    let c6 = space.commit(6, &c5, vec![deleted(20)?]).await?;
+    assert_eq!(space.text(&c6, &appearance)?, None);
+    let edits = core_edits(&space, item(20)?, &c6, &c3).await?;
+    eprintln!("PROBE r7 edits: {}", shape(&edits));
+    assert_eq!(edits.len(), 3);
+    let c7 = space.commit(7, &c6, edits).await?;
+    eprintln!("PROBE r7 files after rewind: {:?}", space.files(&c7)?);
+    for file in ["sources/scan-pdf.md", appearance.as_str(), correction.as_str()] {
+        assert!(space.text(&c7, file)?.is_some(), "{file}");
+        assert_eq!(space.text(&c7, file)?, space.text(&c3, file)?, "{file}");
+    }
+    assert_eq!(space.text(&c7, &supplied)?, None);
+    assert_eq!(space.text(&c7, "sources/renamed.md")?, None);
+    let referrer = space.body(&c7, 11).await?;
+    assert!(referrer.contains("[scan](sources/scan-pdf.md)"), "{referrer}");
+    Ok(())
+}
+
+/// `old.md` with a referrer, moved to `new.md`, then deleted: the three revisions.
+async fn moved_then_deleted(space: &Workspace) -> Fallible<(Revision, Revision, Revision)> {
+    let at_old = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "old.md", "# The item\n\nFirst text.\n")?,
+                note(11, "notes/ref.md", "See [it](../old.md#the-item).\n")?,
+            ],
+        )
+        .await?;
+    let at_new = space.commit(3, &at_old, vec![moved(10, "new.md")?]).await?;
+    let gone = space.commit(4, &at_new, vec![deleted(10)?]).await?;
+    Ok((at_old, at_new, gone))
+}
+
+#[tokio::test]
+async fn r8_a_failure_at_each_step_writes_nothing() -> TestResult {
+    // Step 1 (the restore at the last path) fails: another item took `new.md`.
+    let space = Workspace::new().await?;
+    let (at_old, at_new, gone) = moved_then_deleted(&space).await?;
+    let base = space
+        .commit(5, &gone, vec![note(12, "new.md", "# Another\n")?])
+        .await?;
+    let composed = vec![restore(10, &at_new)?, moved(10, "old.md")?, restore(10, &at_old)?];
+    let step1 = space.commit(6, &base, composed).await;
+    eprintln!("PROBE r8 step 1 fails: {}", told(&step1));
+    assert_eq!(err_of(step1)?.code, ErrorCode::Conflict);
+    assert_eq!(space.head().await?, base);
+    // What core sends there: one edit, since the last path is taken.
+    let sent = core_edits(&space, item(10)?, &base, &at_old).await?;
+    assert_eq!(sent.len(), 1, "{}", shape(&sent));
+
+    // Step 2 (the move) fails: another item holds the path at the target.
+    let space = Workspace::new().await?;
+    let (at_old, _at_new, gone) = moved_then_deleted(&space).await?;
+    let base = space
+        .commit(5, &gone, vec![note(12, "old.md", "# Another\n")?])
+        .await?;
+    let sent = core_edits(&space, item(10)?, &base, &at_old).await?;
+    eprintln!("PROBE r8 step 2 edits: {}", shape(&sent));
+    let step2 = space.commit(6, &base, sent).await;
+    eprintln!("PROBE r8 step 2 fails: {}", told(&step2));
+    assert_eq!(err_of(step2)?.code, ErrorCode::Conflict);
+    assert_eq!(space.head().await?, base);
+    let plain = space.commit(7, &base, vec![restore(10, &at_old)?]).await;
+    eprintln!("PROBE r8 step 2, one plain restore: {}", told(&plain));
+    assert_eq!(space.head().await?, base);
+
+    // Step 3 (the restore from the target) fails: its revision is not in the repository.
+    let space = Workspace::new().await?;
+    let (_at_old, at_new, gone) = moved_then_deleted(&space).await?;
+    let unknown = Revision::try_from("f".repeat(40))?;
+    let step3 = space
+        .commit(
+            6,
+            &gone,
+            vec![restore(10, &at_new)?, moved(10, "old.md")?, restore(10, &unknown)?],
+        )
+        .await;
+    eprintln!("PROBE r8 step 3 fails: {}", told(&step3));
+    assert!(step3.is_err());
+    assert_eq!(space.head().await?, gone);
+    assert_eq!(space.text(&gone, "new.md")?, None);
+
+    // The candidate check refuses the composed tree.
+    let space = Workspace::new().await?;
+    let (at_old, _at_new, gone) = moved_then_deleted(&space).await?;
+    let sent = core_edits(&space, item(10)?, &gone, &at_old).await?;
+    let refused = space
+        .storage
+        .versions()
+        .commit(
+            &space.scope,
+            CommitChanges {
+                mutation_id: serde_json::from_value(json!(uuid_text(6)))?,
+                expected_head: gone.clone(),
+                author: person(),
+                message: "rewind".to_owned(),
+                edits: sent.clone(),
+            },
+            Arc::new(Reject),
+        )
+        .await;
+    assert_eq!(err_of(refused)?.code, ErrorCode::InvalidInput);
+    assert_eq!(space.head().await?, gone);
+    // The same mutation again, accepted, lands once; a third call replays it.
+    let landed = space.commit(6, &gone, sent.clone()).await?;
+    let replayed = space
+        .storage
+        .versions()
+        .commit(
+            &space.scope,
+            CommitChanges {
+                mutation_id: serde_json::from_value(json!(uuid_text(6)))?,
+                expected_head: gone.clone(),
+                author: person(),
+                message: "rewind".to_owned(),
+                edits: sent,
+            },
+            Arc::new(Accept),
+        )
+        .await?;
+    assert_eq!(replayed.revision, landed);
+    assert!(replayed.replayed);
+    Ok(())
+}
+
+#[tokio::test]
+async fn r9_an_item_renamed_in_letter_case_only_and_then_deleted_is_rewound() -> TestResult {
+    let space = Workspace::new().await?;
+    let c2 = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "report.md", "# The report\n")?,
+                note(11, "ref.md", "[r](report.md).\n")?,
+            ],
+        )
+        .await?;
+    let direct = space.commit(90, &c2, vec![moved(10, "Report.md")?]).await;
+    eprintln!("PROBE r9 a direct case-only move: {}", told(&direct));
+    let c4 = match direct {
+        Ok(revision) => revision,
+        Err(_) => {
+            let c3 = space.commit(3, &c2, vec![moved(10, "tmp.md")?]).await?;
+            space.commit(4, &c3, vec![moved(10, "Report.md")?]).await?
+        }
+    };
+    eprintln!("PROBE r9 ref while at Report.md: {:?}", space.body(&c4, 11).await?);
+    let c5 = space.commit(5, &c4, vec![deleted(10)?]).await?;
+    let edits = core_edits(&space, item(10)?, &c5, &c2).await?;
+    eprintln!("PROBE r9 edits core sends: {}", shape(&edits));
+    let composed = space.commit(6, &c5, edits).await;
+    eprintln!("PROBE r9 core's edits on real storage: {}", told(&composed));
+    // What the Rewind was before this change: one RestoreItem.
+    let plain = space.commit(7, &c5, vec![restore(10, &c2)?]).await;
+    eprintln!("PROBE r9 one plain restore (main's behaviour): {}", told(&plain));
+    assert!(plain.is_ok(), "the Rewind main sends succeeds");
+    assert!(
+        composed.is_ok(),
+        "the Rewind this branch sends is refused: {}",
+        told(&composed)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn r10_a_file_where_a_folder_of_the_last_path_is_needed() -> TestResult {
+    let space = Workspace::new().await?;
+    let c2 = space
+        .commit(2, &space.initial, vec![note(10, "old.md", "# The item\n")?])
+        .await?;
+    let c3 = match space.commit(3, &c2, vec![moved(10, "docs.md/inner.md")?]).await {
+        Ok(revision) => revision,
+        Err(error) => {
+            eprintln!("PROBE r10 a folder named docs.md is refused: {error:?}");
+            return Ok(());
+        }
+    };
+    let c4 = space.commit(4, &c3, vec![deleted(10)?]).await?;
+    eprintln!("PROBE r10 files after delete: {:?}", space.files(&c4)?);
+    let c5 = match space
+        .commit(5, &c4, vec![note(12, "docs.md", "# A file now\n")?])
+        .await
+    {
+        Ok(revision) => revision,
+        Err(error) => {
+            eprintln!(
+                "PROBE r10 not reachable, the folder persists: {:?} {:?}",
+                error.code, error.message
+            );
+            return Ok(());
+        }
+    };
+    let edits = core_edits(&space, item(10)?, &c5, &c2).await?;
+    eprintln!("PROBE r10 edits core sends: {}", shape(&edits));
+    let composed = space.commit(6, &c5, edits).await;
+    eprintln!("PROBE r10 core's edits on real storage: {}", told(&composed));
+    let plain = space.commit(7, &c5, vec![restore(10, &c2)?]).await;
+    eprintln!("PROBE r10 one plain restore: {}", told(&plain));
+    Ok(())
+}
+
+#[tokio::test]
+async fn r11_a_folder_of_another_letter_case_holds_the_last_name() -> TestResult {
+    let space = Workspace::new().await?;
+    let c2 = space
+        .commit(2, &space.initial, vec![note(10, "old.md", "# The item\n")?])
+        .await?;
+    let c3 = space.commit(3, &c2, vec![moved(10, "Notes/new.md")?]).await?;
+    let c4 = space.commit(4, &c3, vec![deleted(10)?]).await?;
+    eprintln!("PROBE r11 files after delete: {:?}", space.files(&c4)?);
+    let c5 = match space
+        .commit(5, &c4, vec![note(12, "notes/new.md", "# Another\n")?])
+        .await
+    {
+        Ok(revision) => revision,
+        Err(error) => {
+            eprintln!(
+                "PROBE r11 not reachable this way, the folder persists: {:?} {:?}",
+                error.code, error.message
+            );
+            return Ok(());
+        }
+    };
+    let edits = core_edits(&space, item(10)?, &c5, &c2).await?;
+    eprintln!("PROBE r11 edits core sends: {}", shape(&edits));
+    let composed = space.commit(6, &c5, edits).await;
+    eprintln!("PROBE r11 core's edits on real storage: {}", told(&composed));
+    let plain = space.commit(7, &c5, vec![restore(10, &c2)?]).await;
+    eprintln!("PROBE r11 one plain restore: {}", told(&plain));
+    Ok(())
+}
+
+#[tokio::test]
+async fn c1_what_the_real_stores_do_with_a_written_cursor_and_a_written_tip() -> TestResult {
+    let space = Workspace::new().await?;
+    let (_at_old, _at_new, gone) = moved_then_deleted(&space).await?;
+    let versions = space.storage.versions();
+    let search = space.storage.search();
+    search.index_revision(&space.scope, gone.clone()).await?;
+    let cursors = [
+        "abc",
+        "",
+        "-1",
+        " 1",
+        "+1",
+        "1.0",
+        "0x1",
+        "99999999999999999999999999",
+        "18446744073709551615",
+    ];
+    for text in cursors {
+        let page = || Page {
+            cursor: Some(text.to_owned()),
+            limit: 2,
+        };
+        let log = versions
+            .log(
+                &space.scope,
+                LogQuery {
+                    tip: gone.clone(),
+                    item_id: None,
+                    page: page(),
+                },
+            )
+            .await
+            .map(|response| (response.commits.len(), response.next_cursor))
+            .map_err(|error| (error.code, error.field));
+        let item_log = versions
+            .log(
+                &space.scope,
+                LogQuery {
+                    tip: gone.clone(),
+                    item_id: Some(item(10)?),
+                    page: page(),
+                },
+            )
+            .await
+            .map(|response| (response.commits.len(), response.next_cursor))
+            .map_err(|error| (error.code, error.field));
+        let list = versions
+            .list(&space.scope, &gone, None, page())
+            .await
+            .map(|listing| (listing.items.len(), listing.folders.len(), listing.next_cursor))
+            .map_err(|error| (error.code, error.field));
+        let hits = search
+            .search(
+                &space.scope,
+                SearchQuery {
+                    revision: gone.clone(),
+                    text: "See".to_owned(),
+                    folder: None,
+                    include_archived: false,
+                    extraction: None,
+                    page: page(),
+                },
+            )
+            .await
+            .map(|response| (response.hits.len(), response.next_cursor))
+            .map_err(|error| (error.code, error.field));
+        let links = search
+            .links(
+                &space.scope,
+                LinkQuery {
+                    revision: gone.clone(),
+                    item_id: item(11)?,
+                    direction: LinkDirection::Both,
+                    page: page(),
+                },
+            )
+            .await
+            .map(|response| (response.links.len(), response.next_cursor))
+            .map_err(|error| (error.code, error.field));
+        eprintln!(
+            "PROBE c1 cursor {text:?}: log {log:?} | item log {item_log:?} | list {list:?} | search {hits:?} | links {links:?}"
+        );
+    }
+    // A written tip: unknown, of another hash length, of another workspace, a candidate.
+    let other = space
+        .storage
+        .catalog()
+        .create(
+            &space.scope.tenant_id,
+            serde_json::from_value(json!(uuid_text(70)))?,
+            NewWorkspace {
+                name: "Other".to_owned(),
+                description: String::new(),
+                creator: person(),
+            },
+        )
+        .await?;
+    let other_scope = StorageScope {
+        tenant_id: space.scope.tenant_id.clone(),
+        workspace_id: other.id,
+    };
+    let foreign = versions
+        .commit(
+            &other_scope,
+            CommitChanges {
+                mutation_id: serde_json::from_value(json!(uuid_text(71)))?,
+                expected_head: other.head.clone(),
+                author: person(),
+                message: "elsewhere".to_owned(),
+                edits: vec![note(30, "secret.md", "Another workspace's text.\n")?],
+            },
+            Arc::new(Accept),
+        )
+        .await?
+        .revision;
+    let candidate = versions
+        .create_candidate(
+            &space.scope,
+            serde_json::from_value(json!(uuid_text(80)))?,
+            CandidateChanges {
+                mutation_id: serde_json::from_value(json!(uuid_text(81)))?,
+                base: gone.clone(),
+                author: person(),
+                message: "proposed".to_owned(),
+                edits: vec![note(31, "proposed.md", "Not accepted.\n")?],
+            },
+            Arc::new(Accept),
+        )
+        .await?;
+    let tips = [
+        ("unknown", Revision::try_from("f".repeat(40))?),
+        ("64 hex", Revision::try_from("f".repeat(64))?),
+        ("another workspace's", foreign),
+        ("a candidate's", candidate),
+    ];
+    for (name, tip) in tips {
+        let log = versions
+            .log(
+                &space.scope,
+                LogQuery {
+                    tip: tip.clone(),
+                    item_id: None,
+                    page: Page {
+                        cursor: None,
+                        limit: 2,
+                    },
+                },
+            )
+            .await
+            .map(|response| response.commits.len())
+            .map_err(|error| (error.code, error.message));
+        let list = versions
+            .list(
+                &space.scope,
+                &tip,
+                None,
+                Page {
+                    cursor: None,
+                    limit: 50,
+                },
+            )
+            .await
+            .map(|listing| {
+                listing
+                    .items
+                    .iter()
+                    .map(|held| held.path.as_str().to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|error| (error.code, error.message));
+        eprintln!("PROBE c1 tip {name}: log {log:?} | list {list:?}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn k1_what_the_last_holder_lookup_costs() -> TestResult {
+    const ITEMS: u32 = 200;
+    const COMMITS: u32 = 300;
+    let space = Workspace::new().await?;
+    let mut edits = vec![note(10, "victim.md", "# The victim\n\nSome text.\n")?];
+    for n in 0..ITEMS {
+        edits.push(note(
+            1000 + n,
+            &format!("n/i{n:04}.md"),
+            "# A note\n\nA paragraph of ordinary text, long enough to be a note.\n",
+        )?);
+    }
+    let started = Instant::now();
+    let c2 = space.commit(2, &space.initial, edits).await?;
+    eprintln!("PROBE k1 creating {ITEMS} items in one commit: {:?}", started.elapsed());
+    let c3 = space.commit(3, &c2, vec![moved(10, "victim2.md")?]).await?;
+    let c4 = space.commit(4, &c3, vec![deleted(10)?]).await?;
+    let head = {
+        let repository = space.repository()?;
+        let mut parent = repository.find_commit(repository.refname_to_id("refs/heads/main")?)?;
+        let tree = parent.tree()?;
+        let who = git2::Signature::now("raw", "raw@example.invalid")?;
+        for n in 0..COMMITS {
+            let id = repository.commit(
+                Some("refs/heads/main"),
+                &who,
+                &who,
+                &format!("raw {n}\n\nOkf-Jawn-Mutation: {}\n", uuid_text(5000 + n)),
+                &tree,
+                &[&parent],
+            )?;
+            parent = repository.find_commit(id)?;
+        }
+        Revision::try_from(parent.id().to_string())?
+    };
+    assert_eq!(space.head().await?, head);
+    let versions = space.storage.versions();
+    let started = Instant::now();
+    let shown = versions.show(&space.scope, &head, item(1000)?).await?;
+    let one_show = started.elapsed();
+    assert_eq!(shown.summary.path.as_str(), "n/i0000.md");
+    let started = Instant::now();
+    let plain = versions
+        .log(
+            &space.scope,
+            LogQuery {
+                tip: head.clone(),
+                item_id: None,
+                page: Page {
+                    cursor: None,
+                    limit: 1,
+                },
+            },
+        )
+        .await?;
+    let plain_log = started.elapsed();
+    assert_eq!(plain.commits.len(), 1);
+    let started = Instant::now();
+    let newest = versions
+        .log(
+            &space.scope,
+            LogQuery {
+                tip: head.clone(),
+                item_id: Some(item(10)?),
+                page: Page {
+                    cursor: None,
+                    limit: 1,
+                },
+            },
+        )
+        .await?;
+    let item_log = started.elapsed();
+    assert_eq!(some(newest.commits.first(), "the removal")?.revision, c4);
+    let started = Instant::now();
+    let sent = core_edits(&space, item(10)?, &head, &c2).await?;
+    let whole = started.elapsed();
+    assert_eq!(sent.len(), 3);
+    let walked = f64::from(COMMITS + 1);
+    let per_commit = item_log.as_secs_f64() / walked;
+    let per_item = per_commit / (2.0 * f64::from(ITEMS + 1));
+    eprintln!(
+        "PROBE k1 items {ITEMS}, commits walked {walked}: show {one_show:?}, plain log(1) {plain_log:?}, item log(1) {item_log:?}, whole lookup {whole:?}"
+    );
+    eprintln!(
+        "PROBE k1 per commit walked {:.3} ms, per item file read {:.1} us; at 10000 items and 1000 commits: {:.0} s (debug build)",
+        per_commit * 1000.0,
+        per_item * 1_000_000.0,
+        per_item * 2.0 * 10_000.0 * 1000.0
+    );
+    // An item the base's history never held: the walk runs to the root.
+    let started = Instant::now();
+    let never = versions
+        .log(
+            &space.scope,
+            LogQuery {
+                tip: head.clone(),
+                item_id: Some(item(999)?),
+                page: Page {
+                    cursor: None,
+                    limit: 1,
+                },
+            },
+        )
+        .await?;
+    eprintln!(
+        "PROBE k1 item the history never held: {} commits, {:?}",
+        never.commits.len(),
+        started.elapsed()
+    );
+    Ok(())
+}
+
+#[path = "../../../tests/support/check.rs"]
+mod check;
+
+// ===== 2. appended to crates/core/tests/application/items.rs =====
+
+// REVIEW PROBE (never committed): the ruled inconsistency of report concern 5.
+#[tokio::test]
+async fn zz_probe_a_listing_at_a_named_revision_stays_a_current_listing_on_page_two() -> TestResult {
+    let world = World::new()?;
+    let mut archived = listed(2, None)?;
+    archived.archived = true;
+    world.versions.put_listing(
+        &revision('a')?,
+        Some(path("notes")?),
+        FolderListing {
+            items: vec![listed(1, None)?, archived],
+            folders: Vec::new(),
+            next_cursor: Some("next".to_owned()),
+        },
+    )?;
+    let caller = alice(OperationName::ListItems, None)?;
+    let named_a = || -> Built<At> {
+        Ok(At::Revision {
+            revision: revision('a')?,
+        })
+    };
+    // Page one names `a`, which is the head: a current listing, its archived item hidden.
+    let first = world
+        .service
+        .list_items(&caller, listing_of_notes(named_a()?, None)?)
+        .await?;
+    let ids: Vec<ItemId> = first.items.iter().map(|item| item.id).collect();
+    assert_eq!(ids, vec![ItemId(Uuid::from_u128(1))], "page one");
+    let cursor = some(first.next_cursor, "a continuation")?;
+    // A write lands between the pages.
+    world.versions.set_head(revision('b')?)?;
+    let second = world
+        .service
+        .list_items(&caller, listing_of_notes(named_a()?, Some(cursor))?)
+        .await?;
+    let ids: Vec<ItemId> = second.items.iter().map(|item| item.id).collect();
+    assert_eq!(
+        ids,
+        vec![ItemId(Uuid::from_u128(1))],
+        "page two of the same listing shows the archived item page one hid"
+    );
+    Ok(())
+}
+
+// ===== 3. appended to crates/core/tests/application/history.rs =====
+
+// REVIEW PROBES (never committed).
+#[tokio::test]
+async fn zz_probe_a_third_page_reads_at_the_tip_the_first_page_resolved() -> TestResult {
+    let world = World::new()?;
+    let history = |fills: &[char]| -> Built<LogResponse> {
+        Ok(LogResponse {
+            commits: fills
+                .iter()
+                .map(|fill| wire_commit(*fill))
+                .collect::<Built<_>>()?,
+            next_cursor: None,
+        })
+    };
+    world
+        .versions
+        .put_log(&revision('a')?, None, history(&['5', '4', '3', '2', '1'])?)?;
+    world.versions.put_log(
+        &revision('b')?,
+        None,
+        history(&['b', '5', '4', '3', '2', '1'])?,
+    )?;
+    world.versions.put_log(
+        &revision('c')?,
+        None,
+        history(&['c', 'b', '5', '4', '3', '2', '1'])?,
+    )?;
+    world.versions.page_log(2)?;
+    let caller = alice(OperationName::LogItems, None)?;
+    let first = world
+        .service
+        .log_items(&caller, timeline(At::Latest, None, 2)?)
+        .await?;
+    let cursor = some(first.next_cursor, "a continuation")?;
+    world.versions.set_head(revision('b')?)?;
+    let second = world
+        .service
+        .log_items(&caller, timeline(At::Latest, Some(cursor), 2)?)
+        .await?;
+    let cursor = some(second.next_cursor, "a second continuation")?;
+    world.versions.set_head(revision('c')?)?;
+    let third = world
+        .service
+        .log_items(&caller, timeline(At::Latest, Some(cursor), 2)?)
+        .await?;
+    assert_eq!(third.next_cursor, None);
+    let listed: Vec<_> = first
+        .commits
+        .iter()
+        .chain(&second.commits)
+        .chain(&third.commits)
+        .map(|commit| commit.revision.clone())
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            revision('5')?,
+            revision('4')?,
+            revision('3')?,
+            revision('2')?,
+            revision('1')?
+        ],
+        "each commit of the Timeline once, over three pages"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn zz_probe_a_cursor_given_to_another_operation_or_another_query() -> TestResult {
+    let world = paged_timeline()?;
+    let caller = alice(OperationName::LogItems, None)?;
+    let first = world
+        .service
+        .log_items(&caller, timeline(At::Latest, None, 2)?)
+        .await?;
+    let cursor = some(first.next_cursor, "a continuation")?;
+    // The Timeline's cursor, given to a listing of the root.
+    let listing = world
+        .service
+        .list_items(
+            &alice(OperationName::ListItems, None)?,
+            okf_jawn_contract::item::ListItemsRequest {
+                workspace_id: scope()?.workspace_id,
+                at: At::Latest,
+                folder: String::new(),
+                extraction: None,
+                page: PageRequest {
+                    cursor: Some(cursor.clone()),
+                    limit: 50,
+                },
+            },
+        )
+        .await;
+    eprintln!(
+        "PROBE x1 a Timeline cursor given to list_items: {:?}; the store was asked {:?}",
+        listing
+            .as_ref()
+            .map(|listing| (listing.revision.clone(), listing.items.len()))
+            .map_err(|error| (error.code.clone(), error.field.clone())),
+        world.versions.list_queries()?
+    );
+    // The same cursor, given to the Timeline of one item (another query).
+    let other = world
+        .service
+        .log_items(
+            &caller,
+            LogRequest {
+                workspace_id: scope()?.workspace_id,
+                item_id: Some(item(NOTE)),
+                at: At::Latest,
+                page: PageRequest {
+                    cursor: Some(cursor),
+                    limit: 2,
+                },
+            },
+        )
+        .await;
+    let asked = world.versions.log_queries()?;
+    eprintln!(
+        "PROBE x2 a workspace Timeline cursor given to an item's Timeline: {:?}; the store was asked {:?}",
+        other
+            .as_ref()
+            .map(|log| log.commits.len())
+            .map_err(|error| (error.code.clone(), error.field.clone())),
+        asked.last().map(|query| (query.tip.clone(), query.item_id, query.page.cursor.clone()))
+    );
+    // A written cursor: a tip nobody issued, and a store position of any size.
+    let shaped = |value: serde_json::Value| URL_SAFE_NO_PAD.encode(value.to_string());
+    for (name, text) in [
+        (
+            "an unknown tip",
+            shaped(json!({ "tip": "f".repeat(40), "next": "0" })),
+        ),
+        (
+            "a 64-hex tip",
+            shaped(json!({ "tip": "f".repeat(64), "next": "0" })),
+        ),
+        (
+            "a position that is no number",
+            shaped(json!({ "tip": "a".repeat(40), "next": "x".repeat(1 << 20) })),
+        ),
+    ] {
+        let size = text.len();
+        let written = world
+            .service
+            .log_items(&caller, timeline(At::Latest, Some(text), 2)?)
+            .await;
+        eprintln!(
+            "PROBE x3 {name} ({size} bytes of cursor): {:?}",
+            written
+                .map(|log| log.commits.len())
+                .map_err(|error| (error.code, error.field, error.message.len()))
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn zz_probe_a_continuation_that_names_its_revision_is_purge_checked() -> TestResult {
+    let world = paged_timeline()?;
+    let caller = alice(OperationName::LogItems, None)?;
+    let first = world
+        .service
+        .log_items(&caller, timeline(At::Latest, None, 2)?)
+        .await?;
+    let cursor = some(first.next_cursor, "a continuation")?;
+    let purge_id = purge(&world, 'a')?;
+    let named = At::Revision {
+        revision: revision('a')?,
+    };
+    let refused = err_of(
+        world
+            .service
+            .log_items(&caller, timeline(named, Some(cursor), 2)?)
+            .await,
+    )?;
+    assert_invalidated(&refused, purge_id);
+    assert_eq!(world.versions.log_queries()?.len(), 1);
+    Ok(())
+}
+
+// ===== 4. appended to crates/core/tests/dispatch.rs =====
+
+// REVIEW PROBE (never committed): `record_refusal` against the rule and against dispatch's own
+// route refusal, over the whole operation table.
+
+/// A text for a string schema reached by the property or definition `hint`.
+fn zz_text(schema: &Value, hint: &str) -> Value {
+    let format = schema
+        .get("format")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let pattern = schema
+        .get("pattern")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let lower = hint.to_lowercase();
+    let least = schema
+        .get("minLength")
+        .and_then(Value::as_u64)
+        .and_then(|least| usize::try_from(least).ok())
+        .unwrap_or(1)
+        .max(1);
+    let text = if format == "uuid" {
+        if lower.contains("workspace") {
+            WORKSPACE_A.to_owned()
+        } else {
+            "44444444-4444-4444-8444-444444444444".to_owned()
+        }
+    } else if format == "date-time" || lower.contains("timestamp") {
+        "2026-10-08T14:03:07.250Z".to_owned()
+    } else if lower.contains("revision") || pattern.contains("{40}") {
+        "a".repeat(40)
+    } else if lower.contains("digest") || pattern.contains("{64}") {
+        "b".repeat(64)
+    } else if lower.contains("path") || lower == "destination" {
+        "notes/a.md".to_owned()
+    } else if lower.contains("tenant") {
+        "tenant-local".to_owned()
+    } else {
+        "x".repeat(least)
+    };
+    Value::String(text)
+}
+
+/// A minimal instance of `schema`, a node of the root schema `root`.
+fn zz_sample(root: &Value, schema: &Value, hint: &str, depth: usize) -> Value {
+    if depth > 32 {
+        return Value::Null;
+    }
+    let deeper = depth.saturating_add(1);
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        let name = reference.rsplit('/').next().unwrap_or_default();
+        let target = root
+            .get("$defs")
+            .and_then(|definitions| definitions.get(name))
+            .unwrap_or(&Value::Null);
+        return zz_sample(root, target, name, deeper);
+    }
+    if let Some(value) = schema.get("const") {
+        return value.clone();
+    }
+    if let Some(first) = schema
+        .get("enum")
+        .and_then(Value::as_array)
+        .and_then(|values| values.first())
+    {
+        return first.clone();
+    }
+    let mut object = serde_json::Map::new();
+    let mut is_object = false;
+    for key in ["oneOf", "anyOf"] {
+        if let Some(chosen) = schema
+            .get(key)
+            .and_then(Value::as_array)
+            .and_then(|variants| {
+                variants
+                    .iter()
+                    .find(|variant| variant.get("type").and_then(Value::as_str) != Some("null"))
+            })
+        {
+            match zz_sample(root, chosen, hint, deeper) {
+                Value::Object(fields) => {
+                    is_object = true;
+                    object.extend(fields);
+                }
+                other if schema.get("properties").is_none() => return other,
+                _ => {}
+            }
+        }
+    }
+    if let Some(parts) = schema.get("allOf").and_then(Value::as_array) {
+        for part in parts {
+            match zz_sample(root, part, hint, deeper) {
+                Value::Object(fields) => {
+                    is_object = true;
+                    object.extend(fields);
+                }
+                other if schema.get("properties").is_none() && parts.len() == 1 => return other,
+                _ => {}
+            }
+        }
+    }
+    let kind = match schema.get("type") {
+        Some(Value::String(kind)) => kind.as_str(),
+        Some(Value::Array(kinds)) => kinds
+            .iter()
+            .filter_map(Value::as_str)
+            .find(|kind| *kind != "null")
+            .unwrap_or("null"),
+        _ if schema.get("properties").is_some() || is_object => "object",
+        _ => "",
+    };
+    match kind {
+        "object" => {
+            let required: Vec<&str> = schema
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|names| names.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            for name in required {
+                let property = schema
+                    .get("properties")
+                    .and_then(|properties| properties.get(name))
+                    .unwrap_or(&Value::Null);
+                let _previous =
+                    object.insert(name.to_owned(), zz_sample(root, property, name, deeper));
+            }
+            Value::Object(object)
+        }
+        "array" => {
+            let least = schema.get("minItems").and_then(Value::as_u64).unwrap_or(0);
+            if least == 0 {
+                json!([])
+            } else {
+                let element = schema.get("items").unwrap_or(&Value::Null);
+                json!([zz_sample(root, element, hint, deeper)])
+            }
+        }
+        "string" => zz_text(schema, hint),
+        "integer" => json!(
+            schema
+                .get("minimum")
+                .and_then(Value::as_u64)
+                .unwrap_or(1)
+                .max(1)
+        ),
+        "number" => json!(1),
+        "boolean" => json!(false),
+        _ => Value::Null,
+    }
+}
+
+/// The documented rule, restated: the one distinct workspace the targets name, unless a
+/// `Deployment` target is among them.
+fn zz_rule(
+    targets: &[okf_jawn_contract::scope::Target],
+) -> Option<okf_jawn_contract::identity::WorkspaceId> {
+    use okf_jawn_contract::scope::Target;
+    if targets
+        .iter()
+        .any(|target| matches!(target, Target::Deployment(_)))
+    {
+        return None;
+    }
+    let mut named = Vec::new();
+    for target in targets {
+        if let Target::Workspace(workspace_id, _) = target
+            && !named.contains(workspace_id)
+        {
+            named.push(*workspace_id);
+        }
+    }
+    match named.as_slice() {
+        [one] => Some(*one),
+        _ => None,
+    }
+}
+
+/// What the comparison over the table found.
+#[derive(Default)]
+struct ZzReport {
+    lines: Vec<String>,
+    operations: usize,
+    decoded: usize,
+    in_a_workspace_log: usize,
+    agree: usize,
+    disagree: usize,
+    route_refused: usize,
+    route_compared: usize,
+    route_agree: usize,
+}
+
+macro_rules! zz_compare_refusals {
+    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
+        $operator:literal, $visibility:literal, $permission:ident, $ui:literal, $status:literal,
+        $destructive:literal, $description:literal)),* $(,)?) => {
+        async fn zz_compare(
+            app: &CountingApplication,
+            ports: &FixturePorts,
+            session: &Principal,
+            agent: &Principal,
+        ) -> Result<ZzReport, Box<dyn std::error::Error>> {
+            use okf_jawn_contract::scope::RequestScope;
+            let mut report = ZzReport::default();
+            let tenant_log = EventScope::Tenant(tenant("tenant-local")?);
+            $({
+                let name = stringify!($id);
+                let operation = some(
+                    OperationName::ALL.iter().copied().find(|known| known.as_str() == name),
+                    "the operation",
+                )?;
+                report.operations = report.operations.saturating_add(1);
+                let schema = serde_json::to_value(
+                    schemars::generate::SchemaSettings::draft2020_12()
+                        .into_generator()
+                        .into_root_schema_for::<$request>(),
+                )?;
+                let body = zz_sample(&schema, &schema, "", 0);
+                let decoded: Result<$request, serde_json::Error> =
+                    serde_json::from_value(body.clone());
+                let expected = match &decoded {
+                    Ok(request) => {
+                        report.decoded = report.decoded.saturating_add(1);
+                        match zz_rule(&request.targets()) {
+                            Some(workspace_id) => EventScope::Workspace(StorageScope {
+                                tenant_id: tenant("tenant-local")?,
+                                workspace_id,
+                            }),
+                            None => tenant_log.clone(),
+                        }
+                    }
+                    Err(error) => {
+                        report.lines.push(format!(
+                            "{name}: no decodable body generated ({error}); body {body}"
+                        ));
+                        tenant_log.clone()
+                    }
+                };
+                let before = ports.events.appended()?.len();
+                let returned = record_refusal(
+                    ports.events.as_ref(),
+                    session,
+                    operation,
+                    &body,
+                    ApiError::new(ErrorCode::Forbidden, "refused by the binding"),
+                )
+                .await;
+                let appended = ports.events.appended()?;
+                let landed = appended.get(before).map(|(scope, _)| scope.clone());
+                let one = appended.len() == before.saturating_add(1);
+                if one
+                    && returned.code == ErrorCode::Forbidden
+                    && landed.as_ref() == Some(&expected)
+                {
+                    report.agree = report.agree.saturating_add(1);
+                } else {
+                    report.disagree = report.disagree.saturating_add(1);
+                    report.lines.push(format!(
+                        "{name}: DISAGREES: expected {expected:?}, landed {landed:?}, one event {one}"
+                    ));
+                }
+                if matches!(landed, Some(EventScope::Workspace(_))) {
+                    report.in_a_workspace_log = report.in_a_workspace_log.saturating_add(1);
+                }
+                // Dispatch's own route refusal of the same body, where dispatch has one.
+                let human_only = DRAFT_BEARING.contains(&operation)
+                    || okf_jawn_contract::operations::HUMAN_SESSION_ONLY.contains(&operation);
+                if human_only {
+                    report.route_refused = report.route_refused.saturating_add(1);
+                    let before = ports.events.appended()?.len();
+                    let outcome = Box::pin(call(app, ports, agent, name, body.clone())).await;
+                    let appended = ports.events.appended()?;
+                    let by_dispatch = appended.get(before).map(|(scope, _)| scope.clone());
+                    match outcome {
+                        Err(error) if error.code == ErrorCode::Forbidden => {
+                            report.route_compared = report.route_compared.saturating_add(1);
+                            let before = ports.events.appended()?.len();
+                            let _returned = record_refusal(
+                                ports.events.as_ref(),
+                                agent,
+                                operation,
+                                &body,
+                                ApiError::new(ErrorCode::Forbidden, "refused by the binding"),
+                            )
+                            .await;
+                            let appended = ports.events.appended()?;
+                            let by_binding =
+                                appended.get(before).map(|(scope, _)| scope.clone());
+                            if by_dispatch.is_some() && by_dispatch == by_binding {
+                                report.route_agree = report.route_agree.saturating_add(1);
+                                report.lines.push(format!(
+                                    "{name}: dispatch and the binding both wrote {by_dispatch:?}"
+                                ));
+                            } else {
+                                report.lines.push(format!(
+                                    "{name}: ROUTE DISAGREES: dispatch {by_dispatch:?}, binding {by_binding:?}"
+                                ));
+                            }
+                        }
+                        other => report.lines.push(format!(
+                            "{name}: dispatch did not refuse the generated body by route: {:?}",
+                            other
+                                .map(|_| "ok")
+                                .map_err(|error| (error.code, error.field, error.message))
+                        )),
+                    }
+                }
+            })*
+            Ok(report)
+        }
+    };
+}
+
+okf_jawn_contract::for_each_operation!(zz_compare_refusals);
+
+#[tokio::test]
+async fn zz_probe_every_operations_binding_refusal_lands_by_dispatchs_rule() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    let session = principal("alice", AccessRoute::BrowserSession)?;
+    let agent = connector("alice", all_permissions())?;
+    let report = Box::pin(zz_compare(&app, &ports, &session, &agent)).await?;
+    for line in &report.lines {
+        eprintln!("PROBE d1 {line}");
+    }
+    eprintln!(
+        "PROBE d1 totals: operations {}, decodable body {}, landed in a workspace log {}, agree with the rule {}, disagree {}, human-route operations {}, refused by dispatch for the route {}, same log {}",
+        report.operations,
+        report.decoded,
+        report.in_a_workspace_log,
+        report.agree,
+        report.disagree,
+        report.route_refused,
+        report.route_compared,
+        report.route_agree
+    );
+    // A body nobody validated: deep and wide.
+    let mut deep = json!("leaf");
+    for _ in 0..100 {
+        deep = json!({ "workspace_id": WORKSPACE_A, "nested": [deep] });
+    }
+    let wide = json!({ "workspace_id": WORKSPACE_A, "filler": "x".repeat(4 << 20) });
+    for (name, body) in [("deep", deep), ("wide", wide)] {
+        let before = ports.events.appended()?.len();
+        let started = std::time::Instant::now();
+        let _returned = record_refusal(
+            ports.events.as_ref(),
+            &session,
+            OperationName::ListItems,
+            &body,
+            ApiError::new(ErrorCode::Forbidden, "refused by the binding"),
+        )
+        .await;
+        let appended = ports.events.appended()?;
+        eprintln!(
+            "PROBE d2 a {name} unvalidated body: {:?} in {:?}",
+            appended.get(before).map(|(scope, _)| scope.clone()),
+            started.elapsed()
+        );
+    }
+    assert_eq!(report.disagree, 0);
+    Ok(())
+}
+
+// ===== 5. the switched mutants, as a patch over crates/core/src (REVIEW_MUTANT selects one) =====
+// diff --git a/crates/core/src/application/history.rs b/crates/core/src/application/history.rs
+// index 8e73188..a810a4e 100644
+// --- a/crates/core/src/application/history.rs
+// +++ b/crates/core/src/application/history.rs
+// @@ -129,6 +129,13 @@ pub(super) async fn log_items(
+//          .await?;
+//      // Commit metadata only: the receipt names no item content.
+//      record_receipt(service, context, &scope, None, Vec::new()).await?;
+// +    let tip = if super::shared::mutant("S8")
+// +        && matches!(request.at, okf_jawn_contract::identity::At::Latest)
+// +    {
+// +        service.ports().versions.head(&scope).await?
+// +    } else {
+// +        tip
+// +    };
+//      Ok(LogResponse {
+//          next_cursor: next_page(&tip, response.next_cursor)?,
+//          commits: response.commits,
+// @@ -422,16 +429,27 @@ async fn item_restore(
+//      if path_at(service, scope, base, item).await?.is_some() {
+//          return Ok(vec![restore]);
+//      }
+// -    let Some(destination) = path_at(service, scope, target, item).await? else {
+// +    let mutant = super::shared::mutant;
+// +    let at_target = path_at(service, scope, target, item).await;
+// +    let at_target = if mutant("H3") {
+// +        at_target.unwrap_or(None)
+// +    } else {
+// +        at_target?
+// +    };
+// +    let Some(destination) = at_target else {
+//          return Ok(vec![restore]);
+//      };
+//      // The newest commit at or before the base that changed the item removed it, since the base
+//      // does not hold it; that commit's first parent is the last revision that held it.
+// -    let newest = versions
+// +    let logged = versions
+//          .log(
+//              scope,
+//              LogQuery {
+// -                tip: base.clone(),
+// +                tip: if mutant("H4") {
+// +                    target.clone()
+// +                } else {
+// +                    base.clone()
+// +                },
+//                  item_id: Some(item),
+//                  page: Page {
+//                      cursor: None,
+// @@ -439,17 +457,27 @@ async fn item_restore(
+//                  },
+//              },
+//          )
+// -        .await?
+// -        .commits
+// -        .into_iter()
+// -        .next();
+// +        .await;
+// +    let logged = if mutant("H12") {
+// +        logged.ok()
+// +    } else {
+// +        Some(logged?)
+// +    };
+// +    let newest = logged.and_then(|response| response.commits.into_iter().next());
+//      let Some(last) = newest.and_then(|commit| commit.parents.into_iter().next()) else {
+//          return Ok(vec![restore]);
+//      };
+// -    let Some(last_path) = path_at(service, scope, &last, item).await? else {
+// +    let at_last = path_at(service, scope, &last, item).await;
+// +    let at_last = if mutant("H3") {
+// +        at_last.unwrap_or(None)
+// +    } else {
+// +        at_last?
+// +    };
+// +    let Some(last_path) = at_last else {
+//          return Ok(vec![restore]);
+//      };
+// -    if last_path == destination || taken(service, scope, base, &last_path).await? {
+// +    let asked = if mutant("H10") { target } else { base };
+// +    if last_path == destination || taken(service, scope, asked, &last_path).await? {
+//          return Ok(vec![restore]);
+//      }
+//      Ok(vec![
+// @@ -497,6 +525,8 @@ async fn taken(
+//          ),
+//          None => None,
+//      };
+// +    let mutant = super::shared::mutant;
+// +    let folder = if mutant("H9") { None } else { folder };
+//      let versions = &service.ports().versions;
+//      let mut cursor = None;
+//      loop {
+// @@ -506,7 +536,7 @@ async fn taken(
+//          };
+//          let listing = match versions.list(scope, revision, folder.as_ref(), page).await {
+//              Ok(listing) => listing,
+// -            Err(error) if error.code == ErrorCode::NotFound => return Ok(false),
+// +            Err(error) if error.code == ErrorCode::NotFound || mutant("H2") => return Ok(false),
+//              Err(error) => return Err(error),
+//          };
+//          let collides = listing
+// @@ -519,8 +549,8 @@ async fn taken(
+//              return Ok(true);
+//          }
+//          match listing.next_cursor {
+// -            Some(next) => cursor = Some(next),
+// -            None => return Ok(false),
+// +            Some(next) if !mutant("H1") => cursor = Some(next),
+// +            _ => return Ok(false),
+//          }
+//      }
+//  }
+// diff --git a/crates/core/src/application/items.rs b/crates/core/src/application/items.rs
+// index 062a3c7..2f35b0d 100644
+// --- a/crates/core/src/application/items.rs
+// +++ b/crates/core/src/application/items.rs
+// @@ -69,7 +69,9 @@ pub(super) async fn list_items(
+//      let ports = service.ports();
+//      // `latest` is the head by resolution; a named revision is current when it is the head now.
+//      let current = match &request.at {
+// -        At::Latest => true,
+// +        At::Latest => {
+// +            !super::shared::mutant("S10") || ports.versions.head(&scope).await? == revision
+// +        }
+//          At::Revision { .. } => ports.versions.head(&scope).await? == revision,
+//      };
+//      let listing = ports
+// diff --git a/crates/core/src/application/shared.rs b/crates/core/src/application/shared.rs
+// index f51afc7..3ebcb3b 100644
+// --- a/crates/core/src/application/shared.rs
+// +++ b/crates/core/src/application/shared.rs
+// @@ -104,10 +104,27 @@ const REPLAY_WARNINGS_UNAVAILABLE: &str = "replay_warnings_unavailable";
+//  /// The request field a page cursor is refused on.
+//  const PAGE_CURSOR: &str = "/page/cursor";
+//  
+// +/// REVIEW MUTANT SWITCH (never committed): whether the mutant `name` is selected.
+// +pub(super) fn mutant(name: &str) -> bool {
+// +    std::env::var("REVIEW_MUTANT").is_ok_and(|selected| selected == name)
+// +}
+// +
+// +/// REVIEW MUTANT S1: the cursor without `deny_unknown_fields`.
+// +#[derive(Deserialize)]
+// +struct LooseCursor {
+// +    tip: Revision,
+// +    next: String,
+// +}
+// +
+//  impl Scratch {
+//      /// A new, empty private directory under the system's temporary directory.
+//      fn create() -> Result<Self, ApiError> {
+// -        let root = std::env::temp_dir().join(format!("okf-jawn-recheck-{}", Uuid::new_v4()));
+// +        let prefix = if mutant("X1") {
+// +            "okf-jawn-rechk"
+// +        } else {
+// +            "okf-jawn-recheck"
+// +        };
+// +        let root = std::env::temp_dir().join(format!("{prefix}-{}", Uuid::new_v4()));
+//          std::fs::create_dir_all(&root).map_err(|error| scratch_error(&error))?;
+//          Ok(Self(root))
+//      }
+// @@ -124,6 +141,9 @@ impl Scratch {
+//  
+//  impl Drop for Scratch {
+//      fn drop(&mut self) {
+// +        if mutant("X1") {
+// +            return;
+// +        }
+//          // Best effort: a directory left under the temporary directory harms nothing.
+//          let _left = std::fs::remove_dir_all(&self.0);
+//      }
+// @@ -200,23 +220,39 @@ pub(super) async fn resolve_page(
+//      let Some(text) = page.cursor.as_deref() else {
+//          return Ok((resolve(service, scope, at).await?, page.into()));
+//      };
+// -    let cursor: PageCursor = URL_SAFE_NO_PAD
+// -        .decode(text)
+// -        .ok()
+// -        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+// -        .ok_or_else(|| invalid("the cursor was not issued by this operation", PAGE_CURSOR))?;
+// -    if matches!(at, At::Revision { revision } if revision != &cursor.tip) {
+// +    let cursor: PageCursor = if mutant("S1") {
+// +        URL_SAFE_NO_PAD
+// +            .decode(text)
+// +            .ok()
+// +            .and_then(|bytes| serde_json::from_slice::<LooseCursor>(&bytes).ok())
+// +            .map(|loose| PageCursor {
+// +                tip: loose.tip,
+// +                next: loose.next,
+// +            })
+// +            .ok_or_else(|| invalid("the cursor was not issued by this operation", PAGE_CURSOR))?
+// +    } else {
+// +        URL_SAFE_NO_PAD
+// +            .decode(text)
+// +            .ok()
+// +            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+// +            .ok_or_else(|| invalid("the cursor was not issued by this operation", PAGE_CURSOR))?
+// +    };
+// +    if matches!(at, At::Revision { revision } if mutant("S2") || revision != &cursor.tip) {
+//          return Err(invalid(
+//              "the cursor continues a read of another revision than the one named",
+//              PAGE_CURSOR,
+//          ));
+//      }
+// -    check_named(service, scope, &cursor.tip).await?;
+// +    let unchecked = (mutant("S3") && matches!(at, At::Revision { .. }))
+// +        || (mutant("S4") && matches!(at, At::Latest));
+// +    if !unchecked {
+// +        check_named(service, scope, &cursor.tip).await?;
+// +    }
+//      Ok((
+//          cursor.tip,
+//          Page {
+//              cursor: Some(cursor.next),
+// -            limit: page.limit,
+// +            limit: if mutant("S5") { 500 } else { page.limit },
+//          },
+//      ))
+//  }
+// @@ -413,8 +449,10 @@ async fn checked_again(
+//      files.extend(file_if_present(service, scope, revision, CHANGE_LOG.to_owned()).await?);
+//      tokio::task::spawn_blocking(move || {
+//          let scratch = Scratch::create()?;
+// -        for (path, bytes) in &files {
+// -            scratch.write(path, bytes)?;
+// +        if !mutant("X3") {
+// +            for (path, bytes) in &files {
+// +                scratch.write(path, bytes)?;
+// +            }
+//          }
+//          check.check(&scratch.0)
+//      })
