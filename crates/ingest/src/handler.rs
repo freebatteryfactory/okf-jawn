@@ -778,6 +778,14 @@ impl IngestHandler {
                     }
                     Err(error) => return Err(error),
                 };
+                // Only a running job is waited for. A sealed job that is queued had its lease lapse:
+                // its attempt died, and no worker can claim it while the purge is recorded, so
+                // waiting would hold the purge to its bound on every run, for nothing. Known limit
+                // (PR #40 review): if that attempt is in fact still alive (a renewal failed while
+                // `restore_import` kept running), its row import, which the purge guard does not
+                // cover, can overlap the purge. The cure is to fence a lapsed attempt's writes by
+                // its lease, checked in each write's own transaction; it is carried to the storage
+                // cleanup's lifecycle work item, which rebuilds the purge.
                 if stands.state == JobState::Running {
                     running.push(job.id);
                 }
