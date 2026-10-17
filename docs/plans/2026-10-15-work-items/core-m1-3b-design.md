@@ -45,8 +45,8 @@ proposal; the body of the design uses the proposal.
    `DuplicateObservation`.
 10. **`apply_names` recomputes the plan** for the plan's own items at its base with the request's
     rules and refuses the whole apply unless every entry is identical; then it writes one commit
-    of `MoveItem`s, through a temporary path where a move must wait for another (a case-only
-    rename, a chain, a swap).
+    of `MoveItem`s, through a temporary path where a move must wait for another (a chain, a swap);
+    a case-only rename is one direct `MoveItem`, which storage parks itself (PR #34).
 11. **The shared function** `conventions::propose` names one path; `preview_names` and the
     import's `name_new_item` both call it and the same `numbered`, so they cannot differ.
 12. **Libraries**: `glob` 0.3.4 (patterns), `convert_case` 0.12.0 (words and letter case),
@@ -321,8 +321,11 @@ other text literally: `[year]`, `[month]` and `[day]` only, as numbers, with the
 date) or any other component is refused. A format holds each of `[year]`, `[month]` and `[day]`
 exactly once, year first (`[year]` `[month]` `[day]`, which section 4.4 reads under every `date_order`)
 or in the order `date_order` names (`dmy`: day, month, year; `mdy`: month, day, year); any other
-format is refused (rulings: the formatted date is read again as the same date, so a second
-preview leaves the name as it is). Examples:
+format is refused. Between the components stands one of `-`, `_` or `.`, the same both times, or
+nothing, and then the year comes first and every component is zero-padded (the compact shape); the
+year keeps four digits, and no other literal text is allowed. These are exactly the shapes section
+4.4 reads (Y, L and C), so the formatted date is read again as the same date and a second preview
+leaves the name as it is (rulings). Examples:
 `"[year]-[month]-[day]"` gives `2025-03-04`; `"[day].[month].[year]"` (with `date_order dmy`) gives `04.03.2025`;
 `"[year][month][day]"` gives `20250304`. Empty means "keep dates as written" (never "delete
 them"). Validation (section 6): it must parse; formatting the probe dates 2025-03-04,
@@ -361,6 +364,8 @@ Vectors (`date_format`):
 | F9 | `Report 2025-03-04.md`, previewed twice | `"[year]-[month]-[day]"` | first preview `report-2025-03-04.md`; second preview: unchanged |
 | F10 | any | `"[year]"` | `invalid_input /rules/rules/0/date_format "a date format writes [year], [month] and [day], each once"` |
 | F11 | any | `date_order ymd`, `"[day].[month].[year]"` | `invalid_input /rules/rules/0/date_format "a date format puts the year first, or follows date_order"` |
+| F12 | any | `"[year padding:none][month padding:none][day padding:none]"` | `invalid_input /rules/rules/0/date_format "a compact date writes every part zero-padded"` (`202534` would not be read back) |
+| F13 | any | `"[year]x[month]x[day]"` | `invalid_input /rules/rules/0/date_format "between the parts of a date stands -, _ or ., the same both times, or nothing"` |
 
 ### 4.5 Words: `case` and `separator`
 
@@ -941,12 +946,13 @@ card the job named before (the function adds the key it chooses).
 1. `propose`. `Unmatched`, `Unchanged`, `Flagged`: the candidate is `subject.path` (with the
    proposal's warnings). `Renamed`: the candidate is its path.
 2. Candidate key free: take it.
-3. Taken, `Renamed` with `suffix`: the first free numbered candidate, n >= 2, built with the
-   contract's shortening helpers (`numbered_source_card_name` for a source card's `-<ext>-<n>.md`
-   tail, `fit_segment` otherwise), so a name already at the 255-unit segment limit is shortened,
-   never refused, and naming never fails an import (Q14).
+3. Taken, `Renamed` with `suffix`: the first free numbered candidate, n >= 2, built from the ruled
+   candidate itself, `fit_segment(<candidate without its .md>, "-<n>.md")`, so the rules' changes
+   (case, prefix, suffix, extension policy) stay, and a name already at the 255-unit segment limit
+   is shortened, never refused: naming never fails an import (Q14). IM7 gives `q3-report-pdf-2.md`.
 4. Taken otherwise (`keep_existing`, `reject`, or no rule): fall back to `subject.path`, then its
-   numbered form for n >= 2, built with the same helpers: exactly today's `free_path` rule; a ruled candidate that
+   numbered form for n >= 2 (`numbered_source_card_name(original, n)` for a source card, which keeps
+   its `-<ext>-<n>.md` tail, and `fit_segment` otherwise): exactly today's `free_path` rule; a ruled candidate that
    lost adds `W(collision_kept)` / `W(collision_rejected)` (section 11, Q14).
 5. A path that is no `WorkspacePath` is `invalid_input /upload_ids/{i}` as today.
 
