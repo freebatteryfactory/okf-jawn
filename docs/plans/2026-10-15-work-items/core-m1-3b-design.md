@@ -948,8 +948,10 @@ card the job named before (the function adds the key it chooses).
 2. Candidate key free: take it.
 3. Taken, `Renamed` with `suffix`: the first free numbered candidate, n >= 2, built from the ruled
    candidate itself, `fit_segment(<candidate without its .md>, "-<n>.md")`, so the rules' changes
-   (case, prefix, suffix, extension policy) stay, and a name already at the 255-unit segment limit
-   is shortened, never refused: naming never fails an import (Q14). IM7 gives `q3-report-pdf-2.md`.
+   (case, prefix, suffix, extension policy) stay. The stem is cut until the segment fits 255 UTF-16
+   units AND the whole path fits 4,096 bytes, so a name at either limit is shortened, never refused.
+   A folder that leaves no room for a one-character stem takes step 4. Naming never fails an import
+   (Q14). IM7 gives `q3-report-pdf-2.md`.
 4. Taken otherwise (`keep_existing`, `reject`, or no rule): fall back to `subject.path`, then its
    numbered form for n >= 2 (`numbered_source_card_name(original, n)` for a source card, which keeps
    its `-<ext>-<n>.md` tail, and `fit_segment` otherwise): exactly today's `free_path` rule; a ruled candidate that

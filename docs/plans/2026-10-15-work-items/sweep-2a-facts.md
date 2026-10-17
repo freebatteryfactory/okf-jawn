@@ -36,7 +36,7 @@ numbering (`sweep-1-review.md:208`, `:214`). Every label was found; none is miss
 | 19 | The item-filtered log's cost (sweep-1 N1) | `sweep-1-review.md:118-124,204` | yes | `git/history.rs:60,315-330`, `git/read.rs:23-37,87-93` |
 | 20 | A 64-hex revision answered Unavailable (sweep-1 N5) | `sweep-1-review.md:72,208` | yes | `git/repo.rs:268`, `git/mod.rs:707` |
 | 21 | The Windows case quirk (sweep-1 N11) | `sweep-1-review.md:214`; probe `sweep-1-review-probes.rs.txt:932` | no (fixed by PR #34, 7b01ed7) | `git/edit.rs:209-236`, test `tests/paths.rs:1690` |
-| 22 | A blocked ancestor path in a relink (sweep-1 N6) | `sweep-1-review.md:209`; `sweep-1-report.md:193`; `progress.md:1367` | yes | core `application/history.rs:519-560` (`taken`) vs `git/edit.rs:255-280` (`occupied`) |
+| 22 | A blocked ancestor path in a relink (sweep-1 N6) | `sweep-1-review.md:209`; `sweep-1-report.md:193`; `progress.md:1367` | yes, but closed by the integration owner's ruling (sweep-2a-small-brief: storage refuses it, and core's `taken` is documented narrower) | core `application/history.rs:519-560` (`taken`) vs `git/edit.rs:255-280` (`occupied`) |
 | 23 | The purge rebuilt by reachability | plan `:895`; `contract-batch-2-rulings.md:58-59` | yes (not built) | `purge/mod.rs:268-350` (plan), `:566-690` (objects), `purge/references.rs` |
 | 24 | `discard_upload`'s storage side | `contract-batch-2-report.md:134,514-518,534-541` | yes (not built) | no port method in `core/src/uploads.rs`; `uploads.rs`; `schema.rs:226` |
 | 25 | A Rewind of two notes that traded paths, asserting what the check is told (F1-f) | `storage-file-links-review.md:281-284,326` | yes | probe path `git/edit.rs:628`; nearest test `tests/restore_item.rs:1091` |

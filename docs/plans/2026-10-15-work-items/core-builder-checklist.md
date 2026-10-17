@@ -50,7 +50,7 @@ Self-check: grep your diff for `.ok()`, `unwrap_or`, `if let Ok`, `matches!` on 
 ## 10. A limit, bound or cost is not checked against the envelope (7 findings)
 Went wrong: a cap silently dropped data, a writer accepted what the reader refuses, or work grew with history or item count.
 Example: lane-storage-m2-pass4-rereview.md, B3: "A conversion record over 64 MiB silently loses its structured exports and assets".
-Self-check: for every limit, loop or read you add, write the bound and compute it at the SPEC.md line 89 envelope (10,000 items per workspace, about 93 pages each). A limit refuses loudly on the writer and the reader and never skips; test limit+1. Say which code is O(items x revisions) or quadratic.
+Self-check: for every limit, loop or read you add, write the bound and compute it at the SPEC.md line 89 envelope (10,000 items per workspace; read the line for the rest). A limit refuses loudly on the writer and the reader and never skips; test limit+1. Say which code is O(items x revisions) or quadratic.
 
 ## 11. A check-then-act window, or a guard that dies with the request (6 findings)
 Went wrong: another writer, a second call or a dropped future slips between the check and the act.
