@@ -14,6 +14,12 @@ ignore = [
   # rsa through jsonwebtoken rust_crypto (server). Remove when rsa ships a constant-time release or
   # jsonwebtoken moves off it.
   { id = "RUSTSEC-2023-0071", reason = "Marvin timing affects RSA private-key decryption; okf-jawn only verifies JWT signatures with public JWKS keys (jsonwebtoken rust_crypto)" },
+  # zip 8.6.0, patched in 9.0.0, which calamine and docling do not accept yet. Each advisory is in unpacking an
+  # archive to disk (`ZipArchive::extract`, `ZipStreamReader::extract`), which nothing here calls; see
+  # .cargo/audit.toml and the zip test in tests/foundation/policy.test.mjs. Remove when calamine and docling accept zip 9.
+  { id = "RUSTSEC-2026-0367", reason = "SUID and SGID bits kept by zip extraction to disk; nothing here extracts an archive to disk (storage reads named entries)" },
+  { id = "RUSTSEC-2026-0368", reason = "zip extraction to disk creates symlinks outside the destination; nothing here extracts an archive to disk (storage reads named entries)" },
+  { id = "RUSTSEC-2026-0369", reason = "zip extraction to disk applies permissions through symlinks; nothing here extracts an archive to disk (storage reads named entries)" },
 ]
 
 [licenses]
