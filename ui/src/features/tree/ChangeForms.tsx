@@ -9,10 +9,13 @@
  * the field in plain words (`fields.ts`). So a refused change is always said, by every form here
  * and by every caller of `ChangeFailure`. Any other failure is a notice in the form, which stays
  * open with what was typed:
- * - a `conflict` says that nothing was changed, and why. The head is asked for once: when the
- *   workspace has a newer version than the one shown, the notice offers Refresh (a change is made
- *   on the version the person sees, never on one they have not seen); when it has not, the name is
- *   taken or the change no longer fits, and the person chooses another name;
+ * - a `conflict` says that nothing was changed, and why. When its detail names the head the
+ *   request was compared with (`stale_base`, ruling 5), the notice offers to show that version, at
+ *   once: a change is made on the version the person sees, never on one they have not seen.
+ *   Otherwise the head is asked for once: when the workspace has a newer version than the one
+ *   shown, the notice offers Refresh; when it has not, the name is taken or the change no longer
+ *   fits, and the person chooses another name. A `conflict` because the workspace is archived
+ *   (`workspace_archived`) is none of these: it says so, and when, and offers nothing to repeat;
  * - `not_implemented` reads "not available in this build";
  * - what may pass when repeated offers its retry (`useRetry`), which repeats the same request
  *   under the same idempotency key.
@@ -33,16 +36,17 @@ import {
   useState,
 } from 'react';
 import { listTypesOptions } from '../../api/generated/@tanstack/react-query.gen';
-import type { ItemSummary } from '../../api/generated/types.gen';
+import type { ItemSummary, Revision } from '../../api/generated/types.gen';
 import type { DraftMark } from '../drafts/marks';
 import type { DraftAfterChange } from '../drafts/saving';
 import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, messageFor } from '../errors/failure';
 import { type FailureRetry, useRetry } from '../errors/retry';
-import { checkHeadsAgain, type HeadChange, headMoved } from '../explorer/head';
+import { adoptHead, checkHeadsAgain, type HeadChange, headMoved } from '../explorer/head';
 import {
   type Attempt,
   attemptFor,
+  type CreatedNote,
   createNewFolder,
   createNote,
   DRAFT_AFTER,
@@ -53,7 +57,14 @@ import {
 } from './changes';
 import { useWorkspaceChanges } from './context';
 import { fieldInWords } from './fields';
-import { folderProblem, joinPath, pathProblem, segmentProblem, splitPath } from './names';
+import {
+  folderProblem,
+  joinPath,
+  noteFileName,
+  pathProblem,
+  segmentProblem,
+  splitPath,
+} from './names';
 
 /** Whether the workspace has a newer head than the one shown; `unknown` when it could not be asked. */
 type Moved = 'checking' | 'moved' | 'same' | 'unknown';
@@ -89,6 +100,10 @@ export interface Change<T> {
   refused: { field: string; message: string } | null;
   /** Set while the failure is a `conflict`: what the head check found. */
   conflict: Moved | null;
+  /** The head a `stale_base` refusal named; null for any other failure. */
+  staleHead: Revision | null;
+  /** Show the workspace at `staleHead`; the refusal is then over, and nothing is sent again. */
+  showHead: () => void;
   /** What the person is told politely: a refresh that was made for them. */
   said: string;
   refresh: () => void;
@@ -141,8 +156,15 @@ export function useChange<T, R extends HeadChange>(
     onError: async (error, attempt) => {
       const failure = classifyFailure(error);
       if (failure.kind !== 'api' || failure.error.code !== 'conflict') return;
+      // An archived workspace refuses whatever its head: nothing to ask of it.
+      if (failure.error.detail?.kind === 'workspace_archived') return;
       // A conflict may mean a newer head: the shell's own check runs again and announces it.
       checkHeadsAgain(client, workspaceId);
+      // The refusal names the head it compared with: the head moved, and there is no need to ask.
+      if (failure.error.detail?.kind === 'stale_base') {
+        setMoved('moved');
+        return;
+      }
       const answer = await headMoved(workspaceId, attempt.base);
       setMoved(answer === null ? 'unknown' : answer ? 'moved' : 'same');
     },
@@ -153,7 +175,9 @@ export function useChange<T, R extends HeadChange>(
     api !== null && api.code === 'invalid_input' && typeof api.field === 'string'
       ? { field: api.field, message: api.message }
       : null;
-  const conflict = api?.code === 'conflict';
+  // A conflict about the head or what the workspace holds; an archived workspace is said as such.
+  const conflict = api?.code === 'conflict' && api.detail?.kind !== 'workspace_archived';
+  const staleHead = api?.detail?.kind === 'stale_base' ? api.detail.head : null;
   // The request that failed, while its failure is the one shown.
   const failed = mutation.isError ? mutation.variables : undefined;
   const withdrawn = failed !== undefined && current !== undefined && !current(failed.values);
@@ -184,6 +208,17 @@ export function useChange<T, R extends HeadChange>(
     failure: retry,
     refused,
     conflict: conflict ? moved : null,
+    staleHead,
+    showHead: () => {
+      if (staleHead === null) return;
+      adoptHead(client, workspaceId, staleHead);
+      checkHeadsAgain(client, workspaceId);
+      // The refusal is over with the version it was about; the form asks again on the new one.
+      mutation.reset();
+      setSaid(
+        `The workspace now shows revision ${staleHead.slice(0, 10)}. Nothing was changed yet: check this form, then press its button again.`,
+      );
+    },
     said,
     refreshing,
     refresh: () => {
@@ -329,7 +364,11 @@ export function ChangeFailure<T>({
             <strong>{context}: nothing was changed.</strong>
           </p>
           <p>
-            {conflict === 'same' && sameWords !== undefined ? sameWords : CONFLICT_WORDS[conflict]}
+            {change.staleHead !== null
+              ? `The workspace has a newer version than the one shown here: it now holds revision ${change.staleHead.slice(0, 10)}, and a change is only made on the version you see. Show that version, check this form, then press its button again.`
+              : conflict === 'same' && sameWords !== undefined
+                ? sameWords
+                : CONFLICT_WORDS[conflict]}
           </p>
           {words.length > 0 && (
             <p>
@@ -337,7 +376,12 @@ export function ChangeFailure<T>({
             </p>
           )}
         </div>
-        {(conflict === 'moved' || conflict === 'unknown') && (
+        {change.staleHead !== null && (
+          <button type="button" ref={failure.buttonRef} onClick={change.showHead}>
+            Show revision {change.staleHead.slice(0, 10)}
+          </button>
+        )}
+        {change.staleHead === null && (conflict === 'moved' || conflict === 'unknown') && (
           <button
             type="button"
             ref={failure.buttonRef}
@@ -459,6 +503,37 @@ const TYPE_FIELDS: ReadonlySet<string> = new Set(['/type_name']);
 /** The fields each form draws: a refusal at one of them is shown there, not in the notice. */
 const NOTE_FIELDS: ReadonlySet<string> = new Set([...PATH_FIELDS, ...TITLE_FIELDS, ...TYPE_FIELDS]);
 
+/**
+ * Keyboard focus to the field a refusal names (its `field` is a JSON Pointer into the request,
+ * ruling 5), once, when the refusal arrives: the person reads its words there and changes the
+ * value. `fields` maps the pointers a form draws to their inputs.
+ */
+function useFocusRefused<T>(
+  change: Change<T>,
+  fields: ReadonlyArray<readonly [ReadonlySet<string>, RefObject<HTMLElement | null>]>,
+) {
+  const field = change.refused?.field ?? null;
+  const focused = useRef<string | null>(null);
+  const drawn = useRef(fields);
+  useLayoutEffect(() => {
+    drawn.current = fields;
+  });
+  useLayoutEffect(() => {
+    if (field === null) {
+      focused.current = null;
+      return;
+    }
+    if (focused.current === field) return;
+    focused.current = field;
+    for (const [names, input] of drawn.current) {
+      if (names.has(field)) {
+        input.current?.focus();
+        return;
+      }
+    }
+  }, [field]);
+}
+
 /** The words of a refusal the service made about `fields`; null when it made none about them. */
 function refusedAt<T>(change: Change<T>, fields: ReadonlySet<string>): string | null {
   return change.refused !== null && fields.has(change.refused.field)
@@ -471,7 +546,7 @@ export interface NewEntryFormProps {
   /** The folder the form starts in; '' is the top level. */
   folder: string;
   /** A note was created (`item`), or a folder (`folder`). */
-  onDone: (created: HeadChange & ({ item: ItemSummary } | { folder: string })) => void;
+  onDone: (created: CreatedNote | (HeadChange & { folder: string })) => void;
   onCancel: () => void;
 }
 
@@ -497,26 +572,30 @@ export function NewEntryForm({ kind, folder: startFolder, onDone, onCancel }: Ne
     enabled: kind === 'note',
   });
 
-  const note = useChange<NewNote, HeadChange & { item: ItemSummary }>(
-    createNote,
-    (result) => onDone(result),
-    submitRef,
-  );
+  const note = useChange<NewNote, CreatedNote>(createNote, (result) => onDone(result), submitRef);
   const made = useChange<{ folder: string }, HeadChange>(
     createNewFolder,
     (result, values) => onDone({ ...result, folder: values.folder }),
     submitRef,
   );
   const change = kind === 'note' ? note : made;
+  useFocusRefused(note, [
+    [TITLE_FIELDS, firstRef],
+    [PATH_FIELDS, nameRef],
+    [TYPE_FIELDS, typeRef],
+  ]);
+  useFocusRefused(made, [[PATH_FIELDS, nameRef]]);
   const edited = () => {
     note.edited();
     made.edited();
   };
 
+  // A note's file ends in ".md" in small letters (`noteFileName`).
+  const sent = kind === 'note' ? noteFileName(name) : name;
   const problems = {
     title: kind === 'note' && title.trim().length === 0 ? 'Give the note a title.' : null,
     folder: folderProblem(folder),
-    name: segmentProblem(name) ?? pathProblem(joinPath(folder, name)),
+    name: segmentProblem(sent) ?? pathProblem(joinPath(folder, sent)),
     type:
       kind === 'note' && typeName.trim().length === 0
         ? 'Give the note a type: any word of your own, such as “note”.'
@@ -539,7 +618,7 @@ export function NewEntryForm({ kind, folder: startFolder, onDone, onCancel }: Ne
       return;
     }
     if (kind === 'note') {
-      note.start({ folder, name, title: title.trim(), typeName: typeName.trim() });
+      note.start({ folder, name: sent, title: title.trim(), typeName: typeName.trim() });
     } else made.start({ folder: joinPath(folder, name) });
   };
 
@@ -657,11 +736,14 @@ export function MoveForm({ item, mark, onDone, onCancel }: MoveFormProps) {
     (result, values) => onDone(result, values.destination),
     submitRef,
   );
-  const destination = joinPath(folder, name);
+  // An item whose file ends in ".md" keeps that ending in small letters (`noteFileName`).
+  const sent = item.path.endsWith('.md') ? noteFileName(name) : name;
+  const destination = joinPath(folder, sent);
+  useFocusRefused(change, [[PATH_FIELDS, nameRef]]);
   const problems = {
     folder: folderProblem(folder),
     name:
-      segmentProblem(name) ??
+      segmentProblem(sent) ??
       pathProblem(destination) ??
       (destination === item.path
         ? 'This is where it is now. Change the name or the folder.'

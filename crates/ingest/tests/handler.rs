@@ -36,11 +36,12 @@ mod job_handler {
     use okf_jawn_core::jobs::{JobHandler, JobScope, JobSpec, NewJob, RecordStore};
     use okf_jawn_core::storage::{
         CandidateCheck, ObjectInfo, Provenance, SourceCard, StorageScope, TreeEdit, VersionStore,
-        derive_commit_mutation_id, derive_item_id,
+        derive_commit_mutation_id, derive_drain_mutation_id, derive_item_id,
     };
     use okf_jawn_core::uploads::UploadRecord;
     use okf_jawn_ingest::handler::{
-        ARCHIVE_MEDIA_TYPE, CARD_NOT_WRITTEN, HandlerLimits, HandlerPorts, IngestHandler,
+        ARCHIVE_MEDIA_TYPE, CARD_NOT_WRITTEN, DRAIN_BOUND, HandlerLimits, HandlerPorts,
+        IngestHandler,
     };
 
     use okf_jawn_ingest::runtime::run_one;
@@ -176,6 +177,18 @@ mod job_handler {
         check: Arc<dyn CandidateCheck>,
         heartbeat: Duration,
     ) -> Built<World> {
+        world_drained(pages, capped, check, heartbeat, DRAIN_BOUND)
+    }
+
+    /// A world as `world_full`, whose workspace purges wait at most `drain` for the
+    /// workspace's jobs to stop.
+    fn world_drained(
+        pages: Option<u32>,
+        capped: Vec<u32>,
+        check: Arc<dyn CandidateCheck>,
+        heartbeat: Duration,
+        drain: Duration,
+    ) -> Built<World> {
         let records = Arc::new(FakeRecords::default());
         let events = Arc::new(FakeEvents::default());
         let versions = Arc::new(FakeVersions::at(base()?));
@@ -195,6 +208,7 @@ mod job_handler {
             report: report()?,
             calls: AtomicUsize::new(0),
             hold: Mutex::new(None),
+            failure: Mutex::new(None),
         });
         let uploads = Arc::new(FakeUploads::default());
         let blobs = Arc::new(FakeBlobs::new()?);
@@ -227,6 +241,7 @@ mod job_handler {
             limits: HandlerLimits {
                 heartbeat,
                 window_timeout: Duration::from_secs(600),
+                drain,
             },
         });
         Ok(World {
@@ -1299,11 +1314,117 @@ mod job_handler {
         Ok(())
     }
 
+    /// R-I11: a cancellation asked for once a restore sealed itself, while `restore_import`
+    /// runs, is refused with `Conflict` (the store's seal), so nothing marks the job cancelled
+    /// and it completes with its report. Before the seal, this cancellation took effect and the
+    /// store then refused the completion of a restore that had been applied.
     #[tokio::test]
-    async fn a_restore_cancelled_once_it_applies_is_not_stopped_and_the_store_refuses_its_completion()
-    -> TestResult {
+    async fn a_restore_cannot_be_cancelled_once_it_sealed_and_completes() -> TestResult {
         let world = heartbeat_world()?;
         let id = restore_job(&world, 121)?;
+        let upload_id = match &world.records.entry(id)?.created.spec {
+            JobSpec::RestoreWorkspace { upload_id, .. } => *upload_id,
+            _ => return Err("a restore was expected".into()),
+        };
+        let records = Arc::clone(&world.records);
+        let answers = Arc::new(Mutex::new(Vec::new()));
+        let kept = Arc::clone(&answers);
+        let scope = workspace_scope()?;
+        let cancel =
+            serde_json::from_value::<MutationId>(json!("00000000-0000-0000-0000-000000000921"))?;
+        *world.backups.restore_hold.lock().map_err(|_| "poisoned")? = Some(Arc::new(move || {
+            let records = Arc::clone(&records);
+            let kept = Arc::clone(&kept);
+            let scope = scope.clone();
+            Box::pin(async move {
+                let answer = records.cancel_job(&scope, cancel, id).await;
+                if let Ok(mut kept) = kept.lock() {
+                    kept.push(answer.map(|job| job.state).map_err(|error| error.code));
+                }
+                // Long enough for several renewals.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            })
+        }));
+        assert!(run(&world, id).await?);
+        assert_eq!(
+            answers.lock().map_err(|_| "poisoned")?.clone(),
+            [Err(ErrorCode::Conflict)],
+            "the cancellation was refused"
+        );
+        assert!(world.records.entry(id)?.sealed);
+        assert_completed_under(&world, id, 1)?;
+        assert_eq!(world.uploads.consumed()?, [(upload_id, id)]);
+        assert_eq!(
+            world.backups.restored.lock().map_err(|_| "poisoned")?.len(),
+            1
+        );
+        let changed = events_of(&world, &EventKind::Changed)?;
+        assert_eq!(changed.len(), 1);
+        Ok(())
+    }
+
+    /// R-I11 and ruling F2 (core M1.4b fix round 1): the restore seals before it consumes its
+    /// upload, so a cancellation the store takes just before the seal wins: the seal answers the
+    /// job cancelled, and the restore stops before it consumes anything, restoring nothing. Its
+    /// upload is not asked for and stays usable (contract ruling 23's first case). Under the old
+    /// order (consume, then seal) the upload stayed consumed by the cancelled job, which no
+    /// retry could use.
+    #[tokio::test]
+    async fn a_restore_cancelled_just_before_its_seal_restores_nothing() -> TestResult {
+        let world = world()?;
+        let id = restore_job(&world, 127)?;
+        world.records.cancel_before_seal(id)?;
+        assert!(run(&world, id).await?);
+        assert_stopped(&world, id)?;
+        assert!(!world.records.entry(id)?.sealed);
+        assert_eq!(
+            world.backups.restored.lock().map_err(|_| "poisoned")?.len(),
+            0,
+            "stopped before restore_import"
+        );
+        assert!(world.versions.written()?.is_empty());
+        assert_eq!(world.uploads.singles()?, Vec::new(), "not asked for");
+        assert_eq!(
+            world.uploads.consumed()?,
+            Vec::new(),
+            "the upload stays usable"
+        );
+        Ok(())
+    }
+
+    /// Ruling F2: a consume that fails after the seal fails the job, which stays sealed (a
+    /// sealed job may fail; only its cancellation is refused). Here a purge recorded meanwhile
+    /// refuses the consumption: the sealed job is refused for good, restores nothing, and its
+    /// upload stays unmarked.
+    #[tokio::test]
+    async fn a_restore_whose_consume_is_refused_after_its_seal_fails_sealed() -> TestResult {
+        let world = world()?;
+        let id = restore_job(&world, 129)?;
+        purge_names_the_workspace(&world)?;
+        assert!(run(&world, id).await?);
+        assert_refused_by_the_purge(&world, id)?;
+        assert!(
+            world.records.entry(id)?.sealed,
+            "sealed before the consume, and failed sealed"
+        );
+        assert_eq!(world.uploads.consumed()?, Vec::new());
+        assert_eq!(
+            world.backups.restored.lock().map_err(|_| "poisoned")?.len(),
+            0
+        );
+        assert!(world.versions.written()?.is_empty());
+        Ok(())
+    }
+
+    /// R-I11: a sealed restore whose attempt dies (its lease lapses while `restore_import`
+    /// runs, so neither its completion nor its failure can be written) is queued again, still
+    /// sealed, so its cancellation stays refused; the next attempt resumes it and completes,
+    /// its upload consumed by it once and the restore's commit written once.
+    #[tokio::test]
+    async fn a_sealed_restore_whose_lease_lapsed_resumes_and_consumes_its_upload_once() -> TestResult
+    {
+        let world = heartbeat_world()?;
+        let id = restore_job(&world, 128)?;
         let upload_id = match &world.records.entry(id)?.created.spec {
             JobSpec::RestoreWorkspace { upload_id, .. } => *upload_id,
             _ => return Err("a restore was expected".into()),
@@ -1312,43 +1433,43 @@ mod job_handler {
         *world.backups.restore_hold.lock().map_err(|_| "poisoned")? = Some(Arc::new(move || {
             let records = Arc::clone(&records);
             Box::pin(async move {
-                let _cancelled = records.cancel(id);
-                // Long enough for several renewals to see the cancellation.
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                let _lapsed = records.expire_running();
+                tokio::time::sleep(Duration::from_millis(50)).await;
             })
         }));
-        // The handler does not stop for the cancellation: it goes on to write its completion,
-        // which the store refuses because someone cancelled the running job (as storage's
-        // `complete` does). Making `cancel_job` refuse a job past this point is request R-I11.
-        let refused = tokio::time::timeout(Duration::from_secs(20), run(&world, id)).await?;
-        let error = err_of(refused)?;
-        assert!(error.to_string().contains("not running"), "{error}");
-        // The upload was consumed before the restore applied, and the restore ran to its end.
-        assert_eq!(world.uploads.consumed()?, [(upload_id, id)]);
+        let died = err_of(run(&world, id).await)?;
+        assert!(died.to_string().contains("lease"), "{died}");
+        *world.backups.restore_hold.lock().map_err(|_| "poisoned")? = None;
+        assert_eq!(world.records.expire_leases().await?, 1);
+        let queued = world.records.entry(id)?;
+        assert_eq!(queued.job.state, JobState::Queued);
+        assert!(queued.sealed, "the seal stays with the job");
+        let refused = err_of(
+            world
+                .records
+                .cancel_job(&workspace_scope()?, queued.created.mutation_id, id)
+                .await,
+        )?;
+        assert_eq!(refused.code, ErrorCode::Conflict);
+        assert!(run(&world, id).await?);
+        assert_completed_under(&world, id, 2)?;
         assert_eq!(
-            world.backups.restored.lock().map_err(|_| "poisoned")?.len(),
-            1
+            world.uploads.consumed()?,
+            [(upload_id, id)],
+            "consumed once"
         );
-        let mutation = world.records.entry(id)?.created.mutation_id;
-        let restored = some(
+        assert_eq!(world.uploads.singles()?.len(), 2, "asked by each attempt");
+        let mutation = queued.created.mutation_id;
+        assert_eq!(
             world
                 .versions
                 .written()?
-                .into_iter()
-                .find(|(changes, _)| changes.mutation_id == mutation),
-            "the restore's commit",
-        )?
-        .1;
-        // Its revision was indexed and announced.
-        assert_eq!(world.search.indexed()?, std::slice::from_ref(&restored));
-        let changed = events_of(&world, &EventKind::Changed)?;
-        assert_eq!(changed.len(), 1);
-        assert_eq!(
-            some(changed.first(), "the changed event")?.2.revision,
-            Some(restored)
+                .iter()
+                .filter(|(changes, _)| changes.mutation_id == mutation)
+                .count(),
+            1,
+            "the restore's commit is written once"
         );
-        // The record stays as the cancel left it: no completion was written, nor a failure.
-        assert_stopped(&world, id)?;
         Ok(())
     }
 
@@ -3069,6 +3190,518 @@ mod job_handler {
         let entry = world.records.entry(id)?;
         assert_eq!(entry.job.state, JobState::Failed);
         assert_eq!(world.backups.writes.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    /// A world with a 10 ms heartbeat whose workspace purges wait at most `drain` for the
+    /// workspace's jobs to stop.
+    fn world_with_drain(drain: Duration) -> Built<World> {
+        world_drained(
+            Some(3),
+            Vec::new(),
+            Arc::new(AcceptAll),
+            Duration::from_millis(10),
+            drain,
+        )
+    }
+
+    /// The workspace purge job of `world` numbered `number`, with its purge recorded as
+    /// `requested`: the job's identity, its mutation and the purge's identity.
+    fn workspace_purge(
+        world: &World,
+        number: u128,
+    ) -> Built<(okf_jawn_contract::identity::JobId, MutationId, PurgeId)> {
+        let purge_id = serde_json::from_value::<PurgeId>(json!(format!(
+            "00000000-0000-0000-0000-{:012}",
+            number.saturating_add(1000)
+        )))?;
+        let workspace_id = serde_json::from_value::<WorkspaceId>(json!(WORKSPACE))?;
+        let id = job(
+            world,
+            number,
+            JobScope::Tenant(tenant()?),
+            JobSpec::PurgeWorkspace {
+                purge_id,
+                workspace_id,
+            },
+        )?;
+        world
+            .records
+            .insert_purge(serde_json::from_value::<Purge>(json!({
+                "id": purge_id,
+                "target": { "kind": "workspace", "workspace_id": WORKSPACE },
+                "state": "requested",
+                "job_id": serde_json::to_value(id)?,
+                "requested_by": "admin",
+                "requested_at": "2026-10-09T00:00:00.000Z",
+            }))?)?;
+        Ok((id, world.records.entry(id)?.created.mutation_id, purge_id))
+    }
+
+    /// A job of the purged workspace, claimed now so that it runs.
+    async fn running_job(world: &World, number: u128) -> Built<okf_jawn_contract::identity::JobId> {
+        let id = job(world, number, workspace_scope()?, JobSpec::RebuildIndex)?;
+        let _claimed = some(world.records.claim_job(id).await?, "the claim")?;
+        Ok(id)
+    }
+
+    /// A restore of the purged workspace that runs and sealed itself past its point of no return.
+    async fn sealed_restore(
+        world: &World,
+        number: u128,
+    ) -> Built<okf_jawn_contract::identity::JobId> {
+        let id = restore_job(world, number)?;
+        let claimed = some(world.records.claim_job(id).await?, "the claim")?;
+        assert_eq!(
+            world.records.seal(&claimed.lease).await?.state,
+            JobState::Running
+        );
+        Ok(id)
+    }
+
+    /// The state of each of `jobs` as the purger saw it when it was called, kept by its hold.
+    fn record_states_at_removal(
+        world: &World,
+        jobs: Vec<okf_jawn_contract::identity::JobId>,
+    ) -> Built<Arc<Mutex<Vec<JobState>>>> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let records = Arc::clone(&world.records);
+        let kept = Arc::clone(&seen);
+        *world.purger.hold.lock().map_err(|_| "poisoned")? = Some(Arc::new(move || {
+            let records = Arc::clone(&records);
+            let kept = Arc::clone(&kept);
+            let jobs = jobs.clone();
+            Box::pin(async move {
+                for job in jobs {
+                    if let (Ok(entry), Ok(mut kept)) = (records.entry(job), kept.lock()) {
+                        kept.push(entry.job.state);
+                    }
+                }
+            })
+        }));
+        Ok(seen)
+    }
+
+    /// P3: before the purger is called, the purge job cancels every queued or running job of
+    /// the workspace, each under the identity derived from its own mutation and the job, and
+    /// announces each cancellation; a finished job and another workspace's job are left alone.
+    #[tokio::test]
+    async fn a_workspace_purge_cancels_the_workspaces_unfinished_jobs_before_it_removes()
+    -> TestResult {
+        let world = heartbeat_world()?;
+        let queued = job(&world, 300, workspace_scope()?, JobSpec::RebuildIndex)?;
+        let running = running_job(&world, 301).await?;
+        let finished = job(&world, 302, workspace_scope()?, JobSpec::RebuildIndex)?;
+        world.records.finish(finished)?;
+        let elsewhere = job(
+            &world,
+            303,
+            JobScope::Workspace(StorageScope {
+                tenant_id: tenant()?,
+                workspace_id: serde_json::from_value(json!(
+                    "00000000-0000-0000-0000-0000000000bb"
+                ))?,
+            }),
+            JobSpec::RebuildIndex,
+        )?;
+        let seen = record_states_at_removal(&world, vec![queued, running])?;
+        let (id, mutation, purge_id) = workspace_purge(&world, 304)?;
+        assert!(run(&world, id).await?);
+        assert_completed_under(&world, id, 1)?;
+        assert_eq!(world.records.purge(purge_id)?.state, PurgeState::Completed);
+        assert_eq!(
+            seen.lock().map_err(|_| "poisoned")?.clone(),
+            [JobState::Cancelled, JobState::Cancelled],
+            "both were cancelled before the purger ran"
+        );
+        // Newest first, as the store lists them, each under its own derived identity.
+        assert_eq!(
+            world.records.cancels()?,
+            [
+                (derive_drain_mutation_id(mutation, running), running),
+                (derive_drain_mutation_id(mutation, queued), queued),
+            ]
+        );
+        assert_eq!(
+            world.records.entry(finished)?.job.state,
+            JobState::Succeeded
+        );
+        assert_eq!(world.records.entry(elsewhere)?.job.state, JobState::Queued);
+        let workspace_log = EventScope::Workspace(storage_scope()?);
+        let cancelled: Vec<_> = events_of(&world, &EventKind::JobUpdated)?
+            .into_iter()
+            .filter(|(log, _, _)| *log == workspace_log)
+            .map(|(_, mutation, event)| (mutation, event.job_id))
+            .collect();
+        assert_eq!(
+            cancelled,
+            [
+                (
+                    Some(derive_drain_mutation_id(mutation, running)),
+                    Some(running)
+                ),
+                (
+                    Some(derive_drain_mutation_id(mutation, queued)),
+                    Some(queued)
+                ),
+            ]
+        );
+        Ok(())
+    }
+
+    /// P3: the drain reads every page of the workspace's jobs.
+    #[tokio::test]
+    async fn a_workspace_purge_cancels_unfinished_jobs_on_every_page() -> TestResult {
+        let world = world()?;
+        world.records.page_jobs(1)?;
+        let jobs = [
+            job(&world, 310, workspace_scope()?, JobSpec::RebuildIndex)?,
+            job(&world, 311, workspace_scope()?, JobSpec::RebuildIndex)?,
+            job(&world, 312, workspace_scope()?, JobSpec::RebuildIndex)?,
+        ];
+        let (id, _, _) = workspace_purge(&world, 313)?;
+        assert!(run(&world, id).await?);
+        for job in jobs {
+            assert_eq!(world.records.entry(job)?.job.state, JobState::Cancelled);
+        }
+        Ok(())
+    }
+
+    /// P3 and P4: a restore past its point of no return refuses its cancellation, and the drain
+    /// waits for it to finish before the purger is called.
+    #[tokio::test]
+    async fn a_workspace_purge_waits_for_a_sealed_restore_to_finish() -> TestResult {
+        let world = heartbeat_world()?;
+        let restore = sealed_restore(&world, 320).await?;
+        let seen = record_states_at_removal(&world, vec![restore])?;
+        let (id, mutation, purge_id) = workspace_purge(&world, 321)?;
+        let records = Arc::clone(&world.records);
+        let finishing = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            records.finish(restore)
+        });
+        assert!(run(&world, id).await?);
+        finishing.await??;
+        assert_eq!(world.records.purge(purge_id)?.state, PurgeState::Completed);
+        assert_eq!(
+            seen.lock().map_err(|_| "poisoned")?.clone(),
+            [JobState::Succeeded],
+            "the purger ran once the restore had finished"
+        );
+        let cancel = derive_drain_mutation_id(mutation, restore);
+        assert!(world.records.cancel_calls()?.contains(&(cancel, restore)));
+        assert_eq!(
+            world.records.cancels()?,
+            Vec::new(),
+            "its cancellation was refused"
+        );
+        assert!(
+            world.records.renewals() >= 2,
+            "the purge job kept its lease while it waited"
+        );
+        Ok(())
+    }
+
+    /// P3: a sealed restore whose attempt died and whose lease lapsed is queued again, and no
+    /// worker can claim it while the purge is recorded: it is not running, so the drain does
+    /// not wait for it.
+    #[tokio::test]
+    async fn a_workspace_purge_does_not_wait_for_a_sealed_restore_that_no_longer_runs() -> TestResult
+    {
+        // A bound short enough that waiting for the queued restore would fail the purge.
+        let world = world_with_drain(Duration::from_secs(2))?;
+        let restore = sealed_restore(&world, 330).await?;
+        world.records.expire_running()?;
+        assert_eq!(world.records.expire_leases().await?, 1);
+        world.records.purge_workspace_of(restore)?;
+        let (id, _, purge_id) = workspace_purge(&world, 331)?;
+        assert!(run(&world, id).await?);
+        assert_eq!(world.records.purge(purge_id)?.state, PurgeState::Completed);
+        assert_eq!(world.records.entry(restore)?.job.state, JobState::Queued);
+        Ok(())
+    }
+
+    /// P3 and P5: past the drain's bound the purge job fails, retryable, with the purge recorded
+    /// failed and the purger never called; the run that the repeated request starts drains
+    /// again, and completes once the restore has finished.
+    #[tokio::test]
+    async fn a_drain_past_its_bound_fails_the_purge_and_the_next_run_drains_again() -> TestResult {
+        let world = world_with_drain(Duration::from_millis(60))?;
+        let restore = sealed_restore(&world, 340).await?;
+        let (id, _, purge_id) = workspace_purge(&world, 341)?;
+        let started = tokio::time::Instant::now();
+        assert!(run(&world, id).await?);
+        // The bound from above: the attempt gives up soon after it, not long after.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        let (message, retryable) = some(entry.failures.first(), "the failure")?;
+        assert!(*retryable, "a drain past its bound is retried");
+        assert!(message.contains(&restore.0.to_string()), "{message}");
+        let failed = world.records.purge(purge_id)?;
+        assert_eq!(failed.state, PurgeState::Failed);
+        assert_eq!(
+            failed.error.as_ref().map(|error| &error.code),
+            Some(&ErrorCode::Unavailable)
+        );
+        assert_eq!(world.purger.calls.load(Ordering::SeqCst), 0);
+        // The restore finishes; the purge is asked for again and its job runs again.
+        world.records.finish(restore)?;
+        let entry = world.records.entry(id)?;
+        world.records.insert(id, entry.scope, entry.created)?;
+        assert!(run(&world, id).await?);
+        let completed = world.records.purge(purge_id)?;
+        assert_eq!(completed.state, PurgeState::Completed);
+        assert!(completed.error.is_none());
+        assert_eq!(world.purger.calls.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    /// P3: a resumed purge drains again and finds nothing to do: every job it cancelled stays
+    /// cancelled, no cancellation is asked for twice and no notification is appended twice.
+    #[tokio::test]
+    async fn a_resumed_purge_drains_again_and_finds_nothing_to_do() -> TestResult {
+        let world = world()?;
+        let queued = job(&world, 350, workspace_scope()?, JobSpec::RebuildIndex)?;
+        world.purger.fail_next(ApiError::new(
+            ErrorCode::Internal,
+            "a survivor's record does not read",
+        ))?;
+        let (id, _, purge_id) = workspace_purge(&world, 351)?;
+        assert!(run(&world, id).await?);
+        assert_eq!(world.records.purge(purge_id)?.state, PurgeState::Failed);
+        let calls = world.records.cancel_calls()?;
+        let workspace_log = EventScope::Workspace(storage_scope()?);
+        let announced = events_of(&world, &EventKind::JobUpdated)?
+            .into_iter()
+            .filter(|(log, _, _)| *log == workspace_log)
+            .count();
+        let entry = world.records.entry(id)?;
+        world.records.insert(id, entry.scope, entry.created)?;
+        assert!(run(&world, id).await?);
+        assert_eq!(world.records.purge(purge_id)?.state, PurgeState::Completed);
+        assert_eq!(world.records.entry(queued)?.job.state, JobState::Cancelled);
+        assert_eq!(
+            world.records.cancel_calls()?,
+            calls,
+            "nothing left to cancel"
+        );
+        assert_eq!(
+            events_of(&world, &EventKind::JobUpdated)?
+                .into_iter()
+                .filter(|(log, _, _)| *log == workspace_log)
+                .count(),
+            announced
+        );
+        Ok(())
+    }
+
+    /// P5: a purge whose removal fails is recorded failed with the purger's error before the
+    /// job's failure is written; the job's failure holds the same error.
+    #[tokio::test]
+    async fn a_purge_whose_removal_fails_is_recorded_failed_with_its_error() -> TestResult {
+        let world = world()?;
+        let refusal = ApiError::new(ErrorCode::Internal, "a survivor's record does not read");
+        world.purger.fail_next(refusal.clone())?;
+        let (id, _, purge_id) = workspace_purge(&world, 360)?;
+        assert!(run(&world, id).await?);
+        let failed = world.records.purge(purge_id)?;
+        assert_eq!(failed.state, PurgeState::Failed);
+        assert_eq!(
+            failed
+                .error
+                .as_ref()
+                .map(|error| (&error.code, error.message.as_str())),
+            Some((&refusal.code, refusal.message.as_str()))
+        );
+        assert_eq!(failed.report, None);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        assert_eq!(
+            entry.job.error.as_ref().map(|error| error.message.clone()),
+            Some(refusal.message)
+        );
+        Ok(())
+    }
+
+    /// P5: a purge whose removal ran but whose completion could not be recorded is recorded
+    /// failed with that error and no report: a report is present exactly when the purge
+    /// completed.
+    #[tokio::test]
+    async fn a_purge_whose_completion_cannot_be_recorded_is_recorded_failed_without_a_report()
+    -> TestResult {
+        let world = world()?;
+        world.records.fail_purge_update(PurgeState::Completed)?;
+        let (id, _, purge_id) = workspace_purge(&world, 375)?;
+        assert!(run(&world, id).await?);
+        let failed = world.records.purge(purge_id)?;
+        assert_eq!(failed.state, PurgeState::Failed);
+        assert_eq!(failed.report, None);
+        assert_eq!(
+            failed.error.as_ref().map(|error| &error.code),
+            Some(&ErrorCode::Unavailable)
+        );
+        Ok(())
+    }
+
+    /// P5: when the failed state cannot be recorded either, the job still fails with the
+    /// purger's error, and its message says the purge was not recorded failed.
+    #[tokio::test]
+    async fn a_purge_whose_failure_cannot_be_recorded_still_fails_with_its_error() -> TestResult {
+        let world = world()?;
+        world
+            .purger
+            .fail_next(ApiError::new(ErrorCode::Internal, "the removal broke"))?;
+        world.records.fail_purge_update(PurgeState::Failed)?;
+        let (id, _, purge_id) = workspace_purge(&world, 370)?;
+        assert!(run(&world, id).await?);
+        assert_eq!(world.records.purge(purge_id)?.state, PurgeState::Running);
+        let entry = world.records.entry(id)?;
+        let error = some(entry.job.error.as_ref(), "the job's failure")?;
+        assert_eq!(error.code, ErrorCode::Internal, "the purger's code");
+        assert!(
+            error.message.starts_with("the removal broke")
+                && error
+                    .message
+                    .contains("recording the purge as failed failed too"),
+            "{}",
+            error.message
+        );
+        Ok(())
+    }
+
+    /// Core M1.4b fix round 1, ruling F1 (contract rulings 14 and 24): whatever stops a
+    /// workspace purge is a state to repair, so the handler writes the job's failure as
+    /// retryable whatever its code, each code the runtime alone holds not retryable included,
+    /// keeping the code and the message that names what failed. The purge is recorded `Failed`
+    /// with the same error, and the failure is announced once.
+    #[tokio::test]
+    async fn a_workspace_purge_that_fails_is_retryable_whatever_its_code() -> TestResult {
+        let codes = [
+            ErrorCode::InvalidInput,
+            ErrorCode::Forbidden,
+            ErrorCode::Unsupported,
+            ErrorCode::NotImplemented,
+        ];
+        let kept = |error: Option<&ApiError>| {
+            error.map(|error| (error.code.clone(), error.message.clone()))
+        };
+        for (number, code) in (390_u128..).zip(codes) {
+            let world = world()?;
+            let refusal = ApiError::new(
+                code.clone(),
+                "the purge cannot read workspace bb's archive in pre-migration backup set set-1",
+            );
+            world.purger.fail_next(refusal.clone())?;
+            let (id, _, purge_id) = workspace_purge(&world, number)?;
+            assert!(run(&world, id).await?);
+            let entry = world.records.entry(id)?;
+            assert_eq!(entry.job.state, JobState::Failed, "{code:?}");
+            assert!(entry.completions.is_empty(), "{code:?}");
+            assert_eq!(
+                entry.failures,
+                [(refusal.message.clone(), true)],
+                "{code:?}: retryable, its message kept"
+            );
+            assert_eq!(
+                kept(entry.job.error.as_ref()),
+                Some((code.clone(), refusal.message.clone())),
+                "the code is kept"
+            );
+            let failed = world.records.purge(purge_id)?;
+            assert_eq!(failed.state, PurgeState::Failed, "{code:?}");
+            assert_eq!(
+                kept(failed.error.as_ref()),
+                kept(entry.job.error.as_ref()),
+                "{code:?}: the purge keeps the job's error"
+            );
+            assert_eq!(
+                events_of(&world, &EventKind::JobUpdated)?.len(),
+                1,
+                "{code:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// An item purge drains nothing until storage's item purge is built (its purger answers
+    /// `NotImplemented` today): no job of the workspace is cancelled.
+    #[tokio::test]
+    async fn an_item_purge_drains_nothing() -> TestResult {
+        let world = world()?;
+        let queued = job(&world, 380, workspace_scope()?, JobSpec::RebuildIndex)?;
+        let purge_id =
+            serde_json::from_value::<PurgeId>(json!("00000000-0000-0000-0000-0000000003e9"))?;
+        let item = "00000000-0000-0000-0000-0000000000dd";
+        let id = job(
+            &world,
+            381,
+            JobScope::Tenant(tenant()?),
+            JobSpec::PurgeItem {
+                purge_id,
+                workspace_id: serde_json::from_value(json!(WORKSPACE))?,
+                item_id: serde_json::from_value(json!(item))?,
+            },
+        )?;
+        world
+            .records
+            .insert_purge(serde_json::from_value::<Purge>(json!({
+                "id": purge_id,
+                "target": { "kind": "item", "workspace_id": WORKSPACE, "item_id": item },
+                "state": "requested",
+                "job_id": serde_json::to_value(id)?,
+                "requested_by": "admin",
+                "requested_at": "2026-10-09T00:00:00.000Z",
+            }))?)?;
+        assert!(run(&world, id).await?);
+        assert_eq!(world.records.cancel_calls()?, Vec::new());
+        assert_eq!(world.records.entry(queued)?.job.state, JobState::Queued);
+        Ok(())
+    }
+
+    /// Ruling F1 is a workspace purge's: an item purge's failure is still the runtime's to
+    /// class, and storage's `NotImplemented` (item purge is not built) is not retryable, since
+    /// no repair changes it.
+    #[tokio::test]
+    async fn an_item_purge_that_is_not_built_fails_not_retryable() -> TestResult {
+        let world = world()?;
+        world.purger.fail_next(ApiError::new(
+            ErrorCode::NotImplemented,
+            "item purge is not built yet",
+        ))?;
+        let purge_id =
+            serde_json::from_value::<PurgeId>(json!("00000000-0000-0000-0000-0000000003ea"))?;
+        let item = "00000000-0000-0000-0000-0000000000dd";
+        let id = job(
+            &world,
+            382,
+            JobScope::Tenant(tenant()?),
+            JobSpec::PurgeItem {
+                purge_id,
+                workspace_id: serde_json::from_value(json!(WORKSPACE))?,
+                item_id: serde_json::from_value(json!(item))?,
+            },
+        )?;
+        world
+            .records
+            .insert_purge(serde_json::from_value::<Purge>(json!({
+                "id": purge_id,
+                "target": { "kind": "item", "workspace_id": WORKSPACE, "item_id": item },
+                "state": "requested",
+                "job_id": serde_json::to_value(id)?,
+                "requested_by": "admin",
+                "requested_at": "2026-10-09T00:00:00.000Z",
+            }))?)?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        let (message, retryable) = some(entry.failures.first(), "the failure")?;
+        assert!(!retryable, "{message}");
+        assert_eq!(world.records.purge(purge_id)?.state, PurgeState::Failed);
         Ok(())
     }
 }

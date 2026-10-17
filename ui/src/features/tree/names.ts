@@ -6,8 +6,14 @@
  * character). The service's refusals state the rest, segment by segment
  * (`crates/contract/src/identity.rs`, `segment_error`): not `.`, `..` or `.git`; no dot or space
  * at the end; not a name Windows keeps for a device (`CON`, `NUL`, `COM1`, `LPT1` and the like,
- * with or without an extension). The service also wants Unicode NFC: a name is put into NFC
- * before it is sent, not refused, because the person cannot see the difference.
+ * with or without an extension); at most 255 UTF-16 units in one segment, what NTFS stores in one
+ * name (`MAX_PATH_SEGMENT_UTF16_UNITS`, ruling 30; SPEC section 2 refuses a path Windows cannot
+ * store). That is JavaScript's `length` of the segment in NFC, so it is counted so. The service also
+ * wants Unicode NFC: a name is put into NFC before it is sent, not refused, because the person
+ * cannot see the difference.
+ *
+ * A note's file ends in `.md` in small letters, and the service refuses another case: a typed name
+ * that ends in `.MD`, in any case, is sent with `.md` (`noteFileName`).
  *
  * A name is checked as it will be sent: after it is put into NFC, and its length in UTF-8 bytes,
  * which is how the service counts (`MAX_PATH_BYTES`; the client's schema counts UTF-16 units, so a
@@ -35,6 +41,12 @@ const RESERVED_CHARACTERS = /[\\:<>"|?*]/;
 /** The longest path the service accepts, in UTF-8 bytes (`identity.rs`). */
 export const MAX_PATH_BYTES = 4096;
 
+/** The most UTF-16 units of one segment (`identity.rs`, `MAX_PATH_SEGMENT_UTF16_UNITS`). */
+export const MAX_SEGMENT_UNITS = 255;
+
+const TOO_LONG_SEGMENT = (units: number) =>
+  `A name holds at most ${MAX_SEGMENT_UNITS} characters, as Windows counts them (an emoji and some rare letters count as two); this one has ${units}.`;
+
 /** A control character (Unicode `Cc`): U+0000 to U+001F, and U+007F to U+009F. */
 function isControl(character: string): boolean {
   const code = character.codePointAt(0) ?? 0;
@@ -57,6 +69,7 @@ export function segmentProblem(typed: string): string | null {
     return 'A name cannot contain any of \\ : < > " | ? *';
   }
   if ([...segment].some(isControl)) return 'A name cannot contain a control character.';
+  if (segment.length > MAX_SEGMENT_UNITS) return TOO_LONG_SEGMENT(segment.length);
   if (segment.endsWith('.') || segment.endsWith(' ')) {
     return 'A name cannot end with a dot or a space.';
   }
@@ -101,7 +114,14 @@ export function pathProblem(typed: string): string | null {
   if (bytes > MAX_PATH_BYTES) {
     return `The folder and the name together are longer than ${MAX_PATH_BYTES} bytes: they take ${bytes}. Letters outside the basic alphabet take more than one.`;
   }
+  const long = path.split('/').find((segment) => segment.length > MAX_SEGMENT_UNITS);
+  if (long !== undefined) return `In this path: ${TOO_LONG_SEGMENT(long.length)}`;
   return zWorkspacePath.safeParse(path).success
     ? null
     : 'This is not a path the workspace can hold.';
+}
+
+/** A note's file name as it is sent: a `.md` ending in any case is sent as `.md`. */
+export function noteFileName(name: string): string {
+  return /\.md$/i.test(name) ? `${name.slice(0, -3)}.md` : name;
 }

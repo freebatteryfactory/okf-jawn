@@ -24,6 +24,8 @@ import { fieldInWords } from '../../src/features/tree/fields';
 import {
   folderProblem,
   joinPath,
+  MAX_SEGMENT_UNITS,
+  noteFileName,
   pathProblem,
   segmentProblem,
   splitPath,
@@ -288,6 +290,8 @@ function service(
   return {
     api,
     state,
+    /** A change of the service's own: the head moves to the revision it makes. */
+    commit,
     /** Someone else changes the workspace: the head moves to a revision this page has not seen. */
     moveHead: () => commit((tree) => tree),
     /** Someone else brings an item back, under its id. */
@@ -315,6 +319,12 @@ const deletedNotice = (container: HTMLElement) =>
     .getByText(/You deleted this item/)
     .closest('[role="note"]');
 const pane = () => screen.getByRole('region', { name: /^Documents/ });
+/** The tree bar with what it says under it. */
+const toolbarArea = () => {
+  const area = screen.getByRole('toolbar', { name: 'Change the folders' }).parentElement;
+  if (area === null) throw new Error('the tree bar stands alone');
+  return area;
+};
 const alertText = async () => (await screen.findByRole('alert')).textContent ?? '';
 const type = async (name: string, value: string) => {
   await userEvent.clear(field(name));
@@ -329,6 +339,23 @@ async function openTree(url = `/w/${WS}`) {
   if (notes.getAttribute('aria-expanded') !== 'true') await userEvent.click(notes);
   await row(/Meeting notes/);
   return view;
+}
+
+/**
+ * A path of exactly `bytes` bytes of UTF-8 written with `letter` (one or two bytes), in segments of
+ * at most 200 letters: each within its own bound.
+ */
+function ofBytes(bytes: number, letter: string): string {
+  const size = new TextEncoder().encode(letter).length;
+  const segments: string[] = [];
+  let left = bytes;
+  while (left > 0) {
+    if (segments.length > 0) left -= 1;
+    const letters = Math.min(200, Math.floor(left / size));
+    segments.push(letter.repeat(letters));
+    left -= letters * size;
+  }
+  return segments.join('/');
 }
 
 describe('the rules of a name', () => {
@@ -370,16 +397,45 @@ describe('the rules of a name', () => {
     expect(splitPath('notes/2025/a.md')).toEqual({ folder: 'notes/2025', name: 'a.md' });
     expect(splitPath('a.md')).toEqual({ folder: '', name: 'a.md' });
     // The whole path, in the bytes it is sent as: exactly the bound passes, one more does not.
-    expect(pathProblem(`${'a'.repeat(4093)}.md`)).toBeNull();
-    expect(pathProblem(`${'a'.repeat(4094)}.md`)).toBe(
+    // Its segments are within their own bound (255 UTF-16 units), so only the whole is judged.
+    expect(pathProblem(ofBytes(4096, 'a'))).toBeNull();
+    expect(pathProblem(ofBytes(4097, 'a'))).toBe(
       'The folder and the name together are longer than 4096 bytes: they take 4097. Letters outside the basic alphabet take more than one.',
     );
     // A letter of two bytes counts as two, though the client's own schema counts it as one.
-    expect(pathProblem('é'.repeat(2048))).toBeNull();
-    expect(pathProblem('é'.repeat(2049))).toMatch(/longer than 4096 bytes: they take 4098/);
+    expect(pathProblem(ofBytes(4096, 'é'))).toBeNull();
+    expect(pathProblem(ofBytes(4098, 'é'))).toMatch(/longer than 4096 bytes: they take 4098/);
     // Typed as a letter and a combining accent, it is sent as the one letter, and counted so.
-    expect(pathProblem('e\u0301'.repeat(2048))).toBeNull();
+    expect(pathProblem(ofBytes(4096, 'é').normalize('NFD'))).toBeNull();
     expect(pathProblem('a\u0000b')).toBe('This is not a path the workspace can hold.');
+  });
+
+  it('refuses a segment over 255 UTF-16 units, counted in NFC, as NTFS counts a name', () => {
+    expect(MAX_SEGMENT_UNITS).toBe(255);
+    expect(segmentProblem('a'.repeat(255))).toBeNull();
+    expect(segmentProblem('a'.repeat(256))).toBe(
+      'A name holds at most 255 characters, as Windows counts them (an emoji and some rare letters count as two); this one has 256.',
+    );
+    // 128 emoji are 256 units: one too many.
+    expect(segmentProblem('😀'.repeat(128))).toMatch(/this one has 256\./);
+    expect(segmentProblem('😀'.repeat(127))).toBeNull();
+    // 255 accented letters typed as a letter and a combining accent are 510 units, and 255 in NFC.
+    expect(segmentProblem('e\u0301'.repeat(255))).toBeNull();
+    expect(segmentProblem('e\u0301'.repeat(256))).toMatch(/this one has 256\./);
+    // A folder, and a whole path, are judged segment by segment.
+    expect(folderProblem(`notes/${'b'.repeat(256)}`)).toMatch(/^In “b+”: A name holds at most 255/);
+    expect(pathProblem(`notes/${'c'.repeat(256)}.md`)).toMatch(
+      /^In this path: A name holds at most 255 characters/,
+    );
+    expect(pathProblem(`notes/${'c'.repeat(252)}.md`)).toBeNull();
+  });
+
+  it('sends a note’s name ending in ".MD", in any case, with ".md"', () => {
+    expect(noteFileName('Report.MD')).toBe('Report.md');
+    expect(noteFileName('Report.Md')).toBe('Report.md');
+    expect(noteFileName('Report.md')).toBe('Report.md');
+    expect(noteFileName('Report.mdx')).toBe('Report.mdx');
+    expect(noteFileName('Report')).toBe('Report');
   });
 
   it('checks a name as it is sent: in NFC', () => {
@@ -449,6 +505,112 @@ describe('a new note and a new folder', () => {
     expect(api.violations).toEqual([]);
   });
 
+  describe('what the commit of a new note answers beside it', () => {
+    const RECEIPTS = '/api/events/get-receipt';
+    const lint = {
+      code: 'okf_validator_warning',
+      message: 'The note has no description.',
+      location: 'notes/Decisions.md',
+    };
+    /** A service whose creation answers `extra` beside the item, in place of its own. */
+    function answering(extra: Json, overrides: Record<string, Handler> = {}) {
+      const made = service({
+        [CREATE]: (body) => {
+          const item = summary(NEW, text(body, 'path'), text(body, 'title'), 'note');
+          const revision = made.commit((tree) => ({ ...tree, items: [...tree.items, item] }));
+          return ok({ item: itemDocument({ ...item, revision }), warnings: [], ...extra });
+        },
+        ...overrides,
+      });
+      return made;
+    }
+    async function createDecisions() {
+      await openTree();
+      await userEvent.click(button('New note'));
+      await userEvent.type(field('Title'), 'Decisions');
+      await userEvent.keyboard('{Enter}');
+      // The new note opens, as every new note does.
+      await findTextBox('Text of Decisions');
+    }
+
+    it('says the check’s warnings, and names the receipt, which the person can read', async () => {
+      const { api } = answering(
+        { warnings: [lint], receipt_id: RECEIPT },
+        {
+          [RECEIPTS]: () =>
+            ok({
+              id: RECEIPT,
+              workspace_id: WS,
+              operation_id: 'create_item',
+              principal_subject: 'ada',
+              route: 'browser_session',
+              audience: 'human_display',
+              returned_at: '2026-01-02T08:15:00.000Z',
+              sources: [],
+            }),
+        },
+      );
+      await createDecisions();
+      const tree = toolbarArea();
+      expect(within(tree).getByRole('note').textContent).toBe(
+        'The note has no description. (notes/Decisions.md)',
+      );
+      expect(tree.textContent).toContain(`The service recorded this change as receipt ${RECEIPT}.`);
+      const show = within(tree).getByRole('button', { name: 'Show the receipt' });
+      expect(show.getAttribute('aria-expanded')).toBe('false');
+      expect(api.callsTo(RECEIPTS)).toEqual([]);
+      await userEvent.click(show);
+      expect(show.getAttribute('aria-expanded')).toBe('true');
+      expect(show.textContent).toBe('Hide the receipt');
+      expect(document.activeElement).toBe(show);
+      await within(tree).findByText('create_item');
+      expect(tree.textContent).toContain('Acted forada');
+      expect(tree.textContent).toContain('Througha signed-in browser');
+      expect(tree.textContent).toContain('Its content wasshown to a person');
+      expect(api.callsTo(RECEIPTS)).toEqual([{ workspace_id: WS, receipt_id: RECEIPT }]);
+      expect(api.violations).toEqual([]);
+    });
+
+    it('says that a repeated answer stored before receipts were recorded names none', async () => {
+      answering({});
+      await createDecisions();
+      const tree = toolbarArea();
+      expect(tree.textContent).toContain('it names no receipt');
+      expect(within(tree).queryByRole('button', { name: 'Show the receipt' })).toBeNull();
+      expect(within(tree).queryByRole('note')).toBeNull();
+    });
+
+    it('reads "not available in this build" when the receipt cannot be read in this build', async () => {
+      answering({ receipt_id: RECEIPT });
+      await createDecisions();
+      const tree = toolbarArea();
+      await userEvent.click(within(tree).getByRole('button', { name: 'Show the receipt' }));
+      expect(
+        await within(tree).findByText('Reading the receipt: Not available in this build.'),
+      ).toBeTruthy();
+    });
+
+    it('is said no more once something else is said', async () => {
+      answering({ warnings: [lint], receipt_id: RECEIPT });
+      await createDecisions();
+      expect(within(toolbarArea()).getByRole('note')).toBeTruthy();
+      await userEvent.click(button('New folder'));
+      expect(within(toolbarArea()).queryByRole('note')).toBeNull();
+      expect(toolbarArea().textContent).not.toContain('receipt');
+    });
+  });
+
+  it('creates a note named with ".MD" as ".md": a note’s file ends in small letters', async () => {
+    const { api } = service();
+    await openTree();
+    await userEvent.click(button('New note'));
+    await userEvent.type(field('Title'), 'Decisions');
+    await type('File name', 'Decisions.MD');
+    await userEvent.keyboard('{Enter}');
+    await findTextBox('Text of Decisions');
+    expect(api.callsTo(CREATE).at(0)?.path).toBe('notes/Decisions.md');
+  });
+
   it('checks the name before anything is sent, and says what is wrong at the field', async () => {
     const { api } = service();
     await openTree();
@@ -505,6 +667,88 @@ describe('a new note and a new folder', () => {
     await userEvent.type(name, 'x');
     expect(name.getAttribute('aria-invalid')).toBe('false');
     expect(api.callsTo(CREATE)).toHaveLength(1);
+  });
+
+  it('moves keyboard focus to the field a refusal names: its JSON Pointer into the request', async () => {
+    service({
+      [CREATE]: () => refuse(400, 'invalid_input', 'a title is at most 200 bytes', '/title'),
+    });
+    await openTree();
+    await userEvent.click(button('New note'));
+    await userEvent.type(field('Title'), 'Decisions');
+    await userEvent.click(button('Create the note'));
+    const title = field('Title');
+    await waitFor(() => expect(title.getAttribute('aria-invalid')).toBe('true'));
+    expect(document.activeElement).toBe(title);
+    expect(document.getElementById(title.getAttribute('aria-describedby') ?? '')?.textContent).toBe(
+      'The service refused this: a title is at most 200 bytes',
+    );
+  });
+
+  it('offers the version a stale-base refusal names, without asking for the head', async () => {
+    const { api } = service({
+      [CREATE]: () => ({
+        status: 409,
+        body: {
+          code: 'conflict',
+          message: 'the head moved',
+          field: '/base_revision',
+          detail: { kind: 'stale_base', head: FIRST },
+        },
+      }),
+    });
+    await openTree();
+    const opened = api.callsTo(OPEN).length;
+    await userEvent.click(button('New note'));
+    await userEvent.type(field('Title'), 'Decisions');
+    await userEvent.click(button('Create the note'));
+    expect(
+      await screen.findByText(
+        'The workspace has a newer version than the one shown here: it now holds revision cccccccccc, and a change is only made on the version you see. Show that version, check this form, then press its button again.',
+      ),
+    ).toBeTruthy();
+    // The refusal named the head: nothing more is asked to learn it (the one request since is the
+    // shell's own check, which runs after every refusal).
+    expect(api.callsTo(OPEN).length - opened).toBe(1);
+    expect(screen.queryByRole('button', { name: 'Refresh the workspace' })).toBeNull();
+    const show = button('Show revision cccccccccc');
+    act(() => show.focus());
+    await userEvent.click(show);
+    expect(screen.getByText(/Showing the workspace as of/).textContent).toContain('cccccccccc');
+    expect(
+      screen.getByText(
+        'The workspace now shows revision cccccccccc. Nothing was changed yet: check this form, then press its button again.',
+      ),
+    ).toBeTruthy();
+    // The notice left with focus in it: focus is on the form's button, not on the page.
+    expect(document.activeElement).toBe(button('Create the note'));
+    expect(api.violations).toEqual([]);
+  });
+
+  it('says an archived workspace as archived, with no retry and no head asked', async () => {
+    const { api } = service({
+      [CREATE]: () => ({
+        status: 409,
+        body: {
+          code: 'conflict',
+          message: 'the workspace is archived',
+          detail: { kind: 'workspace_archived', archived_at: '2026-01-02T08:15:00.000Z' },
+        },
+      }),
+    });
+    await openTree();
+    const opened = api.callsTo(OPEN).length;
+    await userEvent.click(button('New note'));
+    await userEvent.type(field('Title'), 'Decisions');
+    await userEvent.click(button('Create the note'));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Creating the note: This workspace is archived.');
+    expect(alert.textContent).toMatch(/nothing in it can be changed until it is unarchived/);
+    expect(alert.textContent).not.toMatch(/newer version/);
+    expect(
+      screen.queryByRole('button', { name: /Try again|Reload|Refresh the workspace/ }),
+    ).toBeNull();
+    expect(api.callsTo(OPEN).length - opened).toBeLessThanOrEqual(1);
   });
 
   it('creates a folder and puts keyboard focus on its row', async () => {
@@ -693,6 +937,22 @@ describe('a move or a rename', () => {
     // Read at the head the move made, without a Refresh.
     expect(await screen.findByText(/Read from notes\/minutes.md at/)).toBeTruthy();
     expect(api.callsTo(READ).some((body) => revisionAsked(body, '') === FIRST)).toBe(true);
+    expect(api.violations).toEqual([]);
+  });
+
+  it('sends a rename that changes only letter case as such, and ".MD" as ".md"', async () => {
+    const { api } = service();
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Rename or move' }));
+    // Only the letter case changes: it is not "where it is now".
+    await type('File name', 'Meeting.MD');
+    await userEvent.keyboard('{Enter}');
+    await within(pane()).findByText('notes/Meeting.md');
+    expect(api.callsTo(MOVE).map((body) => body.destination)).toEqual(['notes/Meeting.md']);
+    expect(
+      screen.queryByText('This is where it is now. Change the name or the folder.'),
+    ).toBeNull();
     expect(api.violations).toEqual([]);
   });
 

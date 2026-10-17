@@ -179,7 +179,11 @@ function service(
     },
     '/api/items/list-drafts': () =>
       ok({
-        items: [...state.drafts].map(([id, held]) => draftOf(id, held.base)),
+        revision: state.head,
+        items: [...state.drafts].map(([id, held]) => ({
+          draft: draftOf(id, held.base),
+          item: id === NOTE ? note : id === SOURCE ? source : plan,
+        })),
         next_cursor: null,
       }),
     '/api/items/save-draft': async (body) => {

@@ -72,6 +72,12 @@
  * a YAML 1.1 reader would take for something else is read as the string it is and reported as a
  * warning, so the person can quote it.
  *
+ * Places. A reader may be asked where some values stand in the text, each named by a JSON Pointer
+ * (`/rules/0/glob`): the service names a problem of a stored file so, and the page shows it at its
+ * line and column. Each is found by walking the document the reader built, key by key and index by
+ * index; a pointer that goes further than the document does stands at the last value it reached,
+ * and one that reaches nothing is not placed. Only a text that was read can be placed.
+ *
  * Writing: keys stay in the order the value has them (unknown keys go back in their place), and
  * a string a YAML 1.1 reader would take for a boolean, a number, a date or null is quoted
  * (`compat: 'yaml-1.1'`), so the text means the same to every reader.
@@ -80,10 +86,12 @@
  */
 import {
   CST,
+  type Document,
   isAlias,
   isMap,
   isPair,
   isScalar,
+  isSeq,
   Lexer,
   LineCounter,
   parseDocument,
@@ -112,8 +120,20 @@ export interface YamlProblem {
   column: number | null;
 }
 
+/** Where something stands in a YAML text, counted from 1. */
+export interface YamlPlace {
+  line: number;
+  column: number;
+}
+
 export type YamlRead =
-  | { ok: true; value: unknown; warnings: YamlProblem[] }
+  | {
+      ok: true;
+      value: unknown;
+      warnings: YamlProblem[];
+      /** Where each JSON Pointer asked for stands; present only when some were asked for. */
+      places?: Record<string, YamlPlace>;
+    }
   | { ok: false; problems: YamlProblem[] };
 
 const whole = (message: string): YamlProblem => ({ message, line: null, column: null });
@@ -224,8 +244,45 @@ function wholeNumberOf(source: string): bigint | null {
   return amount % unit === 0n ? signed(amount / unit) : null;
 }
 
-/** Read `typed` as one YAML document of values JSON can carry. */
-export function readYaml(typed: string): YamlRead {
+/** The keys of a JSON Pointer (RFC 6901); null when it is not one. '' is the whole document. */
+export function pointerKeys(pointer: string): string[] | null {
+  if (pointer === '') return [];
+  if (!pointer.startsWith('/')) return null;
+  return pointer
+    .slice(1)
+    .split('/')
+    .map((key) => key.replaceAll('~1', '/').replaceAll('~0', '~'));
+}
+
+/**
+ * Where the value `pointer` names begins in the text, as an offset: the last value reached when
+ * the pointer goes further than the document does; null when it is not a pointer or the document
+ * is empty.
+ */
+function offsetOf(document: Document.Parsed, pointer: string): number | null {
+  const keys = pointerKeys(pointer);
+  if (keys === null) return null;
+  const startOf = (node: unknown): number | null =>
+    (isScalar(node) || isMap(node) || isSeq(node)) && node.range ? node.range[0] : null;
+  let node: unknown = document.contents;
+  let reached = startOf(node);
+  for (const key of keys) {
+    let next: unknown = null;
+    if (isMap(node)) {
+      const pair = node.items.find((each) => isScalar(each.key) && String(each.key.value) === key);
+      if (pair !== undefined) next = pair.value ?? pair.key;
+    } else if (isSeq(node) && /^(0|[1-9]\d*)$/.test(key)) {
+      next = node.items.at(Number(key)) ?? null;
+    }
+    if (next === null) break;
+    node = next;
+    reached = startOf(node) ?? reached;
+  }
+  return reached;
+}
+
+/** Read `typed` as one YAML document of values JSON can carry; `locate` names places to find. */
+export function readYaml(typed: string, locate: readonly string[] = []): YamlRead {
   // Before anything else: a byte order mark is not part of the text.
   const text = typed.charCodeAt(0) === BYTE_ORDER_MARK ? typed.slice(1) : typed;
   if (text.length > MAX_YAML_CHARS) {
@@ -330,11 +387,18 @@ export function readYaml(typed: string): YamlRead {
     const value: unknown = document.toJS({
       reviver: (_key, entry) => (typeof entry === 'bigint' ? Number(entry) : entry),
     });
-    return {
-      ok: true,
-      value,
-      warnings: document.warnings.map((warning) => at(warning.pos[0], firstLine(warning.message))),
-    };
+    const warnings = document.warnings.map((warning) =>
+      at(warning.pos[0], firstLine(warning.message)),
+    );
+    if (locate.length === 0) return { ok: true, value, warnings };
+    const places: Record<string, YamlPlace> = {};
+    for (const pointer of locate) {
+      const offset = offsetOf(document, pointer);
+      if (offset === null) continue;
+      const { line, col } = lines.linePos(offset);
+      places[pointer] = { line, column: col };
+    }
+    return { ok: true, value, warnings, places };
   } catch (thrown) {
     return refusedWhole(thrownWords(thrown));
   }

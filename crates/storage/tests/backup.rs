@@ -2601,18 +2601,19 @@ async fn migrations_take_a_pre_migration_backup_set_before_an_upgrade() -> TestR
             &directory.path().join("records.sqlite"),
             "PRAGMA user_version"
         )?,
-        3,
+        4,
         "then the records are upgraded"
     );
     Ok(())
 }
 
-/// Put a records database back as records schema 1 left it: without the tables schemas 2 and 3 add,
-/// without the ledger's workspace column, and with the events table as it was before event keys.
+/// Put a records database back as records schema 1 left it: without the tables schemas 2 and 3
+/// add and the job column schema 4 adds, without the ledger's workspace column, and with the
+/// events table as it was before event keys.
 fn as_records_schema_1(records: &Path) -> TestResult {
     let connection = rusqlite::Connection::open(records)?;
     connection.execute_batch(
-        "DROP TABLE commit_warnings;
+        "ALTER TABLE jobs DROP COLUMN sealed; DROP TABLE commit_warnings;
          DROP TABLE purge_progress; DROP TABLE backup_archives; DROP TABLE restores;
          DROP TABLE pending_puts; DROP TABLE replacement_restores;
          DROP INDEX mutations_by_workspace; ALTER TABLE mutations DROP COLUMN workspace_id;
@@ -5540,8 +5541,10 @@ async fn backup_a_records_schema_2_backup_set_restores_by_replacement_and_by_imp
     let fixture = fixture(directory.path()).await?;
     let workspace = fixture.workspace.clone();
     drop(fixture);
-    rusqlite::Connection::open(directory.path().join("records.sqlite"))?
-        .execute_batch("DROP TABLE commit_warnings; PRAGMA user_version = 2;")?;
+    rusqlite::Connection::open(directory.path().join("records.sqlite"))?.execute_batch(
+        "DROP TABLE commit_warnings; ALTER TABLE jobs DROP COLUMN sealed;
+             PRAGMA user_version = 2;",
+    )?;
     let (installation, archive) = {
         let storage = Storage::open(directory.path())?;
         let sets: Vec<_> = std::fs::read_dir(storage.data().pre_migration_path())?
@@ -5584,7 +5587,7 @@ async fn backup_a_records_schema_2_backup_set_restores_by_replacement_and_by_imp
         .restore_replacement(&installation, std::slice::from_ref(&archive))
         .await?;
     let live = directory.path().join("records.sqlite");
-    assert_eq!(count(&live, "PRAGMA user_version")?, 3);
+    assert_eq!(count(&live, "PRAGMA user_version")?, 4);
     assert_eq!(count(&live, "SELECT count(*) FROM workspaces")?, 1);
     assert!(
         count(&live, "SELECT count(*) FROM drafts")? > 0,
@@ -8984,7 +8987,7 @@ async fn rr10_refused_import_leaves_the_backups_working(
     assert_eq!(sets, 1, "the pre-migration backup set was written");
     assert_eq!(
         count(&records, "PRAGMA user_version")?,
-        3,
+        4,
         "then the records are upgraded"
     );
     Ok(())

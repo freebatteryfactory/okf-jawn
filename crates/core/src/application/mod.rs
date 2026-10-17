@@ -6,8 +6,10 @@
 //! `ports::Application` implementation for `ApplicationService` is organized as cohesive child
 //! modules of this one: `items` (folders, items and types), `drafts`, `reads` (`read_item` and
 //! sandbox capabilities), `sources` (citations and object reads), `history` (Timeline, Changes,
-//! Who, Snapshot and Rewind), `navigation` (search, links and the graph) and `status` (health,
-//! readiness and the session), over the shared steps in `shared` (revision resolution, commits,
+//! Who, Snapshot and Rewind), `navigation` (search, links and the graph), `proposals`
+//! (proposals, their acceptance and discussion), `reviews` (confirmations and reviews),
+//! `status` (health, readiness and the session) and `purges` (recording, resuming and reading
+//! a workspace purge), over the shared steps in `shared` (revision resolution, commits,
 //! receipts).
 //!
 //! Operations whose part of the construction plan has not landed answer `NotImplemented`,
@@ -44,6 +46,7 @@ use crate::search::SearchIndex;
 use crate::storage::{BlobStore, CandidateCheck, StorageScope, VersionStore, WorkspaceCatalog};
 use crate::uploads::UploadStore;
 
+pub use reviews::CONFIRMATION_TTL;
 pub use sources::MAX_OBJECT_BLOCK;
 
 /// The handler of one operation: its function in a child module, or `pending` while the
@@ -129,6 +132,42 @@ macro_rules! route {
     };
     (get_session) => {
         status::get_session
+    };
+    (purge_workspace) => {
+        purges::purge_workspace
+    };
+    (get_purge) => {
+        purges::get_purge
+    };
+    (open_proposal) => {
+        proposals::open_proposal
+    };
+    (list_proposals) => {
+        proposals::list_proposals
+    };
+    (get_proposal) => {
+        proposals::get_proposal
+    };
+    (accept_proposal) => {
+        proposals::accept_proposal
+    };
+    (decline_proposal) => {
+        proposals::decline_proposal
+    };
+    (add_comment) => {
+        proposals::add_comment
+    };
+    (list_comments) => {
+        proposals::list_comments
+    };
+    (create_confirmation) => {
+        reviews::create_confirmation
+    };
+    (create_review) => {
+        reviews::create_review
+    };
+    (list_reviews) => {
+        reviews::list_reviews
     };
     ($pending:ident) => {
         pending
@@ -412,7 +451,10 @@ mod drafts;
 mod history;
 mod items;
 mod navigation;
+mod proposals;
+mod purges;
 mod reads;
+mod reviews;
 mod shared;
 mod sources;
 mod status;

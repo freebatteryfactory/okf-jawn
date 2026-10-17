@@ -179,7 +179,11 @@ async function service(): Promise<Service> {
     '/api/items/create-item': write('create_item', (body) => {
       const made = summary(NEW, text(body, 'path'), text(body, 'title'), text(body, 'type_name'));
       const revision = commit((tree) => ({ ...tree, items: [...tree.items, made] }));
-      return ok(document({ ...made, revision }, text(body, 'body')));
+      return ok({
+        item: document({ ...made, revision }, text(body, 'body')),
+        receipt_id: RECEIPT,
+        warnings: [],
+      });
     }),
     '/api/items/create-folder': write('create_folder', (body) =>
       done(commit((tree) => ({ ...tree, folders: [...tree.folders, text(body, 'folder')] }))),
@@ -219,27 +223,39 @@ async function service(): Promise<Service> {
       ),
     ),
     '/api/schemas/naming-rules': () => ok(schema),
-    '/api/conventions/get-rules': (body) => ok(rules.get(at(body))),
+    '/api/conventions/get-rules': (body) => ok({ revision: at(body), rules: rules.get(at(body)) }),
     '/api/conventions/preview-names': (body) => {
       const revision = at(body);
-      const ids = Array.isArray(body.item_ids) ? body.item_ids : [];
+      // The selection, as the service resolves it: the workspace, or a folder and those under it.
+      const selection = body.selection as { kind?: string; folder?: string } | undefined;
+      const selected = treeAt(revision).items.filter(
+        (item) =>
+          selection?.kind === 'workspace' ||
+          (selection?.kind === 'folder' && item.path.startsWith(`${selection.folder ?? ''}/`)),
+      );
+      // Archived items are left out of the plan and counted (ruling 10).
+      const considered = selected.filter((item) => !item.archived);
       const asked = body.rules as { rules: Array<{ prefix: string }> };
       const prefix = asked.rules[0]?.prefix ?? '';
+      const entries = considered
+        .map((item) => {
+          const cut = item.path.lastIndexOf('/') + 1;
+          const to =
+            item.id === SOURCE
+              ? item.path
+              : `${item.path.slice(0, cut)}${prefix}${item.path.slice(cut)}`;
+          return { item_id: item.id, from: item.path, to, warnings: [] };
+        })
+        .filter((entry) => entry.from !== entry.to);
       return ok({
         base_revision: revision,
         rules_digest: 'c'.repeat(64),
-        entries: treeAt(revision)
-          .items.filter((item) => ids.includes(item.id))
-          .map((item) => {
-            const cut = item.path.lastIndexOf('/') + 1;
-            const to =
-              item.id === SOURCE
-                ? item.path
-                : `${item.path.slice(0, cut)}${prefix}${item.path.slice(cut)}`;
-            return { item_id: item.id, from: item.path, to, warnings: [] };
-          }),
+        entries,
         duplicate_observations: [],
         warnings: [],
+        considered: considered.length,
+        unchanged: considered.length - entries.length,
+        archived_left_out: selected.length - considered.length,
       });
     },
     '/api/conventions/apply-names': (body) => {
@@ -367,6 +383,36 @@ test.describe('changing the tree and the naming rules', () => {
     await shot(page, '20-new-folder');
   });
 
+  test('a rename from the tree that changes only letter case is sent as such', async ({ page }) => {
+    const played = await service();
+    await routeApi(page, played.answers);
+    await page.goto(`${server.origin()}/w/${WS}`);
+    await openNotes(page);
+    // From the folder's row to the note's, by the keyboard; F2 there opens "Rename or move" for
+    // it, with focus in the name.
+    await page.keyboard.press('ArrowDown');
+    await expect(row(page, /Meeting notes/)).toBeFocused();
+    await page.keyboard.press('F2');
+    const name = page.getByRole('textbox', { name: 'File name' });
+    await expect(name).toBeFocused();
+    await expect(name).toHaveValue('meeting.md');
+    await page.keyboard.press('ControlOrMeta+a');
+    await page.keyboard.type('Meeting.md');
+    await page.keyboard.press('Enter');
+    // Not refused by the page as "where it is now": storage takes it as one move (PR #34).
+    await expect(page.getByText('“Meeting notes” is now at notes/Meeting.md.')).toBeVisible();
+    await expect(page.getByText('This is where it is now.')).toHaveCount(0);
+    expect(played.sent).toMatchObject([
+      {
+        path: 'move_item',
+        body: { item_id: NOTE, destination: 'notes/Meeting.md', base_revision: HEAD },
+      },
+    ]);
+    await expect(headLine(page)).toContainText(revision(0));
+    await expectNoAxeViolations(page, 'the tree after a case-only rename');
+    await shot(page, '24a-case-only-rename');
+  });
+
   test('rename an open item and keep its tab, then change its status', async ({ page }) => {
     const played = await service();
     await routeApi(page, played.answers);
@@ -461,7 +507,7 @@ test.describe('changing the tree and the naming rules', () => {
 
     await press(page, 'Naming rules');
     await expect(page.getByRole('heading', { name: 'Naming rules' })).toBeFocused();
-    const prefix = page.getByRole('textbox', { name: /^prefix/ });
+    const prefix = page.getByRole('textbox', { name: /^Prefix/ });
     await prefix.focus();
     await page.keyboard.type('2025-');
     await expectNoAxeViolations(page, 'the naming rules form');
@@ -749,7 +795,7 @@ test.describe('changing the tree and the naming rules', () => {
     await page.getByRole('link', { name: 'Workshop notes' }).click();
     await expect(row(page, 'notes')).toBeVisible();
     await press(page, 'Naming rules');
-    const prefix = page.getByRole('textbox', { name: /^prefix/ });
+    const prefix = page.getByRole('textbox', { name: /^Prefix/ });
     await prefix.fill('unsaved-');
     const question = page.getByRole('group', { name: 'Leave the naming rules without saving?' });
     const onWorkspace = new RegExp(`/w/${WS}$`);
@@ -825,7 +871,7 @@ test.describe('changing the tree and the naming rules', () => {
     await page.goto(`${server.origin()}/w/${WS}`);
     await expect(row(page, 'notes')).toBeVisible();
     await press(page, 'Naming rules');
-    const prefix = page.getByRole('textbox', { name: /^prefix/ });
+    const prefix = page.getByRole('textbox', { name: /^Prefix/ });
     await prefix.fill('unsaved-');
     const question = page.getByRole('group', { name: 'Leave the naming rules without saving?' });
 

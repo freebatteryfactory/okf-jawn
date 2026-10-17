@@ -22,9 +22,22 @@
  * reading takes longer than a second is ended and is then a text that cannot be read: its
  * problem says that it is too complex, and the text stays in the box.
  *
+ * A stored rules file that cannot be read (`get_rules` answers it as `unreadable`, ruling 11) is
+ * repaired as text, never taken for "no rules": the YAML view opens on its text, no form is
+ * offered, each problem the service found is listed at its line and column and marked in the text
+ * (a JSON Pointer is placed by reading the text off the page's thread, `usePointerPlaces`), and
+ * the repaired text is saved with `set_rules`. Limit: the YAML view reads at most 16,384
+ * characters (`MAX_YAML_CHARS`, `lib/yaml.ts`). A stored file longer than that is still shown
+ * whole, and a problem the service placed at a line and column is still marked there; but its
+ * JSON Pointers cannot be placed (they read "At /rules/…"), and every edit of the text is refused
+ * as too long, so nothing can be saved, until the text is at most that long. Rules files that
+ * long are possible.
+ *
  * A preview writes nothing. It lists each item that would be renamed with its name now and its
  * name after, as a table (read row by row with a screen reader's table keys; the column it is in
- * scrolls from any control), with the service's warnings and the duplicate paths it observed. A preview belongs to the revision and the rules it was made of.
+ * scrolls from any control), with the service's warnings and the duplicate paths it observed, and
+ * the counts the plan gives: the items considered, those that keep their names, and the archived
+ * items left out (ruling 10). A preview belongs to the revision and the rules it was made of.
  * When either is no longer what the page shows (the person saved the rules, made another change
  * or refreshed; the rules were edited; the service refused the preview as out of date), it is
  * marked out of date and cannot be applied: the person previews again. Applying asks first, and
@@ -74,14 +87,20 @@
 
 import { Tabs } from '@base-ui/react/tabs';
 import type { RJSFSchema } from '@rjsf/utils';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { type RefObject, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { z } from 'zod';
-import type { NamingRules, RenamePlan, Revision } from '../../api/generated/types.gen';
+import type { NamingRules, RenamePlan, Revision, Warning } from '../../api/generated/types.gen';
 import { takeHeld, useWatchedPart } from '../../lib/focus';
 import { keyed } from '../../lib/keys';
-import { usePausedReading, YamlEditor, YamlFindings } from '../../lib/YamlEditor';
-import { writeYaml, type YamlRead } from '../../lib/yaml';
+import {
+  usePausedReading,
+  YamlEditor,
+  type YamlEditorHandle,
+  YamlFindings,
+} from '../../lib/YamlEditor';
+import { pointerKeys, writeYaml, type YamlPlace, type YamlRead } from '../../lib/yaml';
+import { readOffThread } from '../../lib/yaml-reading';
 import { short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
@@ -89,18 +108,21 @@ import type { HeadChange } from '../explorer/head';
 import { ChangeFailure, useChange } from '../tree/ChangeForms';
 import { useWorkspaceChanges } from '../tree/context';
 import { folderProblem } from '../tree/names';
-import { formHolds, RulesForm, rulesProblems } from './RulesForm';
+import { fieldElementId, formHolds, RulesForm, refusalAt, rulesProblems } from './RulesForm';
 import {
   applyPreview,
   keepOrder,
-  NothingToPreview,
   type Preview,
   previewRenames,
+  problemPlace,
   type Renamed,
   rulesOptions,
   rulesSchemaOptions,
+  type StoredRules,
   sameRules,
+  sameStored,
   saveRules,
+  startingRules,
 } from './rules';
 
 /**
@@ -127,6 +149,70 @@ const NOT_READ_YET =
 const RULES_REFUSED =
   'The service refused it because it does not fit the workspace as it is now. Preview again, then check the rules.';
 
+type UnreadableFile = Extract<StoredRules, { kind: 'unreadable' }>;
+
+const NO_PLACES: Readonly<Record<string, YamlPlace>> = {};
+
+/** `stored` when it is a file that cannot be read as rules. */
+function unreadableIn(stored: StoredRules | undefined): UnreadableFile | undefined {
+  return stored?.kind === 'unreadable' ? stored : undefined;
+}
+
+/**
+ * Where the JSON Pointers among the problems of `file` stand in its text. The text is read off
+ * the page's thread, as typed YAML is (`readOffThread`): it is untrusted, and can be large. Until
+ * that answers, and for a text it could not read, a pointer has no line.
+ */
+function usePointerPlaces(file: UnreadableFile | undefined): Readonly<Record<string, YamlPlace>> {
+  const [found, setFound] = useState<{
+    of: UnreadableFile;
+    places: Readonly<Record<string, YamlPlace>>;
+  } | null>(null);
+  useEffect(() => {
+    if (file === undefined) return;
+    const pointers = file.problems.flatMap((problem) => {
+      const place = problemPlace(problem.location);
+      return place.kind === 'pointer' ? [place.pointer] : [];
+    });
+    if (pointers.length === 0) return;
+    return readOffThread(
+      file.text,
+      (read) => setFound({ of: file, places: read.ok ? (read.places ?? NO_PLACES) : NO_PLACES }),
+      pointers,
+    );
+  }, [file]);
+  return found !== null && found.of === file ? found.places : NO_PLACES;
+}
+
+/**
+ * A problem of a stored rules file in words, with the line and column it is at in the file's
+ * text when that is known: given as such, or found for its JSON Pointer in `places`.
+ */
+function placed(
+  problem: Warning,
+  places: Readonly<Record<string, YamlPlace>>,
+): { words: string; place: YamlPlace | null } {
+  const where = problemPlace(problem.location);
+  if (where.kind === 'line') {
+    return {
+      words: `Line ${where.line}, column ${where.column}: ${problem.message}`,
+      place: { line: where.line, column: where.column },
+    };
+  }
+  if (where.kind === 'pointer') {
+    const place = places[where.pointer];
+    return place === undefined
+      ? { words: `At ${where.pointer}: ${problem.message}`, place: null }
+      : {
+          words: `Line ${place.line}, column ${place.column} (${where.pointer}): ${problem.message}`,
+          place,
+        };
+  }
+  if (where.kind === 'words')
+    return { words: `At ${where.words}: ${problem.message}`, place: null };
+  return { words: `In the whole file: ${problem.message}`, place: null };
+}
+
 /**
  * Why a preview can no longer be applied; null while it is the preview of what the page shows.
  * `refused` is the plan the service refused as out of date, if it refused one.
@@ -148,7 +234,6 @@ export function staleReason(
 }
 
 export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
-  const client = useQueryClient();
   const { workspaceId, head, canWrite } = useWorkspaceChanges();
   const heading = useId();
   const previewHeading = useId();
@@ -164,15 +249,26 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   const problemsRef = useRef<HTMLDivElement | null>(null);
 
   const schema = useQuery(rulesSchemaOptions());
-  // The rules of the version shown. While they are read again at a new head, and when that read
-  // fails, the ones read last stay on screen: a read that fails in the background replaces
-  // nothing, and the line above the rules says which version they are of.
+  // What the version shown holds as its rules. While they are read again at a new head, and when
+  // that read fails, the ones read last stay on screen: a read that fails in the background
+  // replaces nothing, and the line above the rules says which version they are of.
   const saved = useQuery(rulesOptions(workspaceId, head));
-  const [lastRead, setLastRead] = useState<{ rules: NamingRules; at: Revision } | null>(null);
-  if (saved.data !== undefined && (lastRead?.at !== head || lastRead.rules !== saved.data)) {
-    setLastRead({ rules: saved.data, at: head });
+  const [lastRead, setLastRead] = useState<{ stored: StoredRules; at: Revision } | null>(null);
+  if (saved.data !== undefined && (lastRead?.at !== head || lastRead.stored !== saved.data)) {
+    setLastRead({ stored: saved.data, at: head });
   }
-  const savedRules = saved.data ?? lastRead?.rules;
+  const stored = saved.data ?? lastRead?.stored;
+  // The saved rules edits start from: with none saved, none at all; a stored file that cannot be
+  // read has none (it is repaired as text).
+  const savedRules = stored === undefined ? undefined : startingRules(stored);
+  // What was saved when the edits started (see `basis` below).
+  const [basis, setBasis] = useState<StoredRules | undefined>(undefined);
+  // The stored file the edits start from, when it cannot be read as rules: the page is repairing
+  // it. Its text is what the YAML view starts from, the form is not offered, and its problems are
+  // listed at their lines.
+  const fromFile = unreadableIn(basis ?? stored);
+  const repairing = fromFile !== undefined;
+  const filePlaces = usePointerPlaces(fromFile);
   const schemaFailure = useRetry({
     request: workspaceId,
     failed: schema.isError,
@@ -198,11 +294,18 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   // The YAML is read a pause after the last change, off the page's thread; `flush` starts reading
   // at once what still waits (at a change of view, and when a press finds text that is not read).
   const reading = usePausedReading((text, read) => {
+    // The stored file's own text, typed back as it was, is no edit of it.
+    if (fromFile !== undefined && text === fromFile.text) {
+      setTyped(null);
+      setEdited(undefined);
+      return;
+    }
     setTyped({ text, read });
     // Only YAML that can be read becomes the rules; otherwise they stay as they were.
     if (read.ok) setEdited(read.value);
   });
   const findingsId = useId();
+  const fileNoticeId = useId();
   const shape = zSchema.safeParse(schema.data);
   const form: RJSFSchema | null = shape.success ? shape.data : null;
   const problems = form === null || value === undefined ? [] : rulesProblems(form, value);
@@ -212,8 +315,10 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
       ? held
       : null;
   const rules = sendableOf(value, !unreadable);
+  // Any rules the person's text holds differ from a stored file that cannot be read.
   const changed =
-    edited !== undefined && savedRules !== undefined && !sameRules(edited, savedRules);
+    edited !== undefined &&
+    (savedRules === undefined ? stored?.kind === 'unreadable' : !sameRules(edited, savedRules));
 
   // The saved rules the edits started from. While nothing is edited they follow the rules of the
   // version shown; once there are edits they stay, so other rules saved meanwhile are seen.
@@ -228,8 +333,10 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   // starts again in place (`restarts`), not as another element: the head can move while the caret
   // is in the box with nothing typed (a Refresh pressed before answers; the workspace is asked
   // again by itself when the network returns), and the person goes on typing where they were.
+  //
+  // What was saved is compared as what the version holds (`sameStored`): rules, none, or a stored
+  // file that cannot be read, by its text.
   const atHead = saved.data;
-  const [basis, setBasis] = useState<NamingRules | undefined>(undefined);
   // The rules of the person's own save that succeeded, until the page shows them as the saved
   // rules of the version shown (the version that save made, or a later one that still holds
   // them). From then on they are what the person starts from. Rules on the page that are still
@@ -237,7 +344,7 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   // read) stays an edit, of them. Nothing on the page changes by this: what stops being an edit
   // says the same as the saved rules now drawn.
   const [ownSave, setOwnSave] = useState<NamingRules | null>(null);
-  if (ownSave !== null && atHead !== undefined && sameRules(atHead, ownSave)) {
+  if (ownSave !== null && atHead?.kind === 'rules' && sameRules(atHead.rules, ownSave)) {
     setOwnSave(null);
     setBasis(atHead);
     if (edited !== undefined && !unreadable && sameRules(edited, ownSave)) {
@@ -252,13 +359,18 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
     atHead !== undefined &&
     !changed &&
     !heldUnread &&
-    (basis === undefined || !sameRules(basis, atHead))
+    (basis === undefined || !sameStored(basis, atHead))
   ) {
     setBasis(atHead);
     if (basis !== undefined && edited === undefined && typed === null) setFollowed(followed + 1);
   }
   const replaced =
-    changed && atHead !== undefined && basis !== undefined && !sameRules(basis, atHead);
+    changed && atHead !== undefined && basis !== undefined && !sameStored(basis, atHead);
+  // The repair starts in the YAML view, and stays there once the file is repaired.
+  if (repairing && view !== 'yaml') setView('yaml');
+  const editorHandle = useRef<YamlEditorHandle | null>(null);
+  const fileProblems =
+    fromFile === undefined ? [] : fromFile.problems.map((each) => placed(each, filePlaces));
   // The rules drawn are those read before, and the rules of the version shown are not on the
   // page (being read, or not readable): saving now would go over rules the page has not shown.
   const notShown = atHead === undefined;
@@ -335,9 +447,32 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
     // A failed save is repeated only while the rules on screen are the ones it carried.
     (carried) => rules !== null && sameRules(carried, rules),
   );
+  // A refusal of the save at a field of the rules (`/rules/…`, a JSON Pointer into the request):
+  // shown at that field in the form, which takes keyboard focus there once when it arrives.
+  const refusedField = save.refused?.field ?? '';
+  const refusedKeys = refusedField.startsWith('/rules/')
+    ? pointerKeys(refusedField.slice('/rules'.length))
+    : null;
+  const fieldRefusal =
+    refusedKeys === null || save.refused === null
+      ? undefined
+      : refusalAt(refusedKeys, `The service refused this: ${save.refused.message}`);
+  const focusedRefusal = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    const field = save.refused?.field ?? null;
+    if (field === null) {
+      focusedRefusal.current = null;
+      return;
+    }
+    if (refusedKeys === null || view !== 'form' || focusedRefusal.current === field) return;
+    const element = document.getElementById(fieldElementId(refusedKeys));
+    if (element === null) return;
+    focusedRefusal.current = field;
+    element.focus();
+  });
   const previewing = useMutation({
     mutationFn: (asked: { rules: NamingRules; folder: string; head: Revision }) =>
-      previewRenames(client, workspaceId, asked.head, asked.rules, asked.folder),
+      previewRenames(workspaceId, asked.head, asked.rules, asked.folder),
     onSuccess: (made) => {
       setPreview(made);
       setAsking(false);
@@ -345,10 +480,9 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
       focusNext.current = 'preview';
     },
   });
-  const nothing = previewing.isError && previewing.error instanceof NothingToPreview;
   const previewFailure = useRetry({
     request: workspaceId,
-    failed: previewing.isError && !nothing,
+    failed: previewing.isError,
     error: previewing.error,
     run: () =>
       previewing.variables === undefined
@@ -408,7 +542,6 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   }
 
   const renames = preview === null ? [] : preview.plan.entries.filter((e) => e.from !== e.to);
-  const kept = preview === null ? 0 : preview.plan.entries.length - renames.length;
 
   /**
    * Whether the YAML view holds text that is not read yet (typed a moment ago, or being read).
@@ -480,10 +613,12 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
     previewing.mutate({ rules: asked, folder, head });
   };
   const startSave = () => {
-    // Nothing is saved over rules the page has not shown.
+    // Nothing is saved over rules the page has not shown, and the rules saved now are not saved
+    // again. Any rules replace a stored file that cannot be read.
     if (atHead === undefined) return;
     const asked = sendable();
-    if (asked === null || sameRules(asked, atHead)) return;
+    const now = startingRules(atHead);
+    if (asked === null || (now !== undefined && sameRules(asked, now))) return;
     setSaid('');
     save.start(asked);
   };
@@ -563,10 +698,29 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
         )}{' '}
         Changing them here changes nothing until you save them, and a preview renames nothing.
       </p>
+      {stored?.kind === 'none' && (
+        <p role="note" className="notice">
+          <strong>There are no naming rules yet.</strong> No rules are saved in this version, so
+          nothing is renamed by them. Start from the empty set below: add a rule, then save.
+        </p>
+      )}
+      {fromFile !== undefined && (
+        <div role="note" className="failure-notice" id={fileNoticeId}>
+          <p>
+            <strong>The saved rules file cannot be read.</strong>
+          </p>
+          <p>
+            This build cannot read it as naming rules, so no rules apply from it until it is
+            repaired; it is not the same as having no rules. Its text is in the YAML view below, and
+            what is wrong with it is listed under the text. Fix it there, then save: the rules you
+            save replace the file.
+          </p>
+        </div>
+      )}
       {/* Present from the start, so what an action did is announced. */}
       <p role="status" className="meta rules-said">
         {previewing.isPending && !previewFailure.retrying
-          ? 'Listing the items and making the preview…'
+          ? 'Making the preview…'
           : save.pending
             ? 'Saving the rules…'
             : apply.pending
@@ -592,10 +746,10 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
       {(schema.isPending || saved.isPending) && !schemaFailure.shown && !savedFailure.shown && (
         <p role="status">Reading the naming rules…</p>
       )}
-      {form !== null && value !== undefined && (
+      {form !== null && (value !== undefined || repairing) && (
         <>
           <Tabs.Root
-            value={view}
+            value={repairing ? 'yaml' : view}
             onValueChange={(next) => {
               if (next !== 'form' && next !== 'yaml') return;
               // The other view opens on what the text says: its reading starts now, and the
@@ -605,45 +759,51 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
             }}
           >
             <Tabs.List aria-label="How the rules are shown" className="tab-list">
-              <Tabs.Tab value="form" className="tab">
-                Form
-              </Tabs.Tab>
+              {/* No form over a stored file that cannot be read: it is repaired as text. */}
+              {!repairing && (
+                <Tabs.Tab value="form" className="tab">
+                  Form
+                </Tabs.Tab>
+              )}
               <Tabs.Tab value="yaml" className="tab">
                 YAML
               </Tabs.Tab>
             </Tabs.List>
-            <Tabs.Panel value="form">
-              {reading.pending ? (
-                // Nothing over rules older than the text: an edit made in a form of them would
-                // be undone, or would undo the text, when the reading answers.
-                <p role="status">Reading the text of the YAML view…</p>
-              ) : (
-                <>
-                  {unreadable && (
-                    <p role="note" className="notice">
-                      The YAML view holds text that cannot be read. Below are the last rules that
-                      could be. A change made here replaces that text.
-                    </p>
-                  )}
-                  {formHolds(value) ? (
-                    <RulesForm
-                      schema={form}
-                      value={value}
-                      onChange={(next) => {
-                        // The form is one view of the value: the YAML is written from it again,
-                        // its keys where they were.
-                        setEdited(keepOrder(value, next));
-                        setTyped(null);
-                      }}
-                    />
-                  ) : (
-                    <p role="note" className="notice">
-                      What the YAML view holds is not a set of rules, so there is no form for it.
-                    </p>
-                  )}
-                </>
-              )}
-            </Tabs.Panel>
+            {!repairing && (
+              <Tabs.Panel value="form">
+                {value === undefined ? null : reading.pending ? (
+                  // Nothing over rules older than the text: an edit made in a form of them would
+                  // be undone, or would undo the text, when the reading answers.
+                  <p role="status">Reading the text of the YAML view…</p>
+                ) : (
+                  <>
+                    {unreadable && (
+                      <p role="note" className="notice">
+                        The YAML view holds text that cannot be read. Below are the last rules that
+                        could be. A change made here replaces that text.
+                      </p>
+                    )}
+                    {formHolds(value) ? (
+                      <RulesForm
+                        schema={form}
+                        value={value}
+                        extraErrors={fieldRefusal}
+                        onChange={(next) => {
+                          // The form is one view of the value: the YAML is written from it again,
+                          // its keys where they were.
+                          setEdited(keepOrder(value, next));
+                          setTyped(null);
+                        }}
+                      />
+                    ) : (
+                      <p role="note" className="notice">
+                        What the YAML view holds is not a set of rules, so there is no form for it.
+                      </p>
+                    )}
+                  </>
+                )}
+              </Tabs.Panel>
+            )}
             <Tabs.Panel value="yaml">
               <p role="note" className="notice">
                 Comments are not kept. The service stores the rules as data, not as text: a comment
@@ -654,10 +814,14 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
                 key={dropped}
                 restarts={followed}
                 label="The naming rules as YAML"
-                initialText={typed?.text ?? writeYaml(value)}
-                describedBy={findingsId}
+                initialText={
+                  typed?.text ?? (value !== undefined ? writeYaml(value) : (fromFile?.text ?? ''))
+                }
+                describedBy={repairing ? `${fileNoticeId} ${findingsId}` : findingsId}
                 onChange={reading.change}
                 onBlur={reading.flush}
+                marks={fileProblems.flatMap((each) => (each.place === null ? [] : [each.place]))}
+                handle={editorHandle}
               />
             </Tabs.Panel>
           </Tabs.Root>
@@ -666,6 +830,37 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
             tabIndex={-1}
             className={problems.length > 0 && !unreadable ? 'failure-notice' : undefined}
           >
+            {fromFile !== undefined && (
+              <div className="failure-notice">
+                <p>
+                  <strong>
+                    What is wrong with the saved file (
+                    {count(fileProblems.length, 'problem', 'problems')}
+                    ), as the service read it:
+                  </strong>
+                </p>
+                <ul>
+                  {keyed(fileProblems, (each) => each.words).map(({ key, value: each }) => (
+                    <li key={key}>
+                      {each.words}
+                      {each.place !== null && (
+                        <>
+                          {' '}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (each.place !== null) editorHandle.current?.show(each.place);
+                            }}
+                          >
+                            Go to line {each.place.line}, column {each.place.column}
+                          </button>
+                        </>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <YamlFindings id={findingsId} read={typed?.read ?? null} />
             {problems.length > 0 && !unreadable && (
               <div role="alert">
@@ -684,9 +879,13 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
             )}
           </div>
           <p className="meta">
-            {changed
-              ? 'These rules differ from the saved ones.'
-              : 'These are the saved rules, unchanged.'}
+            {repairing
+              ? changed
+                ? 'Your text differs from the saved file.'
+                : 'This is the saved file, unchanged.'
+              : changed
+                ? 'These rules differ from the saved ones.'
+                : 'These are the saved rules, unchanged.'}
           </p>
           <div className="change-field">
             <label htmlFor={folderId}>Preview the items in folder</label>
@@ -718,14 +917,34 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
                 yours are above. Saving yours replaces them whole: nothing of the others is merged
                 in.
               </p>
-              <label htmlFor={theirsId}>The rules as they are saved now (read-only)</label>
-              <textarea
-                id={theirsId}
-                className="left-draft"
-                readOnly
-                rows={10}
-                value={writeYaml(atHead)}
-              />
+              {atHead.kind === 'none' ? (
+                <p>No rules are saved now.</p>
+              ) : (
+                <>
+                  <label htmlFor={theirsId}>
+                    {atHead.kind === 'rules'
+                      ? 'The rules as they are saved now (read-only)'
+                      : 'The rules file as it is saved now, which cannot be read (read-only)'}
+                  </label>
+                  <textarea
+                    id={theirsId}
+                    className="left-draft"
+                    readOnly
+                    rows={10}
+                    value={atHead.kind === 'rules' ? writeYaml(atHead.rules) : atHead.text}
+                  />
+                  {atHead.kind === 'unreadable' && (
+                    <ul>
+                      {keyed(
+                        atHead.problems.map((each) => placed(each, NO_PLACES).words),
+                        (words) => words,
+                      ).map(({ key, value: words }) => (
+                        <li key={key}>{words}</li>
+                      ))}
+                    </ul>
+                  )}
+                </>
+              )}
               <p className="change-buttons">
                 <button type="button" onClick={takeSaved}>
                   Take the saved rules, and drop mine
@@ -809,17 +1028,6 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
         sameWords={RULES_REFUSED}
         withdrawnWords="The rules on this page are no longer the ones that were sent, so they are not sent again by themselves. Check them, then press “Save the rules” to save them as they are now."
       />
-      {nothing && (
-        <div role="alert" className="failure-notice">
-          <p>
-            <strong>There is nothing to preview.</strong>
-          </p>
-          <p>
-            {folder === '' ? 'This workspace' : `The folder ${folder}`} holds no item, so nothing
-            was asked of the service.
-          </p>
-        </div>
-      )}
       {previewFailure.shown && (
         <FailureNotice
           context="Previewing the renames"
@@ -834,17 +1042,21 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
             Preview: what would be renamed
           </h3>
           <p>
-            {count(renames.length, 'item', 'items')} would be renamed
-            {kept > 0 ? `, and ${count(kept, 'keeps its name', 'keep their names')}` : ''}, of the{' '}
-            {count(preview.looked, 'item', 'items')} in{' '}
-            {preview.folder === '' ? 'the whole workspace' : `the folder ${preview.folder}`} at
-            revision{' '}
+            {preview.plan.considered === 0
+              ? 'There is no item to rename'
+              : `${count(renames.length, 'item', 'items')} would be renamed, and ${count(preview.plan.unchanged, 'keeps its name', 'keep their names')}, of the ${count(preview.plan.considered, 'item', 'items')} considered`}{' '}
+            in{' '}
+            {preview.folder === ''
+              ? 'the whole workspace'
+              : `the folder ${preview.folder} and the folders under it`}{' '}
+            at revision{' '}
             <code title={preview.plan.base_revision}>{short(preview.plan.base_revision)}</code>.
             Nothing has been renamed.
           </p>
           <p className="meta">
-            Archived items are not listed in the workspace as it is now, so they are not in this
-            preview and would not be renamed. How many there are cannot be told here.
+            {preview.plan.archived_left_out === 0
+              ? 'No archived item is among them.'
+              : `${count(preview.plan.archived_left_out, 'archived item is', 'archived items are')} left out: archived items are never renamed.`}
           </p>
           {stale !== null && (
             <div role="alert" className="failure-notice">

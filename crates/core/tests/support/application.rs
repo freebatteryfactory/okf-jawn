@@ -86,7 +86,7 @@ use okf_jawn_contract::item::{
 };
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::proposal::{Comment, ListProposalsResponse, Proposal};
-use okf_jawn_contract::purge::Purge;
+use okf_jawn_contract::purge::{Purge, PurgeTarget};
 use okf_jawn_contract::read::{AssetRole, OutlineEntry, OutlineEntryKind, Selection};
 use okf_jawn_contract::review::{Confirmation, Review};
 use okf_jawn_contract::search::{
@@ -1621,6 +1621,9 @@ impl RecordStore for FakeRecords {
     ) -> PortFuture<'_, Job> {
         unused()
     }
+    fn seal<'a>(&'a self, _lease: &'a JobLease) -> PortFuture<'a, Job> {
+        unused()
+    }
     fn cancel_job<'a>(
         &'a self,
         _scope: &'a JobScope,
@@ -1667,6 +1670,13 @@ impl RecordStore for FakeRecords {
         unused()
     }
     fn get_purge<'a>(&'a self, _tenant: &'a TenantId, _purge: PurgeId) -> PortFuture<'a, Purge> {
+        unused()
+    }
+    fn find_purge<'a>(
+        &'a self,
+        _tenant: &'a TenantId,
+        _target: &'a PurgeTarget,
+    ) -> PortFuture<'a, Option<Purge>> {
         unused()
     }
     fn update_purge<'a>(&'a self, _tenant: &'a TenantId, _purge: Purge) -> PortFuture<'a, Purge> {
@@ -2222,7 +2232,9 @@ impl ProposalStore for Unused {
     fn update<'a>(
         &'a self,
         _scope: &'a StorageScope,
+        _mutation_id: MutationId,
         _proposal: Proposal,
+        _expected: okf_jawn_contract::proposal::ProposalStatus,
     ) -> PortFuture<'a, Proposal> {
         unused()
     }

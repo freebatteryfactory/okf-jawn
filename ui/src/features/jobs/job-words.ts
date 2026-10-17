@@ -3,9 +3,10 @@
  * generated types name, so a new kind or state fails type checking until it has words.
  *
  * Which states allow what, as the generated request types say: `cancel_job` cancels "pending or
- * running work" (`queued`, `running`); `retry_job` takes an "existing failed job" (`failed`). The
- * wire does not say whether a failed job can be retried, so a retry is offered for every failed
- * job and a refusal is shown as one.
+ * running work" (`queued`, `running`); `retry_job` takes an "existing failed job" (`failed`) that
+ * the service says it will accept again (`retryable`, ruling 2: present exactly when the job
+ * failed). A failed job that does not say so (one recorded before the field existed) is not
+ * offered a retry. Who may do either is `job-control.ts`.
  *
  * A kind or a state this build does not know (a newer service) is said to be unknown, with the
  * service's own word: never a blank, never another state's words. Such a job is offered neither
@@ -55,4 +56,4 @@ export function jobName(job: Job): string {
 }
 
 export const canCancel = (job: Job) => job.state === 'queued' || job.state === 'running';
-export const canRetry = (job: Job) => job.state === 'failed';
+export const canRetry = (job: Job) => job.state === 'failed' && job.retryable === true;

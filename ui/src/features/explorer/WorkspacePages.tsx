@@ -51,7 +51,7 @@ export function DocumentsOrPage({
       {page === 'import' && (
         <ImportPage workspaceId={workspaceId} head={head} canWrite={canWrite} />
       )}
-      {page === 'jobs' && <JobsPage workspaceId={workspaceId} canWrite={canWrite} />}
+      {page === 'jobs' && <JobsPage workspaceId={workspaceId} />}
       {page === 'attention' && <AttentionPage workspaceId={workspaceId} head={head} />}
     </div>
   );

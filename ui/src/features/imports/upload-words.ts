@@ -7,9 +7,11 @@
  * large for the service either: the slot holds more than it said (`slotIsAhead`).
  *
  * The action each allows is what a retry does (`uploading.ts`): "Try again" goes on with the same
- * slot, "Send it again" opens a new one. Every other failure keeps its general words.
+ * slot, "Send it again" opens a new one. A `conflict` whose detail says what the slot holds against
+ * what was announced (`upload_mismatch`, ruling 5) says that, in place of the general guess. Every
+ * other failure keeps its general words.
  */
-import { classifyFailure, type FailureMessage } from '../errors/failure';
+import { classifyFailure, type FailureMessage, mismatchWords } from '../errors/failure';
 import { FileUnreadable, HashUnavailable } from './hash';
 import type { UploadStep } from './upload-list';
 import {
@@ -98,6 +100,13 @@ export function uploadWords(failure: {
         action: SEND_AGAIN,
       };
     case 'conflict':
+      if (step !== 'bytes' && classified.error.detail?.kind === 'upload_mismatch') {
+        return {
+          title: 'What the service holds does not match this file.',
+          advice: `${mismatchWords(classified.error.detail)} Send it again: the file goes into a new upload.`,
+          action: SEND_AGAIN,
+        };
+      }
       return step === 'bytes'
         ? {
             title: 'The service could not take this file’s bytes now.',

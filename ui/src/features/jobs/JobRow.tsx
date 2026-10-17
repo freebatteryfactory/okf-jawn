@@ -2,14 +2,17 @@
  * One job as the service last reported it: what it is, how it stands (in words, never by color),
  * its progress while it has not ended, and its outcome.
  *
- * The wire carries no time for a job, so none is shown; the attempt number is, from the second
- * attempt on. A finished job leads to the items it made: a link for each, pinned to the revision
+ * When the job was accepted, when its current attempt started and when it ended are shown as the
+ * wire gives them (ruling 2), each in the reader's time zone; a job recorded before those times
+ * existed shows none. The attempt number is shown from the second attempt on. A finished job leads to the items it made: a link for each, pinned to the revision
  * the job reports, with the item's conversion state beside it when it is a source. A job that
  * reports no revision gets no links: a link without a revision would read whatever the workspace
  * shows, which may not hold the items yet.
  *
  * Cancel is offered while the job is waiting or running, and asks first, in place: "Keep it
- * running" has focus. "Try the job again" is offered for a failed job.
+ * running" has focus. "Try the job again" is offered for a failed job the service says it will
+ * take again (`retryable`); a failed job says whether it can be. Both are offered only to a person
+ * the operation metadata lets control the job (`job-control.ts`).
  *
  * Idempotency. A press of "Cancel the job" or of "Try the job again" is a new request under a new
  * idempotency key, every time. Only the failure notice's "Try again" repeats a request, the one
@@ -33,6 +36,7 @@ import { useId, useLayoutEffect, useRef, useState } from 'react';
 import { cancelJob, retryJob } from '../../api/generated/sdk.gen';
 import type { ArtifactKind, Job, Revision } from '../../api/generated/types.gen';
 import { type HeldFocus, takeHeld, useWatchedPart } from '../../lib/focus';
+import { Instant } from '../../lib/instant';
 import { keyed } from '../../lib/keys';
 import { wordsFor } from '../../lib/words';
 import { itemOptions } from '../documents/DocumentView';
@@ -40,14 +44,13 @@ import { conversionWord, short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, type FailureMessage, messageFor } from '../errors/failure';
 import { useRetry } from '../errors/retry';
+import { mayControl, useControlRights } from './job-control';
 import { canCancel, canRetry, jobName, jobState } from './job-words';
 import { jobUncertain, rememberJob, unfinished } from './jobs';
 
 export interface JobRowProps {
   workspaceId: string;
   job: Job;
-  /** The person may write in this workspace: only then are Cancel and a retry offered. */
-  canWrite: boolean;
 }
 
 /** Item links shown at first, and added by each "Show more". */
@@ -76,7 +79,7 @@ function jobWords(error: unknown): FailureMessage | undefined {
   return failure.kind === 'api' && failure.error.code === 'conflict' ? JOB_MOVED_ON : undefined;
 }
 
-export function JobRow({ workspaceId, job, canWrite }: JobRowProps) {
+export function JobRow({ workspaceId, job }: JobRowProps) {
   const client = useQueryClient();
   const titleId = useId();
   const name = jobName(job);
@@ -128,8 +131,11 @@ export function JobRow({ workspaceId, job, canWrite }: JobRowProps) {
     loaded: () => rowRef.current,
   });
 
-  const cancellable = canWrite && canCancel(job);
-  const retryable = canWrite && canRetry(job);
+  // Who may control this job: the permission of the operation that started it (ruling 8).
+  const rights = useControlRights(workspaceId);
+  const control = mayControl(job, rights.permissions, rights.route);
+  const cancellable = control && canCancel(job);
+  const retryable = control && canRetry(job);
   // The question is on screen only while the job can still be cancelled.
   const question = asking && cancellable;
 
@@ -163,6 +169,7 @@ export function JobRow({ workspaceId, job, canWrite }: JobRowProps) {
           </>
         )}
       </p>
+      <JobTimes job={job} />
       <Outcome workspaceId={workspaceId} job={job} />
       {keyed(job.warnings, (warning) => JSON.stringify(warning)).map(({ key, value: warning }) => (
         <p key={key} role="note" className="notice">
@@ -236,6 +243,28 @@ export function JobRow({ workspaceId, job, canWrite }: JobRowProps) {
   );
 }
 
+/** When the job was accepted, started and ended, as far as the wire says. */
+function JobTimes({ job }: { job: Job }) {
+  const times = (
+    [
+      ['Accepted', job.created_at],
+      ['Started', job.started_at],
+      ['Ended', job.finished_at],
+    ] as const
+  ).flatMap(([label, at]) => (at === undefined || at === null ? [] : [{ label, at }]));
+  if (times.length === 0) return null;
+  return (
+    <p className="meta">
+      {times.map(({ label, at }, index) => (
+        <span key={label}>
+          {label} <Instant value={at} />
+          {index < times.length - 1 ? '; ' : '.'}
+        </span>
+      ))}
+    </p>
+  );
+}
+
 /** What the job came to, as far as the wire says. */
 function Outcome({ workspaceId, job }: { workspaceId: string; job: Job }) {
   if (job.state === 'cancelled') {
@@ -243,23 +272,34 @@ function Outcome({ workspaceId, job }: { workspaceId: string; job: Job }) {
   }
   if (job.state === 'failed') {
     const error = job.error ?? null;
-    if (error === null) return <p>The service recorded no reason.</p>;
+    const final = job.retryable === false ? <p>The service will not take this job again.</p> : null;
+    if (error === null) {
+      return (
+        <>
+          <p>The service recorded no reason.</p>
+          {final}
+        </>
+      );
+    }
     return (
-      <p>
-        Why: {messageFor(classifyFailure(error)).title}
-        {error.message.length > 0 ? (
-          <>
-            {' '}
-            The service said: <q>{error.message}</q>
-          </>
-        ) : null}
-        {error.request_id ? (
-          <>
-            {' '}
-            Reference: <code>{error.request_id}</code>
-          </>
-        ) : null}
-      </p>
+      <>
+        {final}
+        <p>
+          Why: {messageFor(classifyFailure(error)).title}
+          {error.message.length > 0 ? (
+            <>
+              {' '}
+              The service said: <q>{error.message}</q>
+            </>
+          ) : null}
+          {error.request_id ? (
+            <>
+              {' '}
+              Reference: <code>{error.request_id}</code>
+            </>
+          ) : null}
+        </p>
+      </>
     );
   }
   if (job.state !== 'succeeded') return null;

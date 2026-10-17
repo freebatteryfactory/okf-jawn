@@ -223,6 +223,8 @@ pub struct FakePurger {
     pub calls: AtomicUsize,
     /// Awaited as either purge starts (a long purge).
     pub hold: Mutex<Option<Hold>>,
+    /// The failure the next call answers, after its hold, once.
+    pub failure: Mutex<Option<ApiError>>,
 }
 
 /// The rows `FakeBackups` says each workspace archive it writes left out.
@@ -1073,6 +1075,25 @@ impl Backups for FakeBackups {
     }
 }
 
+impl FakePurger {
+    /// Make the next call answer `error`, after its hold, once.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn fail_next(&self, error: ApiError) -> Result<(), ApiError> {
+        *self.failure.lock().map_err(|_| poisoned())? = Some(error);
+        Ok(())
+    }
+
+    /// The failure a test asked of this call, taken.
+    fn failed(&self) -> Result<(), ApiError> {
+        match self.failure.lock().map_err(|_| poisoned())?.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
 impl Purger for FakePurger {
     fn purge_workspace<'a>(
         &'a self,
@@ -1086,6 +1107,7 @@ impl Purger for FakePurger {
         let hold = hold_of(&self.hold);
         Box::pin(async move {
             held(hold).await?;
+            self.failed()?;
             Ok(report)
         })
     }
@@ -1101,6 +1123,7 @@ impl Purger for FakePurger {
         let hold = hold_of(&self.hold);
         Box::pin(async move {
             held(hold).await?;
+            self.failed()?;
             Ok(report)
         })
     }

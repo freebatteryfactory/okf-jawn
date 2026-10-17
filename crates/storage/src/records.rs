@@ -5,7 +5,9 @@
 //! followed by a read of the row that holds that id, so the unique column, not a lookup, makes
 //! a repeated id a no-op that returns the prior row. A job's wire `Job` is kept as JSON with its
 //! state, scope and lease in columns; the specification and initiator are kept exactly as
-//! written and handed back unchanged on every claim. The job lease is `JOB_LEASE_SECONDS`.
+//! written and handed back unchanged on every claim. The job lease is `JOB_LEASE_SECONDS`. A
+//! job its running claim sealed (`seal`, the `sealed` column of records schema 4) refuses its
+//! cancellation, in the cancellation's own transaction, while it is queued or running.
 
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::events::Receipt;
@@ -21,7 +23,7 @@ use okf_jawn_core::jobs::{
 };
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{ObjectInfo, Page, Provenance, StorageScope};
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::db::{
     Db, conflict, cursor, internal, job_scope_key, json, not_found, page_limit, paged, scope_key,
@@ -218,6 +220,32 @@ impl RecordStore for SqliteRecords {
         }))
     }
 
+    fn seal<'a>(&'a self, lease: &'a JobLease) -> PortFuture<'a, Job> {
+        let lease = lease.clone();
+        Box::pin(self.db.transaction(move |transaction| {
+            let row = leased_row(transaction, lease.job_id)?;
+            if row.token.as_deref() != Some(lease.token.as_str()) {
+                return Err(lost_claim());
+            }
+            let job = decode_job(&row.record)?;
+            // Cancelled first: the cancellation took effect, so the job is not sealed and its
+            // handler stops (the order between the two is this transaction's).
+            if job.state == JobState::Cancelled {
+                return Ok(job);
+            }
+            if job.state != JobState::Running || !row.live() {
+                return Err(lost_claim());
+            }
+            transaction
+                .execute(
+                    "UPDATE jobs SET sealed = 1 WHERE job_id = ?1",
+                    [lease.job_id.0.to_string()],
+                )
+                .map_err(|error| sql(&error))?;
+            Ok(job)
+        }))
+    }
+
     fn cancel_job<'a>(
         &'a self,
         scope: &'a JobScope,
@@ -360,6 +388,19 @@ impl RecordStore for SqliteRecords {
         Box::pin(self.db.transaction(move |transaction| {
             insert_purge(transaction, &tenant, mutation_id, &purge)
         }))
+    }
+
+    fn find_purge<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        target: &'a PurgeTarget,
+    ) -> PortFuture<'a, Option<Purge>> {
+        let tenant = tenant.clone();
+        let target_key = target_key(target);
+        Box::pin(
+            self.db
+                .call(move |connection| purge_of_target(connection, &tenant, &target_key)),
+        )
     }
 
     fn get_purge<'a>(&'a self, tenant: &'a TenantId, purge: PurgeId) -> PortFuture<'a, Purge> {
@@ -813,11 +854,12 @@ fn control(
     {
         guard::refuse(transaction, &tenant, workspace)?;
     }
-    let record: String = transaction
+    let (record, sealed): (String, bool) = transaction
         .query_row(
-            "SELECT record FROM jobs WHERE job_id = ?1 AND tenant_id = ?2 AND workspace_id IS ?3",
+            "SELECT record, sealed FROM jobs
+             WHERE job_id = ?1 AND tenant_id = ?2 AND workspace_id IS ?3",
             params![job_id.0.to_string(), tenant, workspace],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(|error| sql(&error))?
@@ -834,6 +876,10 @@ fn control(
         return Ok(job);
     }
     match (action, &job.state) {
+        // The refusal is returned, so this transaction, the control row with it, is undone.
+        ("cancel", JobState::Queued | JobState::Running) if sealed => Err(conflict(
+            "this job has passed its point of no return; it runs to its end",
+        )),
         ("cancel", JobState::Queued | JobState::Running) => {
             job.state = JobState::Cancelled;
             job.finished_at = Some(seam::now()?);
@@ -876,33 +922,28 @@ fn control(
     }
 }
 
-/// Record a purge with its tenant job, or return the purge already recorded for its id or the
-/// unfinished purge of the same target.
+/// Record a purge with its tenant job, or return the purge already recorded for its id, or
+/// else the purge of the same target (`purge_of_target`).
 fn insert_purge(
     transaction: &Transaction<'_>,
     tenant: &TenantId,
     mutation_id: MutationId,
     purge: &NewPurge,
 ) -> Result<Purge, ApiError> {
-    let target_key = match &purge.target {
-        PurgeTarget::Workspace { workspace_id } => format!("workspace/{}", workspace_id.0),
-        PurgeTarget::Item {
-            workspace_id,
-            item_id,
-        } => format!("item/{}/{}", workspace_id.0, item_id.0),
-    };
+    let target_key = target_key(&purge.target);
     let prior: Option<String> = transaction
         .query_row(
-            "SELECT record FROM purges WHERE tenant_id = ?1
-               AND (purge_id = ?2 OR (target_key = ?3 AND state <> 'completed'))
-             ORDER BY purge_id = ?2 DESC LIMIT 1",
-            params![tenant.as_str(), purge.id.0.to_string(), target_key],
+            "SELECT record FROM purges WHERE tenant_id = ?1 AND purge_id = ?2",
+            params![tenant.as_str(), purge.id.0.to_string()],
             |row| row.get(0),
         )
         .optional()
         .map_err(|error| sql(&error))?;
     if let Some(prior) = prior {
         return serde_json::from_str(&prior).map_err(|error| json(&error));
+    }
+    if let Some(prior) = purge_of_target(transaction, tenant, &target_key)? {
+        return Ok(prior);
     }
     let job = insert_job(
         transaction,
@@ -938,6 +979,38 @@ fn insert_purge(
         )
         .map_err(|error| sql(&error))?;
     Ok(record)
+}
+
+/// The key a purge's target is stored and looked up by (`purges.target_key`).
+fn target_key(target: &PurgeTarget) -> String {
+    match target {
+        PurgeTarget::Workspace { workspace_id } => format!("workspace/{}", workspace_id.0),
+        PurgeTarget::Item {
+            workspace_id,
+            item_id,
+        } => format!("item/{}/{}", workspace_id.0, item_id.0),
+    }
+}
+
+/// The purge a request for the target is answered with (contract ruling 24): the unfinished
+/// one while there is one, otherwise the first completed one, in the order they were recorded.
+fn purge_of_target(
+    connection: &Connection,
+    tenant: &TenantId,
+    target_key: &str,
+) -> Result<Option<Purge>, ApiError> {
+    let found: Option<String> = connection
+        .query_row(
+            "SELECT record FROM purges WHERE tenant_id = ?1 AND target_key = ?2
+             ORDER BY state = 'completed', rowid LIMIT 1",
+            params![tenant.as_str(), target_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| sql(&error))?;
+    found
+        .map(|record| serde_json::from_str(&record).map_err(|error| json(&error)))
+        .transpose()
 }
 
 fn leased_row(transaction: &Transaction<'_>, job_id: JobId) -> Result<LeasedRow, ApiError> {
