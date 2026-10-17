@@ -15,7 +15,9 @@ use okf_jawn_core::conversion::ConversionSettings;
 use okf_jawn_core::jobs::{
     ArtifactRecord, JobScope, JobSpec, artifact_download_path, purge_job_spec, restore_job_spec,
 };
-use okf_jawn_core::storage::{ObjectInfo, StorageScope, derive_purge_id};
+use okf_jawn_core::storage::{
+    ObjectInfo, StorageScope, derive_commit_mutation_id, derive_drain_mutation_id, derive_purge_id,
+};
 use uuid::Uuid;
 
 use check::{TestResult, err_of, some};
@@ -215,6 +217,24 @@ fn a_stored_restore_without_its_editors_is_a_store_fault() -> TestResult {
             editors: vec!["alice".to_owned()],
         }
     );
+    Ok(())
+}
+
+/// A purge's drain cancels each job under an identity of its own, the same on every attempt of
+/// the purge, and no other derivation's.
+#[test]
+fn a_drain_cancels_each_job_under_its_own_stable_identity() -> TestResult {
+    let purge = MutationId(Uuid::try_parse("00000000-0000-4000-8000-000000000005")?);
+    let (first, second) = (JobId(Uuid::from_u128(7)), JobId(Uuid::from_u128(8)));
+    let cancel = derive_drain_mutation_id(purge, first);
+    assert_eq!(cancel, derive_drain_mutation_id(purge, first));
+    assert_ne!(cancel, derive_drain_mutation_id(purge, second));
+    assert_ne!(
+        cancel,
+        derive_drain_mutation_id(MutationId(Uuid::from_u128(6)), first)
+    );
+    assert_ne!(cancel, derive_commit_mutation_id(purge, 0));
+    assert_ne!(cancel, purge);
     Ok(())
 }
 

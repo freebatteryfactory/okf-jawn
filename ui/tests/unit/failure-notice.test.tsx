@@ -3,6 +3,7 @@
  * success. A retry keeps the notice and its focused button on screen until it settles.
  */
 
+import { QueryClientProvider } from '@tanstack/react-query';
 import {
   createMemoryHistory,
   createRootRoute,
@@ -13,8 +14,10 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { type ReactNode, StrictMode, useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
+import { openWorkspaceQueryKey } from '../../src/api/generated/@tanstack/react-query.gen';
 import type { ErrorCode } from '../../src/api/generated/types.gen';
 import { zErrorCode } from '../../src/api/generated/zod.gen';
+import { createQueryClient } from '../../src/app/query-client';
 import { FailureNotice } from '../../src/features/errors/FailureNotice';
 import { classifyFailure, messageFor, shouldRetry } from '../../src/features/errors/failure';
 import { useRetry } from '../../src/features/errors/retry';
@@ -438,6 +441,82 @@ describe('failure messages', () => {
       }),
     );
     expect(messageFor(failure).advice).toBe('Try again in 12 seconds.');
+  });
+
+  describe('typed details (ruling 5)', () => {
+    const HEAD = 'e'.repeat(40);
+
+    it('says a stale base with the head it names, and offers to show that version', () => {
+      const message = messageFor(
+        classifyFailure(
+          apiError('conflict', {
+            field: '/base_revision',
+            detail: { kind: 'stale_base', head: HEAD },
+          }),
+        ),
+      );
+      expect(message).toEqual({
+        title: 'The workspace changed since the version this was made on.',
+        advice:
+          'It now holds revision eeeeeeeeee. Show that version, check what you did, then do it again.',
+        action: { kind: 'show-head', label: 'Show revision eeeeeeeeee', head: HEAD },
+      });
+    });
+
+    it('says an archived workspace with when, and offers nothing to repeat', () => {
+      const message = messageFor(
+        classifyFailure(
+          apiError('conflict', {
+            detail: { kind: 'workspace_archived', archived_at: '2026-01-02T08:15:00.000Z' },
+          }),
+        ),
+      );
+      expect(message.title).toBe('This workspace is archived.');
+      expect(message.advice).toMatch(
+        /^It was archived on .+2026.+: nothing in it can be changed until it is unarchived\. It can still be read\.$/,
+      );
+      expect(message.action).toEqual({ kind: 'none' });
+    });
+
+    it('says what an upload holds against what was announced', () => {
+      const words = (detail: Record<string, unknown>) =>
+        messageFor(
+          classifyFailure(apiError('conflict', { detail: { kind: 'upload_mismatch', ...detail } })),
+        ).advice;
+      expect(words({ expected_bytes: '10', received_bytes: '4' })).toBe(
+        'It was announced with 10 bytes and holds 4.',
+      );
+      expect(words({ expected_bytes: '10', received_bytes: '10', digest_matches: false })).toBe(
+        "It holds the 10 bytes announced, but they do not have the file's SHA-256 hash.",
+      );
+    });
+
+    it('shows the named head when the person asks, and says so', async () => {
+      const client = createQueryClient();
+      const key = openWorkspaceQueryKey({ body: { workspace_id: 'w1' } });
+      client.setQueryData(key, {
+        id: 'w1',
+        name: 'W',
+        description: '',
+        head: 'a'.repeat(40),
+        created_at: '2026-01-01T00:00:00.000Z',
+        permissions: ['read'],
+      });
+      await renderNotice(
+        <QueryClientProvider client={client}>
+          <FailureNotice
+            context="Saving"
+            workspaceId="w1"
+            error={apiError('conflict', { detail: { kind: 'stale_base', head: HEAD } })}
+          />
+        </QueryClientProvider>,
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Show revision eeeeeeeeee' }));
+      expect(client.getQueryData<{ head: string }>(key)?.head).toBe(HEAD);
+      expect(
+        screen.getByText('The workspace now shows revision eeeeeeeeee. Nothing was sent again.'),
+      ).toBeDefined();
+    });
   });
 
   it('keeps a server error whose detail this client cannot read as that server error', () => {

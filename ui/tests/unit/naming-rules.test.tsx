@@ -10,13 +10,18 @@ import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import namingSchema from '../../../api/forms/naming-rules.schema.json';
-import type { ItemSummary, NamingRules } from '../../src/api/generated/types.gen';
+import type { ItemSummary, NamingRules, Warning } from '../../src/api/generated/types.gen';
 import { staleReason } from '../../src/features/conventions/NamingRules';
 import { formHolds, RulesForm, rulesProblems } from '../../src/features/conventions/RulesForm';
-import { keepOrder, type Preview, sameRules } from '../../src/features/conventions/rules';
+import {
+  keepOrder,
+  type Preview,
+  sameRules,
+  storedRulesOf,
+} from '../../src/features/conventions/rules';
 import { resetDraftSessions } from '../../src/features/drafts/saving';
 import { placeOf, samePlace } from '../../src/features/explorer/ExplorerShell';
-import { YAML_PAUSE_MS } from '../../src/lib/yaml';
+import { writeYaml, YAML_PAUSE_MS } from '../../src/lib/yaml';
 import { setYamlEngine, TOO_COMPLEX_WORDS, YAML_LIMIT_MS } from '../../src/lib/yaml-reading';
 import {
   draftsPage,
@@ -48,7 +53,6 @@ import {
   RECEIPT,
   readResponse,
   renderAt,
-  SOURCE,
   sourceSummary,
   WS,
   workspace,
@@ -81,6 +85,16 @@ const rule: NamingRules['rules'][number] = {
   collision: 'reject',
 };
 const savedRules: NamingRules = { schema_version: 1, rules: [rule] };
+
+/** A version that holds no rules file at all: `get_rules` answers neither rules nor a file. */
+const NO_FILE = Symbol('no rules file');
+/** A version whose rules file cannot be read: `get_rules` answers its text and problems. */
+class BrokenFile {
+  readonly unreadable: { text: string; problems: Warning[] };
+  constructor(unreadable: { text: string; problems: Warning[] }) {
+    this.unreadable = unreadable;
+  }
+}
 
 afterEach(() => {
   act(() => resetDraftSessions());
@@ -169,8 +183,14 @@ function service(overrides: Record<string, Handler> = {}, rules: unknown = saved
     '/api/items/list-drafts': () => ok(draftsPage([])),
     '/api/types/list-types': () => ok({ items: [] }),
     [SCHEMA]: () => ok(namingSchema),
-    [RULES]: (body) =>
-      ok(rulesAnswer(state.rules.get(revisionAsked(body, state.head)) ?? savedRules, body)),
+    [RULES]: (body) => {
+      const held = state.rules.get(revisionAsked(body, state.head)) ?? savedRules;
+      if (held === NO_FILE) return ok({ revision: revisionAsked(body, state.head) });
+      if (held instanceof BrokenFile) {
+        return ok({ revision: revisionAsked(body, state.head), unreadable: held.unreadable });
+      }
+      return ok(rulesAnswer(held, body));
+    },
     [SET]: (body) => {
       if (text(body, 'base_revision') !== state.head) {
         return refuse(409, 'conflict', 'the workspace head moved since the base revision');
@@ -183,25 +203,34 @@ function service(overrides: Record<string, Handler> = {}, rules: unknown = saved
     },
     [PREVIEW]: (body) => {
       const revision = revisionAsked(body, state.head);
-      const selection = body.selection as { item_ids?: unknown } | undefined;
-      const ids = Array.isArray(selection?.item_ids) ? selection.item_ids : [];
+      // The selection, as the service resolves it: the workspace, or a folder (and those under it).
+      const selection = body.selection as { kind?: unknown; folder?: unknown } | undefined;
+      const folder = typeof selection?.folder === 'string' ? selection.folder : '';
+      const selected = itemsAt(revision).filter(
+        (item) =>
+          selection?.kind === 'workspace' ||
+          (selection?.kind === 'folder' && item.path.startsWith(`${folder}/`)),
+      );
+      const considered = selected.filter((item) => !item.archived);
+      const entries = considered
+        .map((item) => ({
+          item_id: item.id,
+          from: item.path,
+          to: item.kind === 'source' ? item.path : renamed(item.path, body.rules),
+          warnings:
+            item.id === OTHER ? [{ code: 'ambiguous_date', message: 'No date was found.' }] : [],
+        }))
+        // The plan lists only the items whose path would change.
+        .filter((entry) => entry.from !== entry.to);
       return ok({
         base_revision: revision,
         rules_digest: DIGEST,
-        entries: itemsAt(revision)
-          .filter((item) => ids.includes(item.id))
-          .map((item) => ({
-            item_id: item.id,
-            from: item.path,
-            to: item.kind === 'source' ? item.path : renamed(item.path, body.rules),
-            warnings:
-              item.id === OTHER ? [{ code: 'ambiguous_date', message: 'No date was found.' }] : [],
-          })),
+        entries,
         duplicate_observations: [],
         warnings: [{ code: 'note', message: 'Index files are not renamed.' }],
-        considered: ids.length,
-        unchanged: 0,
-        archived_left_out: 0,
+        considered: considered.length,
+        unchanged: considered.length - entries.length,
+        archived_left_out: selected.length - considered.length,
       });
     },
     [APPLY]: (body) => {
@@ -277,7 +306,7 @@ describe('whether a preview may still be applied', () => {
     unchanged: 0,
     archived_left_out: 0,
   };
-  const preview: Preview = { plan, rules: savedRules, folder: '', looked: 3 };
+  const preview: Preview = { plan, rules: savedRules, folder: '' };
 
   it('holds while the head and the rules are those of the preview, whatever the key order', () => {
     const reordered = { rules: [{ ...rule }], schema_version: 1 };
@@ -452,8 +481,8 @@ describe('the naming rules', () => {
       {
         workspace_id: WS,
         at: { kind: 'revision', revision: HEAD },
-        // The top level, then the folder under it.
-        selection: { kind: 'items', item_ids: [SOURCE, NOTE, OTHER] },
+        // The whole workspace: the service reads its items itself.
+        selection: { kind: 'workspace' },
         rules: { schema_version: 1, rules: [{ ...rule, prefix: '2025-' }] },
       },
     ]);
@@ -467,8 +496,9 @@ describe('the naming rules', () => {
       'notes/plan.mdnotes/2025-plan.mdNo date was found.',
     ]);
     expect(panel().textContent).toContain(
-      '2 items would be renamed, and 1 keeps its name, of the 3 items in the whole workspace',
+      '2 items would be renamed, and 1 keeps its name, of the 3 items considered in the whole workspace',
     );
+    expect(panel().textContent).toContain('No archived item is among them.');
     expect(panel().textContent).toContain('Index files are not renamed.');
     expect(panel().textContent).toContain('Nothing has been renamed.');
     // Nothing was written, and the workspace shows the same version.
@@ -477,27 +507,41 @@ describe('the naming rules', () => {
     expect(api.violations).toEqual([]);
   });
 
-  it('lists every page of a folder before it previews', async () => {
-    const { api } = service({
-      [LIST]: (body) => {
-        const revision = revisionAsked(body, HEAD);
-        const page = body.page as { cursor?: string | null };
-        const second = page.cursor === 'next';
-        return ok({
-          folders: [],
-          items: [{ ...(second ? otherSummary : noteSummary), revision }],
-          revision,
-          next_cursor: second ? null : 'next',
-        });
-      },
+  it('asks the service once for the selection, and lists no folder of its own for it', async () => {
+    const { api } = service();
+    await openRules();
+    const listed = api.callsTo(LIST).length;
+    await setPrefix('2025-');
+    await previewNow();
+    expect(api.callsTo(PREVIEW)).toHaveLength(1);
+    expect(api.callsTo(LIST)).toHaveLength(listed);
+  });
+
+  it('says the counts the plan gives: the items considered, those that keep their names, and the archived left out', async () => {
+    service({
+      [PREVIEW]: (body) =>
+        ok({
+          base_revision: revisionAsked(body, HEAD),
+          rules_digest: DIGEST,
+          entries: [
+            { item_id: NOTE, from: noteSummary.path, to: 'notes/2025-meeting.md', warnings: [] },
+          ],
+          duplicate_observations: [],
+          warnings: [],
+          considered: 4,
+          unchanged: 3,
+          archived_left_out: 2,
+        }),
     });
     await openRules();
     await setPrefix('2025-');
     await previewNow();
-    expect(api.callsTo(PREVIEW).at(0)?.selection).toEqual({
-      kind: 'items',
-      item_ids: [NOTE, OTHER],
-    });
+    expect(panel().textContent).toContain(
+      '1 item would be renamed, and 3 keep their names, of the 4 items considered in the whole workspace',
+    );
+    expect(panel().textContent).toContain(
+      '2 archived items are left out: archived items are never renamed.',
+    );
   });
 
   it('gives the documents back their place when an item is opened from the folders', async () => {
@@ -509,7 +553,7 @@ describe('the naming rules', () => {
     expect(screen.queryByRole('region', { name: 'Naming rules' })).toBeNull();
   });
 
-  it('previews one folder when asked, and asks nothing for a folder that holds no item', async () => {
+  it('previews one folder and those under it when asked, and says when it holds no item', async () => {
     const { api } = service();
     await openRules();
     await setPrefix('2025-');
@@ -517,22 +561,29 @@ describe('the naming rules', () => {
     await userEvent.type(folder, 'notes');
     await previewNow();
     expect(api.callsTo(PREVIEW).at(0)?.selection).toEqual({
-      kind: 'items',
-      item_ids: [NOTE, OTHER],
+      kind: 'folder',
+      folder: 'notes',
+      recursive: true,
     });
+    expect(panel().textContent).toContain(
+      'of the 2 items considered in the folder notes and the folders under it',
+    );
     await userEvent.clear(folder);
     await userEvent.type(folder, 'empty');
     await userEvent.click(button('Preview the renames'));
-    expect(
-      (await screen.findByText('There is nothing to preview.')).closest('[role="alert"]'),
-    ).toBeTruthy();
-    expect(api.callsTo(PREVIEW)).toHaveLength(1);
+    await waitFor(() =>
+      expect(panel().textContent).toContain(
+        'There is no item to rename in the folder empty and the folders under it',
+      ),
+    );
+    expect(api.callsTo(PREVIEW)).toHaveLength(2);
+    expect(within(panel()).queryByRole('button', { name: /Apply this preview/ })).toBeNull();
     await userEvent.clear(folder);
     await userEvent.type(folder, 'a//b');
     await userEvent.click(button('Preview the renames'));
     expect(document.activeElement).toBe(folder);
     expect(folder.getAttribute('aria-invalid')).toBe('true');
-    expect(api.callsTo(PREVIEW)).toHaveLength(1);
+    expect(api.callsTo(PREVIEW)).toHaveLength(2);
   });
 
   it('applies only after the question, sending exactly the plan and the rules of the preview', async () => {
@@ -573,12 +624,11 @@ describe('the naming rules', () => {
               to: 'notes/2025-plan.md',
               warnings: [{ code: 'ambiguous_date', message: 'No date was found.' }],
             },
-            { item_id: SOURCE, from: 'report.pdf.md', to: 'report.pdf.md', warnings: [] },
           ],
           duplicate_observations: [],
           warnings: [{ code: 'note', message: 'Index files are not renamed.' }],
           considered: 3,
-          unchanged: 0,
+          unchanged: 1,
           archived_left_out: 0,
         },
         rules: previewed?.rules,
@@ -812,6 +862,299 @@ describe('the naming rules', () => {
   });
 });
 
+describe('what the version shown holds as its rules', () => {
+  // A file the validator refused: two problems, each named by a JSON Pointer into the file.
+  const brokenText =
+    'schema_version: 2\nrules:\n  - glob: notes/**x\n    case: kebab\n    separator: "-"\n' +
+    '    prefix: ""\n    date_order: ymd\n    date_format: "%Y-%m-%d"\n' +
+    '    strip_version_suffix: true\n    extension_policy: preserve\n' +
+    '    alias_preservation: true\n    collision: reject\n';
+  const broken = new BrokenFile({
+    text: brokenText,
+    problems: [
+      {
+        code: 'rules_schema_version_unknown',
+        message: 'This build reads naming rules of format version 1.',
+        location: '/schema_version',
+      },
+      {
+        code: 'rules_glob_invalid',
+        message: 'The pattern notes/**x is not a valid glob.',
+        location: '/rules/0/glob',
+      },
+    ],
+  });
+  // A file the YAML reader refused: one problem at a line and a column.
+  const unparsed = new BrokenFile({
+    text: 'schema_version: 1\ncolour: red\nrules: []\n',
+    problems: [
+      {
+        code: 'rules_yaml_invalid',
+        message: 'unknown field `colour`, expected `schema_version` or `rules`',
+        location: 'line 2, column 1',
+      },
+    ],
+  });
+  const repaired = { schema_version: 1, rules: [{ ...rule, glob: 'notes/**' }] };
+
+  /** Open the naming rules of a version that holds no readable rules, and wait for the panel. */
+  async function openPanel() {
+    renderAt(`/w/${WS}`);
+    await userEvent.click(await screen.findByRole('button', { name: 'Naming rules' }));
+    await screen.findByRole('heading', { name: 'Naming rules' });
+  }
+  const marked = (box: HTMLElement) =>
+    [...(box.closest('.cm-editor')?.querySelectorAll('.yaml-marked') ?? [])].map(
+      (mark) => mark.textContent,
+    );
+
+  it('reads each answer of get_rules as what it is: a file that cannot be read is never "no rules"', () => {
+    expect(storedRulesOf({ revision: HEAD, rules: savedRules })).toEqual({
+      kind: 'rules',
+      rules: savedRules,
+    });
+    expect(storedRulesOf({ revision: HEAD })).toEqual({ kind: 'none' });
+    expect(storedRulesOf({ revision: HEAD, rules: null, unreadable: null })).toEqual({
+      kind: 'none',
+    });
+    expect(storedRulesOf({ revision: HEAD, unreadable: broken.unreadable })).toEqual({
+      kind: 'unreadable',
+      ...broken.unreadable,
+    });
+  });
+
+  it('says there are no rules yet when none are saved, and starts the first ones from the form', async () => {
+    const { api } = service({}, NO_FILE);
+    await openPanel();
+    await within(panel()).findByRole('button', { name: 'Add a rule' });
+    expect(panel().textContent).toContain('There are no naming rules yet.');
+    expect(panel().textContent).not.toContain('cannot be read');
+    expect(screen.getByRole('tab', { name: 'Form' })).toBeTruthy();
+    // The empty set is no change: there is nothing to save yet.
+    await userEvent.click(button('Save the rules'));
+    expect(api.callsTo(SET)).toEqual([]);
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const box = await findTextBox('The naming rules as YAML');
+    expect(textIn(box)).toBe('schema_version: 1\nrules: []\n');
+    await typeYaml(box, writeYaml(savedRules));
+    await userEvent.click(button('Save the rules'));
+    await waitFor(() => expect(said()).toContain('The rules are saved.'));
+    expect(api.callsTo(SET).map((body) => body.rules)).toEqual([savedRules]);
+    expect(api.callsTo(SET).at(0)?.base_revision).toBe(HEAD);
+    await waitFor(() =>
+      expect(panel().textContent).not.toContain('There are no naming rules yet.'),
+    );
+    expect(api.violations).toEqual([]);
+  });
+
+  it('opens a file that cannot be read in the YAML view, with each problem at its line and column, and offers no form', async () => {
+    const { api } = service({}, broken);
+    await openPanel();
+    const box = await findTextBox('The naming rules as YAML');
+    expect(textIn(box)).toBe(brokenText);
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Naming rules' }));
+    expect(screen.queryByRole('tab', { name: 'Form' })).toBeNull();
+    expect(screen.getByRole('tab', { name: 'YAML' }).getAttribute('aria-selected')).toBe('true');
+    expect(within(panel()).queryByRole('textbox', { name: /^Prefix/ })).toBeNull();
+    expect(panel().textContent).toContain('The saved rules file cannot be read.');
+    expect(panel().textContent).not.toContain('There are no naming rules yet.');
+    expect(panel().textContent).toContain('This is the saved file, unchanged.');
+    // Each pointer is found in the file's text, read off the page's thread.
+    await waitFor(() =>
+      expect(panel().textContent).toContain(
+        'Line 1, column 17 (/schema_version): This build reads naming rules of format version 1.',
+      ),
+    );
+    expect(panel().textContent).toContain(
+      'Line 3, column 11 (/rules/0/glob): The pattern notes/**x is not a valid glob.',
+    );
+    expect(marked(box)).toEqual(['2', 'notes/**x']);
+    // The text box is described by the notice that the file cannot be read.
+    expect(box.getAttribute('aria-describedby')).toContain(
+      within(panel()).getByText('The saved rules file cannot be read.').closest('[id]')?.id ?? '-',
+    );
+    expect(api.violations).toEqual([]);
+  });
+
+  it('shows a problem the YAML reader found at the line and column it gives', async () => {
+    service({}, unparsed);
+    await openPanel();
+    const box = await findTextBox('The naming rules as YAML');
+    expect(panel().textContent).toContain(
+      'Line 2, column 1: unknown field `colour`, expected `schema_version` or `rules`',
+    );
+    expect(marked(box)).toEqual(['colour: red']);
+  });
+
+  it('puts the caret at a problem’s place in the editor, wherever the person’s changes moved it', async () => {
+    service({}, broken);
+    await openPanel();
+    const box = await findTextBox('The naming rules as YAML');
+    await userEvent.click(await screen.findByRole('button', { name: 'Go to line 3, column 11' }));
+    expect(caretIn(box)).toBe(brokenText.indexOf('notes/**x'));
+    expect(box.contains(document.activeElement)).toBe(true);
+    // A line typed above both places: each is found where it went.
+    putCaret(box, 0);
+    typeAtCaret(box, '# fixed below\n');
+    await userEvent.click(screen.getByRole('button', { name: 'Go to line 1, column 17' }));
+    expect(caretIn(box)).toBe('# fixed below\n'.length + 'schema_version: '.length);
+    await userEvent.click(screen.getByRole('button', { name: 'Go to line 3, column 11' }));
+    expect(caretIn(box)).toBe('# fixed below\n'.length + brokenText.indexOf('notes/**x'));
+    expect(marked(box)).toEqual(['2', 'notes/**x']);
+  });
+
+  it('saves the repaired text in place of the file, and then shows the rules it holds as rules', async () => {
+    const { api } = service({}, broken);
+    await openPanel();
+    const box = await findTextBox('The naming rules as YAML');
+    // The file as it is is not sent again.
+    await userEvent.click(button('Save the rules'));
+    expect(api.callsTo(SET)).toEqual([]);
+    await typeYaml(
+      box,
+      brokenText.replace('schema_version: 2', 'schema_version: 1').replace('**x', '**'),
+    );
+    expect(panel().textContent).toContain('Your text differs from the saved file.');
+    // Repaired, it is still text: the form is offered once the rules are saved, not before.
+    expect(screen.queryByRole('tab', { name: 'Form' })).toBeNull();
+    await userEvent.click(button('Save the rules'));
+    await waitFor(() => expect(said()).toContain('The rules are saved.'));
+    expect(api.callsTo(SET)).toEqual([
+      {
+        workspace_id: WS,
+        base_revision: HEAD,
+        idempotency_key: expect.stringMatching(UUID),
+        rules: repaired,
+      },
+    ]);
+    // Read again at the revision the save made: rules, shown as rules.
+    await screen.findByRole('tab', { name: 'Form' });
+    expect(panel().textContent).not.toContain('The saved rules file cannot be read.');
+    expect(screen.getByRole('tab', { name: 'YAML' }).getAttribute('aria-selected')).toBe('true');
+    await userEvent.click(screen.getByRole('tab', { name: 'Form' }));
+    expect(within(panel()).getByRole('textbox', { name: /^Applies to paths/ })).toHaveProperty(
+      'value',
+      'notes/**',
+    );
+    expect(panel().textContent).toContain('These are the saved rules, unchanged.');
+    expect(api.violations).toEqual([]);
+  });
+
+  it('shows another file that cannot be read, saved meanwhile, before the repair replaces it, and asks', async () => {
+    // Someone else saves another file that cannot be read while this page repairs the first.
+    const otherText = 'schema_version: 1\nrules:\n  - glob: "["\n    case: shouting\n';
+    const other = new BrokenFile({
+      text: otherText,
+      problems: [
+        {
+          code: 'rules_glob_invalid',
+          message: 'The pattern [ is not a valid glob.',
+          location: '/rules/0/glob',
+        },
+        {
+          code: 'rules_yaml_invalid',
+          message: 'unknown variant `shouting`',
+          location: 'line 4, column 11',
+        },
+      ],
+    });
+    const own = service({}, broken);
+    await openPanel();
+    const box = await findTextBox('The naming rules as YAML');
+    const mine = brokenText.replace('schema_version: 2', 'schema_version: 1').replace('**x', '**');
+    await typeYaml(box, mine);
+    const next = own.moveHead();
+    own.state.rules.set(next, other);
+    await userEvent.click(button('Save the rules'));
+    await userEvent.click(await screen.findByRole('button', { name: 'Refresh the workspace' }));
+    // The file saved now is on the page, read-only, with what is wrong with it.
+    const theirs = await screen.findByRole('textbox', {
+      name: 'The rules file as it is saved now, which cannot be read (read-only)',
+    });
+    expect(theirs).toHaveProperty('readOnly', true);
+    expect(theirs).toHaveProperty('value', otherText);
+    const note = theirs.closest('[role="note"]');
+    expect(note?.textContent).toContain('The saved rules are no longer the ones you started from.');
+    expect([...(note?.querySelectorAll('li') ?? [])].map((each) => each.textContent)).toEqual([
+      'At /rules/0/glob: The pattern [ is not a valid glob.',
+      'Line 4, column 11: unknown variant `shouting`',
+    ]);
+    // The person's repair is still theirs, in the YAML view.
+    expect(textIn(box)).toBe(mine);
+    // No plain "Save": the button says that it replaces, and asks before it does.
+    expect(screen.queryByRole('button', { name: 'Save the rules' })).toBeNull();
+    await userEvent.click(button('Replace the saved rules with mine…'));
+    expect(screen.getByRole('group', { name: 'Replace the saved rules with yours?' })).toBeTruthy();
+    expect(own.api.callsTo(SET)).toHaveLength(1);
+    await userEvent.click(button('Replace them with mine'));
+    await waitFor(() => expect(said()).toContain('The rules are saved.'));
+    expect(own.api.callsTo(SET).at(1)).toMatchObject({ base_revision: next, rules: repaired });
+    expect(own.api.violations).toEqual([]);
+  });
+
+  it('shows a stored file longer than the YAML view reads, places no pointer in it, and saves nothing until it is shorter', async () => {
+    // Over MAX_YAML_CHARS (16,384): a long comment after the file's rules.
+    const longText = `${brokenText}# ${'x'.repeat(16_400)}\n`;
+    const long = new BrokenFile({
+      text: longText,
+      problems: [
+        {
+          code: 'rules_glob_invalid',
+          message: 'The pattern notes/**x is not a valid glob.',
+          location: '/rules/0/glob',
+        },
+        {
+          code: 'rules_yaml_invalid',
+          message: 'The case kebab is not known here.',
+          location: 'line 4, column 11',
+        },
+      ],
+    });
+    const { api } = service({}, long);
+    await openPanel();
+    const box = await findTextBox('The naming rules as YAML');
+    // Shown whole.
+    expect(textIn(box)).toBe(longText);
+    // Its reading has answered: the text is too long to be read, so the pointer has no place.
+    await turn();
+    await turn();
+    expect(panel().textContent).toContain(
+      'At /rules/0/glob: The pattern notes/**x is not a valid glob.',
+    );
+    // A place the service gave as a line and column needs no reading: it is listed and marked.
+    expect(panel().textContent).toContain('Line 4, column 11: The case kebab is not known here.');
+    expect(marked(box)).toEqual(['kebab']);
+    // An edit is refused as too long, and nothing is saved.
+    await typeYaml(box, `${longText}# more\n`);
+    expect(panel().textContent).toContain('and at most 16384 are read here');
+    await userEvent.click(button('Save the rules'));
+    expect(api.callsTo(SET)).toEqual([]);
+    // Shortened, it is read, and saved.
+    await typeYaml(
+      box,
+      brokenText.replace('schema_version: 2', 'schema_version: 1').replace('**x', '**'),
+    );
+    await userEvent.click(button('Save the rules'));
+    await waitFor(() => expect(said()).toContain('The rules are saved.'));
+    expect(api.callsTo(SET).map((body) => body.rules)).toEqual([repaired]);
+  });
+
+  it('counts the person’s text as an edit of the file before leaving, and the file’s own text as none', async () => {
+    service({}, broken);
+    await openPanel();
+    const box = await findTextBox('The naming rules as YAML');
+    await typeYaml(box, `${brokenText}# a note\n`);
+    await userEvent.click(button('Close the naming rules'));
+    expect(
+      screen.getByRole('group', { name: 'Leave the naming rules without saving?' }),
+    ).toBeTruthy();
+    await userEvent.click(button('Keep editing'));
+    await typeYaml(box, brokenText);
+    await userEvent.click(button('Close the naming rules'));
+    expect(screen.queryByRole('region', { name: 'Naming rules' })).toBeNull();
+  });
+});
+
 describe('a refusal that names a field of the rules or of a preview', () => {
   /** The alert that holds `words`, once it is on the page. */
   const refusalWith = async (words: string) => {
@@ -840,6 +1183,23 @@ describe('a refusal that names a field of the rules or of a preview', () => {
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
     expect(screen.getByText(/Showing the workspace as of/).textContent).toContain('aaaaaaaaaa');
     expect(api.callsTo(SET)).toHaveLength(1);
+  });
+
+  it('set_rules: a refusal at a field of the form is shown at that field, which takes focus', async () => {
+    service({
+      [SET]: () =>
+        refuse(400, 'invalid_input', 'the glob does not parse: unclosed [', '/rules/rules/0/glob'),
+    });
+    await openRules();
+    await setPrefix('2025-');
+    await userEvent.click(button('Save the rules'));
+    await refusalWith('the glob does not parse: unclosed [');
+    const glob = within(panel()).getByRole('textbox', { name: /^Applies to paths/ });
+    await waitFor(() => expect(document.activeElement).toBe(glob));
+    expect(glob.id).toBe('root_rules_0_glob');
+    expect(panel().querySelector('#root_rules_0_glob__error')?.textContent).toContain(
+      'The service refused this: the glob does not parse: unclosed [',
+    );
   });
 
   it('apply_names: the field is named in the notice, and nothing reads as renamed', async () => {
@@ -2098,15 +2458,13 @@ describe('what the two views of the rules say and keep', () => {
     expect(note.getAttribute('role')).toBe('note');
   });
 
-  it('says in a preview that archived items are left out, and that their number cannot be told', async () => {
+  it('says in a preview how many archived items it left out, as the plan counts them', async () => {
     service();
     await openRules();
     await setPrefix('2025-');
     await previewNow();
     const preview = screen.getByRole('region', { name: 'Preview: what would be renamed' });
-    expect(preview.textContent).toContain(
-      'Archived items are not listed in the workspace as it is now, so they are not in this preview and would not be renamed. How many there are cannot be told here.',
-    );
+    expect(preview.textContent).toContain('No archived item is among them.');
   });
 });
 

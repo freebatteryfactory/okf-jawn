@@ -15,7 +15,7 @@
  */
 import { vi } from 'vitest';
 import type { ZodType } from 'zod';
-import type { Draft } from '../../../src/api/generated/types.gen';
+import type { Draft, ItemSummary } from '../../../src/api/generated/types.gen';
 import {
   zApplyNamesRequest,
   zCommitRequest,
@@ -25,7 +25,9 @@ import {
   zDeleteItemRequest,
   zDiscardDraftRequest,
   zDraft,
+  zEmpty,
   zGetItemRequest,
+  zGetReceiptRequest,
   zGetRulesRequest,
   zGetRulesResponse,
   zGetSourcesRequest,
@@ -45,10 +47,12 @@ import {
   zPreviewNamesRequest,
   zReadItemRequest,
   zReadItemResponse,
+  zReceipt,
   zRenamePlan,
   zSaveDraftRequest,
   zSearchRequest,
   zSearchResponse,
+  zSessionResponse,
   zSetLifecycleRequest,
   zSetRulesRequest,
   zWorkspace,
@@ -96,6 +100,8 @@ export const CONTRACT: Record<string, { request: ZodType; response: ZodType }> =
   '/api/reads/read-item': { request: zReadItemRequest, response: zReadItemResponse },
   '/api/reads/get-sources': { request: zGetSourcesRequest, response: zGetSourcesResponse },
   '/api/search/search-items': { request: zSearchRequest, response: zSearchResponse },
+  '/api/events/get-receipt': { request: zGetReceiptRequest, response: zReceipt },
+  '/api/session/get-session': { request: zEmpty, response: zSessionResponse },
 };
 
 /**
@@ -109,14 +115,32 @@ export function fromNewerService<T extends string>(value: string): T {
   return value as T;
 }
 
+/** What a listing finds of an item: its summary, or undefined when it is not there. */
+export type ItemsFound = (itemId: string) => ItemSummary | undefined;
+
+let found: ItemsFound = () => undefined;
+
+/** Name the items a listing finds when a test does not say: `support/workspace.tsx` names its own. */
+export function knowItems(items: ItemsFound) {
+  found = items;
+}
+
 /**
- * A `list_drafts` answer: each draft a row without its item's summary (this build does not read
- * it), at a revision no test reads.
+ * A `list_drafts` answer: each draft a row with its item's summary as the listing read it
+ * (`items`: by default the workspace's own items), without one for an item that is not there, at
+ * a revision no test reads.
  */
-export function draftsPage(drafts: readonly Draft[], nextCursor: string | null = null): Json {
+export function draftsPage(
+  drafts: readonly Draft[],
+  nextCursor: string | null = null,
+  items: ItemsFound = found,
+): Json {
   return {
     revision: '0'.repeat(40),
-    items: drafts.map((draft) => ({ draft })),
+    items: drafts.map((draft) => {
+      const item = items(draft.item_id);
+      return item === undefined ? { draft } : { draft, item };
+    }),
     next_cursor: nextCursor,
   };
 }

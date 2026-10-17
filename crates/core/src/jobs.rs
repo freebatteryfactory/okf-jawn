@@ -321,11 +321,30 @@ pub trait RecordStore: Send + Sync {
     /// whether `retry_job` queues the job again; the code never says it. `field` is a JSON
     /// Pointer into the request that started the job.
     fn fail_job(&self, lease: JobLease, error: ApiError, retryable: bool) -> PortFuture<'_, Job>;
+    /// Mark the job the current claim runs as past its point of no return, and return the job
+    /// as it stands.
+    ///
+    /// From then on `cancel_job` refuses the job while it is unfinished, so its handler goes on
+    /// to its completion: a restore seals before it consumes its upload (`UploadStore::consume`)
+    /// and calls `Backups::restore_import`, whose import cannot be undone midway, so a
+    /// cancellation lands before the consume or not at all. A sealed job may still fail
+    /// (`fail_job`); only its cancellation is refused. A job already cancelled is returned as it
+    /// is, not sealed, and its handler stops: the seal and a cancellation are ordered by the
+    /// store, and only the first of them takes effect. Sealing again changes nothing. The seal stays with the
+    /// job: once its lease lapses and the job is queued again (`expire_leases`), or a failed
+    /// sealed job is retried, it is still sealed, because the attempt that runs it next resumes
+    /// the same work. The wire `Job` does not show it.
+    ///
+    /// Refuses with `Conflict`, sealing nothing, when `lease` is not the job's current,
+    /// unexpired claim of a running job.
+    fn seal<'a>(&'a self, lease: &'a JobLease) -> PortFuture<'a, Job>;
     /// Cancel pending or running work while retaining recorded state.
     ///
     /// Unique on `mutation_id`: a repeated id makes no second transition and returns the job
-    /// row as it stands. Never refused because of a recorded purge: cancelling is the purge's
-    /// own drain.
+    /// row as it stands. Refuses with `Conflict` ("this job has passed its point of no
+    /// return"), writing nothing, a queued or running job that sealed itself (`seal`): its
+    /// work cannot be undone midway, so it runs to its end. Never refused because of a recorded
+    /// purge: cancelling is the purge's own drain, which waits for a sealed job instead.
     fn cancel_job<'a>(
         &'a self,
         scope: &'a JobScope,
@@ -371,15 +390,29 @@ pub trait RecordStore: Send + Sync {
     /// Record a purge and, in the same transaction, its tenant job (`PurgeWorkspace` or
     /// `PurgeItem` from the target) under `mutation_id`.
     ///
-    /// Unique on `purge.id`: a repeated id returns the prior purge. While a purge of the same
-    /// target is not completed, any request for that target returns that unfinished purge and
-    /// records nothing: that is how a failed purge is resumed.
+    /// Unique on `purge.id`: a repeated id returns the prior purge. A request for a target that
+    /// a purge already names returns that purge and records nothing (the one `find_purge`
+    /// answers): the unfinished one while there is one, which is how a failed purge is
+    /// resumed, otherwise the completed one, since a target is purged once (contract ruling
+    /// 24).
     fn create_purge<'a>(
         &'a self,
         tenant: &'a TenantId,
         mutation_id: MutationId,
         purge: NewPurge,
     ) -> PortFuture<'a, Purge>;
+    /// The purge a request for `target` is answered with: the unfinished purge of the target
+    /// while there is one, otherwise the first completed one; `None` when no purge names the
+    /// target. Nothing is recorded.
+    ///
+    /// It is the purge `create_purge` would return instead of recording one, read without
+    /// recording, so a caller answers a recorded purge before it checks what only a new purge
+    /// needs (`purge_workspace` checks `base_revision` only then).
+    fn find_purge<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        target: &'a PurgeTarget,
+    ) -> PortFuture<'a, Option<Purge>>;
     /// Read one purge; it outlives the workspace it removed.
     fn get_purge<'a>(&'a self, tenant: &'a TenantId, purge: PurgeId) -> PortFuture<'a, Purge>;
     /// Store the progress, report or failure of a purge and return it as stored.

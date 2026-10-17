@@ -8,7 +8,8 @@
  * application's root (`drop-guard.ts`): over this box that is what lets a browser deliver the
  * drop, and anywhere else it keeps the file from opening in place of the app. The buttons are the
  * keyboard's way; the drop is the pointer's. Each file is listed with the path it came in and its size before anything is sent,
- * and can be removed. A file larger than this page uploads is listed as too large and never sent.
+ * and can be removed. A file larger than this page uploads, or than the service takes (`limits.upload_bytes`
+ * of `get_session`, once read: Upload waits for it), is listed as too large and never sent.
  * A file of a dropped folder that the browser could not hand over is listed by its path as not
  * readable, and never sent; the other files of the folder are listed as usual. A polite status
  * says how many were listed, and what of a drop was not: a file that could not be read, a folder
@@ -25,10 +26,12 @@
  * that is not drawn itself shown as a mark of its code point (`shownName`), so a right-to-left
  * override cannot make a name read as another; what is sent is the name itself.
  *
- * What stays with the service. The client cannot remove an upload from the service. So a file
- * whose upload was left for a new one says, on its row, that the earlier one stays with the
- * service until it expires; and removing a file some of which was sent says the same in the
- * list's status.
+ * What stays with the service. Nothing expires: an upload stays with the service until it is
+ * imported or discarded. A file whose upload was left for a new one says, on its row, that the
+ * earlier one stays with the service; removing a file some of which was sent says the same in the
+ * list's status. Both are listed under "Uploads the service holds" (`WaitingUploads.tsx`), where
+ * they can be discarded, and where an upload this page did not make (one finished before the page
+ * was opened) can be included in the import.
  *
  * Uploading starts when the person asks. Each file shows how it stands, in words: its own percent
  * while it is sent, and "uploaded" only once the service has verified its length and hash. A file
@@ -43,7 +46,16 @@
  * in its place, else the last row, else "Choose files…". "Upload" never leaves; with nothing to
  * upload it is unavailable (`aria-disabled`), not gone.
  */
-import { type DragEvent, type RefObject, useId, useLayoutEffect, useRef, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  type DragEvent,
+  type RefObject,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import type { Revision } from '../../api/generated/types.gen';
 import { type HeldFocus, takeHeld, useWatchedPart } from '../../lib/focus';
 import { FailureNotice } from '../errors/FailureNotice';
@@ -59,6 +71,7 @@ import {
   pathOf,
 } from './files';
 import { ImportStart, StartedJobs } from './ImportStart';
+import { sessionOptions, uploadLimitOf } from './limits';
 import { describeProblem, shownName } from './paths';
 import {
   collisions,
@@ -72,6 +85,7 @@ import {
 } from './upload-list';
 import { uploadWords } from './upload-words';
 import { removeUpload, retryUpload, uploadChosen } from './uploading';
+import { WaitingUploads } from './WaitingUploads';
 
 export interface ImportPageProps {
   workspaceId: string;
@@ -184,6 +198,14 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
   const listHeading = useId();
   const entries = useWorkspaceUploads(workspaceId);
   const add = useUploads((state) => state.add);
+  const applyLimit = useUploads((state) => state.applyLimit);
+  const client = useQueryClient();
+  // The most the service takes of one file: applied to what is listed once it is known.
+  const session = useQuery(sessionOptions());
+  const limit = uploadLimitOf(session.data);
+  useEffect(() => {
+    if (limit !== null) applyLimit(limit);
+  }, [limit, applyLimit]);
   const [choiceNote, setChoiceNote] = useState('');
   const [over, setOver] = useState(false);
   const filesInput = useRef<HTMLInputElement | null>(null);
@@ -192,7 +214,7 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
   const listRef = useRef<HTMLUListElement | null>(null);
 
   const list = (chosen: readonly ChosenFile[], rest: DropRemainder = NOTHING_LEFT) => {
-    setChoiceNote(describeChoice(add(workspaceId, chosen, rest.unreadable), rest));
+    setChoiceNote(describeChoice(add(workspaceId, chosen, rest.unreadable, limit), rest));
   };
   const picked = (input: HTMLInputElement) => {
     list(chosenFromPicker(input.files ?? []));
@@ -220,6 +242,19 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
   });
 
   const colliding = collisions(entries);
+  // The uploads this page's list holds: not listed again among those the service holds.
+  const own = new Set(
+    entries.flatMap((entry) => [entry.slotId, entry.uploadId].filter((id) => id !== null)),
+  );
+  // The uploads the service holds that the person included in the next import.
+  const [included, setIncluded] = useState<ReadonlySet<string>>(new Set());
+  const include = (uploadId: string, chosen: boolean) =>
+    setIncluded((now) => {
+      const next = new Set(now);
+      if (chosen) next.add(uploadId);
+      else next.delete(uploadId);
+      return next;
+    });
   const toUpload = toBeSent(entries).length;
 
   if (!canWrite) {
@@ -309,7 +344,7 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
                 const path = shownName(pathOf(entry));
                 if (removeUpload(entry.id).leftWithService) {
                   setChoiceNote(
-                    `“${path}” was removed from the list. What was already sent of it stays with the service until it expires: this page has no way to remove it.`,
+                    `“${path}” was removed from the list. What was already sent of it stays with the service: it is listed under “Uploads the service holds”, where you can discard it.`,
                   );
                 }
               }}
@@ -323,7 +358,17 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
           type="button"
           aria-disabled={toUpload === 0}
           onClick={() => {
-            if (toUpload > 0) uploadChosen(workspaceId);
+            if (toUpload === 0) return;
+            // Nothing is sent before the service's limit is known, when it can be: the files over
+            // it are refused here. A session that cannot be read leaves the limit to the service.
+            void client
+              .fetchQuery(sessionOptions())
+              .then((read) => {
+                const known = uploadLimitOf(read);
+                if (known !== null) applyLimit(known);
+              })
+              .catch(() => undefined)
+              .finally(() => uploadChosen(workspaceId));
           }}
         >
           Upload {count(toUpload, 'file', 'files')}
@@ -332,8 +377,17 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
       <p role="status" className="meta">
         {describeUploads(entries)}
       </p>
-      <ImportStart workspaceId={workspaceId} head={head} entries={entries} />
-      <StartedJobs workspaceId={workspaceId} canWrite={canWrite} />
+      <WaitingUploads workspaceId={workspaceId} own={own} included={included} onInclude={include} />
+      <ImportStart
+        workspaceId={workspaceId}
+        head={head}
+        entries={entries}
+        included={[...included]}
+        onStarted={(taken) =>
+          setIncluded((now) => new Set([...now].filter((uploadId) => !taken.includes(uploadId))))
+        }
+      />
+      <StartedJobs workspaceId={workspaceId} />
     </section>
   );
 }
@@ -358,10 +412,15 @@ function Standing({ entry }: { entry: UploadEntry }) {
     case 'failed':
       return <>Not uploaded.</>;
     case 'too-large':
-      return (
+      return entry.over?.whose === 'service' ? (
         <>
-          Too large: this page uploads files of up to {describeSize(MAX_FILE_BYTES)}. It will not be
-          sent.
+          Too large: the service takes files of up to {describeSize(entry.over.bytes)}. It will not
+          be sent.
+        </>
+      ) : (
+        <>
+          Too large: this page uploads files of up to{' '}
+          {describeSize(entry.over?.bytes ?? MAX_FILE_BYTES)}. It will not be sent.
         </>
       );
     case 'unreadable':
@@ -435,8 +494,8 @@ function UploadRow({
       {entry.leftBehind > 0 && (
         <span className="upload-state">
           {' '}
-          What was sent of it before stays with the service until it expires: this page has no way
-          to remove it.
+          What was sent of it before stays with the service: it is listed under “Uploads the service
+          holds”, where you can discard it.
         </span>
       )}{' '}
       {entry.state === 'sending' && (

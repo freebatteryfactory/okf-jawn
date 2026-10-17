@@ -17,8 +17,8 @@ use okf_jawn_contract::{
     error::{ApiError, ErrorCode},
     history::{BlameResponse, DiffResponse, LogResponse},
     identity::{
-        Digest, ItemId, MutationId, ProposalId, PurgeId, Revision, TenantId, WorkspaceId,
-        WorkspacePath,
+        Digest, ItemId, JobId, MutationId, ProposalId, PurgeId, ReviewId, Revision, TenantId,
+        WorkspaceId, WorkspacePath,
     },
     item::{ItemDocument, ItemKind, ItemStatus, ItemSummary, TypeDefinition},
     proposal::Change,
@@ -620,9 +620,11 @@ pub trait VersionStore: Send + Sync {
     /// Accept a candidate: commit the candidate's exact tree on top of `expected_head`.
     ///
     /// Fails with `Conflict`, writing nothing, when the head is not `expected_head` (with
-    /// `ErrorDetail::StaleBase` naming the head and no `field`, as `commit`), when the
-    /// candidate's parent is not `expected_head`, or when `candidate` is not the revision the
-    /// proposal reference retains. The promoted tree is the tree that was checked when the
+    /// `ErrorDetail::StaleBase` naming the head and no `field`, as `commit`); when `candidate` is
+    /// not the revision the proposal reference retains (a plain `Conflict`: it is about no base);
+    /// and when the candidate's parent is not `expected_head`, which is then the head, also with
+    /// `StaleBase` naming the head and no `field`: by contract ruling 5 a candidate drafted on a
+    /// base that is not the head is stale. The promoted tree is the tree that was checked when the
     /// candidate was created, so no check runs here and the result has no warnings. Idempotent
     /// on `promotion.mutation_id` exactly as `commit` is: the store keeps that empty answer as it
     /// keeps a commit's warnings, so a replay answers no warnings either.
@@ -788,15 +790,22 @@ pub trait WorkspaceCatalog: Send + Sync {
 ///
 /// - Record the purge first (`RecordStore::create_purge`), and only then call the purger.
 /// - Before the first call, cancel every queued or running job of the target workspace and
-///   wait until none is running (the drain). From the moment the purge is recorded storage
+///   wait until none is running (the drain). Running is the store's state: a job the drain
+///   cancelled is `cancelled` at once, though its attempt may still be inside a storage call,
+///   and each write that attempt then makes to the workspace is one of those refused below; a
+///   sealed restore is never cancelled, so while its attempt runs, its import, which storage
+///   does not refuse, is waited for. From the moment the purge is recorded storage
 ///   refuses to create, retry or claim a job of the workspace (`RecordStore::create_job`,
 ///   `retry_job`, `claim_job`, each with `Conflict` naming the purge; a refused claim leaves
 ///   the job as it is, for the caller to cancel), but it cannot stop a job that already runs.
-///   A workspace archive and a written history check the refusal before and again under the
+///   A job past its point of no return (a restore that sealed itself, `RecordStore::seal`)
+///   refuses its cancellation: the drain waits for it to finish instead. A workspace archive
+///   and a written history check the refusal before and again under the
 ///   workspace's lock, and store their files as workspace-scoped puts: a pending put is
 ///   recorded before the bytes are retained, and their record lands it, so a stop before the
 ///   record leaves bytes the objects step deletes. An import copies its rows without the
-///   refusal.
+///   refusal; it runs only in a sealed restore, which the drain waits for. Ingest's purge job
+///   handler is this caller.
 ///
 /// What storage guarantees on its own, from the moment the purge is recorded and after the
 /// purge completes:
@@ -814,7 +823,7 @@ pub trait WorkspaceCatalog: Send + Sync {
 ///   for its plan, so each either is in the plan or is refused. Every content-bearing write a
 ///   conversion makes is among these: its object puts, its commits, its derived objects and its
 ///   job completion. Events are not refused: an event carries identities only. Job
-///   cancellation is never refused.
+///   cancellation is never refused because of the purge (only a sealed job's, by its seal).
 /// - A workspace-scoped object put (`BlobStore::put`, an upload completion, an import) pins
 ///   the object for as long as the write runs and then, in one transaction, checks the refusal
 ///   again and records a durable pending put, before it retains the object. Apart from the
@@ -1147,6 +1156,25 @@ pub fn derive_proposal_id(mutation_id: MutationId) -> ProposalId {
     ProposalId(derived_uuid(b"proposal", mutation_id, 0))
 }
 
+/// The identity of the comment written under one mutation (`add_comment`, and the reason a
+/// `decline_proposal` records).
+///
+/// A resumed attempt derives the same identity, so a handler can tell the comment its first
+/// attempt wrote from every other comment of the proposal.
+#[must_use]
+pub fn derive_comment_id(mutation_id: MutationId) -> String {
+    derived_uuid(b"comment", mutation_id, 0).to_string()
+}
+
+/// The identity of the review recorded under one mutation.
+///
+/// A resumed attempt derives the same identity, so it finds among the item's reviews the one its
+/// first attempt recorded.
+#[must_use]
+pub fn derive_review_id(mutation_id: MutationId) -> ReviewId {
+    ReviewId(derived_uuid(b"review", mutation_id, 0))
+}
+
 /// The identity of the purge recorded under one mutation.
 ///
 /// Derived, not allocated, so the tenant job that carries the purge out can name it in its
@@ -1154,6 +1182,21 @@ pub fn derive_proposal_id(mutation_id: MutationId) -> ProposalId {
 #[must_use]
 pub fn derive_purge_id(mutation_id: MutationId) -> PurgeId {
     PurgeId(derived_uuid(b"purge", mutation_id, 0))
+}
+
+/// The identity under which a purge's drain cancels one job of the purged workspace
+/// (`RecordStore::cancel_job`; the `Purger` caller's duty).
+///
+/// Derived from the purge job's mutation and the cancelled job, so a resumed purge cancels each
+/// job under the identity its first attempt used, and the store makes no second transition.
+#[must_use]
+pub fn derive_drain_mutation_id(purge_mutation: MutationId, job: JobId) -> MutationId {
+    let mut hasher = Sha256::new();
+    hasher.update(b"okf-jawn derived identity\0");
+    hasher.update(b"drain\0");
+    hasher.update(purge_mutation.0.as_bytes());
+    hasher.update(job.0.as_bytes());
+    MutationId(version_8(hasher.finalize().into()))
 }
 
 /// A version-8 UUID from SHA-256 of a label, a mutation identity and a count.
@@ -1164,7 +1207,11 @@ fn derived_uuid(label: &[u8], mutation_id: MutationId, ordinal: u32) -> uuid::Uu
     hasher.update(b"\0");
     hasher.update(mutation_id.0.as_bytes());
     hasher.update(ordinal.to_be_bytes());
-    let hash: [u8; 32] = hasher.finalize().into();
+    version_8(hasher.finalize().into())
+}
+
+/// The version-8 UUID of the first sixteen bytes of a hash.
+fn version_8(hash: [u8; 32]) -> uuid::Uuid {
     let mut bytes = [0_u8; 16];
     for (target, source) in bytes.iter_mut().zip(hash) {
         *target = source;

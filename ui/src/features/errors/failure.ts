@@ -8,11 +8,18 @@
  * failure like any other: it reads "not available in this build" and is never shown as a success,
  * an empty result or a silent nothing. The message table is keyed by every `ErrorCode`, so a new
  * code fails type checking until it has words.
+ *
+ * A typed detail (ruling 5) says more than its code, and its words say so with the action it
+ * allows: `stale_base` names the head the request was compared with, and offers to show that
+ * version (`show-head`); `workspace_archived` says when, and that nothing can be changed until it is
+ * unarchived; `upload_mismatch` says what the slot holds against what was announced. A refusal's
+ * `field` is a JSON Pointer into the request (`/base_revision`, `/rules/0/glob`).
  */
 import type { z } from 'zod';
-import type { ErrorCode } from '../../api/generated/types.gen';
+import type { ErrorCode, Revision } from '../../api/generated/types.gen';
 import { zApiError } from '../../api/generated/zod.gen';
 import { RequestStopped, RequestTimedOut } from '../../app/api-client';
+import { formatInstant } from '../../lib/instant';
 
 export type ApiFailure = z.infer<typeof zApiError>;
 
@@ -26,6 +33,8 @@ export type Failure =
 export type FailureAction =
   | { kind: 'retry'; label: string }
   | { kind: 'home'; label: string }
+  /** Show the workspace at `head`, the version the service compared the request with. */
+  | { kind: 'show-head'; label: string; head: Revision }
   | { kind: 'none' };
 
 export interface FailureMessage {
@@ -149,6 +158,32 @@ export function messageFor(failure: Failure): FailureMessage {
   if (detail?.kind === 'in_progress') {
     return { ...base, advice: `Try again in ${detail.retry_after} seconds.` };
   }
+  if (detail?.kind === 'stale_base') {
+    return {
+      title: 'The workspace changed since the version this was made on.',
+      advice: `It now holds revision ${detail.head.slice(0, 10)}. Show that version, check what you did, then do it again.`,
+      action: {
+        kind: 'show-head',
+        label: `Show revision ${detail.head.slice(0, 10)}`,
+        head: detail.head,
+      },
+    };
+  }
+  if (detail?.kind === 'workspace_archived') {
+    const when = formatInstant(detail.archived_at) ?? detail.archived_at;
+    return {
+      title: 'This workspace is archived.',
+      advice: `It was archived on ${when}: nothing in it can be changed until it is unarchived. It can still be read.`,
+      action: { kind: 'none' },
+    };
+  }
+  if (detail?.kind === 'upload_mismatch') {
+    return {
+      title: 'What the service holds does not match this file.',
+      advice: mismatchWords(detail),
+      action: { kind: 'none' },
+    };
+  }
   if (detail?.kind === 'invalidated') {
     return {
       ...base,
@@ -159,6 +194,20 @@ export function messageFor(failure: Failure): FailureMessage {
     };
   }
   return base;
+}
+
+/** What an upload's slot holds against what was announced (`upload_mismatch`), in words. */
+export function mismatchWords(detail: {
+  expected_bytes: string;
+  received_bytes: string;
+  digest_matches?: boolean | null | undefined;
+}): string {
+  if (detail.expected_bytes !== detail.received_bytes) {
+    return `It was announced with ${detail.expected_bytes} bytes and holds ${detail.received_bytes}.`;
+  }
+  return detail.digest_matches === false
+    ? `It holds the ${detail.expected_bytes} bytes announced, but they do not have the file's SHA-256 hash.`
+    : `It holds the ${detail.expected_bytes} bytes announced.`;
 }
 
 /** Codes a repeat of the same request can cure without anyone changing anything. */

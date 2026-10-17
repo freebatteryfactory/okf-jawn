@@ -20,7 +20,7 @@ use okf_jawn_contract::{
     },
     import::{Job, ListJobsResponse},
     item::{ItemDocument, ItemSummary, TypeDefinition},
-    purge::Purge,
+    purge::{Purge, PurgeTarget},
     review::Review,
 };
 use okf_jawn_core::jobs::{
@@ -367,6 +367,9 @@ impl RecordStore for FakeRecords {
     ) -> PortFuture<'_, Job> {
         unused()
     }
+    fn seal<'a>(&'a self, _lease: &'a JobLease) -> PortFuture<'a, Job> {
+        unused()
+    }
     fn cancel_job<'a>(
         &'a self,
         _scope: &'a JobScope,
@@ -413,6 +416,13 @@ impl RecordStore for FakeRecords {
         unused()
     }
     fn get_purge<'a>(&'a self, _tenant: &'a TenantId, _purge: PurgeId) -> PortFuture<'a, Purge> {
+        unused()
+    }
+    fn find_purge<'a>(
+        &'a self,
+        _tenant: &'a TenantId,
+        _target: &'a PurgeTarget,
+    ) -> PortFuture<'a, Option<Purge>> {
         unused()
     }
     fn update_purge<'a>(&'a self, _tenant: &'a TenantId, _purge: Purge) -> PortFuture<'a, Purge> {

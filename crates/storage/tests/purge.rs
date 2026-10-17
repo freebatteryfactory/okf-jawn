@@ -915,8 +915,10 @@ async fn purge_reaches_a_schema_2_copy_that_has_no_table_of_kept_warnings() -> T
         .join("backups")
         .join("pre-migration")
         .join("records-v2-1.sqlite");
-    rusqlite::Connection::open(&copy)?
-        .execute_batch("DROP TABLE commit_warnings; PRAGMA user_version = 2;")?;
+    rusqlite::Connection::open(&copy)?.execute_batch(
+        "DROP TABLE commit_warnings; ALTER TABLE jobs DROP COLUMN sealed;
+             PRAGMA user_version = 2;",
+    )?;
     assert!(
         marked_files(directory.path())?.contains(&copy.display().to_string()),
         "the copy holds the marker before the purge"
@@ -1151,6 +1153,64 @@ async fn purge_reaches_a_pre_migration_set_written_after_a_failed_attempt() -> T
     Ok(())
 }
 
+/// Contract ruling 14 (core M1.4b fix round 1, ruling F1): a survivor's archive in the object
+/// store whose bytes do not read stops the purge with the reader's code, naming the archive by
+/// identity (its workspace and its digest) and by no path. Repeating the call once the archive
+/// is repaired resumes the purge, which completes and scrubs the archive.
+#[tokio::test]
+async fn purge_stopped_by_a_survivors_unreadable_archive_names_it_and_resumes_once_repaired()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let archive = fixture
+        .storage
+        .backups()
+        .write_workspace_archive(&fixture.survivor, uuid!(71)?)
+        .await?
+        .object
+        .digest;
+    let file = directory
+        .path()
+        .join("objects")
+        .join("local")
+        .join(some(archive.as_str().get(..2), "a digest")?)
+        .join(archive.as_str());
+    let readable = std::fs::read(&file)?;
+    std::fs::write(&file, b"not a zip")?;
+    let purge: PurgeId = uuid!(60)?;
+    record_purge(&fixture.storage, &fixture, purge).await?;
+    let (purger, tenant) = (fixture.storage.purger(), tenant()?);
+    let stopped = err_of(
+        purger
+            .purge_workspace(&tenant, uuid!(61)?, purge, fixture.target.workspace_id)
+            .await,
+    )?;
+    assert_eq!(stopped.code, ErrorCode::InvalidInput, "{}", stopped.message);
+    assert!(
+        stopped
+            .message
+            .contains(&fixture.survivor.workspace_id.0.to_string())
+            && stopped.message.contains(archive.as_str()),
+        "the archive is named by identity: {}",
+        stopped.message
+    );
+    assert!(
+        !stopped
+            .message
+            .contains(&directory.path().display().to_string()),
+        "{}",
+        stopped.message
+    );
+    assert_eq!(stopped.field, None, "no pointer into a restore's request");
+    std::fs::write(&file, readable)?;
+    let report = purger
+        .purge_workspace(&tenant, uuid!(61)?, purge, fixture.target.workspace_id)
+        .await?;
+    assert_eq!(report.backups_rewritten, 1, "the survivor's archive");
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    Ok(())
+}
+
 /// A completed ledger row of `tenant` for `operation` under key `n`, recording `workspace`.
 async fn completed_row(
     storage: &Storage,
@@ -1176,12 +1236,13 @@ async fn completed_row(
     Ok(())
 }
 
-/// Put a records database back as records schema 1 left it: without the tables schemas 2 and 3 add,
-/// without the ledger's workspace column, and with the events table as it was before event keys.
+/// Put a records database back as records schema 1 left it: without the tables schemas 2 and 3
+/// add and the job column schema 4 adds, without the ledger's workspace column, and with the
+/// events table as it was before event keys.
 fn as_records_schema_1(records: &Path) -> TestResult {
     let connection = rusqlite::Connection::open(records)?;
     connection.execute_batch(
-        "DROP TABLE commit_warnings;
+        "ALTER TABLE jobs DROP COLUMN sealed; DROP TABLE commit_warnings;
          DROP TABLE purge_progress; DROP TABLE backup_archives; DROP TABLE restores;
          DROP TABLE pending_puts; DROP TABLE replacement_restores;
          DROP INDEX mutations_by_workspace; ALTER TABLE mutations DROP COLUMN workspace_id;
@@ -1861,7 +1922,9 @@ async fn refuse_discussion(
     let mut changed = open.clone();
     changed.status = ProposalStatus::Declined;
     refused(
-        proposals.update(target, changed).await,
+        proposals
+            .update(target, uuid!(28)?, changed, ProposalStatus::Open)
+            .await,
         &format!("a proposal update {when}"),
     )?;
     let comment: Comment = serde_json::from_value(json!({

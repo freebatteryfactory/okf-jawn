@@ -2,14 +2,20 @@
  * Ground for the import tests: files as a browser hands them over, a small upload service that
  * keeps the rules of the real one, and contract-valid jobs.
  *
- * The upload service follows `crates/storage/src/uploads.rs`, which the tests do not run:
- * - `create_upload` is unique on its idempotency key: a repeat opens nothing and answers the slot
- *   as it stands, with the bytes it holds;
+ * The upload service follows `crates/storage/src/uploads.rs` and contract batch 2 (ruling 3),
+ * which the tests do not run:
+ * - `create_upload` is unique on its idempotency key: a repeat opens nothing and answers the
+ *   response first given; `get_upload` reads the slot as it stands now, with the bytes it holds;
  * - `upload_content` appends; a body that would pass the announced size appends nothing and is
  *   `too_large`; a complete slot takes no more bytes (`conflict`);
  * - `complete_upload` is `conflict` unless the slot holds exactly the announced length, and unless
  *   the SHA-256 of what it holds is the one sent (and the one announced). The hash is computed
- *   here from the bytes that arrived, so a wrong hash or wrong bytes are refused, not believed.
+ *   here from the bytes that arrived, so a wrong hash or wrong bytes are refused, not believed;
+ * - `list_uploads` lists the slots newest first, by state: `incomplete`, `waiting` (complete and
+ *   not consumed), `consumed`; a page holds at most the limit asked (and at most `pageSize`, which
+ *   a test sets to make the service page with few slots), and `next_cursor` names where the next
+ *   page starts; `discard_upload` removes a slot and its bytes, is `conflict` for one a job
+ *   consumed, and a repeat under its key answers the response first given.
  * A test scripts the awkward answers: each scripted step replaces one answer, in order.
  */
 import { vi } from 'vitest';
@@ -18,12 +24,16 @@ import {
   zCancelJobRequest,
   zCompleteUploadRequest,
   zCreateUploadRequest,
+  zDiscardUploadRequest,
   zGetAttentionRequest,
   zGetAttentionResponse,
   zGetJobRequest,
+  zGetUploadRequest,
   zJob,
   zListJobsRequest,
   zListJobsResponse,
+  zListUploadsRequest,
+  zListUploadsResponse,
   zRetryJobRequest,
   zStartImportRequest,
   zUpload,
@@ -34,6 +44,9 @@ import { HEAD, WS } from './workspace';
 
 export const CREATE = '/api/imports/create-upload';
 export const COMPLETE = '/api/imports/complete-upload';
+export const GET_UPLOAD = '/api/imports/get-upload';
+export const LIST_UPLOADS = '/api/imports/list-uploads';
+export const DISCARD_UPLOAD = '/api/imports/discard-upload';
 export const START = '/api/imports/start-import';
 export const JOBS = '/api/imports/list-jobs';
 export const JOB = '/api/imports/get-job';
@@ -44,6 +57,9 @@ export const ATTENTION = '/api/attention/get-attention';
 Object.assign(CONTRACT, {
   [CREATE]: { request: zCreateUploadRequest, response: zUpload },
   [COMPLETE]: { request: zCompleteUploadRequest, response: zUpload },
+  [GET_UPLOAD]: { request: zGetUploadRequest, response: zUpload },
+  [LIST_UPLOADS]: { request: zListUploadsRequest, response: zListUploadsResponse },
+  [DISCARD_UPLOAD]: { request: zDiscardUploadRequest, response: zUpload },
   [START]: { request: zStartImportRequest, response: zJob },
   [JOBS]: { request: zListJobsRequest, response: zListJobsResponse },
   [JOB]: { request: zGetJobRequest, response: zJob },
@@ -177,7 +193,7 @@ export function dropOf(entries: DroppedEntry[]) {
   };
 }
 
-interface Slot {
+export interface Slot {
   id: string;
   key: string;
   filename: string;
@@ -186,6 +202,12 @@ interface Slot {
   announced: string | null;
   parts: Blob[];
   complete: boolean;
+  /** The job that took it; null while none has. */
+  consumedBy: string | null;
+  /** When it was opened: the order of the listing, newest first. */
+  createdAt: string;
+  /** What `create_upload` first answered: a repeat under its key answers this. */
+  first: Upload | null;
 }
 
 async function sha256Of(content: Blob): Promise<string> {
@@ -203,6 +225,11 @@ export interface UploadService {
   transfer: TransferHandler;
   /** Every slot opened, in order. */
   slots: Slot[];
+  /**
+   * The most one page of `list_uploads` holds, below the limit asked ("server may return fewer"):
+   * none by default.
+   */
+  pageSize: number | null;
   /** The bytes a slot holds, as text. */
   held: (slot: Slot | undefined) => Promise<string>;
   /** Take a transfer's bytes as the service usually does, and say what it answers. */
@@ -213,18 +240,53 @@ export interface UploadService {
     /** Returning nothing leaves the transfer open for the test to drive. */
     put: Array<(transfer: Transfer, usual: () => Reply) => Reply | Promise<Reply> | undefined>;
     complete: Array<Scripted<Json>>;
+    /** For get_upload: the slot as it stands. */
+    get: Array<Scripted<Json>>;
+  };
+}
+
+/** A slot the service holds already, from before the page opened: complete unless said. */
+export function slotOf(
+  number: number,
+  filename: string,
+  content: string,
+  extra: Partial<Slot> = {},
+): Slot {
+  const bytes = new Blob([content]);
+  return {
+    id: `66666666-6666-4666-8666-${String(number).padStart(12, '0')}`,
+    key: crypto.randomUUID(),
+    filename,
+    relativePath: '',
+    expected: bytes.size,
+    announced: null,
+    parts: [bytes],
+    complete: true,
+    consumedBy: null,
+    createdAt: `2026-01-0${number}T08:00:00.000Z`,
+    first: null,
+    ...extra,
   };
 }
 
 export function uploadService(): UploadService {
   const slots: Slot[] = [];
+  /** The answers of `discard_upload`, by key: a repeat answers the first. */
+  const discarded = new Map<string, Upload>();
   const view = (slot: Slot): Upload => ({
     id: slot.id,
     workspace_id: WS,
     upload_path: `/api/workspaces/${WS}/uploads/${slot.id}/content`,
     received_bytes: String(slot.parts.reduce((sum, part) => sum + part.size, 0)),
     complete: slot.complete,
+    filename: slot.filename,
+    relative_path: slot.relativePath,
+    size: String(slot.expected),
+    created_at: slot.createdAt,
+    ...(slot.consumedBy === null ? {} : { consumed_by: slot.consumedBy }),
   });
+  const stateOf = (slot: Slot) =>
+    slot.consumedBy !== null ? 'consumed' : slot.complete ? 'waiting' : 'incomplete';
   const accept = (transfer: Transfer): Reply => {
     const slot = slots.find((candidate) => transfer.path.includes(candidate.id));
     if (slot === undefined) return fail(404, 'not_found', 'no such upload');
@@ -242,14 +304,16 @@ export function uploadService(): UploadService {
   };
   const service: UploadService = {
     slots,
+    pageSize: null,
     held: (slot) => new Blob(slot?.parts ?? []).text(),
     accept,
-    script: { create: [], put: [], complete: [] },
+    script: { create: [], put: [], complete: [], get: [] },
     handlers: {
       [CREATE]: (body) => {
         const usual = () => {
           const known = slots.find((slot) => slot.key === body.idempotency_key);
-          if (known !== undefined) return ok(view(known));
+          // A repeat answers the response first given, not the slot as it stands.
+          if (known !== undefined) return ok(known.first ?? view(known));
           const slot: Slot = {
             id: `77777777-7777-4777-8777-${String(slots.length + 1).padStart(12, '0')}`,
             key: String(body.idempotency_key),
@@ -259,9 +323,13 @@ export function uploadService(): UploadService {
             announced: typeof body.sha256 === 'string' ? body.sha256 : null,
             parts: [],
             complete: false,
+            consumedBy: null,
+            createdAt: `2026-01-02T08:${String(slots.length).padStart(2, '0')}:00.000Z`,
+            first: null,
           };
+          slot.first = view(slot);
           slots.push(slot);
-          return ok(view(slot));
+          return ok(slot.first);
         };
         return (service.script.create.shift() ?? ((_body, proceed) => proceed()))(body, usual);
       },
@@ -286,6 +354,42 @@ export function uploadService(): UploadService {
         };
         return (service.script.complete.shift() ?? ((_body, proceed) => proceed()))(body, usual);
       },
+      [GET_UPLOAD]: (body) => {
+        const usual = () => {
+          const slot = slots.find((candidate) => candidate.id === body.upload_id);
+          return slot === undefined ? fail(404, 'not_found', 'no such upload') : ok(view(slot));
+        };
+        return (service.script.get.shift() ?? ((_body, proceed) => proceed()))(body, usual);
+      },
+      [LIST_UPLOADS]: (body) => {
+        const state = typeof body.state === 'string' ? body.state : null;
+        const listed = slots
+          .filter((slot) => state === null || stateOf(slot) === state)
+          .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+        const page = body.page as { limit: number; cursor?: string | null };
+        // Opaque to the page; here, where the next page starts in the list as it stands.
+        const from = typeof page.cursor === 'string' ? Number(page.cursor) : 0;
+        const size = Math.min(page.limit, service.pageSize ?? page.limit);
+        const to = from + size;
+        return ok({
+          items: listed.slice(from, to).map(view),
+          next_cursor: to < listed.length ? String(to) : null,
+        });
+      },
+      [DISCARD_UPLOAD]: (body) => {
+        const key = String(body.idempotency_key);
+        const answered = discarded.get(key);
+        if (answered !== undefined) return ok(answered);
+        const slot = slots.find((candidate) => candidate.id === body.upload_id);
+        if (slot === undefined) return fail(404, 'not_found', 'no such upload');
+        if (slot.consumedBy !== null) {
+          return fail(409, 'conflict', 'a job has consumed this upload');
+        }
+        slots.splice(slots.indexOf(slot), 1);
+        const answer = view(slot);
+        discarded.set(key, answer);
+        return ok(answer);
+      },
     },
     transfer: (transfer) => {
       const scripted = service.script.put.shift();
@@ -299,6 +403,10 @@ export const JOB_ID = '88888888-8888-4888-8888-888888888888';
 /** The revision an import made. */
 export const IMPORTED = 'f'.repeat(40);
 
+/**
+ * A job as the service records it. A failed one says whether `retry_job` will take it
+ * (`retryable`, present exactly when the job failed): by default it will.
+ */
 export function jobOf(state: Job['state'], extra: Partial<Job> = {}): Job {
   return {
     id: JOB_ID,
@@ -309,6 +417,7 @@ export function jobOf(state: Job['state'], extra: Partial<Job> = {}): Job {
     item_ids: [],
     warnings: [],
     workspace_id: WS,
+    ...(state === 'failed' ? { retryable: true } : {}),
     ...extra,
   };
 }

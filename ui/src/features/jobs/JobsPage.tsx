@@ -32,8 +32,6 @@ import { JOBS_POLL_MS, JOBS_SAFETY_POLL_MS, jobsOptions, sessionEnded } from './
 
 export interface JobsPageProps {
   workspaceId: string;
-  /** The person may write in this workspace: only then are Cancel and a retry offered. */
-  canWrite: boolean;
 }
 
 /** How the list stays current, in words. `signedOut`: the service said the session has ended. */
@@ -80,7 +78,7 @@ function listedOnce(pages: ReadonlyArray<{ items: Job[] }> | undefined): Job[] {
   return [...byId.values()];
 }
 
-export function JobsPage({ workspaceId, canWrite }: JobsPageProps) {
+export function JobsPage({ workspaceId }: JobsPageProps) {
   const heading = useId();
   const headingRef = useRef<HTMLHeadingElement | null>(null);
   const listRef = useRef<HTMLUListElement | null>(null);
@@ -172,7 +170,7 @@ export function JobsPage({ workspaceId, canWrite }: JobsPageProps) {
       {listed.length > 0 && (
         <ul ref={listRef} className="job-list" aria-labelledby={heading}>
           {listed.map((job) => (
-            <JobRow key={job.id} workspaceId={workspaceId} job={job} canWrite={canWrite} />
+            <JobRow key={job.id} workspaceId={workspaceId} job={job} />
           ))}
         </ul>
       )}

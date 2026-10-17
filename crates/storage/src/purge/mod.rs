@@ -403,15 +403,21 @@ impl StoragePurger {
                     copies::remove(&directory.join(name))?;
                 }
                 let mut rewritten = Vec::new();
-                for name in copies::other_archives(&directory, &tenant, &workspace)? {
-                    let archive = directory.join(&name);
+                for other in copies::other_archives(&directory, &tenant, &workspace)? {
+                    let archive = directory.join(&other.name);
                     let next = archive.with_extension("rewrite");
                     if copies::rewrite_archive(
-                        &archive, &next, &staging, &tenant, &workspace, purge,
+                        &archive,
+                        &next,
+                        &staging,
+                        &tenant,
+                        &workspace,
+                        purge,
+                        &other.survivor,
                     )? {
                         std::fs::rename(&next, &archive)
                             .map_err(|error| io_error("replace", &archive, &error))?;
-                        rewritten.push(name);
+                        rewritten.push(other.name);
                     }
                 }
                 Ok((rewrite, remove, rewritten))
@@ -449,7 +455,7 @@ impl StoragePurger {
         for old in &plan.superseded {
             self.storage.blobs.remove_for(&scope.tenant_id, old)?;
         }
-        for old in digests {
+        for (old, owner) in digests {
             let path = self.storage.blobs.local_path(&scope.tenant_id, &old)?;
             if !path.is_file() {
                 continue;
@@ -458,8 +464,14 @@ impl StoragePurger {
             let rewritten = {
                 let (next, staging) = (next.clone(), staging.to_path_buf());
                 let (tenant, workspace) = (tenant.clone(), workspace.clone());
+                let survivor = format!(
+                    "workspace {owner}'s archive {} in the object store",
+                    old.as_str()
+                );
                 blocking(move || {
-                    copies::rewrite_archive(&path, &next, &staging, &tenant, &workspace, purge)
+                    copies::rewrite_archive(
+                        &path, &next, &staging, &tenant, &workspace, purge, &survivor,
+                    )
                 })
                 .await?
             };
@@ -880,31 +892,31 @@ fn archives(
 }
 
 /// The workspace archives of the tenant's other workspaces in the object store: those written
-/// (`backup_archives`) and those recorded as artifacts.
+/// (`backup_archives`) and those recorded as artifacts, each with the workspace it is of.
 fn other_archives(
     connection: &Connection,
     tenant: &str,
     workspace: &str,
-) -> Result<Vec<Digest>, ApiError> {
+) -> Result<Vec<(Digest, String)>, ApiError> {
     let kind = variant_text!(&ArtifactKind::WorkspaceBackup)?;
     let mut statement = connection
         .prepare(
-            "SELECT digest FROM backup_archives
+            "SELECT digest, workspace_id FROM backup_archives
                WHERE tenant_id = ?1 AND workspace_id IS NOT NULL AND workspace_id <> ?2
-             UNION SELECT digest FROM artifacts
+             UNION SELECT digest, workspace_id FROM artifacts
                WHERE tenant_id = ?1 AND workspace_id <> ?2 AND kind = ?3",
         )
         .map_err(|error| sql(&error))?;
-    let digests = statement
+    let archives = statement
         .query_map(params![tenant, workspace, kind], |row| {
-            row.get::<_, String>(0)
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
         .map_err(|error| sql(&error))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| sql(&error))?;
-    digests
-        .iter()
-        .map(|digest| from_text!(digest.as_str()))
+    archives
+        .into_iter()
+        .map(|(digest, owner)| Ok((from_text!(digest.as_str())?, owner)))
         .collect()
 }
 

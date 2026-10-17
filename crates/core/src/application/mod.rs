@@ -6,8 +6,10 @@
 //! `ports::Application` implementation for `ApplicationService` is organized as cohesive child
 //! modules of this one: `items` (folders, items and types), `drafts`, `reads` (`read_item` and
 //! sandbox capabilities), `sources` (citations and object reads), `history` (Timeline, Changes,
-//! Who, Snapshot and Rewind), `navigation` (search, links and the graph), `status` (health,
-//! readiness and the session), `workspaces` (the catalog, archive, export, backup and restore),
+//! Who, Snapshot and Rewind), `navigation` (search, links and the graph), `proposals`
+//! (proposals, their acceptance and discussion), `reviews` (confirmations and reviews),
+//! `status` (health, readiness and the session), `purges` (recording, resuming and reading
+//! a workspace purge), `workspaces` (the catalog, archive, export, backup and restore),
 //! `events` (receipts and the two event logs) and `connectors` (local connector credentials),
 //! over the shared steps in `shared` (revision resolution, commits, receipts). Besides the
 //! operations, the service answers dispatch's archive question (`Application::archived_at`)
@@ -49,6 +51,7 @@ use crate::search::SearchIndex;
 use crate::storage::{BlobStore, CandidateCheck, StorageScope, VersionStore, WorkspaceCatalog};
 use crate::uploads::UploadStore;
 
+pub use reviews::CONFIRMATION_TTL;
 pub use sources::MAX_OBJECT_BLOCK;
 
 /// The handler of one operation: its function in a child module, or `pending` while the
@@ -182,6 +185,42 @@ macro_rules! route {
     };
     (revoke_connector) => {
         connectors::revoke_connector
+    };
+    (purge_workspace) => {
+        purges::purge_workspace
+    };
+    (get_purge) => {
+        purges::get_purge
+    };
+    (open_proposal) => {
+        proposals::open_proposal
+    };
+    (list_proposals) => {
+        proposals::list_proposals
+    };
+    (get_proposal) => {
+        proposals::get_proposal
+    };
+    (accept_proposal) => {
+        proposals::accept_proposal
+    };
+    (decline_proposal) => {
+        proposals::decline_proposal
+    };
+    (add_comment) => {
+        proposals::add_comment
+    };
+    (list_comments) => {
+        proposals::list_comments
+    };
+    (create_confirmation) => {
+        reviews::create_confirmation
+    };
+    (create_review) => {
+        reviews::create_review
+    };
+    (list_reviews) => {
+        reviews::list_reviews
     };
     ($pending:ident) => {
         pending
@@ -482,7 +521,10 @@ mod events;
 mod history;
 mod items;
 mod navigation;
+mod proposals;
+mod purges;
 mod reads;
+mod reviews;
 mod shared;
 mod sources;
 mod status;

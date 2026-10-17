@@ -16,6 +16,7 @@ const RECORDS_STEPS: &[M<'static>] = &[
     M::up(RECORDS_V1).foreign_key_check(),
     M::up(RECORDS_V2).foreign_key_check(),
     M::up(RECORDS_V3).foreign_key_check(),
+    M::up(RECORDS_V4).foreign_key_check(),
 ];
 
 const INDEX_STEPS: &[M<'static>] = &[M::up(INDEX_V1)];
@@ -407,6 +408,19 @@ CREATE TABLE commit_warnings (
     warnings TEXT NOT NULL,
     PRIMARY KEY (tenant_id, workspace_id, mutation_id)
 ) STRICT;
+";
+
+/// Records schema, version 4: whether a job has passed its point of no return
+/// (`RecordStore::seal`, request R-I11).
+///
+/// `sealed` is 1 once the job's running claim sealed it (a restore, before it consumes its
+/// upload and imports) and stays 1 for the job's life: `cancel_job` refuses a sealed job that is queued or
+/// running. Every job written before this step is unsealed, which is what it was: before this
+/// step nothing sealed a job, and a cancellation was never refused. The column travels with the
+/// job's row, so a workspace archive written now carries it, and an archive from before this
+/// step gets it, as 0, when its records copy is brought to this build's schema on import.
+const RECORDS_V4: &str = r"
+ALTER TABLE jobs ADD COLUMN sealed INTEGER NOT NULL DEFAULT 0 CHECK (sealed IN (0, 1));
 ";
 
 /// Index schema, version 1: one copy of each indexed revision's searchable projection.

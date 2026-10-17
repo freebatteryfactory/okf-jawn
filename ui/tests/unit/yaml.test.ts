@@ -38,6 +38,40 @@ const problems = (text: string) => {
   return read.ok ? [] : read.problems.map(describeProblem);
 };
 
+describe('places in a text', () => {
+  const text = 'schema_version: 2\nrules:\n  - glob: "notes/**x"\n    case: kebab\n  - glob: a\n';
+
+  it('finds where the value each JSON Pointer names begins, at its line and column', () => {
+    const read = readYaml(text, ['/schema_version', '/rules/0/glob', '/rules/1/glob', '/rules/0']);
+    expect(read.ok && read.places).toEqual({
+      '/schema_version': { line: 1, column: 17 },
+      '/rules/0/glob': { line: 3, column: 11 },
+      '/rules/1/glob': { line: 5, column: 11 },
+      '/rules/0': { line: 3, column: 5 },
+    });
+    // The whole document, and keys that hold a slash or a tilde (RFC 6901).
+    const escaped = readYaml('"a/b": 1\n"c~d": 2\n', ['', '/a~1b', '/c~0d']);
+    expect(escaped.ok && escaped.places).toEqual({
+      '': { line: 1, column: 1 },
+      '/a~1b': { line: 1, column: 8 },
+      '/c~0d': { line: 2, column: 8 },
+    });
+  });
+
+  it('places a pointer that goes further than the document at the last value it reached', () => {
+    const read = readYaml(text, ['/rules/0/missing', '/rules/7', '/schema_version/x', 'rules']);
+    expect(read.ok && read.places).toEqual({
+      '/rules/0/missing': { line: 3, column: 5 },
+      '/rules/7': { line: 3, column: 3 },
+      '/schema_version/x': { line: 1, column: 17 },
+    });
+    // Asked for nothing, a reading carries no places at all.
+    expect(readYaml(text)).not.toHaveProperty('places');
+    // A text that cannot be read places nothing.
+    expect(readYaml('a: [\n', ['/a']).ok).toBe(false);
+  });
+});
+
 describe('reading YAML', () => {
   it('reads a mapping as JSON, its keys in the order they were written', () => {
     const read = readYaml('zeta: 1\nalpha: [x, 2, true, null]\nnested:\n  b: text\n  a: 1.5\n');

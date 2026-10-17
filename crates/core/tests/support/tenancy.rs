@@ -35,7 +35,7 @@ use okf_jawn_contract::identity::{
     TenantId, Timestamp, UploadId, WorkspaceId,
 };
 use okf_jawn_contract::import::{Job, JobState, ListJobsResponse};
-use okf_jawn_contract::purge::Purge;
+use okf_jawn_contract::purge::{Purge, PurgeTarget};
 use okf_jawn_contract::review::Review;
 use okf_jawn_contract::workspace::Workspace;
 use okf_jawn_core::access::AccessControl;
@@ -814,6 +814,9 @@ impl RecordStore for FakeJobs {
     ) -> PortFuture<'_, Job> {
         unused()
     }
+    fn seal<'a>(&'a self, _lease: &'a JobLease) -> PortFuture<'a, Job> {
+        unused()
+    }
     fn cancel_job<'a>(
         &'a self,
         _scope: &'a JobScope,
@@ -857,6 +860,13 @@ impl RecordStore for FakeJobs {
         _mutation_id: MutationId,
         _purge: NewPurge,
     ) -> PortFuture<'a, Purge> {
+        unused()
+    }
+    fn find_purge<'a>(
+        &'a self,
+        _tenant: &'a TenantId,
+        _target: &'a PurgeTarget,
+    ) -> PortFuture<'a, Option<Purge>> {
         unused()
     }
     fn get_purge<'a>(&'a self, _tenant: &'a TenantId, _purge: PurgeId) -> PortFuture<'a, Purge> {
