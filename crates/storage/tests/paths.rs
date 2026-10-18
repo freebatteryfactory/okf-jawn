@@ -56,11 +56,14 @@ struct Recording {
 
 /// A data directory with one blank workspace.
 struct Workspace {
-    directory: tempfile::TempDir,
     storage: Storage,
     scope: StorageScope,
     /// The catalog's first commit.
     initial: Revision,
+    /// Declared last: fields drop in declaration order, so the storage has closed its
+    /// databases and its lock when the directory is removed (Windows cannot remove an open
+    /// file, and `TempDir` would leave the directory behind).
+    directory: tempfile::TempDir,
 }
 
 /// The private name a case-only rename parks its item under, in any folder.
