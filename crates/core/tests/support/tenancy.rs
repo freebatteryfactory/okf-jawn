@@ -13,8 +13,11 @@
 //!   lookup made fresh is told from a kept one; it counts every `authorize` by permission, and
 //!   fails one `authorize` or one `grant_creator` on request.
 //! - `FakeJobs` is the fixture's `FakeRecords` (revision maps, receipts) with jobs: unique on
-//!   the mutation, and receipts read back within their workspace. It refuses no job for a purge
-//!   or an archive (storage's).
+//!   the mutation, read and listed within their scope (a tenant's or one workspace's, as storage
+//!   filters them), cancelled and retried once per mutation with storage's refusals, and receipts
+//!   read back within their workspace. It refuses no job, and no retry, for a purge or an archive
+//!   (storage's), and it never claims or runs a job: a test puts one in the state it needs
+//!   (`put_job`).
 //! - `FakeQueue` keeps every wake-up and fails one on request.
 //! - `FakeUploads` opens slots unique on the mutation, lists them newest first a page at a time
 //!   after a position cursor, and completes one against the bytes a test says it received
@@ -121,10 +124,24 @@ struct GrantState {
 /// `RecordStore`: the fixture's records with jobs and receipts that can be read back.
 pub struct FakeJobs {
     records: Arc<FakeRecords>,
-    jobs: Mutex<Vec<(MutationId, JobScope, NewJob, Job)>>,
+    /// Every job, in the order it was created or first put.
+    jobs: Mutex<Vec<HeldJob>>,
+    /// The mutation of every cancellation or retry that took effect.
+    controls: Mutex<Vec<MutationId>>,
     receipts: Mutex<Vec<(StorageScope, Receipt)>>,
     ignore_receipt_scope: AtomicBool,
     mapping_lookups: Mutex<Vec<(StorageScope, Revision)>>,
+}
+
+/// One job as `FakeJobs` holds it.
+#[derive(Clone)]
+struct HeldJob {
+    /// What `create_job` was given; `None` for a job a test put.
+    created: Option<NewJob>,
+    scope: JobScope,
+    job: Job,
+    /// Whether the job sealed itself (`RecordStore::seal`).
+    sealed: bool,
 }
 
 /// `JobQueue` that keeps every wake-up.
@@ -414,6 +431,7 @@ impl FakeJobs {
         Self {
             records,
             jobs: Mutex::new(Vec::new()),
+            controls: Mutex::new(Vec::new()),
             receipts: Mutex::new(Vec::new()),
             ignore_receipt_scope: AtomicBool::new(false),
             mapping_lookups: Mutex::new(Vec::new()),
@@ -442,15 +460,111 @@ impl FakeJobs {
         Ok(lock(&self.mapping_lookups)?.clone())
     }
 
-    /// Every job created, with its scope and specification, oldest first.
+    /// Every job created, with its scope, specification and record as it stands now, oldest
+    /// first.
     ///
     /// # Errors
     /// Returns when the lock is poisoned.
     pub fn created(&self) -> Built<Vec<(JobScope, NewJob, Job)>> {
         Ok(lock(&self.jobs)?
             .iter()
-            .map(|(_, scope, job, wire)| (scope.clone(), job.clone(), wire.clone()))
+            .filter_map(|held| {
+                held.created
+                    .as_ref()
+                    .map(|created| (held.scope.clone(), created.clone(), held.job.clone()))
+            })
             .collect())
+    }
+
+    /// Hold `job` in `scope`, sealed or not, in place of the job of that identity, as a job
+    /// that was claimed, sealed, completed or failed reads afterwards.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn put_job(&self, scope: &JobScope, job: Job, sealed: bool) -> Built<()> {
+        let mut jobs = lock(&self.jobs)?;
+        if let Some(held) = jobs.iter_mut().find(|held| held.job.id == job.id) {
+            held.scope = scope.clone();
+            held.job = job;
+            held.sealed = sealed;
+        } else {
+            jobs.push(HeldJob {
+                created: None,
+                scope: scope.clone(),
+                job,
+                sealed,
+            });
+        }
+        Ok(())
+    }
+
+    /// The job of identity `id` as it stands, in whatever scope.
+    ///
+    /// # Errors
+    /// Returns when no such job is held or the lock is poisoned.
+    pub fn job(&self, id: JobId) -> Built<Job> {
+        Ok(lock(&self.jobs)?
+            .iter()
+            .find(|held| held.job.id == id)
+            .map(|held| held.job.clone())
+            .ok_or("the fake holds no such job")?)
+    }
+
+    /// The transition a cancellation (`retry` false) or a retry of `job` under `mutation` makes,
+    /// as storage's `control` makes it: once per mutation, and a refusal records nothing.
+    fn control(
+        &self,
+        scope: &JobScope,
+        mutation: MutationId,
+        job: JobId,
+        retry: bool,
+    ) -> Result<Job, ApiError> {
+        let mut jobs = lock_api(&self.jobs)?;
+        let held = jobs
+            .iter_mut()
+            .find(|held| held.job.id == job && held.scope == *scope)
+            .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such job"))?;
+        let mut controls = lock_api(&self.controls)?;
+        if controls.contains(&mutation) {
+            return Ok(held.job.clone());
+        }
+        let stands = &mut held.job;
+        match (retry, &stands.state) {
+            (false, JobState::Queued | JobState::Running) if held.sealed => {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "this job has passed its point of no return; it runs to its end",
+                ));
+            }
+            (false, JobState::Queued | JobState::Running) => {
+                stands.state = JobState::Cancelled;
+                stands.finished_at = Some(instant().map_err(internal)?);
+            }
+            (true, JobState::Failed) if stands.retryable == Some(true) => {
+                stands.state = JobState::Queued;
+                stands.error = None;
+                stands.started_at = None;
+                stands.finished_at = None;
+                stands.retryable = None;
+            }
+            (true, JobState::Failed) => {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "this job's failure is not retryable",
+                ));
+            }
+            (_, state) => {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    format!(
+                        "a {state:?} job cannot be {}",
+                        if retry { "retried" } else { "cancelled" }
+                    ),
+                ));
+            }
+        }
+        controls.push(mutation);
+        Ok(stands.clone())
     }
 }
 
@@ -856,11 +970,12 @@ impl RecordStore for FakeJobs {
     fn create_job<'a>(&'a self, scope: &'a JobScope, job: NewJob) -> PortFuture<'a, Job> {
         Box::pin(async move {
             let mut jobs = lock_api(&self.jobs)?;
-            if let Some((_, _, _, prior)) = jobs
-                .iter()
-                .find(|(mutation, _, _, _)| *mutation == job.mutation_id)
-            {
-                return Ok(prior.clone());
+            if let Some(prior) = jobs.iter().find(|held| {
+                held.created
+                    .as_ref()
+                    .is_some_and(|created| created.mutation_id == job.mutation_id)
+            }) {
+                return Ok(prior.job.clone());
             }
             if !job.spec.fits(scope) {
                 return Err(ApiError::new(
@@ -887,19 +1002,63 @@ impl RecordStore for FakeJobs {
                 finished_at: None,
                 retryable: None,
             };
-            jobs.push((job.mutation_id, scope.clone(), job, wire.clone()));
+            jobs.push(HeldJob {
+                created: Some(job),
+                scope: scope.clone(),
+                job: wire.clone(),
+                sealed: false,
+            });
             Ok(wire)
         })
     }
-    fn get_job<'a>(&'a self, _scope: &'a JobScope, _job: JobId) -> PortFuture<'a, Job> {
-        unused()
+    /// "Read one durable job within its scope." A job of another scope (a tenant's asked in a
+    /// workspace, a workspace's asked at the tenant or in another workspace) is `NotFound`, as
+    /// storage filters on the tenant and the workspace column.
+    fn get_job<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, Job> {
+        Box::pin(async move {
+            lock_api(&self.jobs)?
+                .iter()
+                .find(|held| held.job.id == job && held.scope == *scope)
+                .map(|held| held.job.clone())
+                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such job"))
+        })
     }
+    /// "List durable jobs of one scope, newest first, with bounded pagination." Paged as storage
+    /// pages them: after the position a decimal cursor names (a job's place in the fake's one
+    /// sequence, from 1, as storage's row), with the last listed job's position as the cursor
+    /// while jobs remain; a cursor that is not a position is `InvalidInput` on `/page/cursor`.
     fn list_jobs<'a>(
         &'a self,
-        _scope: &'a JobScope,
-        _page: Page,
+        scope: &'a JobScope,
+        page: Page,
     ) -> PortFuture<'a, ListJobsResponse> {
-        unused()
+        Box::pin(async move {
+            let before = position_cursor(page.cursor.as_deref())?;
+            let limit = usize::from(page.limit.max(1));
+            let jobs = lock_api(&self.jobs)?;
+            let mut items: Vec<(usize, Job)> = Vec::new();
+            let mut more = false;
+            for (index, held) in jobs.iter().enumerate().rev() {
+                let position = index.saturating_add(1);
+                if held.scope != *scope || before.is_some_and(|before| position >= before) {
+                    continue;
+                }
+                if items.len() >= limit {
+                    more = true;
+                    break;
+                }
+                items.push((position, held.job.clone()));
+            }
+            let next_cursor = if more {
+                items.last().map(|(position, _)| position.to_string())
+            } else {
+                None
+            };
+            Ok(ListJobsResponse {
+                items: items.into_iter().map(|(_, job)| job).collect(),
+                next_cursor,
+            })
+        })
     }
     fn claim_job(&self, _job: JobId) -> PortFuture<'_, Option<ClaimedJob>> {
         unused()
@@ -921,21 +1080,34 @@ impl RecordStore for FakeJobs {
     fn seal<'a>(&'a self, _lease: &'a JobLease) -> PortFuture<'a, Job> {
         unused()
     }
+    /// "Cancel pending or running work while retaining recorded state. Unique on
+    /// `mutation_id`: a repeated id makes no second transition and returns the job row as it
+    /// stands. Refuses with `Conflict` ("this job has passed its point of no return"), writing
+    /// nothing, a queued or running job that sealed itself (`seal`)." A finished job is
+    /// `Conflict` and a job of another scope `NotFound`, as storage refuses them; a refusal
+    /// records nothing, so a repeat of its mutation meets it again.
     fn cancel_job<'a>(
         &'a self,
-        _scope: &'a JobScope,
-        _mutation_id: MutationId,
-        _job: JobId,
+        scope: &'a JobScope,
+        mutation_id: MutationId,
+        job: JobId,
     ) -> PortFuture<'a, Job> {
-        unused()
+        Box::pin(async move { self.control(scope, mutation_id, job, false) })
     }
+    /// "Queue a failed job again under the same durable identity. Unique on `mutation_id`: a
+    /// repeated id does not queue the job a second time, even when the job has run and failed
+    /// again since, and returns the job row as it stands." Only a failure recorded retryable
+    /// (`Job::retryable` is `Some(true)`, the flag storage keeps) is queued again, with its error,
+    /// instants and flag cleared; any other job is `Conflict` and a job of another scope
+    /// `NotFound`, as storage refuses them. Kinder than storage: no purge and no archive
+    /// refuses a retry here.
     fn retry_job<'a>(
         &'a self,
-        _scope: &'a JobScope,
-        _mutation_id: MutationId,
-        _job: JobId,
+        scope: &'a JobScope,
+        mutation_id: MutationId,
+        job: JobId,
     ) -> PortFuture<'a, Job> {
-        unused()
+        Box::pin(async move { self.control(scope, mutation_id, job, true) })
     }
     fn record_artifact<'a>(
         &'a self,
