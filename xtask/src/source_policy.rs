@@ -11,7 +11,8 @@
 //!   production code can import a test;
 //! - nothing imports from the zip crate with a rename or a glob, or re-exports it;
 //! - no type alias names `ZipArchive`, no item visible outside its module (a `pub` or
-//!   `pub(..)` function, method, field, constant, static, enum or trait) has it in its signature,
+//!   `pub(..)` function, method, field, constant or associated constant, associated type, static,
+//!   enum or trait) has it in its signature,
 //!   and no trait implementation names it (its trait, its self type, or the signature, associated
 //!   type or constant of any item: `AsMut<ZipArchive<_>>`, `Deref<Target = ZipArchive<_>>` and
 //!   the like are callable from anywhere, though written without `pub`), so the reader never
@@ -227,6 +228,20 @@ impl<'ast> Visit<'ast> for ZipUse {
             self.findings.insert(EXPOSES);
         }
         syn::visit::visit_item_const(self, item);
+    }
+
+    fn visit_impl_item_const(&mut self, item: &'ast syn::ImplItemConst) {
+        if visible(&item.vis) && names_reader(|visitor| visitor.visit_type(&item.ty)) {
+            self.findings.insert(EXPOSES);
+        }
+        syn::visit::visit_impl_item_const(self, item);
+    }
+
+    fn visit_impl_item_type(&mut self, item: &'ast syn::ImplItemType) {
+        if visible(&item.vis) && names_reader(|visitor| visitor.visit_type(&item.ty)) {
+            self.findings.insert(EXPOSES);
+        }
+        syn::visit::visit_impl_item_type(self, item);
     }
 
     fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
@@ -529,6 +544,11 @@ mod tests {
             "//! x\nuse zip::ZipArchive;\npub struct Opened { pub zip: ZipArchive<File> }\n",
         )?;
         assert!(says(&field, "visible outside"), "{field:?}");
+        let constant = zip(
+            ZIP_READER_FILE,
+            "//! x\nuse zip::ZipArchive;\nstruct Opened;\nimpl Opened { pub(crate) const OPEN: fn(File) -> ZipResult<ZipArchive<File>> = ZipArchive::new; }\n",
+        )?;
+        assert!(says(&constant, "visible outside"), "{constant:?}");
         let method = zip(
             ZIP_READER_FILE,
             "//! x\nuse zip::ZipArchive;\nstruct O;\nimpl O { pub(super) fn inner(&mut self) -> &mut ZipArchive<File> { todo() } }\n",
