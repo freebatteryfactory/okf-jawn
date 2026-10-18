@@ -14,6 +14,7 @@ use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::extraction::{Extraction, TextOrigin};
 use okf_jawn_contract::history::{CommitRequest, FileChange, FileChangeKind, RestoreRequest};
 use okf_jawn_contract::identity::{At, IdempotencyKey, ItemId, PurgeId, Revision};
+use okf_jawn_contract::import::JobKind;
 use okf_jawn_contract::item::{
     CreateItemRequest, DraftContent, ItemDocument, ItemKind, SaveDraftRequest,
 };
@@ -22,11 +23,13 @@ use okf_jawn_contract::source::{
     GetObjectRequest, GetSourcesRequest, SourceLocation, SourceLocator,
 };
 use okf_jawn_contract::views::{
-    ChartFailure, ChartRef, ChartResult, ChartStatus, Dataset, GetCatalogRequest, GetViewRequest,
-    PresentRequest, PresentResponse, ResolveViewRequest, ViewDocument,
+    ChartFailure, ChartRef, ChartResult, ChartStatus, Dataset, ExportViewRequest,
+    GetCatalogRequest, GetViewRequest, PresentRequest, PresentResponse, ResolveViewRequest,
+    ViewDocument,
 };
+use okf_jawn_core::context::Attempt;
 use okf_jawn_core::conversion::{ConversionRecord, ConvertedCell, ConvertedTable};
-use okf_jawn_core::jobs::RevisionMapping;
+use okf_jawn_core::jobs::{JobScope, JobSpec, RevisionMapping};
 use okf_jawn_core::portable::draft_digest;
 use okf_jawn_core::ports::Application;
 use okf_jawn_core::storage::{TreeEdit, derive_item_id};
@@ -39,6 +42,7 @@ use crate::fixture::{
     record, revision, scope, source_card,
 };
 use crate::proposal_store::noon;
+use crate::tenancy::Tenancy;
 
 /// The source card S.
 const SOURCE: u128 = 30;
@@ -1371,5 +1375,100 @@ async fn a_unit_naming_no_column_is_reported() -> TestResult {
     let dataset: Dataset = serde_json::from_slice(&bytes)?;
     let revenue = some(dataset.columns.get(1), "the revenue column")?;
     assert_eq!(revenue.unit.as_deref(), Some("EUR"));
+    Ok(())
+}
+
+fn export_request(item: u128) -> Built<ExportViewRequest> {
+    Ok(ExportViewRequest {
+        workspace_id: scope()?.workspace_id,
+        item_id: id(item),
+        at: At::Latest,
+        idempotency_key: IdempotencyKey(Uuid::from_u128(81)),
+    })
+}
+
+/// The tenancy fixture (jobs and wake-ups) over the module header's tree, V holding `body`.
+fn export_tenancy(body: &str) -> Built<Tenancy> {
+    let tenancy = Tenancy::new()?;
+    stock(&tenancy.world, body)?;
+    Ok(tenancy)
+}
+
+#[tokio::test]
+async fn export_view_queues_the_export_of_the_view_at_the_revision_it_resolved() -> TestResult {
+    let tenancy = export_tenancy(&view_body("Revenue.", &view_block()?)?)?;
+    let caller = alice(OperationName::ExportView, Some(mutation(5)))?;
+    let job = tenancy
+        .service
+        .export_view(&caller, export_request(VIEW)?)
+        .await?;
+    assert_eq!(job.kind, JobKind::ExportView);
+    let created = tenancy.jobs.created()?;
+    let (job_scope, new_job, _) = some(created.first(), "the job")?;
+    assert_eq!(*job_scope, JobScope::Workspace(scope()?));
+    assert_eq!(new_job.mutation_id, mutation(5));
+    assert_eq!(
+        new_job.spec,
+        JobSpec::ExportView {
+            item_id: id(VIEW),
+            revision: revision('a')?,
+        }
+    );
+    assert_eq!(
+        tenancy.queue.woken()?,
+        vec![(JobScope::Workspace(scope()?), job.id)]
+    );
+    // A retry under the same mutation answers the job its first attempt created.
+    let mut resumed = caller.clone();
+    resumed.attempt = Attempt::Resumed;
+    let again = tenancy
+        .service
+        .export_view(&resumed, export_request(VIEW)?)
+        .await?;
+    assert_eq!(again.id, job.id);
+    assert_eq!(tenancy.jobs.created()?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn export_view_queues_nothing_for_a_note_or_a_view_it_cannot_read() -> TestResult {
+    let tenancy = export_tenancy(&view_body("Revenue.", &view_block()?)?)?;
+    let caller = alice(OperationName::ExportView, Some(mutation(5)))?;
+    let note_refused = err_of(
+        tenancy
+            .service
+            .export_view(&caller, export_request(NOTE)?)
+            .await,
+    )?;
+    assert_eq!(note_refused.code, ErrorCode::InvalidInput);
+    assert_eq!(note_refused.field.as_deref(), Some("/item_id"));
+    let broken = export_tenancy("Only prose.\n")?;
+    let unsupported = err_of(
+        broken
+            .service
+            .export_view(&caller, export_request(VIEW)?)
+            .await,
+    )?;
+    assert_eq!(unsupported.code, ErrorCode::Unsupported);
+    assert!(tenancy.jobs.created()?.is_empty());
+    assert!(broken.jobs.created()?.is_empty());
+    assert_eq!(broken.queue.woken()?, Vec::new());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_view_whose_chart_fails_its_own_check_is_still_exported() -> TestResult {
+    let tenancy = export_tenancy(&view_body(
+        "Revenue.",
+        &block_with("/charts/quarters/mark", json!("bogus"))?,
+    )?)?;
+    tenancy
+        .service
+        .export_view(
+            &alice(OperationName::ExportView, Some(mutation(5)))?,
+            export_request(VIEW)?,
+        )
+        .await?;
+    assert_eq!(tenancy.jobs.created()?.len(), 1);
     Ok(())
 }

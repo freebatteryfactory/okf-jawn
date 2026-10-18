@@ -119,6 +119,9 @@ macro_rules! route {
     (resolve_view) => {
         views::resolve_view
     };
+    (export_view) => {
+        views::export_view
+    };
     (log_items) => {
         history::log_items
     };

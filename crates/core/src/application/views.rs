@@ -1,7 +1,7 @@
 //! Persistent Views (SPEC section 10; core M1.6 and M1b): reading a saved View (`get_view`),
 //! the approved component catalog (`get_catalog`), presenting a candidate (`present_view`),
-//! resolving a saved View (`resolve_view`), and the check every saved-View write runs first
-//! (`check_view_write`).
+//! resolving a saved View (`resolve_view`), queueing its export (`export_view`), and the check
+//! every saved-View write runs first (`check_view_write`).
 //!
 //! A View is an item of kind `view` whose file `views::layout` reads; it names no workspace, so
 //! its bindings bind to the workspace that holds it. `get_view` reads it at one resolved
@@ -24,22 +24,30 @@
 //! live one at the head when asked (`refresh_live`; a pinned View refuses it on
 //! `/refresh_live`). Both read the instant and the head once, and record a receipt whose
 //! sources are exactly the bindings answered.
+//!
+//! `export_view` resolves `at` once, checks that the View reads and passes the View-level
+//! rules, and queues `JobSpec::ExportView` with that revision (202), as a workspace export is
+//! queued (`workspaces::start_job`). Ingest's handler does not run it yet (its export work item
+//! writes the bundle the owner decided, T2), so the job fails as `NotImplemented` until then.
 
 use std::collections::BTreeMap;
 use std::future::Ready;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{ItemId, Revision};
+use okf_jawn_contract::import::Job;
 use okf_jawn_contract::item::{ItemDocument, ItemKind};
 use okf_jawn_contract::views::{
-    CatalogResponse, GetCatalogRequest, GetViewRequest, PresentRequest, PresentResponse,
-    ResolveViewRequest, ViewDocument, ViewMode,
+    CatalogResponse, ExportViewRequest, GetCatalogRequest, GetViewRequest, PresentRequest,
+    PresentResponse, ResolveViewRequest, ViewDocument, ViewMode,
 };
 use serde_json::Value;
 
 use super::ApplicationService;
 use super::shared::{invalid, now, record_receipt, resolve, workspace_scope};
+use super::workspaces::start_job;
 use crate::context::OperationContext;
+use crate::jobs::{JobScope, JobSpec};
 use crate::reading::check_citation;
 use crate::storage::StorageScope;
 use crate::views::layout::{view_from, view_of};
@@ -150,6 +158,36 @@ pub(super) async fn resolve_view(
         Inputs::AsCited
     };
     answer(service, context, &scope, view, &checked, inputs).await
+}
+
+/// Queue the export of one saved View at one resolved revision (202): the View must read and
+/// pass `views::validate`'s View-level rules (a chart-level fault does not stop an export); the
+/// job's specification carries the revision `at` resolved to. A retry under the same key answers
+/// the job its first attempt created. Stated, not hidden: ingest's handler does not run a View
+/// export yet (its export work item), so the job fails as `NotImplemented` until it does.
+///
+/// # Errors
+/// Returns the refusals of `get_view` for the item, `Unsupported` on `/item_id` for a stored
+/// View that does not pass `views::validate`, or any port error.
+pub(super) async fn export_view(
+    service: &ApplicationService,
+    context: &OperationContext,
+    request: ExportViewRequest,
+) -> Result<Job, ApiError> {
+    let scope = workspace_scope(context)?;
+    let revision = resolve(service, &scope, &request.at).await?;
+    let (view, _) = stored_view(service, &scope, &revision, request.item_id).await?;
+    validate(&view, scope.workspace_id).map_err(stored_fault)?;
+    start_job(
+        service,
+        context,
+        JobScope::Workspace(scope),
+        JobSpec::ExportView {
+            item_id: request.item_id,
+            revision,
+        },
+    )
+    .await
 }
 
 /// Resolve `view`'s bindings at `inputs`, with the instant and the head read once, and record the
