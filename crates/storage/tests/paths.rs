@@ -2170,6 +2170,50 @@ async fn a_name_with_the_kelvin_sign_differs_in_encoding_not_only_in_letter_case
     Ok(())
 }
 
+/// Contract ruling 33 (PR #34's Codex pair): two names that differ only in Unicode
+/// normalization inside a segment Windows refuses even in NFC (`café?.txt` with a precomposed
+/// `é`, and with a combining accent) share a collision key (`identity::collision_key_of`, which
+/// normalizes every string), so a tree built in Git with both refuses every commit naming both
+/// spellings, escaped, before anything is staged; a whole-tree Rewind repairs it. The NFC of
+/// such a segment is not known to storage, so the words say only that the two differ in how
+/// their characters are encoded.
+#[tokio::test]
+async fn two_normalizations_of_a_name_windows_refuses_are_refused_as_one() -> TestResult {
+    let space = Workspace::new().await?;
+    let seeded = space
+        .commit(2, &space.initial, vec![note(10, "notes/a.md", "Ten.")?])
+        .await?;
+    let spelled = space.raw(
+        900,
+        &[],
+        &[
+            ("notes/caf\u{e9}?.txt", b"one".to_vec()),
+            ("notes/cafe\u{301}?.txt", b"two".to_vec()),
+        ],
+    )?;
+    for (mutation, edit) in [(3, edited(10, "Changed.")?), (4, set_type("Memo"))] {
+        let error = space.refused(mutation, &spelled, vec![edit]).await?;
+        assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+        assert_eq!(
+            error.message,
+            "notes/caf\\u{e9}?.txt collides with notes/cafe\\u{301}?.txt: the revision holds two \
+             names that differ in how their characters are encoded, which macOS keeps as one; \
+             the workspace can be restored to a revision from before they appeared"
+        );
+    }
+    let repaired = space
+        .commit(
+            5,
+            &spelled,
+            vec![TreeEdit::RestoreWorkspace {
+                from: seeded.clone(),
+            }],
+        )
+        .await?;
+    assert_eq!(space.files(&repaired)?, space.files(&seeded)?);
+    Ok(())
+}
+
 /// A whole-tree Rewind to a revision that holds two spellings of one path, from a head that
 /// holds neither, is refused saying that the revision being restored holds them and that an
 /// earlier one can be chosen, not that the workspace's own revision does.

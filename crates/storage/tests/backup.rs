@@ -3701,6 +3701,31 @@ async fn backup_an_import_refuses_an_archive_whose_reference_holds_a_respelling(
     .await
 }
 
+/// Contract ruling 33 (PR #34's Codex pair): an import refuses, before anything is written, an
+/// archive whose head holds two names that differ only in Unicode normalization inside a
+/// segment Windows refuses even in NFC (`café?.txt`, precomposed and with a combining accent):
+/// they share a collision key (`identity::collision_key_of`), so the import's check names both,
+/// escaped, and the reference.
+#[tokio::test]
+async fn backup_an_import_refuses_an_archive_holding_two_normalizations_of_a_name() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let main = "refs/heads/main";
+    respelled_at(&storage, &source, main, "notes/caf\u{e9}?.txt")?;
+    respelled_at(&storage, &source, main, "notes/cafe\u{301}?.txt")?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let imported = import_crafted(&storage, bytes).await?;
+    assert_import_refused(
+        &storage,
+        imported,
+        "the archive cannot be restored: notes/caf\\u{e9}?.txt collides with \
+         notes/cafe\\u{301}?.txt: its refs/heads/main holds two names that differ in how their \
+         characters are encoded, which macOS keeps as one",
+    )
+    .await
+}
+
 /// Ruling B-R2 refuses an import only: a replacement restore puts back a workspace whose head
 /// holds two spellings as the installation held it, since the archive writer wrote that head
 /// and a refusal would make the set unrestorable; the workspace then refuses a commit as it
