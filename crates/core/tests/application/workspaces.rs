@@ -671,6 +671,23 @@ async fn an_open_of_a_workspace_the_adapter_lists_no_grant_on_is_forbidden() -> 
             .await,
     )?;
     assert_eq!(refused.code, ErrorCode::Forbidden, "{}", refused.message);
+    // A fresh grant without `read` refuses the open too, as `list_workspaces` leaves it out,
+    // whatever the cached grant dispatch checked still held.
+    tenancy
+        .access
+        .grant(ALICE, id(1), vec![Permission::Propose])?;
+    let refused = err_of(
+        tenancy
+            .service
+            .open_workspace(
+                &caller,
+                OpenWorkspaceRequest {
+                    workspace_id: id(1),
+                },
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Forbidden, "{}", refused.message);
     // A listed grant of another tenant is refused too.
     tenancy.access.grant(ALICE, id(1), EVERY.to_vec())?;
     tenancy.access.answer_for(StorageScope {
