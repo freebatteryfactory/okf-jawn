@@ -1486,7 +1486,9 @@ async fn file_links_survive_a_rename_by_letter_case() -> TestResult {
 /// at `archive/a.md` with the bytes it held there; item 12 keeps its bytes throughout. A Rewind
 /// moves the item back with its links (`move_back`, through the same rewrite) and then writes
 /// the earlier revision's bytes of the item itself, so this pins the outcome; the moved bytes
-/// themselves are pinned by `file_links_survive_a_move_to_another_folder`.
+/// themselves are pinned by `file_links_survive_a_move_to_another_folder`. What the hops wrote
+/// of the item's own links is invisible in these bytes, not in what the check is told
+/// (`a_rewind_of_two_notes_that_traded_paths_tells_the_check_only_the_referrer`).
 #[tokio::test]
 async fn file_links_survive_a_rewind_of_a_move() -> TestResult {
     let moves = file_links_moved(
@@ -1606,7 +1608,9 @@ async fn self_links_follow_a_rename_by_letter_case() -> TestResult {
 /// it; a Rewind to the moved revision puts the moved bytes back. As in
 /// `file_links_survive_a_rewind_of_a_move`, the Rewind writes the earlier revision's bytes of
 /// the item after it moves the item back, so this pins the outcome; the moved bytes are pinned
-/// by the two moves it starts from.
+/// by the two moves it starts from. The links to itself that each hop of the move back wrote
+/// are invisible in these bytes, not in what the check is told
+/// (`a_rewind_of_two_notes_that_traded_paths_tells_the_check_only_the_referrer`).
 #[tokio::test]
 async fn self_links_follow_a_rewind_of_a_move() -> TestResult {
     for (to, body, link) in [
@@ -1646,6 +1650,71 @@ async fn self_links_follow_a_rewind_of_a_move() -> TestResult {
             );
         }
     }
+    Ok(())
+}
+
+/// File-links review R1 (its probe `probe_rewind_traded_self_links`): item 10 at `notes/y.md`
+/// and item 11 at `notes/x.md` each link to themselves (beside them, and absolute with an
+/// anchor), and `notes/ref.md` links to both. One commit trades their paths, then one commit
+/// rewinds both to the first revision under a recording check: every file comes back byte for
+/// byte, no private name is left, and the check is told exactly the referrer, once. Each hop
+/// of the move back writes an item's links to itself for the path that hop ends at (`park`'s
+/// `ends`); one that named the item's final path instead (mutant F1-f) leaves the same bytes,
+/// since the restore writes the earlier ones after it, but makes the next hop rewrite the other
+/// item's file, which the check would then be told too.
+#[tokio::test]
+async fn a_rewind_of_two_notes_that_traded_paths_tells_the_check_only_the_referrer() -> TestResult {
+    let space = Workspace::new().await?;
+    let seeded = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "notes/y.md", "Me [m](y.md) and [abs](/notes/y.md#sec).")?,
+                note(11, "notes/x.md", "Me [m](x.md) and [abs](/notes/x.md#sec).")?,
+                note(12, "notes/ref.md", "Both [y](y.md) and [x](x.md).")?,
+            ],
+        )
+        .await?;
+    let traded = space
+        .commit(
+            3,
+            &seeded,
+            vec![
+                moved(10, "notes/parked.md")?,
+                moved(11, "notes/y.md")?,
+                moved(10, "notes/x.md")?,
+            ],
+        )
+        .await?;
+    assert_eq!(
+        space.item_at(&traded, "notes/x.md").await?,
+        Some(uuid!(10)?)
+    );
+    let recording = Arc::new(Recording::default());
+    let rewound = space
+        .commit_with(
+            4,
+            &traded,
+            vec![restore(10, &seeded)?, restore(11, &seeded)?],
+            recording.clone(),
+        )
+        .await?
+        .revision;
+    for file in ["notes/y.md", "notes/x.md", "notes/ref.md"] {
+        assert!(space.file(&seeded, file)?.is_some(), "{file}");
+        assert_eq!(
+            space.file(&rewound, file)?,
+            space.file(&seeded, file)?,
+            "{file}"
+        );
+    }
+    let files = space.files(&rewound)?;
+    assert!(
+        !files.iter().any(|file| file.contains("okf-jawn-")),
+        "{files:?}"
+    );
+    assert_eq!(recording.seen()?, vec![vec!["notes/ref.md".to_owned()]]);
     Ok(())
 }
 
