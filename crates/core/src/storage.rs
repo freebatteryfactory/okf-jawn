@@ -411,6 +411,28 @@ pub struct FolderListing {
     pub next_cursor: Option<String>,
 }
 
+/// Every item of one revision with what the naming rules read of it, and every folder
+/// (`VersionStore::tree`).
+#[derive(Debug, Clone)]
+pub struct WorkspaceTree {
+    /// Every item, in path order, archived items and items under a folder whose name starts
+    /// with `.` included.
+    pub items: Vec<TreeItem>,
+    /// Every folder that holds a file, at any depth, in path order: each folder above each file
+    /// of the tree, `.okf` and the folders under it included.
+    pub folders: Vec<WorkspacePath>,
+}
+
+/// One item of a `WorkspaceTree`.
+#[derive(Debug, Clone)]
+pub struct TreeItem {
+    /// The item, summarized as `list` of its folder summarizes it.
+    pub summary: ItemSummary,
+    /// A source card's original file name (`items::SourceHeader::original_name`); `None` for
+    /// every other item.
+    pub original_name: Option<String>,
+}
+
 /// History of a workspace or of one item, newest first.
 #[derive(Debug, Clone)]
 pub struct LogQuery {
@@ -497,6 +519,15 @@ pub trait VersionStore: Send + Sync {
         folder: Option<&'a WorkspacePath>,
         page: Page,
     ) -> PortFuture<'a, FolderListing>;
+    /// Every item and every folder of `revision` in one pass over its tree, each item file read
+    /// once (`WorkspaceTree`): what the naming rules read to name a selection against the whole
+    /// workspace. Unlike `list`, it includes the items under a folder whose name starts with
+    /// `.`, and it is not paged. `NotFound` only when the revision itself is unknown.
+    fn tree<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+    ) -> PortFuture<'a, WorkspaceTree>;
     /// The item whose path is exactly `path` at `revision`, summarized as `list` of its folder
     /// summarizes it.
     ///

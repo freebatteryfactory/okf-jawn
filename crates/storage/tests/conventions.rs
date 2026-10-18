@@ -1,7 +1,9 @@
 //! The version store's naming-rules ports against real Git repositories: the rules file read
-//! with its text and the reader's error (`VersionStore::rules`). Named `conventions_*`.
+//! with its text and the reader's error (`VersionStore::rules`), and the whole tree in one pass
+//! (`VersionStore::tree`). Named `conventions_*`.
 #![cfg(feature = "runtime")]
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -13,12 +15,13 @@ use okf_jawn_contract::conventions::{
 };
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{Revision, TenantId, WorkspacePath};
+use okf_jawn_contract::item::ItemKind;
 use okf_jawn_core::storage::{
-    CandidateCheck, CommitChanges, NewWorkspace, Provenance, StorageScope, TreeEdit, VersionStore,
-    WorkspaceCatalog,
+    CandidateCheck, CommitChanges, NewWorkspace, Provenance, SourceCard, StorageScope, TreeEdit,
+    VersionStore, WorkspaceCatalog,
 };
 use okf_jawn_storage::Storage;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use check::{TestResult, err_of, some};
 
@@ -143,6 +146,54 @@ fn person(subject: &str) -> Provenance {
         client_id: None,
     }
 }
+fn path(text: &str) -> Fallible<WorkspacePath> {
+    Ok(WorkspacePath::try_from(text.to_owned())?)
+}
+
+/// A note numbered `item` at `at` with `properties` besides its type and title.
+fn note(item: u32, at: &str, body: &str, properties: Value) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::CreateItem {
+        item_id: uuid!(item)?,
+        path: path(at)?,
+        title: Some(format!("Note {item}")),
+        type_name: "Note".to_owned(),
+        kind: ItemKind::Note,
+        body: body.to_owned(),
+        properties: serde_json::from_value(properties)?,
+    })
+}
+
+/// A source card numbered `item` at `at`, of an original named `original`.
+fn card(item: u32, at: &str, original: &str) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::WriteSourceCard(Box::new(SourceCard {
+        item_id: uuid!(item)?,
+        path: path(at)?,
+        title: original.to_owned(),
+        type_name: "source".to_owned(),
+        body: "Converted.".to_owned(),
+        properties: BTreeMap::new(),
+        appearance: serde_json::from_value(json!({
+            "object": "d".repeat(64),
+            "names": [{
+                "filename": original,
+                "folder": "",
+                "observed_at": "2026-10-09T12:00:00.000Z",
+                "supplied_by": "ana"
+            }],
+            "media_type": "application/pdf",
+            "size": "10",
+            "metadata": {},
+            "extraction": {
+                "outcome": { "status": "unsupported" },
+                "digest": "a".repeat(64),
+                "text_origin": "none",
+                "corrected": false,
+                "warnings": []
+            }
+        }))?,
+    })))
+}
+
 fn rule() -> NamingRule {
     NamingRule {
         glob: "**".to_owned(),
@@ -257,6 +308,112 @@ async fn conventions_rules_an_unknown_revision_is_not_found() -> TestResult {
             .storage
             .versions()
             .rules(&workspace.scope, &unknown)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::NotFound);
+    Ok(())
+}
+
+// P1: `VersionStore::tree` answers every item and folder in one pass.
+
+#[tokio::test]
+async fn conventions_tree_holds_every_item_and_folder_in_path_order() -> TestResult {
+    let workspace = Workspace::new().await?;
+    let head = workspace
+        .commit(
+            2,
+            &workspace.initial,
+            vec![
+                note(10, "notes/b.md", "B.", json!({}))?,
+                note(11, "a.md", "A.", json!({}))?,
+                note(12, ".hidden/c.md", "C.", json!({}))?,
+                note(13, "notes/deep/d.md", "D.", json!({}))?,
+                card(14, "inbox/Report-pdf.md", "Report.pdf")?,
+                TreeEdit::SetStatus {
+                    item_id: uuid!(13)?,
+                    status: None,
+                    archived: Some(true),
+                },
+            ],
+        )
+        .await?;
+    let tree = workspace
+        .storage
+        .versions()
+        .tree(&workspace.scope, &head)
+        .await?;
+    let items: Vec<(&str, bool, Option<&str>)> = tree
+        .items
+        .iter()
+        .map(|item| {
+            (
+                item.summary.path.as_str(),
+                item.summary.archived,
+                item.original_name.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        items,
+        [
+            (".hidden/c.md", false, None),
+            ("a.md", false, None),
+            ("inbox/Report-pdf.md", false, Some("Report.pdf")),
+            ("notes/b.md", false, None),
+            ("notes/deep/d.md", true, None),
+        ]
+    );
+    let folders: Vec<&str> = tree.folders.iter().map(WorkspacePath::as_str).collect();
+    for folder in [
+        ".hidden",
+        "inbox",
+        "notes",
+        "notes/deep",
+        ".okf",
+        ".okf/sources",
+    ] {
+        assert!(folders.contains(&folder), "{folder} in {folders:?}");
+    }
+    let mut sorted = folders.clone();
+    sorted.sort_unstable();
+    assert_eq!(folders, sorted);
+    // The same summaries `list` gives of a folder.
+    let listed = workspace
+        .storage
+        .versions()
+        .list(
+            &workspace.scope,
+            &head,
+            Some(&path("notes")?),
+            okf_jawn_core::storage::Page {
+                cursor: None,
+                limit: 50,
+            },
+        )
+        .await?;
+    let listed_b = some(listed.items.first(), "notes/b.md listed")?;
+    let tree_b = some(
+        tree.items
+            .iter()
+            .find(|item| item.summary.path.as_str() == "notes/b.md"),
+        "notes/b.md in the tree",
+    )?;
+    assert_eq!(
+        serde_json::to_value(&tree_b.summary)?,
+        serde_json::to_value(listed_b)?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn conventions_tree_of_an_unknown_revision_is_not_found() -> TestResult {
+    let workspace = Workspace::new().await?;
+    let unknown = Revision::try_from("e".repeat(40))?;
+    let error = err_of(
+        workspace
+            .storage
+            .versions()
+            .tree(&workspace.scope, &unknown)
             .await,
     )?;
     assert_eq!(error.code, ErrorCode::NotFound);

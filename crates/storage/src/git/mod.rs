@@ -28,7 +28,7 @@ use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
     BlameQuery, CandidateChanges, CandidateCheck, CommitChanges, Committed, DiffQuery,
     FolderListing, LogQuery, ObjectInfo, Page, Promotion, Provenance, RulesFile, StorageScope,
-    TreeEdit, VersionStore,
+    TreeEdit, VersionStore, WorkspaceTree,
 };
 
 use crate::blobs::{LocalBlobs, file_reader};
@@ -204,6 +204,17 @@ impl VersionStore for GitVersions {
                 folder.as_ref(),
                 &page,
             )
+        }))
+    }
+
+    fn tree<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+    ) -> PortFuture<'a, WorkspaceTree> {
+        let revision = revision.clone();
+        Box::pin(self.blocking(scope, move |repositories, scope| {
+            read::tree(&repositories.open(scope)?, &revision)
         }))
     }
 

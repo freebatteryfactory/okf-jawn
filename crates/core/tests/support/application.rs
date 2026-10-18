@@ -25,7 +25,9 @@
 //! other edit (a delete, a status change, a folder), and only the items an applied edit wrote
 //! are readable at the new revision. A test may make the next `show` fail with a code it
 //! names (`fail_next_show`, `fail_show_number`), as a store fault would, and so may the next `log` and the next `list` (`fail_next_log`, `fail_next_list`). `item_at_path` answers from the scripted documents as its port documents it: `None` when no item is at the path at
-//! a known revision, `NotFound` only for an unknown revision. A port the operations
+//! a known revision, `NotFound` only for an unknown revision. `tree` answers the documents at a
+//! revision, one per item, in path order, each source card with its header's original name, and
+//! every folder above them; it holds no folder no document lies under. A port the operations
 //! under test do not call answers `Internal` ("not used by this test").
 //!
 //! The search index, the event log and the receipt store keep their documented idempotence
@@ -106,6 +108,7 @@ use okf_jawn_core::credentials::{
 };
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::events::{EventLog, EventQuery, EventScope, NewEvent};
+use okf_jawn_core::items::ApplicationHeader;
 use okf_jawn_core::jobs::{
     ArtifactRecord, ClaimedJob, DerivedObject, JobCompletion, JobLease, JobQueue, JobScope,
     NewArtifact, NewJob, NewPurge, RecordStore, RevisionMapping,
@@ -120,8 +123,9 @@ use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
     BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges, Committed,
     DiffQuery, FolderListing, LocalSource, LogQuery, NewWorkspace, ObjectInfo, ObjectRead, Page,
-    Promotion, Provenance, RulesFile, StorageScope, TreeEdit, VersionStore, WorkspaceArchive,
-    WorkspaceCatalog, WorkspaceUpdate, replay_warnings_unavailable,
+    Promotion, Provenance, RulesFile, StorageScope, TreeEdit, TreeItem, VersionStore,
+    WorkspaceArchive, WorkspaceCatalog, WorkspaceTree, WorkspaceUpdate,
+    replay_warnings_unavailable,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadRecord, UploadStore};
 use serde_json::Value;
@@ -917,6 +921,48 @@ impl VersionState {
         })
     }
 
+    /// `tree` at `revision` from the documents scripted there: one per item (the first, as
+    /// `show` reads it), in path order, each with its header's original name when it is a
+    /// source card, and every folder above them. Only an unknown revision is `NotFound`.
+    fn tree_at(&self, revision: &Revision) -> Result<WorkspaceTree, ApiError> {
+        self.require_known(revision)?;
+        let mut items: Vec<TreeItem> = Vec::new();
+        for (at, document) in &self.documents {
+            if at != revision
+                || items
+                    .iter()
+                    .any(|held| held.summary.id == document.summary.id)
+            {
+                continue;
+            }
+            let original_name = ApplicationHeader::from_properties(&document.properties)?
+                .and_then(|header| header.source)
+                .map(|source| source.original_name);
+            items.push(TreeItem {
+                summary: document.summary.clone(),
+                original_name,
+            });
+        }
+        items.sort_by(|left, right| left.summary.path.as_str().cmp(right.summary.path.as_str()));
+        let mut folders = std::collections::BTreeSet::new();
+        for item in &items {
+            let text = item.summary.path.as_str();
+            folders.extend(
+                text.match_indices('/')
+                    .filter_map(|(at, _)| text.get(..at))
+                    .map(str::to_owned),
+            );
+        }
+        Ok(WorkspaceTree {
+            items,
+            folders: folders
+                .into_iter()
+                .map(WorkspacePath::try_from)
+                .collect::<Result<_, _>>()
+                .map_err(internal)?,
+        })
+    }
+
     fn require_known(&self, revision: &Revision) -> Result<(), ApiError> {
         let known = self.head.as_ref() == Some(revision)
             || self.commits.iter().any(|(_, at)| at == revision)
@@ -1216,6 +1262,13 @@ impl VersionStore for FakeVersions {
                 None => Ok(whole),
             }
         })
+    }
+    fn tree<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        revision: &'a Revision,
+    ) -> PortFuture<'a, WorkspaceTree> {
+        Box::pin(async move { lock_api(&self.state)?.tree_at(revision) })
     }
     fn item_at_path<'a>(
         &'a self,

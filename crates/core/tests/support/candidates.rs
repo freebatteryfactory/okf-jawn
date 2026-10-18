@@ -31,7 +31,7 @@ use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
     BlameQuery, CandidateChanges, CandidateCheck, CommitChanges, Committed, DiffQuery,
     FolderListing, LogQuery, ObjectInfo, Page, Promotion, RulesFile, StorageScope, TreeEdit,
-    VersionStore, replay_warnings_unavailable,
+    VersionStore, WorkspaceTree, replay_warnings_unavailable,
 };
 use serde_json::Value;
 
@@ -225,6 +225,13 @@ impl VersionStore for CandidateVersions {
         path: &'a WorkspacePath,
     ) -> PortFuture<'a, Vec<u8>> {
         self.inner.read_file(scope, revision, path)
+    }
+    fn tree<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+    ) -> PortFuture<'a, WorkspaceTree> {
+        self.inner.tree(scope, revision)
     }
     fn rules<'a>(
         &'a self,

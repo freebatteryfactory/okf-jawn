@@ -1,4 +1,5 @@
-//! Reads of one resolved revision: folder listings, items, files, rules, types, corrections.
+//! Reads of one resolved revision: folder listings, the whole tree, items, files, rules, types,
+//! corrections.
 //!
 //! `show` finds an item by the identity in its application header, never by a path the caller
 //! names, so a moved item is found at its new path. `item_at_path` answers what is at one path
@@ -12,7 +13,9 @@ use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath};
 use okf_jawn_contract::item::{ItemDocument, ItemSummary, TypeDefinition};
 use okf_jawn_contract::source::SourceAppearance;
 use okf_jawn_core::portable::item_content_digest;
-use okf_jawn_core::storage::{FolderListing, Page, Provenance, RulesFile, RulesParseError};
+use okf_jawn_core::storage::{
+    FolderListing, Page, Provenance, RulesFile, RulesParseError, TreeItem, WorkspaceTree,
+};
 
 use super::edit::{appearance_file, correction_file, supplied_file};
 use super::history::last_change;
@@ -24,8 +27,16 @@ pub(crate) fn items(
     repository: &Repository,
     tree: &Tree<'_>,
 ) -> Result<Vec<(WorkspacePath, ItemFile)>, ApiError> {
+    items_of(repository, files(repository, tree)?)
+}
+
+/// The items among `files` (a tree's files, as `repo::files` lists them), in their order.
+fn items_of(
+    repository: &Repository,
+    files: Vec<(String, Oid)>,
+) -> Result<Vec<(WorkspacePath, ItemFile)>, ApiError> {
     let mut found = Vec::new();
-    for (path, blob) in files(repository, tree)? {
+    for (path, blob) in files {
         if let Some(file) = item_file(repository, &path, blob)? {
             let path = WorkspacePath::try_from(path.clone())
                 .map_err(|error| internal(format!("{path} is not a workspace path: {error}")))?;
@@ -180,6 +191,47 @@ pub(crate) fn list(
         folders: page_folders,
         next_cursor: (end < total).then(|| end.to_string()),
     })
+}
+
+/// Every item of `revision` and every folder of its tree, in one walk (`VersionStore::tree`):
+/// each item file is parsed once and summarized as `list` summarizes it (`summary_of`), with a
+/// source card's original name from its header; the folders are every folder above a file, so
+/// the dot-folders `list` leaves out, `.okf` included, are here.
+pub(crate) fn tree(
+    repository: &Repository,
+    revision: &Revision,
+) -> Result<WorkspaceTree, ApiError> {
+    let tree = commit_of(repository, revision)?
+        .tree()
+        .map_err(|error| git(&error))?;
+    let files = files(repository, &tree)?;
+    let mut folders = std::collections::BTreeSet::new();
+    for (path, _) in &files {
+        folders.extend(
+            path.match_indices('/')
+                .filter_map(|(at, _)| path.get(..at))
+                .map(str::to_owned),
+        );
+    }
+    let mut items = Vec::new();
+    for (path, file) in items_of(repository, files)? {
+        items.push(TreeItem {
+            summary: summary_of(repository, &tree, &path, &file, revision)?,
+            original_name: file
+                .header
+                .source
+                .as_ref()
+                .map(|source| source.original_name.clone()),
+        });
+    }
+    let folders = folders
+        .into_iter()
+        .map(|folder| {
+            WorkspacePath::try_from(folder.clone())
+                .map_err(|error| internal(format!("{folder}: {error}")))
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(WorkspaceTree { items, folders })
 }
 
 pub(crate) fn show(

@@ -33,8 +33,8 @@ use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
     Backups, BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges,
     Committed, DiffQuery, FolderListing, LocalSource, LogQuery, ObjectInfo, ObjectRead, Page,
-    Promotion, Purger, RulesFile, SourceCard, StorageScope, TreeEdit, VersionStore, WrittenArchive,
-    replay_warnings_unavailable,
+    Promotion, Purger, RulesFile, SourceCard, StorageScope, TreeEdit, TreeItem, VersionStore,
+    WorkspaceTree, WrittenArchive, replay_warnings_unavailable,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadRecord, UploadStore};
 
@@ -859,6 +859,18 @@ impl VersionStore for FakeVersions {
     ) -> PortFuture<'a, Vec<u8>> {
         unused("read_file")
     }
+    fn tree<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        revision: &'a Revision,
+    ) -> PortFuture<'a, WorkspaceTree> {
+        // The port doc: every item and folder of the revision, in path order; `NotFound` only
+        // for a revision the line does not hold (`items_at`).
+        let tree = self
+            .items_at(revision)
+            .and_then(|items| tree_of(&items, revision));
+        Box::pin(async move { tree })
+    }
     fn rules<'a>(
         &'a self,
         _scope: &'a StorageScope,
@@ -1565,6 +1577,38 @@ fn apply_to_items(items: &mut Vec<SourceCard>, edit: &TreeEdit) {
 }
 
 /// The document `show` returns for a card at a revision.
+/// The tree of `items` at `revision`: each card summarized as `show` summarizes it, with its first
+/// observed name as its original's, in path order, and every folder above them.
+fn tree_of(items: &[SourceCard], revision: &Revision) -> Result<WorkspaceTree, ApiError> {
+    let mut held = Vec::new();
+    let mut folders = std::collections::BTreeSet::new();
+    for card in items {
+        let path = card.path.as_str();
+        folders.extend(
+            path.match_indices('/')
+                .filter_map(|(at, _)| path.get(..at))
+                .map(str::to_owned),
+        );
+        held.push(TreeItem {
+            summary: document_of(card, revision)?.summary,
+            original_name: card
+                .appearance
+                .names
+                .first()
+                .map(|name| name.filename.clone()),
+        });
+    }
+    held.sort_by(|left, right| left.summary.path.as_str().cmp(right.summary.path.as_str()));
+    Ok(WorkspaceTree {
+        items: held,
+        folders: folders
+            .into_iter()
+            .map(WorkspacePath::try_from)
+            .collect::<Result<_, _>>()
+            .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?,
+    })
+}
+
 fn document_of(card: &SourceCard, revision: &Revision) -> Result<ItemDocument, ApiError> {
     let content = serde_json::to_vec(&(&card.body, &card.properties))
         .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
