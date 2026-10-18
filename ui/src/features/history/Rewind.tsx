@@ -151,7 +151,11 @@ export function RewindPanel({ workspaceId, target, item, level, onClose }: Rewin
                 nothing to rewind.
               </p>
             ) : (
-              <Changes result={preview.data} title="What Rewind will change" level={5} />
+              <Changes
+                result={preview.data}
+                title="What Rewind will change"
+                level={level === 3 ? 4 : 5}
+              />
             ))}
           <p className="change-field">
             <label>

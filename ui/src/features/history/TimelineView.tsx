@@ -161,7 +161,7 @@ export function TimelineView({ workspaceId, revision, item, title, level }: Time
               workspaceId={workspaceId}
               commit={commit}
               itemId={itemId}
-              level={level === 2 ? 4 : 5}
+              level={level === 2 ? 3 : 4}
             />
           )}
         </div>
@@ -256,7 +256,7 @@ function VersionChanges({
   workspaceId: string;
   commit: Commit;
   itemId: string | null;
-  level: 4 | 5;
+  level: 3 | 4;
 }) {
   const before = commit.parents.at(0) ?? null;
   const diff = useQuery({
