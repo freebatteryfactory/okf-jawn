@@ -434,7 +434,9 @@ function ProposalActions({ workspaceId, proposal }: { workspaceId: string; propo
         busyLabel="Accepting…"
         busy={accepting.isPending}
         onConfirm={() => void runAccept().catch(() => undefined)}
-        returnFocus={approveRef}
+        // Once accepted, Approve is about to leave with the proposal no longer open: focus goes to
+        // the line that says what was done.
+        returnFocus={accepted !== null ? doneRef : approveRef}
         failure={
           acceptFailure.shown ? (
             <FailureNotice
