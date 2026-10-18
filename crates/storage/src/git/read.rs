@@ -36,12 +36,17 @@ pub(crate) fn items(
 }
 
 /// The item a file at `path` holds: `None` when `path` cannot hold an item (`is_item_path`)
-/// or the text carries no application header. `items`, and so `list`, and `item_at_path`
-/// decide what is an item here and nowhere else.
-fn item_file(repository: &Repository, path: &str, blob: Oid) -> Result<Option<ItemFile>, ApiError> {
+/// or the text carries no application header. `items`, and so `list`, `item_at_path` and the
+/// item-filtered log (`history::log`) decide what is an item here and nowhere else.
+pub(crate) fn item_file(
+    repository: &Repository,
+    path: &str,
+    blob: Oid,
+) -> Result<Option<ItemFile>, ApiError> {
     if !is_item_path(path) {
         return Ok(None);
     }
+    parses::record();
     let text = String::from_utf8(blob_bytes(repository, blob)?)
         .map_err(|_| internal(format!("{path} is not UTF-8")))?;
     ItemFile::parse(&text)
@@ -86,7 +91,7 @@ pub(crate) fn item_at_path(
 
 /// The blob at `path` in `tree`, found one tree entry per segment; `None` when a segment is
 /// missing or not a folder, or the entry is not a file.
-fn blob_at(tree: &Tree<'_>, path: &str) -> Result<Option<Oid>, ApiError> {
+pub(crate) fn blob_at(tree: &Tree<'_>, path: &str) -> Result<Option<Oid>, ApiError> {
     let entry = match tree.get_path(std::path::Path::new(path)) {
         Ok(entry) => entry,
         Err(error) if error.code() == git2::ErrorCode::NotFound => return Ok(None),
@@ -328,4 +333,29 @@ fn supplied(
             .unwrap_or_default(),
         kept_by: None,
     }))
+}
+
+/// How many item files `item_file` parsed on this thread, counted in unit tests so the cost of
+/// a walk can be checked; nothing is counted outside tests.
+pub(crate) mod parses {
+    #[cfg(test)]
+    thread_local! {
+        static COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Count one parse.
+    #[cfg(test)]
+    pub(crate) fn record() {
+        COUNT.with(|count| count.set(count.get().saturating_add(1)));
+    }
+
+    /// Count nothing outside tests.
+    #[cfg(not(test))]
+    pub(crate) const fn record() {}
+
+    /// The parses counted on this thread since the last call.
+    #[cfg(test)]
+    pub(crate) fn take() -> usize {
+        COUNT.with(|count| count.replace(0))
+    }
 }

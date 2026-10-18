@@ -479,9 +479,9 @@ async fn authorize_targets(
 /// does not allow it (contract ruling 25).
 ///
 /// Every workspace the mutation's targets name is checked, not only the one it writes: a
-/// comment written in a live workspace that cites an archived one, and a connector that would
-/// be granted an archived one, are refused as a write in it is, whatever the order of the
-/// targets. Each distinct workspace's catalog entry is read once, through
+/// comment written in a live workspace that cites an archived one is refused as a write in it
+/// is, whatever the order of the targets. Issuing a connector that lists an archived workspace
+/// is allowed (`create_connector` is on `ALLOWED_WHILE_ARCHIVED`, owner decision 2026-10-17). Each distinct workspace's catalog entry is read once, through
 /// `Application::archived_at`, in target order, until one is archived. A mutation authorized
 /// only at the tenant names no workspace and asks nothing. Nothing is recorded: the refusal is
 /// a state of the workspace, not a missing grant.

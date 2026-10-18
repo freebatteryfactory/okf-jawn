@@ -918,6 +918,7 @@ async fn proposal_updated(
                 connector_id: None,
                 actor: None,
                 operation: None,
+                transport: None,
                 proposal_id: Some(proposal),
                 count: None,
             },

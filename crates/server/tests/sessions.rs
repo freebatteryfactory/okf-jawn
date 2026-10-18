@@ -238,6 +238,7 @@ async fn the_launch_token_opens_a_strict_http_only_session_and_records_the_sign_
             client_id: None,
         }),
         operation: None,
+        transport: None,
         proposal_id: None,
         count: None,
     };

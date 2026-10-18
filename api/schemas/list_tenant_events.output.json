@@ -108,7 +108,7 @@
               "type": "null"
             }
           ],
-          "description": "The refused operation of a `permission_denied` event."
+          "description": "The refused operation of a `permission_denied` event; absent when a byte transport was\nrefused (`transport`)."
         },
         "proposal_id": {
           "anyOf": [
@@ -131,6 +131,17 @@
             }
           ],
           "description": "Content revision when applicable."
+        },
+        "transport": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TransportName"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The refused byte transport of a `permission_denied` event (a download, or an upload's\nbytes, which are not operations); `operation` is then absent."
         },
         "workspace_id": {
           "anyOf": [
@@ -675,6 +686,31 @@
       "format": "date-time",
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$",
       "type": "string"
+    },
+    "TransportName": {
+      "description": "A byte transport by name, as a refused one is recorded (`Event::transport`); each is one entry\nof `TRANSPORTS`, whose `id` is its `as_str`.",
+      "oneOf": [
+        {
+          "const": "upload_content",
+          "description": "`upload_content`.",
+          "type": "string"
+        },
+        {
+          "const": "download_object",
+          "description": "`download_object`.",
+          "type": "string"
+        },
+        {
+          "const": "download_artifact",
+          "description": "`download_artifact`.",
+          "type": "string"
+        },
+        {
+          "const": "download_tenant_artifact",
+          "description": "`download_tenant_artifact`.",
+          "type": "string"
+        }
+      ]
     },
     "WorkspaceId": {
       "description": "Stable application identity for one user-organized workspace.",

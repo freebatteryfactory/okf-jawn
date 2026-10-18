@@ -12,7 +12,7 @@ use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::EventKind;
 use okf_jawn_contract::extraction::ConversionSettings;
-use okf_jawn_contract::identity::{Digest, ItemId, Revision, TenantId, WorkspacePath};
+use okf_jawn_contract::identity::{Digest, ItemId, Revision, TenantId, UploadId, WorkspacePath};
 use okf_jawn_contract::item::ItemKind;
 use okf_jawn_contract::purge::{PurgeState, PurgeTarget};
 use okf_jawn_contract::workspace::ArtifactKind;
@@ -1354,6 +1354,7 @@ async fn backup_a_replacement_restore_run_again_restores_each_tenant_event_once(
                     connector_id: None,
                     actor: None,
                     operation: None,
+                    transport: None,
                     proposal_id: None,
                     count: None,
                 },
@@ -1691,6 +1692,7 @@ async fn backup_an_unfiltered_set_writes_the_archive_of_a_tenant_only_an_event_n
                 connector_id: None,
                 actor: None,
                 operation: None,
+                transport: None,
                 proposal_id: None,
                 count: None,
             },
@@ -1727,6 +1729,7 @@ async fn backup_a_later_archive_of_one_installation_restores_each_event_once() -
             connector_id: None,
             actor: None,
             operation: None,
+            transport: None,
             proposal_id: None,
             count: None,
         };
@@ -1896,6 +1899,7 @@ fn sign_in() -> NewEvent {
         connector_id: None,
         actor: None,
         operation: None,
+        transport: None,
         proposal_id: None,
         count: None,
     }
@@ -2378,6 +2382,64 @@ async fn backup_an_import_stopped_after_its_commit_writes_no_second_one_on_retry
     records.execute_batch("DROP TRIGGER stop_restore;")?;
     backups
         .restore_import(&target, uploaded, uuid!(84)?, vec!["ana".to_owned()])
+        .await?;
+    assert_eq!(storage.versions().head(&target).await?, stopped);
+    assert_one_restore_commit(storage, &target, &fixture.head)?;
+    Ok(())
+}
+
+/// MT (F1 re-review, finding 4): after an import stopped after its restore commit, an import of
+/// the same archive under another mutation finds the head's only parent at the archive head,
+/// but the trailer names the first import's mutation, not its own: the head is not its restore
+/// commit, so it is refused as filling a workspace that is not blank, and writes no commit and
+/// no record. The first import's retry then completes on its own commit.
+#[tokio::test]
+async fn backup_an_import_under_another_mutation_after_a_stopped_one_is_refused() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let storage = &fixture.storage;
+    let backups = storage.backups();
+    let (target, _) = create(storage, "elsewhere", 80, "Copy").await?;
+    let uploaded = archive_into(storage, &fixture.workspace, &target).await?;
+    let records = rusqlite::Connection::open(directory.path().join("records.sqlite"))?;
+    records.execute_batch(
+        "CREATE TRIGGER stop_restore BEFORE INSERT ON restores
+         BEGIN SELECT RAISE(ABORT, 'stopped before the import record'); END;",
+    )?;
+    let editors = || vec!["ana".to_owned()];
+    err_of(
+        backups
+            .restore_import(&target, uploaded.clone(), uuid!(84)?, editors())
+            .await,
+    )?;
+    records.execute_batch("DROP TRIGGER stop_restore;")?;
+    let stopped = storage.versions().head(&target).await?;
+    let error = err_of(
+        backups
+            .restore_import(&target, uploaded.clone(), uuid!(85)?, editors())
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    assert_eq!(error.message, "a restore fills only a blank workspace");
+    assert_eq!(storage.versions().head(&target).await?, stopped);
+    assert!(
+        storage
+            .versions()
+            .find_commit(&target, uuid!(85)?, None)
+            .await?
+            .is_none(),
+        "no commit carries the other import's mutation"
+    );
+    assert_eq!(
+        count(
+            &directory.path().join("records.sqlite"),
+            "SELECT count(*) FROM restores"
+        )?,
+        0,
+        "no import is recorded"
+    );
+    backups
+        .restore_import(&target, uploaded, uuid!(84)?, editors())
         .await?;
     assert_eq!(storage.versions().head(&target).await?, stopped);
     assert_one_restore_commit(storage, &target, &fixture.head)?;
@@ -3697,6 +3759,31 @@ async fn backup_an_import_refuses_an_archive_whose_reference_holds_a_respelling(
             "the archive cannot be restored: notes collides with Notes: its {candidate} holds two \
              spellings of one path, which Windows and macOS keep as one"
         ),
+    )
+    .await
+}
+
+/// Contract ruling 33 (PR #34's Codex pair): an import refuses, before anything is written, an
+/// archive whose head holds two names that differ only in Unicode normalization inside a
+/// segment Windows refuses even in NFC (`café?.txt`, precomposed and with a combining accent):
+/// they share a collision key (`identity::collision_key_of`), so the import's check names both,
+/// escaped, and the reference.
+#[tokio::test]
+async fn backup_an_import_refuses_an_archive_holding_two_normalizations_of_a_name() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let main = "refs/heads/main";
+    respelled_at(&storage, &source, main, "notes/caf\u{e9}?.txt")?;
+    respelled_at(&storage, &source, main, "notes/cafe\u{301}?.txt")?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let imported = import_crafted(&storage, bytes).await?;
+    assert_import_refused(
+        &storage,
+        imported,
+        "the archive cannot be restored: notes/caf\\u{e9}?.txt collides with \
+         notes/cafe\\u{301}?.txt: its refs/heads/main holds two names that differ in how their \
+         characters are encoded, which macOS keeps as one",
     )
     .await
 }
@@ -5422,24 +5509,40 @@ async fn backup_a_restore_refuses_damaged_records_before_any_write() -> TestResu
 
 /// B1-R: a constraint the live database still enforces at the copy is the archive's, so
 /// `InvalidInput`, never a collision: here the second archive of a set gives its workspace the
-/// creation mutation of the first, which the same restore already wrote.
+/// creation mutation of the first, which the same restore already wrote. N-3: the failed run
+/// leaves what `restore_replacement` says it leaves (the installation's rows, the first
+/// workspace in full, and of the second its history but none of its rows), and a run again
+/// with the good set completes.
 #[tokio::test]
 async fn backup_a_constraint_failed_at_the_copy_is_invalid_input() -> TestResult {
     let directory = tempfile::tempdir()?;
     let output = tempfile::tempdir()?;
-    let (first, second) = {
+    let (first, second, identity) = {
         let storage = Storage::open(directory.path())?;
+        let identity = storage.credentials().installation_identity().await?;
         let first = notes_workspace(&storage).await?;
-        let (second, _) = create(&storage, "local", 2, "Second").await?;
+        let (second, created) = create(&storage, "local", 2, "Second").await?;
+        // The second holds an object, so what its failed copy leaves of it can be seen.
+        let original = put(&storage, &second, b"n3 the second workspace's original").await?;
+        commit(
+            &storage,
+            &second,
+            3,
+            &created,
+            vec![card(uuid!(15)?, &original.digest)?],
+        )
+        .await?;
         storage
             .backups()
             .write_backup_set(output.path(), None)
             .await?;
-        (first, second)
+        (first, second, identity)
     };
     let (installation, first_archive) = set_of(output.path(), &first);
     let (_, second_archive) = set_of(output.path(), &second);
     let bytes = std::fs::read(&second_archive)?;
+    let good_second = output.path().join("good-second.zip");
+    std::fs::write(&good_second, &bytes)?;
     let records = rr4_forged_records(
         &bytes,
         &format!("UPDATE workspaces SET mutation_id = '{}'", uuid_text(1)),
@@ -5458,7 +5561,7 @@ async fn backup_a_constraint_failed_at_the_copy_is_invalid_input() -> TestResult
     let error = err_of(
         restored
             .backups()
-            .restore_replacement(&installation, &[first_archive, second_archive])
+            .restore_replacement(&installation, &[first_archive.clone(), second_archive])
             .await,
     )?;
     assert_eq!(error.code, ErrorCode::InvalidInput, "{error}");
@@ -5466,7 +5569,61 @@ async fn backup_a_constraint_failed_at_the_copy_is_invalid_input() -> TestResult
         error.message.contains("workspaces") && error.message.contains("constraint"),
         "{error}"
     );
+    // What the failed run left: the installation's rows; the first workspace in full, its rows
+    // with the record of the restore that wrote them; of the second, its objects as pending
+    // puts and its history, no row.
+    let live = directory.path().join("records.sqlite");
+    assert_eq!(
+        restored
+            .credentials()
+            .installation_identity()
+            .await?
+            .subject,
+        identity.subject
+    );
+    for (workspace, table, rows) in [
+        (&first, "workspaces", 1),
+        (&first, "replacement_restores", 1),
+        (&first, "drafts", 1),
+        (&second, "workspaces", 0),
+        (&second, "replacement_restores", 0),
+        (&second, "pending_puts", 1),
+    ] {
+        assert_eq!(rows_of(&live, workspace, table)?, rows, "{table}");
+    }
+    assert!(
+        restored
+            .data()
+            .repositories_path()
+            .join("local")
+            .join(format!("{}.git", second.workspace_id.0))
+            .is_dir(),
+        "the second workspace's history was written before its rows failed"
+    );
+    // A run again with the good set completes: the first is accepted as it is, the second is
+    // restored over the history the failed run left.
+    let reports = restored
+        .backups()
+        .restore_replacement(&installation, &[first_archive, good_second])
+        .await?;
+    assert_eq!(reports.len(), 2);
+    for workspace in [&first, &second] {
+        assert_eq!(rows_of(&live, workspace, "workspaces")?, 1);
+        assert_eq!(rows_of(&live, workspace, "replacement_restores")?, 1);
+        restored.catalog().open(workspace).await?;
+    }
     Ok(())
+}
+
+/// How many rows of `table` in the records database `live` name `workspace`.
+fn rows_of(live: &Path, workspace: &StorageScope, table: &str) -> Fallible<i64> {
+    count(
+        live,
+        &format!(
+            "SELECT count(*) FROM {table} WHERE workspace_id = '{}'",
+            workspace.workspace_id.0
+        ),
+    )
 }
 
 /// B1-R: a workspace archive whose records are at records schema 1 (a pre-migration set's)
@@ -7974,6 +8131,145 @@ async fn rr7_a_small_pending_json_naming_another_workspaces_object_keeps_nothing
     Ok(())
 }
 
+/// A completed upload slot of `workspace` under mutation `mutation` holding `body`, and the
+/// object it holds.
+async fn n6_upload(
+    storage: &Storage,
+    workspace: &StorageScope,
+    mutation: u32,
+    body: &[u8],
+) -> Fallible<(UploadId, Digest)> {
+    let object = put(storage, workspace, body).await?.digest;
+    let uploads = storage.uploads();
+    let slot = uploads
+        .create(
+            workspace,
+            uuid!(mutation)?,
+            NewUpload {
+                filename: "document.pdf".to_owned(),
+                relative_path: String::new(),
+                expected_size: u64::try_from(body.len())?,
+                expected_sha256: None,
+                supplied_by: person("ana"),
+            },
+        )
+        .await?;
+    uploads
+        .put_content(
+            workspace,
+            slot.id,
+            Box::pin(std::io::Cursor::new(body.to_vec())),
+            1 << 20,
+        )
+        .await?;
+    uploads.complete(workspace, slot.id, object.clone()).await?;
+    Ok((slot.id, object))
+}
+
+/// An import job of `workspace` under mutation `mutation`, claimed, that took `upload` as its
+/// input; answers the job and its claim.
+async fn n6_import_taking(
+    storage: &Storage,
+    workspace: &StorageScope,
+    mutation: u32,
+    upload: UploadId,
+) -> Fallible<ClaimedJob> {
+    let records = storage.records();
+    let job = records
+        .create_job(
+            &JobScope::Workspace(workspace.clone()),
+            NewJob {
+                mutation_id: uuid!(mutation)?,
+                initiator: person("ana"),
+                spec: JobSpec::Import {
+                    base_revision: storage.versions().head(workspace).await?,
+                    upload_ids: vec![upload],
+                    destination: None,
+                    apply_naming_rules: false,
+                    settings: ConversionSettings::default(),
+                },
+            },
+        )
+        .await?;
+    let claimed = some(records.claim_job(job.id).await?, "the claimed import")?;
+    storage
+        .uploads()
+        .consume_batch(workspace, &[upload], job.id)
+        .await?;
+    Ok(claimed)
+}
+
+/// Complete the claimed import `claimed` with no output.
+async fn n6_complete(storage: &Storage, claimed: ClaimedJob) -> TestResult {
+    storage
+        .records()
+        .complete_job(JobCompletion {
+            lease: claimed.lease,
+            revision: None,
+            item_ids: Vec::new(),
+            artifact: None,
+            restore: None,
+            backup: None,
+            outputs: Vec::new(),
+            warnings: Vec::new(),
+        })
+        .await?;
+    Ok(())
+}
+
+/// N-6 (b1r re-review): a backup taken while an import runs, after the import took its upload
+/// and before its card landed, drops the running job (a restored one would run again), and so
+/// writes the upload back as completed and unconsumed: restored by replacement, a new import
+/// takes the upload and lands its card. An upload a finished import took stays taken by it.
+#[tokio::test]
+async fn backup_an_upload_a_running_import_took_is_restored_free_for_the_next_import() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let (workspace, (taken, object), (done, finished)) = {
+        let storage = Storage::open(directory.path())?;
+        let workspace = notes_workspace(&storage).await?;
+        let (done, _) =
+            n6_upload(&storage, &workspace, 40, b"n6 a finished import's input").await?;
+        let finished = n6_import_taking(&storage, &workspace, 41, done).await?;
+        let finished_job = finished.job.id;
+        n6_complete(&storage, finished).await?;
+        let taken = n6_upload(&storage, &workspace, 42, b"n6 a running import's input").await?;
+        n6_import_taking(&storage, &workspace, 43, taken.0).await?;
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+        (workspace, taken, (done, finished_job))
+    };
+    let (installation, archive) = set_of(output.path(), &workspace);
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    restored
+        .backups()
+        .restore_replacement(&installation, &[archive])
+        .await?;
+    let uploads = restored.uploads();
+    assert_eq!(uploads.get(&workspace, taken).await?.consumed_by, None);
+    assert_eq!(
+        uploads.get(&workspace, done).await?.consumed_by,
+        Some(finished),
+        "a finished import keeps its input"
+    );
+    let again = n6_import_taking(&restored, &workspace, 44, taken).await?;
+    let head = restored.versions().head(&workspace).await?;
+    commit(
+        &restored,
+        &workspace,
+        45,
+        &head,
+        vec![card(uuid!(15)?, &object)?],
+    )
+    .await?;
+    n6_complete(&restored, again).await?;
+    Ok(())
+}
+
 // B1-R round 4 (`rr9_`, the round 3 re-review's probes): a card's two references are read by
 // path, a workspace's own damage never stops its purge, a survivor's damage names the
 // workspace, and the restore refusals the review probed are committed tests.
@@ -8875,6 +9171,111 @@ async fn rr9_a_workspace_holding_its_own_backup_restores_without_the_rows_naming
     Ok(())
 }
 
+/// Complete a job of `spec` in `workspace` under mutation `mutation` whose artifact is a new
+/// object `bytes` of `kind`; answers the artifact's identity.
+async fn finished_with_artifact(
+    storage: &Storage,
+    workspace: &StorageScope,
+    mutation: u32,
+    spec: JobSpec,
+    (kind, bytes): (ArtifactKind, &[u8]),
+) -> Fallible<String> {
+    let scope = JobScope::Workspace(workspace.clone());
+    let records = storage.records();
+    let job = records
+        .create_job(
+            &scope,
+            NewJob {
+                mutation_id: uuid!(mutation)?,
+                initiator: person("ana"),
+                spec,
+            },
+        )
+        .await?;
+    let claimed = some(records.claim_job(job.id).await?, "the claimed job")?;
+    let object = put(storage, workspace, bytes).await?;
+    let artifact = records
+        .record_artifact(
+            &scope,
+            claimed.mutation_id,
+            NewArtifact {
+                kind,
+                object: object.clone(),
+                media_type: "application/zip".to_owned(),
+                created_by_job: job.id,
+            },
+        )
+        .await?;
+    records
+        .complete_job(JobCompletion {
+            lease: claimed.lease,
+            revision: None,
+            item_ids: Vec::new(),
+            artifact: Some(artifact.id),
+            restore: None,
+            backup: None,
+            outputs: vec![object.digest],
+            warnings: Vec::new(),
+        })
+        .await?;
+    Ok(artifact.id.0.to_string())
+}
+
+/// MKEPTART (pass-3 re-review): the archive's scrub of job download descriptors removes only
+/// the descriptor of an artifact the archive leaves out. A finished export job keeps its
+/// descriptor, naming its export, which the archive keeps; a finished backup job loses its
+/// descriptor with its workspace backup artifact.
+#[tokio::test]
+async fn backup_a_kept_exports_download_descriptor_survives_the_scrub() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let workspace = notes_workspace(&storage).await?;
+    let head = storage.versions().head(&workspace).await?;
+    let export = finished_with_artifact(
+        &storage,
+        &workspace,
+        30,
+        JobSpec::ExportWorkspace {
+            revision: head,
+            include_history: false,
+        },
+        (ArtifactKind::Export, b"mkeptart an export archive"),
+    )
+    .await?;
+    let backup = finished_with_artifact(
+        &storage,
+        &workspace,
+        31,
+        JobSpec::BackupWorkspace,
+        (ArtifactKind::WorkspaceBackup, b"mkeptart a backup archive"),
+    )
+    .await?;
+    let bytes = archive_bytes(&storage, &workspace).await?;
+    let staged = directory.path().join("archived.sqlite");
+    std::fs::write(&staged, entry_bytes_of(&bytes, "records.sqlite")?)?;
+    let described = |artifact: &str| -> Fallible<i64> {
+        count(
+            &staged,
+            &format!(
+                "SELECT count(*) FROM jobs
+                 WHERE json_extract(record, '$.artifact.artifact_id') = '{artifact}'"
+            ),
+        )
+    };
+    assert_eq!(described(&export)?, 1, "the export job keeps its download");
+    assert_eq!(
+        described(&backup)?,
+        0,
+        "the backup job's download is scrubbed"
+    );
+    assert_eq!(
+        count(&staged, "SELECT count(*) FROM jobs")?,
+        2,
+        "both jobs are kept"
+    );
+    Ok(())
+}
+
 // Round 4 re-review (`rr10_`, b1r4): B4-1, a pack lacking a blob only its history or its head
 // needs, and what a refused import leaves working; N-20, the `.okf` and `sources` trees; N-21,
 // the count against other workspaces' rows; N-22, a survivor whose repository does not open.
@@ -8941,6 +9342,74 @@ async fn rr10_a_pack_lacking_a_blob_its_head_needs_is_refused_before_any_write()
         "the history does not hold",
     )
     .await
+}
+
+/// R11A (b1r4 re-review, its probe adopted): the fixture's candidate is a second reference. A
+/// pack that lacks the blob only the candidate's commit needs (`notes/idea.md`) is refused as
+/// invalid input before any write: the archive writer packs every reference, so the restore's
+/// walk must follow each, not only the first.
+#[tokio::test]
+async fn rr11_a_pack_lacking_a_blob_only_the_candidate_needs_is_refused() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let storage = &fixture.storage;
+    storage
+        .backups()
+        .write_backup_set(output.path(), None)
+        .await?;
+    let (pack, references) = {
+        let repository = repository_of(storage, &fixture.workspace)?;
+        let candidate = repository.find_commit(git2::Oid::from_str(fixture.candidate.as_str())?)?;
+        let idea = candidate.tree()?.get_path(Path::new("notes/idea.md"))?.id();
+        assert!(
+            rr9_head(&repository)?
+                .tree()?
+                .get_path(Path::new("notes/idea.md"))
+                .is_err(),
+            "only the candidate holds the idea"
+        );
+        rr9_pack_of(&repository, Some(idea))?
+    };
+    assert!(
+        references.len() >= 2,
+        "main and the candidate: {references:?}"
+    );
+    let (_, archive) = set_of(output.path(), &fixture.workspace);
+    let crafted = rebuilt(
+        &std::fs::read(&archive)?,
+        &|_| zip::CompressionMethod::Stored,
+        &|name| (name == "history.pack").then(|| pack.clone()),
+        &[],
+    )?;
+    let crafted = rr9_with_manifest(&crafted, &|manifest| {
+        if let Some(fields) = manifest.as_object_mut() {
+            fields.insert("references".to_owned(), json!(references));
+        }
+    })?;
+    let outcome = import_crafted(storage, crafted).await?;
+    assert_import_refused(storage, outcome, "the history does not hold").await
+}
+
+/// R11A's companion (b1r4 re-review, its probe adopted): what a restore takes, a backup writes
+/// again. The fixture's real archive (a card, a candidate, drafts, an export) imports into
+/// another installation, whose workspace archive and backup set are then written.
+#[tokio::test]
+async fn rr11_an_imported_real_archive_is_archived_again() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let bytes = archive_bytes(&fixture.storage, &fixture.workspace).await?;
+    let elsewhere = tempfile::tempdir()?;
+    let other = Storage::open(elsewhere.path())?;
+    let (target, _blank, result) = import_crafted(&other, bytes).await?;
+    result?;
+    other
+        .backups()
+        .write_workspace_archive(&target, uuid!(97)?)
+        .await?;
+    let set = tempfile::tempdir()?;
+    other.backups().write_backup_set(set.path(), None).await?;
+    Ok(())
 }
 
 /// B4-1, the reviewer's characterisation turned around: a workspace Admin of tenant `elsewhere`
@@ -9214,6 +9683,49 @@ async fn rr10_a_survivor_whose_repository_does_not_open_fails_the_purge_naming_i
         Ok(std::fs::remove_file(repository.join("HEAD"))?)
     })
     .await
+}
+
+/// Git errors name no machine path (sweep 2a, ruling 10): libgit2's message for a survivor's
+/// repository that does not open carries the repository's absolute path; the purge's failure
+/// names it relative to the data directory, with libgit2's class and code, and holds no part of
+/// the data directory's absolute path.
+#[tokio::test]
+async fn a_survivor_that_does_not_open_is_named_without_a_machine_path() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (survivor, _) = create(&storage, "local", 1, "Survivor").await?;
+    let (target, _) = create(&storage, "local", 2, "Target").await?;
+    std::fs::remove_file(
+        storage
+            .data()
+            .repositories_path()
+            .join("local")
+            .join(format!("{}.git", survivor.workspace_id.0))
+            .join("HEAD"),
+    )?;
+    let error = err_of(rr8_purge(&storage, &target).await?)?;
+    assert_eq!(error.code, ErrorCode::Unavailable, "{error}");
+    let relative = format!("repositories/local/{}.git", survivor.workspace_id.0);
+    assert!(error.message.contains(&relative), "{error}");
+    assert!(error.message.contains("(Repository, NotFound)"), "{error}");
+    let root = directory.path().to_string_lossy();
+    let forward = root.replace('\\', "/");
+    for whole in [root.as_ref(), forward.as_str()] {
+        assert!(!error.message.contains(whole), "{whole:?} is in {error}");
+    }
+    // A component is looked for as a whole segment, not as a substring: a short one (`T`, `4f` in
+    // a macOS temp root) can occur by chance inside a workspace id or in libgit2's words.
+    let segments: Vec<&str> = error
+        .message
+        .split(['/', '\\', ' ', '\'', '"', '`', '(', ')', ',', ';'])
+        .collect();
+    for part in forward.split('/').filter(|part| !part.is_empty()) {
+        assert!(
+            !segments.contains(&part),
+            "{part:?} is a segment of {error}"
+        );
+    }
+    Ok(())
 }
 
 /// N-22: a survivor whose repository opens but whose references do not list (its `packed-refs`

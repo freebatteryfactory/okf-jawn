@@ -4,9 +4,9 @@
 //! workspace before it is published (temporary file, integrity check, publish on success)". The
 //! live database is copied with `VACUUM INTO` into a private file; every table not listed in
 //! `WORKSPACE_TABLES` is emptied and the listed ones keep only the workspace's rows (a kept job
-//! loses the download descriptor of an artifact the archive leaves out, and a row naming an
-//! object the archive leaves out goes with it, so every kept row names an object the archive
-//! holds); the result
+//! loses the download descriptor of an artifact the archive leaves out, an upload taken by a
+//! job the archive drops is kept unconsumed, and a row naming an object the archive leaves out
+//! goes with it, so every kept row names an object the archive holds); the result
 //! is vacuumed again into a second file, so nothing removed is left in free pages; that file is
 //! checked (`integrity_check`, `foreign_key_check`, schema version) before the caller publishes
 //! it.
@@ -218,6 +218,18 @@ pub(crate) fn filter(
                  WHERE json_extract(record, '$.artifact.artifact_id') IS NOT NULL
                    AND json_extract(record, '$.artifact.artifact_id')
                        NOT IN (SELECT artifact_id FROM artifacts)",
+                [],
+            )
+            .map_err(|error| sql(&error))?;
+        // An upload taken by a job the archive drops (queued or running: an import between
+        // taking its uploads and landing its cards) is kept completed and unconsumed (N-6): the
+        // job is not restored, so the upload must stay free for the import to run again. One
+        // taken by a kept job stays taken by it.
+        transaction
+            .execute(
+                "UPDATE uploads SET consumed_by = NULL
+                 WHERE consumed_by IS NOT NULL
+                   AND consumed_by NOT IN (SELECT job_id FROM jobs)",
                 [],
             )
             .map_err(|error| sql(&error))?;
