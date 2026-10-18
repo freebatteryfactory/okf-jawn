@@ -19,13 +19,13 @@ use okf_jawn_contract::identity::{Digest, ItemId, Revision, TenantId, WorkspaceP
 use okf_jawn_contract::item::ItemKind;
 use okf_jawn_core::conformance::EditCheck;
 use okf_jawn_core::storage::{
-    CandidateChanges, CandidateCheck, CommitChanges, Committed, NewWorkspace, Provenance,
-    SourceCard, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
+    CandidateChanges, CandidateCheck, CommitChanges, Committed, LogQuery, NewWorkspace, Page,
+    Provenance, SourceCard, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
 };
 use okf_jawn_storage::Storage;
 use serde_json::json;
 
-use check::{TestResult, err_of};
+use check::{TestResult, err_of, some};
 
 /// The identity numbered `n`, of the type the context names.
 macro_rules! uuid {
@@ -38,6 +38,9 @@ type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 
 /// Accepts every candidate.
 struct Accept;
+
+/// Refuses every candidate.
+struct Refuses;
 
 /// A check that records the rewritten paths each run was told (`CandidateCheck::check`) and
 /// answers as the check it wraps.
@@ -65,6 +68,12 @@ impl CandidateCheck for Accept {
         _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
     ) -> Result<Vec<Warning>, ApiError> {
         Ok(Vec::new())
+    }
+}
+
+impl CandidateCheck for Refuses {
+    fn check(&self, _root: &Path, _rewritten: &[WorkspacePath]) -> Result<Vec<Warning>, ApiError> {
+        Err(ApiError::new(ErrorCode::InvalidInput, "the check refuses"))
     }
 }
 
@@ -199,6 +208,25 @@ impl Workspace {
         let blob = repository.blob(bytes)?;
         let mut update = git2::build::TreeUpdateBuilder::new();
         update.upsert(at, blob, git2::FileMode::Blob);
+        let tree = repository.find_tree(update.create_updated(&repository, &parent.tree()?)?)?;
+        let who = git2::Signature::now("raw", "raw@example.invalid")?;
+        let commit = repository.commit(
+            Some("refs/heads/main"),
+            &who,
+            &who,
+            &format!("raw\n\nOkf-Jawn-Mutation: {}\n", uuid_text(mutation)),
+            &tree,
+            &[&parent],
+        )?;
+        Ok(Revision::try_from(commit.to_string())?)
+    }
+
+    /// Commit on main straight through `git2`, removing the file at `at`, as no store edit can.
+    fn raw_remove(&self, at: &str, mutation: u32) -> Fallible<Revision> {
+        let repository = self.repository()?;
+        let parent = repository.find_commit(repository.refname_to_id("refs/heads/main")?)?;
+        let mut update = git2::build::TreeUpdateBuilder::new();
+        update.remove(at);
         let tree = repository.find_tree(update.create_updated(&repository, &parent.tree()?)?)?;
         let who = git2::Signature::now("raw", "raw@example.invalid")?;
         let commit = repository.commit(
@@ -1751,6 +1779,581 @@ async fn a_move_away_and_back_in_one_commit_tells_the_referrers_it_rewrote_twice
         ]],
         "told the referrers although their bytes did not change"
     );
+    Ok(())
+}
+
+// The sweep-1 reviewer's probes r1 to r11 (sweep 2a): the edits core composes for a Rewind of
+// an item deleted since its target (R-I14: put back from the last revision that held it, moved
+// to its path at the target, restored from the target), applied by real storage. Core finds the
+// last holder as the first parent of the newest commit the item-filtered log names
+// (`last_holder`, asserted in each test); the edits are written out as core composes them,
+// since a storage test cannot run core's application.
+
+/// `DeleteItem` of `item`.
+fn deleted(item: u32) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::DeleteItem {
+        item_id: uuid!(item)?,
+    })
+}
+
+/// `EditItem` of `item` to `body`, with no properties beyond its header.
+fn edited(item: u32, body: &str) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::EditItem {
+        item_id: uuid!(item)?,
+        body: body.to_owned(),
+        properties: BTreeMap::new(),
+    })
+}
+
+/// The last revision before `base` that held `item`, as core finds it: the first parent of the
+/// newest commit the item-filtered log names, from `base`.
+async fn last_holder(space: &Workspace, base: &Revision, item: u32) -> Fallible<Revision> {
+    let newest = space
+        .storage
+        .versions()
+        .log(
+            &space.scope,
+            LogQuery {
+                tip: base.clone(),
+                item_id: Some(uuid!(item)?),
+                page: Page {
+                    cursor: None,
+                    limit: 1,
+                },
+            },
+        )
+        .await?;
+    let commit = some(
+        newest.commits.into_iter().next(),
+        "the newest commit that changed the item",
+    )?;
+    Ok(some(commit.parents.into_iter().next(), "its first parent")?)
+}
+
+/// The three edits of a Rewind of `item`, deleted since: put back from `last`, moved to `to`
+/// (its path at `target`), restored from `target`.
+fn rewound_deleted(
+    item: u32,
+    last: &Revision,
+    to: &str,
+    target: &Revision,
+) -> Fallible<Vec<TreeEdit>> {
+    Ok(vec![
+        restore(item, last)?,
+        moved(item, to)?,
+        restore(item, target)?,
+    ])
+}
+
+/// The files of `revision` whose path holds a private name (`okf-jawn-`).
+fn private_names(space: &Workspace, revision: &Revision) -> Fallible<Vec<String>> {
+    Ok(space
+        .files_under(revision, "")?
+        .into_iter()
+        .filter(|file| file.contains("okf-jawn-"))
+        .collect())
+}
+
+/// Probe r1: an item moved twice and then deleted, with an unrelated commit since. The delete is
+/// the newest commit that changed it, and its parent held it last; the three edits put it back
+/// at its first path with the target's bytes, its referrer's bytes are the target's again (the
+/// move rewrote the link back), and no later path and no private name is left.
+#[tokio::test]
+async fn r1_an_item_moved_twice_then_deleted_is_rewound_with_its_referrer() -> TestResult {
+    let space = Workspace::new().await?;
+    let c2 = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "a.md", "# The item\n\nOne.\n")?,
+                note(11, "notes/ref.md", "See [it](../a.md#the-item).\n")?,
+            ],
+        )
+        .await?;
+    let c3 = space.commit(3, &c2, vec![moved(10, "b.md")?]).await?;
+    let c4 = space.commit(4, &c3, vec![moved(10, "deep/c.md")?]).await?;
+    let c5 = space.commit(5, &c4, vec![deleted(10)?]).await?;
+    let c6 = space
+        .commit(6, &c5, vec![note(12, "other.md", "Unrelated.\n")?])
+        .await?;
+    assert_eq!(last_holder(&space, &c6, 10).await?, c4);
+    let c7 = space
+        .commit(7, &c6, rewound_deleted(10, &c4, "a.md", &c2)?)
+        .await?;
+    for at in ["a.md", "notes/ref.md"] {
+        assert!(space.file(&c2, at)?.is_some(), "{at}");
+        assert_eq!(space.file(&c7, at)?, space.file(&c2, at)?, "{at}");
+    }
+    for gone in ["b.md", "deep/c.md"] {
+        assert_eq!(space.file(&c7, gone)?, None, "{gone}");
+    }
+    assert_eq!(private_names(&space, &c7)?, Vec::<String>::new());
+    Ok(())
+}
+
+/// Probe r1 (its r3 part): when the target is the last revision that held the deleted item, the
+/// Rewind is one `RestoreItem` from it, and the links are right as they are: the item and its
+/// referrer come back with the target's bytes.
+#[tokio::test]
+async fn r1_a_rewind_to_the_revision_that_held_the_item_last_is_one_restore() -> TestResult {
+    let space = Workspace::new().await?;
+    let d2 = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "a.md", "# The item\n\nOne.\n")?,
+                note(11, "notes/ref.md", "See [it](../a.md#the-item).\n")?,
+            ],
+        )
+        .await?;
+    let d3 = space.commit(3, &d2, vec![moved(10, "deep/c.md")?]).await?;
+    let d4 = space.commit(4, &d3, vec![deleted(10)?]).await?;
+    assert_eq!(last_holder(&space, &d4, 10).await?, d3);
+    let d5 = space.commit(5, &d4, vec![restore(10, &d3)?]).await?;
+    for at in ["deep/c.md", "notes/ref.md"] {
+        assert!(space.file(&d3, at)?.is_some(), "{at}");
+        assert_eq!(space.file(&d5, at)?, space.file(&d3, at)?, "{at}");
+    }
+    Ok(())
+}
+
+/// Probe r1: an item deleted, rewound, then moved and deleted again. The newest commit that
+/// changed it is the second delete, and the three edits from its parent put the referrer back
+/// as the target holds it, with no file at the second last path.
+#[tokio::test]
+async fn r1_an_item_deleted_rewound_and_deleted_again_is_rewound_from_its_last_delete() -> TestResult
+{
+    let space = Workspace::new().await?;
+    let d2 = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "a.md", "# The item\n\nOne.\n")?,
+                note(11, "notes/ref.md", "See [it](../a.md#the-item).\n")?,
+            ],
+        )
+        .await?;
+    let d3 = space.commit(3, &d2, vec![moved(10, "deep/c.md")?]).await?;
+    let d4 = space.commit(4, &d3, vec![deleted(10)?]).await?;
+    let d5 = space.commit(5, &d4, vec![restore(10, &d3)?]).await?;
+    let d6 = space.commit(6, &d5, vec![moved(10, "third.md")?]).await?;
+    let d7 = space.commit(7, &d6, vec![deleted(10)?]).await?;
+    assert_eq!(last_holder(&space, &d7, 10).await?, d6);
+    let d8 = space
+        .commit(8, &d7, rewound_deleted(10, &d6, "a.md", &d2)?)
+        .await?;
+    for at in ["a.md", "notes/ref.md"] {
+        assert_eq!(space.file(&d8, at)?, space.file(&d2, at)?, "{at}");
+    }
+    assert_eq!(space.file(&d8, "third.md")?, None);
+    assert_eq!(private_names(&space, &d8)?, Vec::<String>::new());
+    Ok(())
+}
+
+/// Probe r2: an item deleted in a commit that also deleted the other item of its old folder and
+/// edited its referrer. The three edits put it back in that folder with the target's bytes, and
+/// the referrer keeps its later edit, with its link pointing at the item again.
+#[tokio::test]
+async fn r2_an_item_deleted_with_its_folder_in_a_shared_commit_is_rewound() -> TestResult {
+    let space = Workspace::new().await?;
+    let c2 = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "box/x.md", "# X\n")?,
+                note(12, "box/y.md", "# Y\n")?,
+                note(11, "ref.md", "[x](box/x.md) and [y](box/y.md).\n")?,
+            ],
+        )
+        .await?;
+    let c3 = space
+        .commit(3, &c2, vec![moved(10, "crate/x2.md")?])
+        .await?;
+    let c4 = space
+        .commit(
+            4,
+            &c3,
+            vec![
+                deleted(10)?,
+                deleted(12)?,
+                edited(11, "Edited. [x](crate/x2.md) and [y](box/y.md).\n")?,
+            ],
+        )
+        .await?;
+    assert_eq!(last_holder(&space, &c4, 10).await?, c3);
+    let c5 = space
+        .commit(5, &c4, rewound_deleted(10, &c3, "box/x.md", &c2)?)
+        .await?;
+    let referrer = body_of(&space, &c5, 11).await?;
+    assert!(referrer.contains("[x](box/x.md)"), "{referrer}");
+    assert!(referrer.contains("Edited."), "{referrer}");
+    assert_eq!(space.file(&c5, "box/x.md")?, space.file(&c2, "box/x.md")?);
+    assert_eq!(space.file(&c5, "crate/x2.md")?, None);
+    Ok(())
+}
+
+/// Probe r4: referrers moved, edited and deleted since the item was. The moved referrer's link
+/// is written from its new folder, the edited one keeps its edit with the link to the item's
+/// restored path, and the deleted one stays deleted.
+#[tokio::test]
+async fn r4_referrers_moved_edited_and_deleted_since_follow_the_rewound_item() -> TestResult {
+    let space = Workspace::new().await?;
+    let c2 = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "old.md", "# The item\n")?,
+                note(11, "notes/moved.md", "Moved [it](../old.md).\n")?,
+                note(12, "notes/edited.md", "Edited [it](../old.md).\n")?,
+                note(13, "notes/gone.md", "Gone [it](../old.md).\n")?,
+            ],
+        )
+        .await?;
+    let c3 = space.commit(3, &c2, vec![moved(10, "new.md")?]).await?;
+    let c4 = space.commit(4, &c3, vec![deleted(10)?]).await?;
+    let c5 = space
+        .commit(
+            5,
+            &c4,
+            vec![
+                moved(11, "elsewhere/deep/moved.md")?,
+                edited(12, "Changed since. [it](../new.md).\n")?,
+                deleted(13)?,
+            ],
+        )
+        .await?;
+    assert_eq!(last_holder(&space, &c5, 10).await?, c3);
+    let c6 = space
+        .commit(6, &c5, rewound_deleted(10, &c3, "old.md", &c2)?)
+        .await?;
+    let moved_referrer = body_of(&space, &c6, 11).await?;
+    let edited_referrer = body_of(&space, &c6, 12).await?;
+    assert!(
+        moved_referrer.contains("](../../old.md)"),
+        "{moved_referrer}"
+    );
+    assert!(
+        edited_referrer.contains("Changed since. [it](../old.md)"),
+        "{edited_referrer}"
+    );
+    assert_eq!(space.file(&c6, "notes/gone.md")?, None);
+    assert_eq!(space.file(&c6, "old.md")?, space.file(&c2, "old.md")?);
+    Ok(())
+}
+
+/// Probe r5: an item that links to itself (beside it with an anchor, through `./`, and a pure
+/// anchor) comes back from the three edits with the target's bytes, nothing left at its last
+/// path.
+#[tokio::test]
+async fn r5_an_item_that_links_to_itself_is_rewound_with_its_own_bytes() -> TestResult {
+    let space = Workspace::new().await?;
+    let c2 = space
+        .commit(
+            2,
+            &space.initial,
+            vec![note(
+                10,
+                "old.md",
+                "# Me\n\n[self](old.md#me), [dot](./old.md) and [bare](#me).\n",
+            )?],
+        )
+        .await?;
+    let c3 = space.commit(3, &c2, vec![moved(10, "sub/new.md")?]).await?;
+    let c4 = space.commit(4, &c3, vec![deleted(10)?]).await?;
+    assert_eq!(last_holder(&space, &c4, 10).await?, c3);
+    let c5 = space
+        .commit(5, &c4, rewound_deleted(10, &c3, "old.md", &c2)?)
+        .await?;
+    assert_eq!(space.file(&c5, "old.md")?, space.file(&c2, "old.md")?);
+    assert_eq!(space.file(&c5, "sub/new.md")?, None);
+    assert_eq!(private_names(&space, &c5)?, Vec::<String>::new());
+    Ok(())
+}
+
+/// Probe r6: a referrer's links in every form (inline, with a fragment, in angle brackets, with
+/// a title, reference style, an image) after the three edits.
+#[tokio::test]
+async fn r6_every_link_form_of_a_referrer_follows_the_rewound_item() -> TestResult {
+    let forms = "Inline [a](../old.md).\n\
+                 Fragment [b](../old.md#the-item).\n\
+                 Angle [c](<../old.md>).\n\
+                 Titled [d](../old.md \"The title\").\n\
+                 Reference [e][target].\n\
+                 Image ![f](../old.md).\n\
+                 \n\
+                 [target]: ../old.md\n";
+    let space = Workspace::new().await?;
+    let c2 = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "old.md", "# The item\n")?,
+                note(11, "notes/ref.md", forms)?,
+            ],
+        )
+        .await?;
+    let c3 = space.commit(3, &c2, vec![moved(10, "new.md")?]).await?;
+    let c4 = space.commit(4, &c3, vec![deleted(10)?]).await?;
+    assert_eq!(last_holder(&space, &c4, 10).await?, c3);
+    let c5 = space
+        .commit(5, &c4, rewound_deleted(10, &c3, "old.md", &c2)?)
+        .await?;
+    let after = body_of(&space, &c5, 11).await?;
+    assert!(after.contains("Inline [a](../old.md)"), "{after}");
+    assert!(
+        after.contains("Fragment [b](../old.md#the-item)"),
+        "{after}"
+    );
+    Ok(())
+}
+
+/// Probe r7: a source card with a correction, moved, then given supplied text, then deleted. The
+/// three edits put the card, its appearance and its correction back as the target holds them,
+/// with no supplied text (absent at the target) and nothing at the later path; the referrer's
+/// link points at the card again.
+#[tokio::test]
+async fn r7_a_card_with_companions_is_rewound_with_them() -> TestResult {
+    let space = Workspace::new().await?;
+    let c2 = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                card(20, "application/pdf", 'a')?,
+                note(11, "ref.md", "[scan](sources/scan-pdf.md).\n")?,
+            ],
+        )
+        .await?;
+    let c3 = space
+        .commit(3, &c2, vec![correction(20, 'a', "Fixed A.")?])
+        .await?;
+    let c4 = space
+        .commit(4, &c3, vec![moved(20, "sources/renamed.md")?])
+        .await?;
+    let c5 = space.commit(5, &c4, vec![supplied(20, 'a')?]).await?;
+    let c6 = space.commit(6, &c5, vec![deleted(20)?]).await?;
+    assert_eq!(space.file(&c6, &appearance_file(20))?, None);
+    assert_eq!(last_holder(&space, &c6, 20).await?, c5);
+    let c7 = space
+        .commit(7, &c6, rewound_deleted(20, &c5, CARD, &c3)?)
+        .await?;
+    for file in [
+        CARD.to_owned(),
+        appearance_file(20),
+        correction_file(20, 'a'),
+    ] {
+        assert!(space.file(&c3, &file)?.is_some(), "{file}");
+        assert_eq!(space.file(&c7, &file)?, space.file(&c3, &file)?, "{file}");
+    }
+    assert_eq!(space.file(&c7, &supplied_file(20))?, None);
+    assert_eq!(space.file(&c7, "sources/renamed.md")?, None);
+    let referrer = body_of(&space, &c7, 11).await?;
+    assert!(
+        referrer.contains("[scan](sources/scan-pdf.md)"),
+        "{referrer}"
+    );
+    Ok(())
+}
+
+/// `old.md` (item 10) with a referrer, moved to `new.md`, then deleted: the three revisions.
+async fn moved_then_deleted(space: &Workspace) -> Fallible<(Revision, Revision, Revision)> {
+    let at_old = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "old.md", "# The item\n\nFirst text.\n")?,
+                note(11, "notes/ref.md", "See [it](../old.md#the-item).\n")?,
+            ],
+        )
+        .await?;
+    let at_new = space.commit(3, &at_old, vec![moved(10, "new.md")?]).await?;
+    let gone = space.commit(4, &at_new, vec![deleted(10)?]).await?;
+    Ok((at_old, at_new, gone))
+}
+
+/// Probe r8, its first step failing: another item took the last path since, so putting the item
+/// back there is `Conflict`, and nothing is written.
+#[tokio::test]
+async fn r8_a_rewind_whose_last_path_was_taken_since_writes_nothing() -> TestResult {
+    let space = Workspace::new().await?;
+    let (at_old, at_new, gone) = moved_then_deleted(&space).await?;
+    let base = space
+        .commit(5, &gone, vec![note(12, "new.md", "# Another\n")?])
+        .await?;
+    let error = err_of(
+        space
+            .commit(6, &base, rewound_deleted(10, &at_new, "old.md", &at_old)?)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    assert_eq!(space.storage.versions().head(&space.scope).await?, base);
+    Ok(())
+}
+
+/// Probe r8, its second step failing: another item holds the target's path now, so the move is
+/// `Conflict`, as one plain `RestoreItem` is, and nothing is written.
+#[tokio::test]
+async fn r8_a_rewind_onto_a_path_another_item_holds_writes_nothing() -> TestResult {
+    let space = Workspace::new().await?;
+    let (at_old, at_new, gone) = moved_then_deleted(&space).await?;
+    let base = space
+        .commit(5, &gone, vec![note(12, "old.md", "# Another\n")?])
+        .await?;
+    for (mutation, edits) in [
+        (6, rewound_deleted(10, &at_new, "old.md", &at_old)?),
+        (7, vec![restore(10, &at_old)?]),
+    ] {
+        let error = err_of(space.commit(mutation, &base, edits).await)?;
+        assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+        assert_eq!(space.storage.versions().head(&space.scope).await?, base);
+    }
+    Ok(())
+}
+
+/// Probe r8, its third step failing: the target is a revision the repository does not hold, so
+/// the restore from it is refused, and nothing is written.
+#[tokio::test]
+async fn r8_a_rewind_to_a_revision_the_repository_lacks_writes_nothing() -> TestResult {
+    let space = Workspace::new().await?;
+    let (_, at_new, gone) = moved_then_deleted(&space).await?;
+    let unknown = Revision::try_from("f".repeat(40))?;
+    let error = err_of(
+        space
+            .commit(6, &gone, rewound_deleted(10, &at_new, "old.md", &unknown)?)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::NotFound, "{}", error.message);
+    assert_eq!(space.storage.versions().head(&space.scope).await?, gone);
+    Ok(())
+}
+
+/// Probe r8, the check refusing the composed tree: nothing is written; the same mutation then
+/// accepted lands once, and a third call replays it.
+#[tokio::test]
+async fn r8_a_refused_rewind_lands_once_when_accepted_and_then_replays() -> TestResult {
+    let space = Workspace::new().await?;
+    let (at_old, at_new, gone) = moved_then_deleted(&space).await?;
+    let edits = rewound_deleted(10, &at_new, "old.md", &at_old)?;
+    let refused = err_of(
+        space
+            .commit_with(6, &gone, edits.clone(), Arc::new(Refuses))
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::InvalidInput, "{}", refused.message);
+    assert_eq!(space.storage.versions().head(&space.scope).await?, gone);
+    let landed = space
+        .commit_with(6, &gone, edits.clone(), Arc::new(Accept))
+        .await?;
+    assert!(!landed.replayed);
+    let replayed = space.commit_with(6, &gone, edits, Arc::new(Accept)).await?;
+    assert!(replayed.replayed);
+    assert_eq!(replayed.revision, landed.revision);
+    assert_eq!(
+        space.storage.versions().head(&space.scope).await?,
+        landed.revision
+    );
+    Ok(())
+}
+
+/// Probe r9 (core's B1, fixed in core): an item renamed in letter case only and then deleted.
+/// Its last path is its target path in another spelling, so core sends one `RestoreItem` from
+/// the target, which puts it back at the target's spelling with the target's bytes.
+#[tokio::test]
+async fn r9_an_item_renamed_in_letter_case_only_and_then_deleted_is_rewound() -> TestResult {
+    let space = Workspace::new().await?;
+    let c2 = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "report.md", "# The report\n")?,
+                note(11, "ref.md", "[r](report.md).\n")?,
+            ],
+        )
+        .await?;
+    let c3 = space.commit(3, &c2, vec![moved(10, "Report.md")?]).await?;
+    let c4 = space.commit(4, &c3, vec![deleted(10)?]).await?;
+    assert_eq!(last_holder(&space, &c4, 10).await?, c3);
+    let c5 = space.commit(5, &c4, vec![restore(10, &c2)?]).await?;
+    assert_eq!(space.item_at(&c5, "report.md").await?, Some(uuid!(10)?));
+    assert_eq!(space.file(&c5, "report.md")?, space.file(&c2, "report.md")?);
+    let files = space.files_under(&c5, "")?;
+    assert!(!files.iter().any(|file| file == "Report.md"), "{files:?}");
+    Ok(())
+}
+
+/// Probe r10: a file where a folder of the last path is needed. Plain edits cannot reach it (the
+/// folder outlives its item through its `index.md`), so the tree is changed through Git: the
+/// folder's index removed and a file written at the folder's name. Putting the item back at its
+/// last path is then `Conflict` naming it, and nothing is written (sweep 2a, item 22: storage
+/// refuses the case core's `taken` does not see).
+#[tokio::test]
+async fn r10_a_file_where_a_folder_of_the_last_path_is_needed_refuses_the_rewind() -> TestResult {
+    let space = Workspace::new().await?;
+    let c2 = space
+        .commit(2, &space.initial, vec![note(10, "old.md", "# The item\n")?])
+        .await?;
+    let c3 = space
+        .commit(3, &c2, vec![moved(10, "docs.md/inner.md")?])
+        .await?;
+    let c4 = space.commit(4, &c3, vec![deleted(10)?]).await?;
+    let refused = err_of(
+        space
+            .commit(5, &c4, vec![note(12, "docs.md", "# A file now\n")?])
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Conflict, "{}", refused.message);
+    space.raw_remove("docs.md/index.md", 30)?;
+    let blocked = space.raw_upsert(
+        "docs.md",
+        b"---\ntype: Note\ntitle: A file now\n---\n\n# A file now\n",
+        31,
+    )?;
+    let error = err_of(
+        space
+            .commit(6, &blocked, rewound_deleted(10, &c3, "old.md", &c2)?)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    assert!(
+        error.message.contains("docs.md/inner.md"),
+        "{}",
+        error.message
+    );
+    assert_eq!(space.storage.versions().head(&space.scope).await?, blocked);
+    Ok(())
+}
+
+/// Probe r11: a folder of another letter case holds the last name. After an item at
+/// `Notes/new.md` is deleted, the folder outlives it through its `index.md`, so a note at
+/// `notes/new.md` is refused as a folder spelled another way (PR #34), and the state the probe
+/// went on to rewind is not reachable this way.
+#[tokio::test]
+async fn r11_a_note_under_a_folder_of_another_case_that_held_the_last_name_is_refused() -> TestResult
+{
+    let space = Workspace::new().await?;
+    let c2 = space
+        .commit(2, &space.initial, vec![note(10, "old.md", "# The item\n")?])
+        .await?;
+    let c3 = space
+        .commit(3, &c2, vec![moved(10, "Notes/new.md")?])
+        .await?;
+    let c4 = space.commit(4, &c3, vec![deleted(10)?]).await?;
+    let error = err_of(
+        space
+            .commit(5, &c4, vec![note(12, "notes/new.md", "# Another\n")?])
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::InvalidInput, "{}", error.message);
+    assert!(error.message.contains("Notes"), "{}", error.message);
+    assert_eq!(space.storage.versions().head(&space.scope).await?, c4);
     Ok(())
 }
 
