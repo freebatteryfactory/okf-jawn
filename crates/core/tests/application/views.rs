@@ -11,14 +11,20 @@ use std::collections::BTreeMap;
 
 use okf_jawn_contract::common::TextRange;
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
+use okf_jawn_contract::extraction::{Extraction, TextOrigin};
 use okf_jawn_contract::history::{CommitRequest, FileChange, FileChangeKind, RestoreRequest};
 use okf_jawn_contract::identity::{At, IdempotencyKey, ItemId, PurgeId, Revision};
 use okf_jawn_contract::item::{
     CreateItemRequest, DraftContent, ItemDocument, ItemKind, SaveDraftRequest,
 };
 use okf_jawn_contract::metadata::OperationName;
-use okf_jawn_contract::source::{GetSourcesRequest, SourceLocation, SourceLocator};
-use okf_jawn_contract::views::{GetCatalogRequest, GetViewRequest, ViewDocument};
+use okf_jawn_contract::source::{
+    GetObjectRequest, GetSourcesRequest, SourceLocation, SourceLocator,
+};
+use okf_jawn_contract::views::{
+    ChartFailure, ChartRef, ChartResult, ChartStatus, Dataset, GetCatalogRequest, GetViewRequest,
+    PresentRequest, PresentResponse, ResolveViewRequest, ViewDocument,
+};
 use okf_jawn_core::conversion::{ConversionRecord, ConvertedCell, ConvertedTable};
 use okf_jawn_core::jobs::RevisionMapping;
 use okf_jawn_core::portable::draft_digest;
@@ -32,6 +38,7 @@ use crate::fixture::{
     ALICE, Built, CARD_BODY, NOTE, World, alice, converted, digest, draft_of, mutation, note, path,
     record, revision, scope, source_card,
 };
+use crate::proposal_store::noon;
 
 /// The source card S.
 const SOURCE: u128 = 30;
@@ -43,6 +50,8 @@ const SOURCE_PATH: &str = "reports/revenue-pdf.md";
 const NOTE_PATH: &str = "notes/venue.md";
 /// V's path.
 const VIEW_PATH: &str = "views/revenue.md";
+/// The fixture clock's instant, which `as_of` carries.
+const NOW: &str = "2026-10-09T12:00:00.000Z";
 
 fn id(number: u128) -> ItemId {
     ItemId(Uuid::from_u128(number))
@@ -161,9 +170,16 @@ fn view_item(at: &Revision, body: &str) -> Built<ItemDocument> {
     Ok(document)
 }
 
-/// The world of the module header, V holding `body`.
+/// The world of the module header, V holding `body`, its service reading the fixture's noon.
 fn view_world(body: &str) -> Built<World> {
-    let world = World::new()?;
+    let mut world = World::new()?;
+    world.service = world.service.with_clock(noon);
+    stock(&world, body)?;
+    Ok(world)
+}
+
+/// Put the module header's tree into `world`, V holding `body`.
+fn stock(world: &World, body: &str) -> Built<()> {
     for fill in ['a', 'c'] {
         let at = revision(fill)?;
         world.versions.put_document(
@@ -193,7 +209,7 @@ fn view_world(body: &str) -> Built<World> {
     world
         .blobs
         .put_object(digest('b')?, serde_json::to_vec(&table_record()?)?)?;
-    Ok(world)
+    Ok(())
 }
 
 fn standard_world() -> Built<World> {
@@ -706,5 +722,654 @@ async fn a_rewind_restores_a_view_as_its_history_holds_it_without_validating_it(
         some(commits.first(), "the rewind")?.edits.as_slice(),
         [TreeEdit::RestoreItem { .. }]
     ));
+    Ok(())
+}
+
+/// The wire form of a block: a `ViewDocument` in the fixture workspace, titled.
+fn wire(block: &Value) -> Built<ViewDocument> {
+    let mut value = block.clone();
+    let object = some(value.as_object_mut(), "the block")?;
+    object.insert("title".to_owned(), json!("Revenue"));
+    object.insert("description".to_owned(), json!("Quarterly revenue."));
+    for binding in some(
+        object.get_mut("bindings").and_then(Value::as_array_mut),
+        "bindings",
+    )? {
+        some(
+            binding
+                .pointer_mut("/source")
+                .and_then(Value::as_object_mut),
+            "a source",
+        )?
+        .insert("workspace_id".to_owned(), json!(scope()?.workspace_id));
+    }
+    Ok(serde_json::from_value(value)?)
+}
+
+fn present_request(view: ViewDocument) -> Built<PresentRequest> {
+    Ok(PresentRequest {
+        workspace_id: scope()?.workspace_id,
+        view,
+    })
+}
+
+async fn presented(world: &World, view: ViewDocument) -> Built<Result<PresentResponse, ApiError>> {
+    Ok(world
+        .service
+        .present_view(
+            &alice(OperationName::PresentView, None)?,
+            present_request(view)?,
+        )
+        .await)
+}
+
+fn resolve_request(refresh_live: bool) -> Built<ResolveViewRequest> {
+    Ok(ResolveViewRequest {
+        workspace_id: scope()?.workspace_id,
+        item_id: id(VIEW),
+        at: At::Latest,
+        refresh_live,
+    })
+}
+
+async fn resolved(world: &World, refresh_live: bool) -> Built<Result<PresentResponse, ApiError>> {
+    Ok(world
+        .service
+        .resolve_view(
+            &alice(OperationName::ResolveView, None)?,
+            resolve_request(refresh_live)?,
+        )
+        .await)
+}
+
+fn ready(bindings: &[&str]) -> ChartStatus {
+    ChartStatus::Ready {
+        bindings: bindings.iter().map(|name| (*name).to_owned()).collect(),
+    }
+}
+
+/// The failure reason and binding of the first chart.
+fn first_failure(response: &PresentResponse) -> Built<(ChartFailure, Option<String>, String)> {
+    match &some(response.charts.first(), "the chart")?.status {
+        ChartStatus::Failed {
+            reason,
+            binding,
+            message,
+        } => Ok((*reason, binding.clone(), message.clone())),
+        ChartStatus::Ready { .. } => Err("the chart is ready".into()),
+    }
+}
+
+fn codes(response: &PresentResponse) -> Vec<(String, Option<String>)> {
+    response
+        .warnings
+        .iter()
+        .map(|warning| (warning.code.clone(), warning.location.clone()))
+        .collect()
+}
+
+/// S at `c` with this extraction instead of the converter's.
+fn with_source_text(world: &World, extraction: Extraction) -> Built<()> {
+    let at = revision('c')?;
+    world.versions.replace_document(
+        &at,
+        source_card(SOURCE, &at, SOURCE_PATH, CARD_BODY, extraction)?,
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn present_view_materializes_records_and_cites_each_binding() -> TestResult {
+    let world = standard_world()?;
+    let response = presented(&world, wire(&view_block()?)?).await??;
+    assert_eq!(
+        response.charts,
+        vec![ChartResult {
+            chart: ChartRef::Named {
+                name: "quarters".to_owned()
+            },
+            status: ready(&["revenue"]),
+        }]
+    );
+    assert_eq!(response.as_of.as_str(), NOW);
+    let cited = revision('c')?;
+    assert!(response.warnings.is_empty(), "{:?}", response.warnings);
+    let revenue = some(response.resolved_bindings.first(), "revenue")?;
+    let venue = some(response.resolved_bindings.get(1), "venue")?;
+    let digest_of = some(revenue.materialized.clone(), "the dataset")?;
+    assert_eq!(venue.materialized, None);
+    assert_eq!(revenue.source.revision, cited);
+    assert_eq!(revenue.source.locations, vec![page(2)]);
+    // The view answered is the candidate as validated: no dataset named in its bindings.
+    assert!(
+        response
+            .view
+            .bindings
+            .iter()
+            .all(|binding| binding.materialized.is_none())
+    );
+    // The dataset's bytes are retained and recorded against S at `c`.
+    let dataset: Dataset =
+        serde_json::from_slice(&some(world.blobs.bytes(&digest_of)?, "the bytes")?)?;
+    let names: Vec<&str> = dataset
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect();
+    assert_eq!(names, ["Quarter", "Revenue"]);
+    assert_eq!(dataset.rows.len(), 2);
+    let derived = world.records.derived()?;
+    let object = some(derived.first(), "the derived object")?;
+    assert_eq!(derived.len(), 1);
+    assert_eq!(world.blobs.puts()?, vec![digest_of.clone()]);
+    assert_eq!(
+        (object.item_id, &object.revision),
+        (id(SOURCE), &revision('c')?)
+    );
+    assert_eq!(object.digest, digest_of);
+    // The receipt holds exactly the citations answered.
+    let receipts = world.records.receipts()?;
+    let (under, receipt) = some(receipts.first(), "the receipt")?;
+    assert_eq!(*under, None);
+    assert_eq!(receipt.id, response.receipt_id);
+    assert_eq!(
+        serde_json::to_value(&receipt.sources)?,
+        serde_json::to_value(
+            response
+                .resolved_bindings
+                .iter()
+                .map(|binding| &binding.source)
+                .collect::<Vec<_>>()
+        )?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_materialized_dataset_is_an_object_of_the_bound_revision() -> TestResult {
+    let world = standard_world()?;
+    let response = presented(&world, wire(&view_block()?)?).await??;
+    let revenue = some(response.resolved_bindings.first(), "revenue")?;
+    let object = some(revenue.materialized.clone(), "the dataset")?;
+    let context = alice(OperationName::GetObject, None)?;
+    let served = world
+        .service
+        .get_object(
+            &context,
+            GetObjectRequest {
+                source: revenue.source.clone(),
+                object: object.clone(),
+                offset: None,
+                length: None,
+            },
+        )
+        .await?;
+    assert_eq!(served.sha256, object);
+    let mut elsewhere = revenue.source.clone();
+    elsewhere.revision = revision('a')?;
+    elsewhere.locations = Vec::new();
+    let refused = err_of(
+        world
+            .service
+            .get_object(
+                &context,
+                GetObjectRequest {
+                    source: elsewhere,
+                    object,
+                    offset: None,
+                    length: None,
+                },
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::NotFound);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_chart_over_text_that_is_not_the_converters_fails_alone_and_says_why() -> TestResult {
+    let corrected = Extraction {
+        corrected: true,
+        ..converted(&digest('b')?)
+    };
+    let supplied = Extraction {
+        text_origin: TextOrigin::SuppliedByAgent,
+        ..converted(&digest('b')?)
+    };
+    for (extraction, gist) in [
+        (corrected, "correction"),
+        (supplied, "supplied by an agent"),
+    ] {
+        let world = standard_world()?;
+        with_source_text(&world, extraction)?;
+        let response = presented(&world, wire(&view_block()?)?).await??;
+        let (reason, binding, message) = first_failure(&response)?;
+        assert_eq!(reason, ChartFailure::DatasetUnavailable, "{gist}");
+        assert_eq!(binding.as_deref(), Some("revenue"), "{gist}");
+        assert!(message.contains(gist), "{gist}: {message}");
+        assert!(codes(&response).contains(&(
+            "dataset_unavailable".to_owned(),
+            Some("/bindings/0".to_owned())
+        )));
+        assert_eq!(
+            some(response.resolved_bindings.first(), "revenue")?.materialized,
+            None
+        );
+        // The excerpt's binding is still read and cited.
+        assert_eq!(response.resolved_bindings.len(), 2);
+        assert!(world.records.derived()?.is_empty(), "{gist}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_chart_whose_own_spec_is_at_fault_fails_alone() -> TestResult {
+    // A second chart with a mark Vega-Lite does not know, drawn beside the first.
+    let mut block = view_block()?;
+    some(
+        block.pointer_mut("/charts").and_then(Value::as_object_mut),
+        "charts",
+    )?
+    .insert(
+        "broken".to_owned(),
+        json!({ "data": { "name": "revenue" }, "mark": "bogus" }),
+    );
+    let elements = some(
+        block
+            .pointer_mut("/spec/elements")
+            .and_then(Value::as_object_mut),
+        "elements",
+    )?;
+    elements.insert(
+        "other".to_owned(),
+        json!({ "type": "Chart", "props": { "binding": "revenue", "chart": "broken", "title": "Broken" }, "children": [] }),
+    );
+    some(
+        block
+            .pointer_mut("/spec/elements/root/children")
+            .and_then(Value::as_array_mut),
+        "children",
+    )?
+    .push(json!("other"));
+    let world = standard_world()?;
+    let response = presented(&world, wire(&block)?).await??;
+    let statuses: Vec<(&ChartRef, bool)> = response
+        .charts
+        .iter()
+        .map(|result| {
+            (
+                &result.chart,
+                matches!(result.status, ChartStatus::Ready { .. }),
+            )
+        })
+        .collect();
+    assert_eq!(
+        statuses,
+        vec![
+            (
+                &ChartRef::Named {
+                    name: "broken".to_owned()
+                },
+                false
+            ),
+            (
+                &ChartRef::Named {
+                    name: "quarters".to_owned()
+                },
+                true
+            )
+        ]
+    );
+    assert_eq!(first_failure(&response)?.0, ChartFailure::InvalidSpec);
+    // A chart that reads a name no binding declares is its own `UnknownBinding`.
+    let mut unknown = view_block()?;
+    *some(
+        unknown.pointer_mut("/charts/quarters/data/name"),
+        "the data name",
+    )? = json!("nope");
+    let refused = presented(&standard_world()?, wire(&unknown)?).await??;
+    let (reason, binding, _) = first_failure(&refused)?;
+    assert_eq!(reason, ChartFailure::UnknownBinding);
+    assert_eq!(binding.as_deref(), Some("nope"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn present_view_refuses_a_fault_of_the_view_and_writes_nothing() -> TestResult {
+    let mut supplied = wire(&view_block()?)?;
+    some(supplied.bindings.get_mut(0), "revenue")?.materialized = Some(digest('d')?);
+    let mut located = wire(&view_block()?)?;
+    some(located.bindings.get_mut(0), "revenue")?
+        .source
+        .locations = vec![page(1)];
+    let mut moved = wire(&view_block()?)?;
+    some(moved.bindings.get_mut(0), "revenue")?.source.path = path("reports/other-pdf.md")?;
+    let mut unbound = view_block()?;
+    *some(
+        unbound.pointer_mut("/spec/elements/table/props/binding"),
+        "the table",
+    )? = json!("nope");
+    let cases = [
+        (
+            wire(&unbound)?,
+            ErrorCode::InvalidInput,
+            "/view/spec/elements/table/props/binding",
+        ),
+        (
+            supplied,
+            ErrorCode::InvalidInput,
+            "/view/bindings/0/materialized",
+        ),
+        (
+            located,
+            ErrorCode::InvalidInput,
+            "/view/bindings/0/source/locations",
+        ),
+        (
+            moved,
+            ErrorCode::InvalidInput,
+            "/view/bindings/0/source/path",
+        ),
+    ];
+    for (view, code, field) in cases {
+        let world = standard_world()?;
+        let refused = err_of(presented(&world, view).await?)?;
+        assert_eq!(refused.code, code, "{field}: {}", refused.message);
+        assert_eq!(refused.field.as_deref(), Some(field));
+        assert!(world.records.derived()?.is_empty(), "{field}");
+        assert!(world.records.receipts()?.is_empty(), "{field}");
+    }
+    // A cited revision a purge removed: the typed `NotFound`, at that binding.
+    let world = standard_world()?;
+    removed(&world, 'c')?;
+    let refused = err_of(presented(&world, wire(&view_block()?)?).await?)?;
+    assert_eq!(refused.code, ErrorCode::NotFound);
+    assert_eq!(refused.field.as_deref(), Some("/view/bindings/0/source"));
+    assert!(matches!(
+        refused.detail.as_deref(),
+        Some(ErrorDetail::Invalidated { .. })
+    ));
+    assert!(world.records.receipts()?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn presenting_twice_records_one_dataset_and_two_receipts() -> TestResult {
+    let world = standard_world()?;
+    let first = presented(&world, wire(&view_block()?)?).await??;
+    let second = presented(&world, wire(&view_block()?)?).await??;
+    assert_eq!(
+        some(first.resolved_bindings.first(), "revenue")?.materialized,
+        some(second.resolved_bindings.first(), "revenue")?.materialized
+    );
+    assert_eq!(world.records.derived()?.len(), 1);
+    assert_eq!(world.records.receipts()?.len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn newer_source_data_at_the_head_is_reported_and_not_used() -> TestResult {
+    let world = standard_world()?;
+    let at = revision('a')?;
+    world.versions.replace_document(
+        &at,
+        source_card(
+            SOURCE,
+            &at,
+            SOURCE_PATH,
+            CARD_BODY,
+            converted(&digest('f')?),
+        )?,
+    )?;
+    let response = presented(&world, wire(&view_block()?)?).await??;
+    assert_eq!(
+        codes(&response),
+        vec![("newer_source".to_owned(), Some("/bindings/0".to_owned()))]
+    );
+    assert_eq!(
+        some(response.resolved_bindings.first(), "revenue")?
+            .source
+            .revision,
+        revision('c')?
+    );
+    assert_eq!(first_failure(&response).ok(), None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolve_view_resolves_a_pinned_view_at_its_saved_revisions() -> TestResult {
+    let world = standard_world()?;
+    let response = resolved(&world, false).await??;
+    assert_eq!(response.as_of.as_str(), NOW);
+    assert_eq!(
+        some(response.charts.first(), "the chart")?.status,
+        ready(&["revenue"])
+    );
+    let saved = revision('c')?;
+    assert!(
+        response
+            .resolved_bindings
+            .iter()
+            .all(|binding| binding.source.revision == saved)
+    );
+    let receipts = world.records.receipts()?;
+    let (_, receipt) = some(receipts.first(), "the receipt")?;
+    assert_eq!(receipt.operation_id, OperationName::ResolveView);
+    assert_eq!(
+        serde_json::to_value(&receipt.sources)?,
+        serde_json::to_value(
+            response
+                .resolved_bindings
+                .iter()
+                .map(|binding| &binding.source)
+                .collect::<Vec<_>>()
+        )?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_pinned_view_does_not_refresh() -> TestResult {
+    let world = standard_world()?;
+    let refused = err_of(resolved(&world, true).await?)?;
+    assert_eq!(refused.code, ErrorCode::InvalidInput);
+    assert_eq!(refused.field.as_deref(), Some("/refresh_live"));
+    assert!(world.records.receipts()?.is_empty());
+    assert_eq!(world.records.derived()?, Vec::new());
+    assert_eq!(world.blobs.puts()?, Vec::new());
+    Ok(())
+}
+
+/// The world with V saved as a live View.
+fn live_world() -> Built<World> {
+    view_world(&view_body(
+        "Quarterly revenue, live.",
+        &block_with("/mode", json!("live"))?,
+    )?)
+}
+
+#[tokio::test]
+async fn a_live_view_not_refreshed_reads_its_saved_revisions() -> TestResult {
+    let world = live_world()?;
+    let at = revision('a')?;
+    world.versions.replace_document(
+        &at,
+        source_card(
+            SOURCE,
+            &at,
+            SOURCE_PATH,
+            CARD_BODY,
+            converted(&digest('f')?),
+        )?,
+    )?;
+    let response = resolved(&world, false).await??;
+    assert_eq!(
+        some(response.resolved_bindings.first(), "revenue")?
+            .source
+            .revision,
+        revision('c')?
+    );
+    assert_eq!(
+        codes(&response),
+        vec![("newer_source".to_owned(), Some("/bindings/0".to_owned()))]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_live_view_refreshed_reads_each_binding_at_the_head() -> TestResult {
+    // At the head S was converted again (record `f`) and moved.
+    let world = live_world()?;
+    let at = revision('a')?;
+    world.versions.replace_document(
+        &at,
+        source_card(
+            SOURCE,
+            &at,
+            "archive/revenue-pdf.md",
+            CARD_BODY,
+            converted(&digest('f')?),
+        )?,
+    )?;
+    world
+        .blobs
+        .put_object(digest('f')?, serde_json::to_vec(&table_record()?)?)?;
+    let response = resolved(&world, true).await??;
+    let revenue = some(response.resolved_bindings.first(), "revenue")?;
+    assert_eq!(revenue.source.revision, at);
+    assert_eq!(revenue.source.path.as_str(), "archive/revenue-pdf.md");
+    assert_eq!(revenue.source.digest, Some(digest('f')?));
+    assert!(revenue.materialized.is_some());
+    let derived = world.records.derived()?;
+    assert_eq!(
+        some(derived.first(), "the dataset")?.revision,
+        at,
+        "recorded against the revision it was read at"
+    );
+    // The saved View is not rewritten: its binding still cites `c`.
+    assert_eq!(
+        some(response.view.bindings.first(), "saved")?
+            .source
+            .revision,
+        revision('c')?
+    );
+    assert_eq!(codes(&response), vec![("live_resolution".to_owned(), None)]);
+    assert!(
+        some(response.warnings.first(), "the warning")?
+            .message
+            .contains(at.as_str())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_live_binding_whose_item_left_the_head_fails_its_chart_alone() -> TestResult {
+    let world = live_world()?;
+    world.versions.set_head(revision('d')?)?;
+    // Only N and V are at the new head.
+    let head = revision('d')?;
+    world.versions.put_document(
+        &head,
+        note(
+            NOTE,
+            &head,
+            NOTE_PATH,
+            "# Venue\nThe hall.\n",
+            json!({ "type": "Note", "title": "Venue" }),
+        )?,
+    )?;
+    world.versions.put_document(
+        &head,
+        view_item(
+            &head,
+            &view_body("Live.", &block_with("/mode", json!("live"))?)?,
+        )?,
+    )?;
+    let response = resolved(&world, true).await??;
+    let (reason, binding, _) = first_failure(&response)?;
+    assert_eq!(reason, ChartFailure::DatasetUnavailable);
+    assert_eq!(binding.as_deref(), Some("revenue"));
+    let found = codes(&response);
+    assert!(found.contains(&("source_removed".to_owned(), Some("/bindings/0".to_owned()))));
+    assert!(found.contains(&(
+        "dataset_unavailable".to_owned(),
+        Some("/bindings/0".to_owned())
+    )));
+    assert_eq!(
+        some(response.resolved_bindings.get(1), "venue")?
+            .source
+            .revision,
+        head
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_saved_binding_whose_revision_was_purged_is_invalidated_not_refused() -> TestResult {
+    let world = standard_world()?;
+    removed(&world, 'c')?;
+    let response = resolved(&world, false).await??;
+    let (reason, binding, _) = first_failure(&response)?;
+    assert_eq!(reason, ChartFailure::Invalidated);
+    assert_eq!(binding.as_deref(), Some("revenue"));
+    assert_eq!(world.records.derived()?, Vec::new());
+    assert_eq!(world.blobs.puts()?, Vec::new());
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolve_view_refuses_a_note_and_a_view_this_build_cannot_present() -> TestResult {
+    let world = standard_world()?;
+    let note_refused = err_of(
+        world
+            .service
+            .resolve_view(
+                &alice(OperationName::ResolveView, None)?,
+                ResolveViewRequest {
+                    item_id: id(NOTE),
+                    ..resolve_request(false)?
+                },
+            )
+            .await,
+    )?;
+    assert_eq!(note_refused.code, ErrorCode::InvalidInput);
+    assert_eq!(note_refused.field.as_deref(), Some("/item_id"));
+    let broken = view_world(&view_body(
+        "Broken.",
+        &block_with("/spec/elements/table/props/binding", json!("gone"))?,
+    )?)?;
+    let unsupported = err_of(resolved(&broken, false).await?)?;
+    assert_eq!(unsupported.code, ErrorCode::Unsupported);
+    assert_eq!(unsupported.field.as_deref(), Some("/item_id"));
+    assert!(broken.records.receipts()?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_unit_naming_no_column_is_reported() -> TestResult {
+    let world = view_world(&view_body(
+        "Units.",
+        &block_with(
+            "/bindings/0/units",
+            json!({ "Revenue": "EUR", "Pages": "count" }),
+        )?,
+    )?)?;
+    let response = resolved(&world, false).await??;
+    assert_eq!(
+        codes(&response),
+        vec![("unknown_unit".to_owned(), Some("/bindings/0".to_owned()))]
+    );
+    let bytes = some(
+        world.blobs.bytes(&some(
+            some(response.resolved_bindings.first(), "revenue")?
+                .materialized
+                .clone(),
+            "the dataset",
+        )?)?,
+        "the bytes",
+    )?;
+    let dataset: Dataset = serde_json::from_slice(&bytes)?;
+    let revenue = some(dataset.columns.get(1), "the revenue column")?;
+    assert_eq!(revenue.unit.as_deref(), Some("EUR"));
     Ok(())
 }

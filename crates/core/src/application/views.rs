@@ -1,13 +1,29 @@
-//! Persistent Views (SPEC section 10; core M1.6 and M1b): reading a saved View (`get_view`) and
-//! the approved component catalog (`get_catalog`).
+//! Persistent Views (SPEC section 10; core M1.6 and M1b): reading a saved View (`get_view`),
+//! the approved component catalog (`get_catalog`), presenting a candidate (`present_view`),
+//! resolving a saved View (`resolve_view`), and the check every saved-View write runs first
+//! (`check_view_write`).
 //!
 //! A View is an item of kind `view` whose file `views::layout` reads; it names no workspace, so
 //! its bindings bind to the workspace that holds it. `get_view` reads it at one resolved
 //! revision and fills each binding's locations (`views::resolve::cite`); it does not run
 //! `views::validate`, so a person can open a View that no longer validates (a later catalog, an
-//! archive restored from an older build) and fix it. A stored file this build cannot read is
-//! `unsupported` on `/item_id`, naming where (`stored_fault`); an item that is no View is
-//! `invalid_input` there. `get_catalog` answers the generated catalog as it is; it grants nothing.
+//! archive restored from an older build) and fix it. A stored file this build cannot read, or a
+//! stored View `views::validate` refuses when it is resolved, is `unsupported` on `/item_id`,
+//! naming where (`stored_fault`); an item that is no View is `invalid_input` there.
+//! `get_catalog` answers the generated catalog as it is; it grants nothing.
+//!
+//! A write that would store a View (`create_item`, `save_draft`, a Snapshot, a proposal's
+//! `create` or `edit`, an acceptance) checks it first: the file reads, it validates with every
+//! chart drawable (ruling E7), and every binding's citation checks as a comment's does; each
+//! fault on the request's field for the title or the body, the View pointer leading the message.
+//!
+//! `present_view` validates the candidate (a View-level fault on `/view` and its pointer),
+//! checks every binding's citation (on `/view/bindings/<i>/source`), and only then resolves it:
+//! each binding as cited (`views::resolve`, which produces, retains and records the datasets a
+//! chart or a table reads). `resolve_view` resolves a saved View at its saved revisions, or a
+//! live one at the head when asked (`refresh_live`; a pinned View refuses it on
+//! `/refresh_live`). Both read the instant and the head once, and record a receipt whose
+//! sources are exactly the bindings answered.
 
 use std::collections::BTreeMap;
 use std::future::Ready;
@@ -15,18 +31,21 @@ use std::future::Ready;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{ItemId, Revision};
 use okf_jawn_contract::item::{ItemDocument, ItemKind};
-use okf_jawn_contract::views::{CatalogResponse, GetCatalogRequest, GetViewRequest, ViewDocument};
+use okf_jawn_contract::views::{
+    CatalogResponse, GetCatalogRequest, GetViewRequest, PresentRequest, PresentResponse,
+    ResolveViewRequest, ViewDocument, ViewMode,
+};
 use serde_json::Value;
 
 use super::ApplicationService;
-use super::shared::{invalid, resolve, workspace_scope};
+use super::shared::{invalid, now, record_receipt, resolve, workspace_scope};
 use crate::context::OperationContext;
 use crate::reading::check_citation;
 use crate::storage::StorageScope;
 use crate::views::layout::{view_from, view_of};
-use crate::views::resolve::{ViewPorts, cite};
+use crate::views::resolve::{Inputs, ViewPorts, cite, resolve as resolve_bindings};
 use crate::views::schemas;
-use crate::views::validate::validate;
+use crate::views::validate::{Checked, validate};
 
 /// Where a saved-View write reports a fault (`check_view_write`).
 #[derive(Debug, Clone, Copy)]
@@ -55,6 +74,120 @@ pub(super) async fn get_view(
     let (mut view, _) = stored_view(service, &scope, &revision, request.item_id).await?;
     cite(view_ports(service), &scope, &mut view).await?;
     Ok(view)
+}
+
+/// Render a candidate from its already resolved bindings without saving or approving it: the
+/// View is validated (a View-level fault refuses it on `/view` and the pointer), each binding's
+/// citation is checked as a comment's is (on `/view/bindings/<i>/source`), and only then are the
+/// datasets produced, retained and recorded (`views::resolve`, each binding as cited). A
+/// chart-level fault is that chart's status. The answer's receipt cites exactly the bindings
+/// answered.
+///
+/// # Errors
+/// Returns `InvalidInput` on `/view/...` for a View-level fault, the citation refusals of
+/// `reading::check_citation` under `/view/bindings/<i>/source`, `Internal` when an embedded
+/// schema does not compile, or any port error.
+pub(super) async fn present_view(
+    service: &ApplicationService,
+    context: &OperationContext,
+    request: PresentRequest,
+) -> Result<PresentResponse, ApiError> {
+    let scope = workspace_scope(context)?;
+    let checked = validate(&request.view, scope.workspace_id).map_err(|error| {
+        let at = error.field.clone().unwrap_or_default();
+        error.with_field(format!("/view{at}"))
+    })?;
+    let ports = service.ports();
+    let mut view = request.view;
+    for (index, binding) in view.bindings.iter_mut().enumerate() {
+        let at = format!("/view/bindings/{index}/source");
+        let (source, _) = check_citation(
+            ports.versions.as_ref(),
+            ports.blobs.as_ref(),
+            ports.records.as_ref(),
+            &scope,
+            binding.source.clone(),
+            &at,
+        )
+        .await
+        .map_err(|error| {
+            if error.field.is_some() {
+                error
+            } else {
+                error.with_field(at.as_str())
+            }
+        })?;
+        binding.source = source;
+    }
+    answer(service, context, &scope, view, &checked, Inputs::AsCited).await
+}
+
+/// Resolve and materialize a saved View without changing it: at its saved revisions, or, with
+/// `refresh_live` on a live View, at the workspace head (the module header).
+///
+/// # Errors
+/// Returns `InvalidInput` on `/refresh_live` for a pinned View asked to refresh, the refusals of
+/// `get_view` for the item, `Unsupported` on `/item_id` for a stored View that no longer passes
+/// `views::validate`, or any port error.
+pub(super) async fn resolve_view(
+    service: &ApplicationService,
+    context: &OperationContext,
+    request: ResolveViewRequest,
+) -> Result<PresentResponse, ApiError> {
+    let scope = workspace_scope(context)?;
+    let revision = resolve(service, &scope, &request.at).await?;
+    let (view, _) = stored_view(service, &scope, &revision, request.item_id).await?;
+    if request.refresh_live && view.mode == ViewMode::Pinned {
+        return Err(invalid(
+            "a pinned View does not refresh; only a live View resolves current inputs",
+            "/refresh_live",
+        ));
+    }
+    let checked = validate(&view, scope.workspace_id).map_err(stored_fault)?;
+    let inputs = if request.refresh_live {
+        Inputs::AtHead
+    } else {
+        Inputs::AsCited
+    };
+    answer(service, context, &scope, view, &checked, inputs).await
+}
+
+/// Resolve `view`'s bindings at `inputs`, with the instant and the head read once, and record the
+/// receipt of what is answered.
+async fn answer(
+    service: &ApplicationService,
+    context: &OperationContext,
+    scope: &StorageScope,
+    view: ViewDocument,
+    checked: &Checked,
+    inputs: Inputs,
+) -> Result<PresentResponse, ApiError> {
+    let as_of = now(service)?;
+    let head = service.ports().versions.head(scope).await?;
+    let resolution = resolve_bindings(
+        view_ports(service),
+        scope,
+        view,
+        checked,
+        inputs,
+        &head,
+        &as_of,
+    )
+    .await?;
+    let sources = resolution
+        .resolved_bindings
+        .iter()
+        .map(|binding| binding.source.clone())
+        .collect();
+    let receipt_id = record_receipt(service, context, scope, None, sources).await?;
+    Ok(PresentResponse {
+        view: resolution.view,
+        resolved_bindings: resolution.resolved_bindings,
+        charts: resolution.charts,
+        as_of,
+        warnings: resolution.warnings,
+        receipt_id,
+    })
 }
 
 /// The approved component and action catalog, as the generator wrote it. It reads no port, so

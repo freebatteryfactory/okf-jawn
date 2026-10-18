@@ -113,6 +113,12 @@ macro_rules! route {
     (get_catalog) => {
         views::get_catalog
     };
+    (present_view) => {
+        views::present_view
+    };
+    (resolve_view) => {
+        views::resolve_view
+    };
     (log_items) => {
         history::log_items
     };
