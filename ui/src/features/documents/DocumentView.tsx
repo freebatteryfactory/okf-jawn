@@ -47,7 +47,9 @@
  * it goes to the page's heading.
  *
  * Below the properties, the item's own history is offered on demand (`history/ItemHistory.tsx`):
- * its Timeline and Who changed each line, at the revision the tab reads.
+ * its Timeline and Who changed each line, at the revision the tab reads. A Note at the version
+ * the workspace shows offers "Propose a change…" to a person who may propose
+ * (`proposals/ProposeChange.tsx`).
  */
 import {
   type UseQueryResult,
@@ -87,6 +89,7 @@ import type { ItemSelection } from '../explorer/search-params';
 import { useDeletedItem, useExplorerStore } from '../explorer/store';
 import { BringBack } from '../history/BringBack';
 import { ItemHistory } from '../history/ItemHistory';
+import { ProposeChange } from '../proposals/ProposeChange';
 import { ItemActions } from '../tree/ItemActions';
 import { ConversionState } from './ConversionState';
 import { describeSelection, short, textLabels } from './describe';
@@ -869,6 +872,10 @@ export function DocumentView({
               revision={revision}
               body={document.body}
             />
+          )}
+          {/* A Note at the version the workspace shows: a new text can be proposed for it. */}
+          {document !== undefined && kind === 'note' && revision === head && (
+            <ProposeChange workspaceId={workspaceId} document={document} />
           )}
 
           {textLabels(extraction).map((label) => (

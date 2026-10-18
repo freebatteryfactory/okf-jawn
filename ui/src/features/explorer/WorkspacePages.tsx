@@ -1,7 +1,8 @@
 /**
  * The workspace's own pages, beside its documents: bringing files in (`/import`), its jobs
- * (`/jobs`), its Attention warnings (`/attention`) and its Timeline (`/timeline`: its versions,
- * their Changes and Rewind). Each has a URL, which the router owns.
+ * (`/jobs`), its Attention warnings (`/attention`), its Timeline (`/timeline`: its versions,
+ * their Changes and Rewind) and its proposals (`/proposals`, and one proposal at
+ * `/proposals/<id>`). Each has a URL, which the router owns.
  *
  * A page is shown in place of the documents, between the same navigation and source columns. The
  * open tabs are kept in the Explorer store and are there again under "Documents", which goes back
@@ -21,10 +22,18 @@ import { AttentionPage } from '../attention/AttentionPage';
 import { TimelineView } from '../history/TimelineView';
 import { ImportPage } from '../imports/ImportPage';
 import { JobsPage } from '../jobs/JobsPage';
+import { ProposalPage } from '../proposals/ProposalPage';
+import { ProposalsPage } from '../proposals/ProposalsPage';
 import { DocumentPanes, type DocumentPanesProps } from './DocumentPanes';
 import { type Pane, tabLocation } from './store';
 
-export type WorkspacePage = 'import' | 'jobs' | 'attention' | 'timeline';
+export type WorkspacePage =
+  | 'import'
+  | 'jobs'
+  | 'attention'
+  | 'timeline'
+  | 'proposals'
+  | { proposal: string };
 
 /**
  * The page the URL names; null when it names the documents.
@@ -35,10 +44,20 @@ export type WorkspacePage = 'import' | 'jobs' | 'attention' | 'timeline';
  */
 export function useWorkspacePage(): WorkspacePage | null {
   const route = useMatches({ select: (matches) => matches.at(-1)?.routeId });
+  const proposalId = useMatches({
+    select: (matches) => {
+      const params: Record<string, string> = matches.at(-1)?.params ?? {};
+      return params.proposalId;
+    },
+  });
   if (route === '/w/$workspaceId/import') return 'import';
   if (route === '/w/$workspaceId/jobs') return 'jobs';
   if (route === '/w/$workspaceId/attention') return 'attention';
   if (route === '/w/$workspaceId/timeline') return 'timeline';
+  if (route === '/w/$workspaceId/proposals') return 'proposals';
+  if (route === '/w/$workspaceId/proposals/$proposalId' && proposalId !== undefined) {
+    return { proposal: proposalId };
+  }
   return null;
 }
 
@@ -56,6 +75,10 @@ export function DocumentsOrPage({
       )}
       {page === 'jobs' && <JobsPage workspaceId={workspaceId} />}
       {page === 'attention' && <AttentionPage workspaceId={workspaceId} head={head} />}
+      {page === 'proposals' && <ProposalsPage workspaceId={workspaceId} />}
+      {typeof page === 'object' && (
+        <ProposalPage key={page.proposal} workspaceId={workspaceId} proposalId={page.proposal} />
+      )}
       {page === 'timeline' && (
         <TimelineView
           workspaceId={workspaceId}
@@ -126,6 +149,9 @@ export function WorkspaceNav({ workspaceId, head, query, documents, onFollow }: 
       <AttentionLink workspaceId={workspaceId} head={head} search={kept} onFollow={onFollow} />
       <Link to="/w/$workspaceId/timeline" params={params} search={kept} onClick={onFollow}>
         Timeline
+      </Link>
+      <Link to="/w/$workspaceId/proposals" params={params} search={kept} onClick={onFollow}>
+        Proposals
       </Link>
     </nav>
   );
