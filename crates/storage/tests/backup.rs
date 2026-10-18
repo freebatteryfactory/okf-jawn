@@ -12,7 +12,7 @@ use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::EventKind;
 use okf_jawn_contract::extraction::ConversionSettings;
-use okf_jawn_contract::identity::{Digest, ItemId, Revision, TenantId, WorkspacePath};
+use okf_jawn_contract::identity::{Digest, ItemId, Revision, TenantId, UploadId, WorkspacePath};
 use okf_jawn_contract::item::ItemKind;
 use okf_jawn_contract::purge::{PurgeState, PurgeTarget};
 use okf_jawn_contract::workspace::ArtifactKind;
@@ -7996,6 +7996,145 @@ async fn rr7_a_small_pending_json_naming_another_workspaces_object_keeps_nothing
     put(&storage, &uploader, text.as_bytes()).await?;
     rr5_purge(&storage, &target).await?;
     assert!(!object_file(directory.path(), &hidden)?.is_file());
+    Ok(())
+}
+
+/// A completed upload slot of `workspace` under mutation `mutation` holding `body`, and the
+/// object it holds.
+async fn n6_upload(
+    storage: &Storage,
+    workspace: &StorageScope,
+    mutation: u32,
+    body: &[u8],
+) -> Fallible<(UploadId, Digest)> {
+    let object = put(storage, workspace, body).await?.digest;
+    let uploads = storage.uploads();
+    let slot = uploads
+        .create(
+            workspace,
+            uuid!(mutation)?,
+            NewUpload {
+                filename: "document.pdf".to_owned(),
+                relative_path: String::new(),
+                expected_size: u64::try_from(body.len())?,
+                expected_sha256: None,
+                supplied_by: person("ana"),
+            },
+        )
+        .await?;
+    uploads
+        .put_content(
+            workspace,
+            slot.id,
+            Box::pin(std::io::Cursor::new(body.to_vec())),
+            1 << 20,
+        )
+        .await?;
+    uploads.complete(workspace, slot.id, object.clone()).await?;
+    Ok((slot.id, object))
+}
+
+/// An import job of `workspace` under mutation `mutation`, claimed, that took `upload` as its
+/// input; answers the job and its claim.
+async fn n6_import_taking(
+    storage: &Storage,
+    workspace: &StorageScope,
+    mutation: u32,
+    upload: UploadId,
+) -> Fallible<ClaimedJob> {
+    let records = storage.records();
+    let job = records
+        .create_job(
+            &JobScope::Workspace(workspace.clone()),
+            NewJob {
+                mutation_id: uuid!(mutation)?,
+                initiator: person("ana"),
+                spec: JobSpec::Import {
+                    base_revision: storage.versions().head(workspace).await?,
+                    upload_ids: vec![upload],
+                    destination: None,
+                    apply_naming_rules: false,
+                    settings: ConversionSettings::default(),
+                },
+            },
+        )
+        .await?;
+    let claimed = some(records.claim_job(job.id).await?, "the claimed import")?;
+    storage
+        .uploads()
+        .consume_batch(workspace, &[upload], job.id)
+        .await?;
+    Ok(claimed)
+}
+
+/// Complete the claimed import `claimed` with no output.
+async fn n6_complete(storage: &Storage, claimed: ClaimedJob) -> TestResult {
+    storage
+        .records()
+        .complete_job(JobCompletion {
+            lease: claimed.lease,
+            revision: None,
+            item_ids: Vec::new(),
+            artifact: None,
+            restore: None,
+            backup: None,
+            outputs: Vec::new(),
+            warnings: Vec::new(),
+        })
+        .await?;
+    Ok(())
+}
+
+/// N-6 (b1r re-review): a backup taken while an import runs, after the import took its upload
+/// and before its card landed, drops the running job (a restored one would run again), and so
+/// writes the upload back as completed and unconsumed: restored by replacement, a new import
+/// takes the upload and lands its card. An upload a finished import took stays taken by it.
+#[tokio::test]
+async fn backup_an_upload_a_running_import_took_is_restored_free_for_the_next_import() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let (workspace, (taken, object), (done, finished)) = {
+        let storage = Storage::open(directory.path())?;
+        let workspace = notes_workspace(&storage).await?;
+        let (done, _) =
+            n6_upload(&storage, &workspace, 40, b"n6 a finished import's input").await?;
+        let finished = n6_import_taking(&storage, &workspace, 41, done).await?;
+        let finished_job = finished.job.id;
+        n6_complete(&storage, finished).await?;
+        let taken = n6_upload(&storage, &workspace, 42, b"n6 a running import's input").await?;
+        n6_import_taking(&storage, &workspace, 43, taken.0).await?;
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+        (workspace, taken, (done, finished_job))
+    };
+    let (installation, archive) = set_of(output.path(), &workspace);
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    restored
+        .backups()
+        .restore_replacement(&installation, &[archive])
+        .await?;
+    let uploads = restored.uploads();
+    assert_eq!(uploads.get(&workspace, taken).await?.consumed_by, None);
+    assert_eq!(
+        uploads.get(&workspace, done).await?.consumed_by,
+        Some(finished),
+        "a finished import keeps its input"
+    );
+    let again = n6_import_taking(&restored, &workspace, 44, taken).await?;
+    let head = restored.versions().head(&workspace).await?;
+    commit(
+        &restored,
+        &workspace,
+        45,
+        &head,
+        vec![card(uuid!(15)?, &object)?],
+    )
+    .await?;
+    n6_complete(&restored, again).await?;
     Ok(())
 }
 
