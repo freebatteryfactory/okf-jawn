@@ -10,7 +10,8 @@
 //! (proposals, their acceptance and discussion), `reviews` (confirmations and reviews),
 //! `status` (health, readiness and the session), `purges` (recording, resuming and reading
 //! a workspace purge), `workspaces` (the catalog, archive, export, backup and restore),
-//! `events` (receipts and the two event logs) and `connectors` (local connector credentials),
+//! `events` (receipts and the two event logs), `connectors` (local connector credentials) and
+//! `uploads` (upload slots),
 //! over the shared steps in `shared` (revision resolution, commits, receipts). Besides the
 //! operations, the service answers dispatch's archive question (`Application::archived_at`)
 //! from its catalog and records a sign-in for the server's session routes
@@ -221,6 +222,18 @@ macro_rules! route {
     };
     (list_reviews) => {
         reviews::list_reviews
+    };
+    (create_upload) => {
+        uploads::create_upload
+    };
+    (complete_upload) => {
+        uploads::complete_upload
+    };
+    (get_upload) => {
+        uploads::get_upload
+    };
+    (list_uploads) => {
+        uploads::list_uploads
     };
     ($pending:ident) => {
         pending
@@ -528,4 +541,5 @@ mod reviews;
 mod shared;
 mod sources;
 mod status;
+mod uploads;
 mod workspaces;

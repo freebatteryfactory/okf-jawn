@@ -1,6 +1,6 @@
 //! `ApplicationService` handlers over fakes of their ports: what each operation of the item,
-//! read, source, history, search, health, session, proposal, review, purge, workspace, event
-//! and connector modules asks of the ports, and what it answers.
+//! read, source, history, search, health, session, proposal, review, purge, workspace, event,
+//! connector and upload modules asks of the ports, and what it answers.
 //!
 //! Handlers are called the way dispatch calls them, with the `OperationContext` dispatch
 //! builds; dispatch's own rules (validation, authorization, the human-route refusal of
@@ -34,6 +34,7 @@ mod sources;
 mod status;
 #[path = "../support/tenancy.rs"]
 mod tenancy;
+mod uploads;
 mod workspaces;
 
 #[path = "../../../../tests/support/check.rs"]
