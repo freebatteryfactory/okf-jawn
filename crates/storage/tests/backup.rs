@@ -2384,6 +2384,64 @@ async fn backup_an_import_stopped_after_its_commit_writes_no_second_one_on_retry
     Ok(())
 }
 
+/// MT (F1 re-review, finding 4): after an import stopped after its restore commit, an import of
+/// the same archive under another mutation finds the head's only parent at the archive head,
+/// but the trailer names the first import's mutation, not its own: the head is not its restore
+/// commit, so it is refused as filling a workspace that is not blank, and writes no commit and
+/// no record. The first import's retry then completes on its own commit.
+#[tokio::test]
+async fn backup_an_import_under_another_mutation_after_a_stopped_one_is_refused() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let storage = &fixture.storage;
+    let backups = storage.backups();
+    let (target, _) = create(storage, "elsewhere", 80, "Copy").await?;
+    let uploaded = archive_into(storage, &fixture.workspace, &target).await?;
+    let records = rusqlite::Connection::open(directory.path().join("records.sqlite"))?;
+    records.execute_batch(
+        "CREATE TRIGGER stop_restore BEFORE INSERT ON restores
+         BEGIN SELECT RAISE(ABORT, 'stopped before the import record'); END;",
+    )?;
+    let editors = || vec!["ana".to_owned()];
+    err_of(
+        backups
+            .restore_import(&target, uploaded.clone(), uuid!(84)?, editors())
+            .await,
+    )?;
+    records.execute_batch("DROP TRIGGER stop_restore;")?;
+    let stopped = storage.versions().head(&target).await?;
+    let error = err_of(
+        backups
+            .restore_import(&target, uploaded.clone(), uuid!(85)?, editors())
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    assert_eq!(error.message, "a restore fills only a blank workspace");
+    assert_eq!(storage.versions().head(&target).await?, stopped);
+    assert!(
+        storage
+            .versions()
+            .find_commit(&target, uuid!(85)?, None)
+            .await?
+            .is_none(),
+        "no commit carries the other import's mutation"
+    );
+    assert_eq!(
+        count(
+            &directory.path().join("records.sqlite"),
+            "SELECT count(*) FROM restores"
+        )?,
+        0,
+        "no import is recorded"
+    );
+    backups
+        .restore_import(&target, uploaded, uuid!(84)?, editors())
+        .await?;
+    assert_eq!(storage.versions().head(&target).await?, stopped);
+    assert_one_restore_commit(storage, &target, &fixture.head)?;
+    Ok(())
+}
+
 /// Every reference of `repository` but the accepted head, with its commit, sorted.
 fn other_references(repository: &git2::Repository) -> Fallible<Vec<(String, String)>> {
     let mut found = Vec::new();
