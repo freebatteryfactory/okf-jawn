@@ -1006,6 +1006,70 @@ async fn an_item_listed_twice_ends_as_its_last_listing() -> TestResult {
     Ok(())
 }
 
+/// S7 (fix5 re-review): an item listed twice in one restore run, held at a third path now and
+/// at a different path at each listing's revision, ends at its last listing's path with that
+/// revision's bytes, and a link that pointed at it follows it there: the move back goes to the
+/// last listing's path, in either order of the two listings.
+#[tokio::test]
+async fn a_mover_listed_twice_ends_at_its_last_listings_path_with_its_links() -> TestResult {
+    let space = Workspace::new().await?;
+    let first = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "one/a.md", "First.")?,
+                note(11, "ref.md", "See [it](one/a.md).")?,
+            ],
+        )
+        .await?;
+    let second = space
+        .commit(
+            3,
+            &first,
+            vec![
+                moved(10, "two/a.md")?,
+                TreeEdit::EditItem {
+                    item_id: uuid!(10)?,
+                    body: "Second.".to_owned(),
+                    properties: BTreeMap::new(),
+                },
+            ],
+        )
+        .await?;
+    let now = space
+        .commit(4, &second, vec![moved(10, "three/a.md")?])
+        .await?;
+    let mut head = now;
+    for (mutation, listings, (ends, held)) in [
+        (5, [&first, &second], ("two/a.md", &second)),
+        (6, [&second, &first], ("one/a.md", &first)),
+    ] {
+        let [earlier, last] = listings;
+        head = space
+            .commit(
+                mutation,
+                &head,
+                vec![restore(10, earlier)?, restore(10, last)?],
+            )
+            .await?;
+        assert_eq!(
+            space.item_at(&head, ends).await?,
+            Some(uuid!(10)?),
+            "{ends}"
+        );
+        assert_eq!(space.file(&head, ends)?, space.file(held, ends)?, "{ends}");
+        for other in ["one/a.md", "two/a.md", "three/a.md"] {
+            if other != ends {
+                assert_eq!(space.file(&head, other)?, None, "{other}");
+            }
+        }
+        let referrer = body_of(&space, &head, 11).await?;
+        assert_eq!(referrer, format!("See [it]({ends})."), "{ends}");
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn one_item_of_a_group_absent_at_both_revisions_writes_nothing() -> TestResult {
     let space = Workspace::new().await?;
