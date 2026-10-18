@@ -2572,7 +2572,7 @@ async fn restoring_a_deleted_item_at_an_older_path_moves_it_there_from_its_last_
             edits.as_slice(),
             [
                 TreeEdit::RestoreItem { item_id: put_back, from: held },
-                TreeEdit::MoveItem { item_id: moved, destination },
+                TreeEdit::MoveItem { item_id: moved, destination, keep_alias: false },
                 TreeEdit::RestoreItem { item_id: restored, from },
             ] if [put_back, moved, restored].iter().all(|id| **id == item(NOTE))
                 && *held == last

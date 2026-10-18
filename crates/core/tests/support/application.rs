@@ -812,6 +812,7 @@ impl VersionState {
                     TreeEdit::MoveItem {
                         item_id,
                         destination,
+                        ..
                     },
                 ] => {
                     if move_in(&mut tree, *item_id, destination)? {

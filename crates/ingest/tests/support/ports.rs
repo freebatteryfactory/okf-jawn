@@ -1566,6 +1566,7 @@ fn apply_to_items(items: &mut Vec<SourceCard>, edit: &TreeEdit) {
         TreeEdit::MoveItem {
             item_id,
             destination,
+            ..
         } => {
             for item in items.iter_mut().filter(|item| item.item_id == *item_id) {
                 item.path = destination.clone();

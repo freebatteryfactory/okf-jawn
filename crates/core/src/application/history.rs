@@ -487,6 +487,7 @@ async fn item_restore(
         TreeEdit::MoveItem {
             item_id: item,
             destination,
+            keep_alias: false,
         },
         restore,
     ])

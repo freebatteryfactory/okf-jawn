@@ -930,6 +930,7 @@ async fn a_move_or_folder_onto_a_reserved_name_is_refused_naming_the_path() -> T
                     vec![TreeEdit::MoveItem {
                         item_id: uuid!(10)?,
                         destination: path("notes/Index.md")?,
+                        keep_alias: false,
                     }],
                 )?,
                 Arc::new(Counting::default()),
@@ -1071,6 +1072,7 @@ async fn items_are_shown_listed_moved_with_their_links_and_archived() -> TestRes
                     TreeEdit::MoveItem {
                         item_id: uuid!(11)?,
                         destination: path("plans/b.md")?,
+                        keep_alias: false,
                     },
                     TreeEdit::SetStatus {
                         item_id: uuid!(10)?,

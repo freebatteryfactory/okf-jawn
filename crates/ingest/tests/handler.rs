@@ -3014,6 +3014,7 @@ mod job_handler {
             .edit_elsewhere_with(vec![TreeEdit::MoveItem {
                 item_id,
                 destination: WorkspacePath::try_from("archive/report.md".to_owned())?,
+                keep_alias: false,
             }])?;
         assert!(run(&world, id).await?);
         let (completed, kept) = redigest_warnings(&world, id)?;
@@ -3094,6 +3095,7 @@ mod job_handler {
             TreeEdit::MoveItem {
                 item_id,
                 destination: WorkspacePath::try_from("archive/report.md".to_owned())?,
+                keep_alias: false,
             },
             TreeEdit::EditItem {
                 item_id,

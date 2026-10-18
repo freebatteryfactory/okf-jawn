@@ -247,6 +247,7 @@ pub(super) async fn move_item(
             edits: vec![TreeEdit::MoveItem {
                 item_id: request.item_id,
                 destination: request.destination,
+                keep_alias: false,
             }],
             item: Some(request.item_id),
         },

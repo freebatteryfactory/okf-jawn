@@ -173,6 +173,16 @@ pub enum TreeEdit {
         item_id: ItemId,
         /// New path.
         destination: WorkspacePath,
+        /// Before the move, record the item's path in its frontmatter `aliases`, a list of its
+        /// former workspace paths, oldest first, each once (a naming rule's
+        /// `alias_preservation`): an absent `aliases` becomes a list of that path, a string
+        /// becomes a list of the string and the path, and a list of strings gains the path unless
+        /// it holds it already. Any other value refuses the commit with `InvalidInput` naming
+        /// the item's path, and the value is not written over. `false` writes nothing, and a
+        /// move to the path the item holds records nothing either. The review fingerprint
+        /// leaves `aliases` out (`portable::item_content_digest`), so recording one changes no
+        /// review.
+        keep_alias: bool,
     },
     /// Set an item's OKF status word, its archived flag, or both; `None` leaves one unchanged.
     SetStatus {
@@ -1065,6 +1075,7 @@ impl TreeEdit {
             } => Self::MoveItem {
                 item_id,
                 destination,
+                keep_alias: false,
             },
             Change::Archive { item_id } => Self::SetStatus {
                 item_id,
