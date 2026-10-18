@@ -98,8 +98,13 @@
 //! invisible one is written as an escape (`printable`, in `say`, the one place a diagnostic is
 //! written). A message that was not sent or not delivered is named as the last words name it,
 //! its method cut to 200 characters; what the service says is repeated up to 8192 bytes.
-//! When the output stream fails, the relay stops at once and returns 1, whatever it was
-//! waiting for.
+//!
+//! When the output stream fails, the relay stops at once, whatever it was waiting for, says so
+//! and returns 1. While its input is open too, an output stream that takes nothing of a line
+//! that waits for it for `Limits::stall` (two minutes, the closing time; `STALL` says why) is
+//! given up the same way, in words that name the bound. The error stream is given up alike
+//! when it takes nothing of a diagnostic for as long, and then nothing can be said. Any byte a
+//! stream takes starts the time again, so a slow reader is never given up.
 //!
 //! The relay learns that its input ended only by reading it, so the read loop never only
 //! waits. Whenever it waits for something else (for room for a line it answers itself or for
@@ -115,8 +120,8 @@
 //!   long, and an event stream has no fixed length. Sixteen messages that do not end therefore
 //!   hold every turn, the relay reads one line more and no further, and it learns that its
 //!   input ended only when one of them ends. An output that takes nothing has the same effect
-//!   once sixteen lines wait for it, as messages or as lines the relay answers itself: with
-//!   more lines still unread, the relay does not learn that its input ended, and stays.
+//!   once sixteen lines wait for it, as messages or as lines the relay answers itself, but
+//!   only for `Limits::stall`: then the output is given up.
 //! - A response the service sends for another request's id is passed on as it is.
 
 use std::any::Any;
@@ -205,6 +210,9 @@ pub struct Limits {
     /// How long the relay may still take once the input has ended: for the messages in flight
     /// to finish and for every line to be written.
     pub closing: Duration,
+    /// How long the output stream, or the error stream, may take nothing of what waits for it
+    /// before the relay gives it up and stops, whether or not its input is still open.
+    pub stall: Duration,
 }
 
 /// What an exchange learned for the messages that follow it.
@@ -240,6 +248,8 @@ pub struct Relay<T, L, C> {
 struct Saying<'run, E> {
     stderr: &'run mut E,
     secret: &'run Credential,
+    /// How long the error stream may take nothing of a line.
+    stall: Duration,
 }
 
 /// A piece of work polled so that a panic inside it is caught where it happens and given as
@@ -269,6 +279,15 @@ enum Taken {
     TooLong,
     /// The input failed; nothing is read after it.
     Failed(std::io::Error),
+}
+
+/// Why a write to one of the relay's output streams did not go through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stopped {
+    /// The stream failed.
+    Failed,
+    /// The stream took nothing for the stall bound (`Limits::stall`).
+    Stalled,
 }
 
 /// The turn a line of the input holds. `None` only if the turns were closed, which they never
@@ -339,6 +358,14 @@ const QUEUE: usize = 64;
 /// What a line is called that the relay refused, when the relay has to name it: it could not
 /// be read as a message, so it has no name of its own.
 const REFUSED: &str = "a line the relay refused";
+/// How long an output stream may take nothing of a line that waits for it before the relay
+/// gives it up: two minutes, the closing time. A client takes its protocol stream as it comes,
+/// so one that took nothing of a waiting line for as long as the relay gives its last answers
+/// once the input has ended is not reading it, and is treated as one that closed its input:
+/// MCP hosts commonly give a request a minute, and the relay its own server 45 seconds. Every
+/// byte the stream takes starts the time again, so a slow reader is never given up. Meanwhile
+/// everything waiting stays held, up to the whole room and every turn.
+const STALL: Duration = Duration::from_secs(120);
 /// The line the relay writes for a line over the limit.
 const TOO_LONG: &str = "Invalid request: the line is longer than the request limit of";
 
@@ -526,7 +553,7 @@ impl<I: AsyncRead + Unpin> Input<I> {
 
 impl<E: AsyncWrite + Unpin> Progress for Saying<'_, E> {
     async fn say(&mut self, text: &str) {
-        say(self.stderr, self.secret, text).await;
+        say(self.stderr, self.secret, text, self.stall).await;
     }
 }
 
@@ -568,6 +595,7 @@ impl Default for Limits {
             in_flight: 16,
             waiting_bytes: MAX_REQUEST_BODY_BYTES.saturating_mul(4),
             closing: CLOSING,
+            stall: STALL,
         }
     }
 }
@@ -882,6 +910,8 @@ async fn leave<E: AsyncWrite + Unpin>(
     left: &Left,
     lines: usize,
 ) {
+    // The last words have a bound of their own (`LAST_WORDS`), within which each is written.
+    let stall = LAST_WORDS;
     let (mut names, ahead): (Vec<String>, usize) = left
         .lock()
         .map(|left| {
@@ -911,21 +941,21 @@ async fn leave<E: AsyncWrite + Unpin>(
             names.len(),
             quoted.join(", ")
         );
-        say(stderr, secret, &text).await;
+        say(stderr, secret, &text, stall).await;
     }
     if ahead > 0 {
         let text = format!(
             "the input ended and {ahead} of its lines had not been looked at {after:?} later; \
              the relay stops and leaves them unanswered"
         );
-        say(stderr, secret, &text).await;
+        say(stderr, secret, &text, stall).await;
     }
     if lines > 0 {
         let text = format!(
             "the input ended and {lines} of the lines for the output had not been written \
              {after:?} later; the relay stops without writing them"
         );
-        say(stderr, secret, &text).await;
+        say(stderr, secret, &text, stall).await;
     }
 }
 
@@ -956,6 +986,26 @@ async fn note(desk: &Desk, text: &str) {
     let _ = desk.notes.send(held).await;
 }
 
+/// Write each queued diagnostic to the error stream until every sender is gone; returns
+/// whether the error stream still takes what it is given. When it took nothing of one for
+/// `stall`, it is given up: the queue is closed, which stops the reading, and false returned.
+async fn noting<E: AsyncWrite + Unpin>(
+    queued: &mut mpsc::Receiver<Held>,
+    stderr: &mut E,
+    secret: &Credential,
+    stall: Duration,
+) -> bool {
+    while let Some(text) = queued.recv().await {
+        if !say(stderr, secret, text.as_str(), stall).await {
+            queued.close();
+            return false;
+        }
+        // Written: its room is free again.
+        drop(text);
+    }
+    true
+}
+
 /// Queue one line of the relay's own for the output stream, once it has room; returns false
 /// when it was withheld. It waits for room as [`note`] does, and is for the same moments.
 async fn own(desk: &Desk, text: String) -> bool {
@@ -963,7 +1013,8 @@ async fn own(desk: &Desk, text: String) -> bool {
     line(desk, held).await
 }
 
-/// Forward the input until it ends, or until the output stream fails, whichever is first.
+/// Forward the input until it ends, or until the output stream fails or is given up, or the
+/// error stream is given up, whichever is first.
 ///
 /// A failed output is noticed at any moment: while a line is awaited, while `initialize` is
 /// exchanged, while a message waits for its turn or for room, and while the relay closes.
@@ -979,10 +1030,10 @@ async fn read<T: Transport, I: AsyncRead + Unpin>(
 ) -> u8 {
     tokio::select! {
         code = forward(transport, input, limits, &desk, left, ended) => code,
-        () = desk.lines.closed() => {
-            note(&desk, "the output stream failed; the relay stops").await;
-            1
-        }
+        // The writer stopped: `serve` says why once everything has let go.
+        () = desk.lines.closed() => 1,
+        // The error stream was given up: nothing can be said.
+        () = desk.notes.closed() => 1,
     }
 }
 
@@ -1026,6 +1077,7 @@ where
     let mut progress = Saying {
         stderr: &mut stderr,
         secret: &secret,
+        stall: limits.stall,
     };
     let arrival = start_or_connect(
         transport.as_ref(),
@@ -1044,11 +1096,12 @@ where
                 &secret,
                 "the okf-jawn server the relay started answers; it is left running when the \
                  relay ends",
+                limits.stall,
             )
             .await;
         }
         Err(why) => {
-            say(&mut stderr, &secret, &why).await;
+            say(&mut stderr, &secret, &why, limits.stall).await;
             return 1;
         }
     }
@@ -1066,19 +1119,21 @@ where
     };
     let (ended, closing) = oneshot::channel();
     let mut session = Box::pin(async {
-        let noting = async {
-            while let Some(text) = queued_notes.recv().await {
-                say(&mut stderr, &secret, text.as_str()).await;
-                // Written: its room is free again.
-                drop(text);
-            }
-        };
-        let (code, written, ()) = tokio::join!(
+        let (code, written, heard) = tokio::join!(
             read(transport, stdin, limits, desk, left.clone(), ended),
-            write(queued_lines, stdout, &unwritten),
-            noting
+            write(queued_lines, stdout, &unwritten, limits.stall),
+            noting(&mut queued_notes, &mut stderr, &secret, limits.stall)
         );
-        if written.is_err() { 1 } else { code }
+        match written {
+            Ok(()) if heard => code,
+            Ok(()) => 1,
+            Err(why) => {
+                if heard {
+                    say(&mut stderr, &secret, &why, limits.stall).await;
+                }
+                1
+            }
+        }
     });
     // While the input is open the relay stays for as long as its client keeps it.
     let early = tokio::select! {
@@ -1105,15 +1160,51 @@ where
     1
 }
 
+/// Write each of `parts` whole to `output`, then flush it, giving it up when it takes nothing
+/// for `stall`: each write that takes something, and the flush, start the time again.
+///
+/// # Errors
+/// Returns whether the output failed or was given up.
+async fn put<O: AsyncWrite + Unpin>(
+    output: &mut O,
+    parts: &[&[u8]],
+    stall: Duration,
+) -> Result<(), Stopped> {
+    for part in parts {
+        let mut rest = *part;
+        while !rest.is_empty() {
+            match tokio::time::timeout(stall, output.write(rest)).await {
+                Err(_) => return Err(Stopped::Stalled),
+                Ok(Ok(0) | Err(_)) => return Err(Stopped::Failed),
+                Ok(Ok(taken)) => rest = rest.get(taken..).unwrap_or_default(),
+            }
+        }
+    }
+    match tokio::time::timeout(stall, output.flush()).await {
+        Err(_) => Err(Stopped::Stalled),
+        Ok(Err(_)) => Err(Stopped::Failed),
+        Ok(Ok(())) => Ok(()),
+    }
+}
+
 /// Write one diagnostic line to the error stream, without the credential, and with every
 /// character a reader cannot see written as an escape ([`printable`]), whoever wrote it: the
 /// relay's own words, a client's id or method, what the service says. So a diagnostic is one
 /// line, and nothing in it moves the cursor, hides text or turns its direction.
-async fn say<E: AsyncWrite + Unpin>(stderr: &mut E, secret: &Credential, text: &str) {
+///
+/// Returns false when the error stream took nothing of it for `stall`: the relay then gives
+/// the error stream up. A failed error stream is no reason to stop, and nothing can report it.
+async fn say<E: AsyncWrite + Unpin>(
+    stderr: &mut E,
+    secret: &Credential,
+    text: &str,
+    stall: Duration,
+) -> bool {
     let text = secret.redact(&format!("okf-jawn mcp: {}\n", printable(text)));
-    // Nothing can report a failure of the error stream itself.
-    let _ = stderr.write_all(text.as_bytes()).await;
-    let _ = stderr.flush().await;
+    !matches!(
+        put(stderr, &[text.as_bytes()], stall).await,
+        Err(Stopped::Stalled)
+    )
 }
 
 /// Decide what a finished HTTP answer means; returns the failure, in plain words, if it is one.
@@ -1210,17 +1301,29 @@ async fn refusal(
 }
 
 /// Write each queued line whole, followed by a line feed, until every sender is gone.
+///
+/// # Errors
+/// Returns what the error stream is to be told when the output failed, or took nothing of a
+/// line for `stall` and was given up; the relay then stops.
 async fn write<O: AsyncWrite + Unpin>(
     mut queued: mpsc::Receiver<Held>,
     mut output: O,
     unwritten: &AtomicUsize,
-) -> std::io::Result<()> {
+    stall: Duration,
+) -> Result<(), String> {
     while let Some(text) = queued.recv().await {
         // The line feed is written after the text, not added to it: adding a byte to a
         // buffer that is full would copy the whole line.
-        output.write_all(text.as_str().as_bytes()).await?;
-        output.write_all(b"\n").await?;
-        output.flush().await?;
+        match put(&mut output, &[text.as_str().as_bytes(), b"\n"], stall).await {
+            Ok(()) => {}
+            Err(Stopped::Failed) => return Err("the output stream failed; the relay stops".into()),
+            Err(Stopped::Stalled) => {
+                return Err(format!(
+                    "the output stream took nothing for {stall:?} while a line waited for it; \
+                     the relay stops"
+                ));
+            }
+        }
         unwritten.fetch_sub(1, Ordering::SeqCst);
         // Written: its room is free again.
         drop(text);

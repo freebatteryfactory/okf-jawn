@@ -41,6 +41,15 @@ struct Breaking {
     given: bool,
 }
 
+/// An output stream that takes `bytes` bytes at a time, one piece every `every`, and keeps all
+/// it took.
+struct Trickle {
+    bytes: usize,
+    every: Duration,
+    next: Pin<Box<tokio::time::Sleep>>,
+    taken: Vec<u8>,
+}
+
 /// The length of every line the service's double answers with in the tests of the room.
 const LINE: usize = 200;
 
@@ -94,6 +103,48 @@ impl AsyncRead for Breaking {
         this.given = true;
         buffer.put_slice(&std::mem::take(&mut this.bytes));
         Poll::Ready(Ok(()))
+    }
+}
+
+impl Trickle {
+    fn new(bytes: usize, every: Duration) -> Self {
+        Self {
+            bytes,
+            every,
+            next: Box::pin(tokio::time::sleep(every)),
+            taken: Vec::new(),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for Trickle {
+    fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_write(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        if this.next.as_mut().poll(context).is_pending() {
+            return Poll::Pending;
+        }
+        let deadline = tokio::time::Instant::now()
+            .checked_add(this.every)
+            .unwrap_or_else(tokio::time::Instant::now);
+        this.next.as_mut().reset(deadline);
+        let piece = bytes.get(..this.bytes).unwrap_or(bytes);
+        this.taken.extend_from_slice(piece);
+        Poll::Ready(Ok(piece.len()))
     }
 }
 
@@ -742,6 +793,108 @@ async fn the_relay_ends_when_neither_output_stream_takes_anything() -> TestResul
     .map_err(|_| "the relay waited for an error stream that takes nothing")??;
     assert_eq!(code, 1);
     Ok(())
+}
+
+/// C3: an output stream that takes nothing is given up after a bound also while the input is
+/// still open: the relay says so on the error stream, in words that name the bound, and
+/// returns 1. The input here never ends.
+#[tokio::test]
+async fn an_output_that_takes_nothing_while_the_input_is_open_is_given_up() -> TestResult {
+    let transport = FakeTransport::echoing();
+    let setup = Setup {
+        limits: Limits {
+            stall: Duration::from_millis(300),
+            ..Limits::default()
+        },
+        ..Setup::new(&transport)
+    };
+    let (mut client, stdin) = tokio::io::duplex(65_536);
+    client
+        .write_all(request(&json!(1), "tools/call", &json!({})).as_bytes())
+        .await?;
+    let mut stderr = Vec::new();
+    let started = tokio::time::Instant::now();
+    let code = tokio::time::timeout(PATIENCE, relay_on(setup, stdin, Stuck, &mut stderr))
+        .await
+        .map_err(|_| "the relay waited for an output that takes nothing")??;
+    assert!(started.elapsed() >= Duration::from_millis(300));
+    assert_eq!(
+        (code, String::from_utf8(stderr)?.as_str()),
+        (
+            1,
+            "okf-jawn mcp: the output stream took nothing for 300ms while a line waited for \
+             it; the relay stops\n"
+        )
+    );
+    // The client's end of the input was open all along.
+    drop(client);
+    Ok(())
+}
+
+/// C3, the other side: an output that is slow but takes something within the bound each time
+/// is never given up, however long the whole takes. Each answer of 200 bytes comes out 8 bytes
+/// every 60 ms, about 1.5 s a line, with a bound of 300 ms; then the input ends and the relay
+/// returns 0 with every line written.
+#[tokio::test]
+async fn an_output_that_takes_something_within_the_bound_is_never_given_up() -> TestResult {
+    let transport = FakeTransport::scripted(|message| answered(&sized(message.get("id"))));
+    let setup = Setup {
+        limits: Limits {
+            stall: Duration::from_millis(300),
+            ..Limits::default()
+        },
+        ..Setup::new(&transport)
+    };
+    let input: String = (0..2)
+        .map(|id| request(&json!(id), "tools/call", &json!({})))
+        .collect();
+    let mut output = Trickle::new(8, Duration::from_millis(60));
+    let mut stderr = Vec::new();
+    let code = tokio::time::timeout(
+        PATIENCE,
+        relay_on(setup, input.as_bytes(), &mut output, &mut stderr),
+    )
+    .await
+    .map_err(|_| "the relay did not end")??;
+    assert_eq!((code, String::from_utf8(stderr)?.as_str()), (0, ""));
+    let written = String::from_utf8(output.taken)?;
+    assert_eq!(written.lines().count(), 2, "{written}");
+    assert_eq!(written.len(), LINE.saturating_add(1).saturating_mul(2));
+    Ok(())
+}
+
+/// C3 for the error stream: one that takes nothing while the input is open is given up after
+/// the same bound, and the relay returns 1; it cannot say why.
+#[tokio::test]
+async fn an_error_stream_that_takes_nothing_while_the_input_is_open_is_given_up() -> TestResult {
+    let transport = FakeTransport::scripted(|_| broken("connection reset by peer"));
+    let setup = Setup {
+        limits: Limits {
+            stall: Duration::from_millis(300),
+            ..Limits::default()
+        },
+        ..Setup::new(&transport)
+    };
+    let (mut client, stdin) = tokio::io::duplex(65_536);
+    client
+        .write_all(notification("notifications/progress").as_bytes())
+        .await?;
+    let mut stdout = Vec::new();
+    let code = tokio::time::timeout(PATIENCE, relay_on(setup, stdin, &mut stdout, Stuck))
+        .await
+        .map_err(|_| "the relay waited for an error stream that takes nothing")??;
+    assert_eq!((code, stdout.as_slice()), (1, &b""[..]));
+    drop(client);
+    Ok(())
+}
+
+/// C3: the bound the shipped relay gives an output that takes nothing is two minutes, what it
+/// gives its messages after its input ended.
+#[test]
+fn mcp_stdio_default_stall_bound_is_the_stated_one() {
+    let limits = Limits::default();
+    assert_eq!(limits.stall, Duration::from_secs(120));
+    assert_eq!(limits.stall, limits.closing);
 }
 
 /// An answer that comes after the input ended, inside the closing time, is waited for and
