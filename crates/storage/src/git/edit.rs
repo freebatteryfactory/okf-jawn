@@ -1110,6 +1110,17 @@ pub(crate) fn correction_file(item: ItemId, digest: &Digest) -> String {
     format!("{}/{}.json", corrections_folder(item), digest.as_str())
 }
 
+/// Whether the tree path `path` is one of the item's companion files, which `RestoreItem` sets
+/// back with it (`restore_items`): its source appearance, its accepted supplied text, or a file
+/// anywhere in its corrections folder.
+pub(crate) fn is_companion(path: &str, item: ItemId) -> bool {
+    path == appearance_file(item)
+        || path == supplied_file(item)
+        || path
+            .strip_prefix(&corrections_folder(item))
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
 /// The tree path of the folder holding every correction of one item.
 fn corrections_folder(item: ItemId) -> String {
     format!("{CORRECTIONS_DIR}/{}", item.0)

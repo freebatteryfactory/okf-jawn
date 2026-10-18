@@ -7,6 +7,12 @@
 //! counts the file as stored, not as the serializer would write it again: an item restored
 //! from an archive may hold frontmatter the serializer does not reproduce (a comment line, no
 //! blank line after the closing delimiter, CRLF line endings).
+//!
+//! An item is its file and its companion files (`edit::is_companion`: its source appearance,
+//! its accepted supplied text and its corrections), which `RestoreItem` restores with it. So the
+//! item-limited comparison lists a companion file's change as the item's, and the item-filtered
+//! log names a commit that changed only companions (an appearance-only card write, say), as
+//! one that changed the item's file.
 
 use git2::{
     BlameOptions, Commit, DiffFindOptions, DiffOptions, Oid, Patch, Repository, Sort, Tree,
@@ -22,8 +28,9 @@ use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::source::SourceReference;
 use okf_jawn_core::storage::{BlameQuery, DiffQuery, LogQuery, StorageScope};
 
+use super::edit::is_companion;
 use super::read::find;
-use super::repo::{commit_of, git, internal, revision_of, split_trailer_block};
+use super::repo::{commit_of, files, git, internal, revision_of, split_trailer_block};
 use crate::seam;
 
 /// The line that opens and closes an item file's frontmatter, as `okf_core` reads it.
@@ -108,10 +115,13 @@ pub(crate) fn diff(repository: &Repository, query: &DiffQuery) -> Result<DiffRes
             .path()
             .and_then(|path| path.to_str())
             .map(str::to_owned);
-        if query.item_id.is_some()
+        if let Some(item) = query.item_id
             && !paths
                 .iter()
                 .any(|path| old_path.as_ref() == Some(path) || new_path.as_ref() == Some(path))
+            && ![&old_path, &new_path]
+                .into_iter()
+                .any(|path| path.as_deref().is_some_and(|path| is_companion(path, item)))
         {
             continue;
         }
@@ -310,8 +320,8 @@ pub(crate) fn last_change(
     Ok(None)
 }
 
-/// Whether `commit` changed the item's file (its content or its path) against its first
-/// parent; a root commit changes every item it holds.
+/// Whether `commit` changed the item's file (its content or its path) or one of its companion
+/// files (`is_companion`) against its first parent; a root commit changes every item it holds.
 fn changes_item(
     repository: &Repository,
     commit: &Commit<'_>,
@@ -319,14 +329,35 @@ fn changes_item(
 ) -> Result<bool, ApiError> {
     let tree = commit.tree().map_err(|error| git(&error))?;
     let mine = find(repository, &tree, item)?.map(|(path, file)| (path, file.text()));
-    let parent = match commit.parents().next() {
-        Some(parent) => {
-            let tree = parent.tree().map_err(|error| git(&error))?;
-            find(repository, &tree, item)?.map(|(path, file)| (path, file.text()))
-        }
+    let parent_tree = commit
+        .parents()
+        .next()
+        .map(|parent| parent.tree())
+        .transpose()
+        .map_err(|error| git(&error))?;
+    let parent = match &parent_tree {
+        Some(tree) => find(repository, tree, item)?.map(|(path, file)| (path, file.text())),
         None => None,
     };
-    Ok(mine != parent)
+    Ok(mine != parent
+        || companions(repository, Some(&tree), item)?
+            != companions(repository, parent_tree.as_ref(), item)?)
+}
+
+/// The companion files of `item` in `tree`, with their blobs, in path order; none without a
+/// tree.
+fn companions(
+    repository: &Repository,
+    tree: Option<&Tree<'_>>,
+    item: ItemId,
+) -> Result<Vec<(String, Oid)>, ApiError> {
+    let Some(tree) = tree else {
+        return Ok(Vec::new());
+    };
+    Ok(files(repository, tree)?
+        .into_iter()
+        .filter(|(path, _)| is_companion(path, item))
+        .collect())
 }
 
 fn blob_at(commit: &Commit<'_>, path: &str) -> Result<Option<Oid>, ApiError> {

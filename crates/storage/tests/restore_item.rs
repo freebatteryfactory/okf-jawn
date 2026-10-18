@@ -19,8 +19,8 @@ use okf_jawn_contract::identity::{Digest, ItemId, Revision, TenantId, WorkspaceP
 use okf_jawn_contract::item::ItemKind;
 use okf_jawn_core::conformance::EditCheck;
 use okf_jawn_core::storage::{
-    CandidateChanges, CandidateCheck, CommitChanges, Committed, LogQuery, NewWorkspace, Page,
-    Provenance, SourceCard, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
+    CandidateChanges, CandidateCheck, CommitChanges, Committed, DiffQuery, LogQuery, NewWorkspace,
+    Page, Provenance, SourceCard, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
 };
 use okf_jawn_storage::Storage;
 use serde_json::json;
@@ -488,6 +488,110 @@ async fn a_card_restored_forward_gets_every_companion_back() -> TestResult {
         assert!(restored.is_some(), "{at} is copied back");
         assert_eq!(restored, space.file(&late, &at)?, "{at} as `late` holds it");
     }
+    Ok(())
+}
+
+/// The paths an item-limited comparison of `from` and `to` lists, each change's new path (its
+/// old one when it removed the file).
+async fn item_diff(
+    space: &Workspace,
+    item: u32,
+    from: &Revision,
+    to: &Revision,
+) -> Fallible<Vec<String>> {
+    let compared = space
+        .storage
+        .versions()
+        .diff(
+            &space.scope,
+            DiffQuery {
+                from: from.clone(),
+                to: to.clone(),
+                item_id: Some(uuid!(item)?),
+            },
+        )
+        .await?;
+    Ok(compared
+        .changes
+        .into_iter()
+        .filter_map(|change| change.new_path.or(change.old_path))
+        .collect())
+}
+
+/// The commits the item-filtered log from `tip` names, newest first.
+async fn item_log(space: &Workspace, item: u32, tip: &Revision) -> Fallible<Vec<Revision>> {
+    let log = space
+        .storage
+        .versions()
+        .log(
+            &space.scope,
+            LogQuery {
+                tip: tip.clone(),
+                item_id: Some(uuid!(item)?),
+                page: Page {
+                    cursor: None,
+                    limit: 50,
+                },
+            },
+        )
+        .await?;
+    Ok(log
+        .commits
+        .into_iter()
+        .map(|commit| commit.revision)
+        .collect())
+}
+
+/// N1 (core-cli M1.2 re-review): a change that touches only an item's companion files is a
+/// change of the item, as `RestoreItem` restores them with it: an appearance-only card write,
+/// and, written through Git, a correction file and a supplied-text file alone. The
+/// item-limited comparison lists exactly that file, and the item-filtered log names each
+/// commit; another item's comparison and log do not. (A `CorrectDigest` is not one: it marks
+/// the card's own file corrected too.)
+#[tokio::test]
+async fn a_change_of_only_an_items_companions_is_a_change_of_the_item() -> TestResult {
+    let space = Workspace::new().await?;
+    let carded = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                card(12, "application/pdf", 'a')?,
+                note(10, "notes/n.md", "N.")?,
+            ],
+        )
+        .await?;
+    let shown = space
+        .commit(3, &carded, vec![card(12, "application/x-pdf", 'a')?])
+        .await?;
+    let corrected = space.raw_upsert(
+        &correction_file(12, 'b'),
+        b"{\"corrected_markdown\": \"Corrected B.\"}",
+        30,
+    )?;
+    let supplied = space.raw_upsert(&supplied_file(12), b"{\"markdown\": \"Supplied.\"}", 31)?;
+    let unrelated = space
+        .commit(4, &supplied, vec![note(11, "notes/o.md", "O.")?])
+        .await?;
+    for (from, to, only) in [
+        (&carded, &shown, appearance_file(12)),
+        (&shown, &corrected, correction_file(12, 'b')),
+        (&corrected, &supplied, supplied_file(12)),
+    ] {
+        assert!(space.file(to, CARD)?.is_some());
+        assert_eq!(
+            space.file(to, CARD)?,
+            space.file(from, CARD)?,
+            "the card's own file is unchanged: {only}"
+        );
+        assert_eq!(item_diff(&space, 12, from, to).await?, vec![only]);
+        assert_eq!(item_diff(&space, 10, from, to).await?, Vec::<String>::new());
+    }
+    assert_eq!(
+        item_log(&space, 12, &unrelated).await?,
+        vec![supplied, corrected, shown, carded.clone()]
+    );
+    assert_eq!(item_log(&space, 10, &unrelated).await?, vec![carded]);
     Ok(())
 }
 
