@@ -968,6 +968,7 @@ async fn announce_cancelled(
                 connector_id: None,
                 actor: None,
                 operation: None,
+                transport: None,
                 proposal_id: None,
                 count: None,
             },
@@ -991,6 +992,7 @@ pub(crate) fn job_event(
         connector_id: None,
         actor: None,
         operation: None,
+        transport: None,
         proposal_id: None,
         count: None,
     }

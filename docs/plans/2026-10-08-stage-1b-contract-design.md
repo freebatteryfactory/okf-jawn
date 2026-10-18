@@ -1443,8 +1443,9 @@ Restore:
   data directory, run this command, start the service, find the same content and drafts.
 - **Import into another installation** is the operation `restore_workspace`: it fills a blank
   workspace from a workspace archive uploaded into that workspace; the installation archive is
-  not used. It keeps item ids, rewrites View bindings to the new workspace id (a View binds only
-  to its own workspace), gives each draft whose editor is a validated subject with `write` on
+  not used. It keeps item ids; a View's file names no workspace (core M1.6: a View binds only to
+  its own workspace, so the id is implied), so a restored View binds to the new one with no
+  rewrite. It gives each draft whose editor is a validated subject with `write` on
   the target workspace back to that editor, and keeps the others in the archive, unassigned, with
   their count reported. Restoring a backup of another workspace of the same installation from a
   retained artifact is not offered: its purge semantics for the copy are not simple (round 1

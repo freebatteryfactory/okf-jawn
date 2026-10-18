@@ -2,7 +2,8 @@
 //!
 //! These declarations document streaming and authentication bindings; they do not implement them.
 
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 /// How a transport route authenticates its caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -35,6 +36,21 @@ pub struct TransportOperation {
     pub status: u16,
     /// Credential the route accepts.
     pub auth: TransportAuth,
+}
+
+/// A byte transport by name, as a refused one is recorded (`Event::transport`); each is one entry
+/// of `TRANSPORTS`, whose `id` is its `as_str`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportName {
+    /// `upload_content`.
+    UploadContent,
+    /// `download_object`.
+    DownloadObject,
+    /// `download_artifact`.
+    DownloadArtifact,
+    /// `download_tenant_artifact`.
+    DownloadTenantArtifact,
 }
 
 /// The additional transport bindings the server lane must implement.
@@ -209,6 +225,27 @@ pub const TRANSPORTS: &[TransportOperation] = &[
 /// several changes in one proposal or through JSON escaping. It bounds JSON bodies; the raw
 /// bytes `upload_content` streams are not one.
 pub const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+impl TransportName {
+    /// Every transport, in `TRANSPORTS` order.
+    pub const ALL: [Self; 4] = [
+        Self::UploadContent,
+        Self::DownloadObject,
+        Self::DownloadArtifact,
+        Self::DownloadTenantArtifact,
+    ];
+
+    /// The transport's `TransportOperation::id`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UploadContent => "upload_content",
+            Self::DownloadObject => "download_object",
+            Self::DownloadArtifact => "download_artifact",
+            Self::DownloadTenantArtifact => "download_tenant_artifact",
+        }
+    }
+}
 
 /// Enumerate the additional transport bindings the server lane must implement.
 #[must_use]

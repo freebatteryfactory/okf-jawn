@@ -182,7 +182,8 @@ pub struct BackupInstallationRequest {
 
 /// Fill a blank workspace of this installation from an uploaded workspace archive.
 ///
-/// The restore keeps item ids, rewrites View bindings to this workspace, gives each draft
+/// The restore keeps item ids (a View's file names no workspace, so a restored View binds to
+/// this one), gives each draft
 /// whose editor is a validated subject with `write` here back to that editor, and keeps the
 /// others in the archive, unassigned and counted. An archive of this tenant whose workspace
 /// still exists, or has a purge record, is refused: purged content never comes back through

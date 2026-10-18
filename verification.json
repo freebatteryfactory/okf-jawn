@@ -305,7 +305,7 @@
           "id": "view-server-validation",
           "status": "blocked_on_lanes",
           "owner": "core-cli",
-          "receipt": "cargo test -p okf-jawn-core -- views::",
+          "receipt": "cargo test -p okf-jawn-core -- views:: --skip reviews::",
           "meaning": "views::validate against catalog.schema.json and vega-lite.schema.json plus referential checks, and a binding outside the View's workspace is rejected (`ViewDocument::bindings_outside`); present and saved-view writes call it first"
         },
         {

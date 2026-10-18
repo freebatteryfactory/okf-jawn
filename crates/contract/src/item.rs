@@ -15,7 +15,11 @@ pub enum ItemKind {
     Note,
     /// An appearance of immutable source bytes.
     Source,
-    /// A source-bound declarative visual artifact.
+    /// A source-bound declarative visual artifact. Its file is an OKF concept: the `title`
+    /// property, then a body that is the View's description as Markdown followed by exactly one
+    /// fenced code block whose info string is `json okf-jawn-view`, holding `schema_version`, `mode`,
+    /// `grammar`, `bindings` (without `workspace_id`, `locations` or `materialized`, which the
+    /// server derives), `spec` and `charts`; the block ends the body.
     View,
 }
 

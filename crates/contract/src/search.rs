@@ -80,6 +80,8 @@ pub enum LinkDirection {
 pub struct Link {
     /// Linking item.
     pub from: crate::identity::ItemId,
+    /// The linking item's path at the revision read, so a backlink is shown by its name.
+    pub from_path: crate::identity::WorkspacePath,
     /// Target path as written.
     pub to_path: String,
     /// Resolved target, absent for broken links.

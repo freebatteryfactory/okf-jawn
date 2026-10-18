@@ -726,6 +726,7 @@ fn unnamed_refusal_event(principal: &Principal) -> NewEvent {
             client_id: principal.client_id.clone(),
         }),
         operation: None,
+        transport: None,
         proposal_id: None,
         count: None,
     }
