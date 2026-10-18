@@ -27,7 +27,8 @@
 //! names (`fail_next_show`, `fail_show_number`), as a store fault would, and so may the next `log` and the next `list` (`fail_next_log`, `fail_next_list`). `item_at_path` answers from the scripted documents as its port documents it: `None` when no item is at the path at
 //! a known revision, `NotFound` only for an unknown revision. `tree` answers the documents at a
 //! revision, one per item, in path order, each source card with its header's original name, and
-//! every folder above them; it holds no folder no document lies under. A port the operations
+//! every folder above them; it holds no folder no document lies under. `rules` answers the file a test
+//! scripted at a revision (`put_rules`), and none elsewhere. A port the operations
 //! under test do not call answers `Internal` ("not used by this test").
 //!
 //! The search index, the event log and the receipt store keep their documented idempotence
@@ -177,6 +178,7 @@ pub struct FakeVersions {
     state: Mutex<VersionState>,
     stage: Staged,
     shows: AtomicUsize,
+    trees: AtomicUsize,
     fail_next_lookup: AtomicBool,
     fail_show: Mutex<Option<(usize, ErrorCode)>>,
     fail_next_log: Mutex<Option<ErrorCode>>,
@@ -394,6 +396,7 @@ impl FakeVersions {
             }),
             stage: Staged::conformant()?,
             shows: AtomicUsize::new(0),
+            trees: AtomicUsize::new(0),
             fail_next_lookup: AtomicBool::new(false),
             fail_show: Mutex::new(None),
             fail_next_log: Mutex::new(None),
@@ -480,6 +483,18 @@ impl FakeVersions {
         lock(&self.state)?
             .listings
             .push((at.clone(), folder, listing));
+        Ok(())
+    }
+
+    /// Answer `rules` at `at` with `file`, in place of what was scripted there before; a
+    /// revision nothing was scripted at answers `None` (no rules saved).
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn put_rules(&self, at: &Revision, file: RulesFile) -> Built<()> {
+        let mut state = lock(&self.state)?;
+        state.rules.retain(|(held, _)| held != at);
+        state.rules.push((at.clone(), file));
         Ok(())
     }
 
@@ -582,6 +597,12 @@ impl FakeVersions {
     #[must_use]
     pub fn shows(&self) -> usize {
         self.shows.load(Ordering::SeqCst)
+    }
+
+    /// How many times `tree` was called.
+    #[must_use]
+    pub fn trees(&self) -> usize {
+        self.trees.load(Ordering::SeqCst)
     }
 
     /// Answer `log` from `tip`, optionally of `item`, with `response`.
@@ -1269,6 +1290,7 @@ impl VersionStore for FakeVersions {
         _scope: &'a StorageScope,
         revision: &'a Revision,
     ) -> PortFuture<'a, WorkspaceTree> {
+        self.trees.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move { lock_api(&self.state)?.tree_at(revision) })
     }
     fn item_at_path<'a>(

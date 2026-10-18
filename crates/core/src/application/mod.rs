@@ -8,6 +8,7 @@
 //! sandbox capabilities), `sources` (citations and object reads), `history` (Timeline, Changes,
 //! Who, Snapshot and Rewind), `navigation` (search, links and the graph), `proposals`
 //! (proposals, their acceptance and discussion), `reviews` (confirmations and reviews),
+//! `conventions` (the naming rules: reading and saving them, a rename preview and its apply),
 //! `status` (health, readiness and the session) and `purges` (recording, resuming and reading
 //! a workspace purge), over the shared steps in `shared` (revision resolution, commits,
 //! receipts).
@@ -168,6 +169,18 @@ macro_rules! route {
     };
     (list_reviews) => {
         reviews::list_reviews
+    };
+    (get_rules) => {
+        conventions::get_rules
+    };
+    (set_rules) => {
+        conventions::set_rules
+    };
+    (preview_names) => {
+        conventions::preview_names
+    };
+    (apply_names) => {
+        conventions::apply_names
     };
     ($pending:ident) => {
         pending
@@ -447,6 +460,7 @@ fn is_origin(text: &str) -> bool {
     host_ok && port_ok
 }
 
+mod conventions;
 mod drafts;
 mod history;
 mod items;

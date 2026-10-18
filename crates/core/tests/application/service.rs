@@ -2,10 +2,9 @@
 
 use std::time::Duration;
 
-use okf_jawn_contract::conventions::GetRulesRequest;
 use okf_jawn_contract::error::ErrorCode;
-use okf_jawn_contract::identity::At;
 use okf_jawn_contract::metadata::OperationName;
+use okf_jawn_contract::views::GetCatalogRequest;
 use okf_jawn_core::application::ApplicationConfig;
 use okf_jawn_core::ports::Application;
 use serde_json::json;
@@ -121,21 +120,20 @@ fn an_ipv6_sandbox_host_must_be_an_ipv6_address() -> TestResult {
 #[tokio::test]
 async fn an_operation_of_a_later_part_answers_not_implemented() -> TestResult {
     let world = World::new()?;
-    let context = alice(OperationName::GetRules, None)?;
+    // `get_catalog` waits for the views part (construction plan M1.6).
+    let context = alice(OperationName::GetCatalog, None)?;
     let refused = err_of(
         world
             .service
-            .get_rules(
-                &context,
-                GetRulesRequest {
-                    workspace_id: scope()?.workspace_id,
-                    at: At::Latest,
-                },
-            )
+            .get_catalog(&context, GetCatalogRequest {})
             .await,
     )?;
     assert_eq!(refused.code, ErrorCode::NotImplemented);
-    assert!(refused.message.contains("get_rules"), "{}", refused.message);
+    assert!(
+        refused.message.contains("get_catalog"),
+        "{}",
+        refused.message
+    );
     Ok(())
 }
 
