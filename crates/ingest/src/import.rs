@@ -11,6 +11,16 @@
 //!    number after the extension marker) against the destination folder at the base revision
 //!    and against the other cards of the job. Both fit one path segment: the stem is
 //!    shortened and the tail kept whole, so a long name is never refused for its length.
+//!    With `apply_naming_rules`, each card is named by the workspace naming rules saved at the
+//!    base revision instead, through core's one naming function
+//!    (`okf_jawn_core::conventions::name_new_item`, which `preview_names` names through too),
+//!    against every item and folder of the whole tree at the base (a destination can name any
+//!    folder) and the job's own cards; a collision never fails the import (a `suffix` rule
+//!    numbers the ruled name, any other falls back to the name without rules). No rules saved:
+//!    the cards are named without them and the completion says so (`NAMING_RULES_ABSENT`).
+//!    Rules that cannot be read or applied fail the job for good, `InvalidInput` on
+//!    `/apply_naming_rules`, before any upload is consumed. The naming warnings join the
+//!    completion's, located at the card's path.
 //! 3. All cards are committed first with outcome `pending`, through `portable::ImportCheck`
 //!    (the injected `CandidateCheck`, then OKF lint of the imported files) over every card's
 //!    path. A commit's check reports what that commit wrote: each card's own commit (step 4)
@@ -76,8 +86,6 @@
 //! left to finish it (review N10), until it is redigested.
 //!
 //! Construction limitations, stated rather than hidden:
-//! - `apply_naming_rules: true` fails as `NotImplemented`: core has no function that names a
-//!   new card under the workspace rules (request R-I4).
 //! - Redigest of only the unconverted pages (`pages: Some`) fails as `NotImplemented`: the
 //!   retained record cannot give back the previous text of each window (request R-I5).
 //! - The type name of a new source card is `SOURCE_CARD_TYPE`; no SPEC sentence fixes it.
@@ -88,7 +96,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use okf_jawn_contract::common::{PageRange, Warning};
-use okf_jawn_contract::conventions::numbered_source_card_name;
+use okf_jawn_contract::conventions::{numbered_source_card_name, source_card_name};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::EventKind;
 use okf_jawn_contract::extraction::{
@@ -98,6 +106,7 @@ use okf_jawn_contract::identity::{Digest, ItemId, Revision, UploadId, WorkspaceP
 use okf_jawn_contract::import::JobState;
 use okf_jawn_contract::item::ItemDocument;
 use okf_jawn_contract::source::{SourceAppearance, SourceName};
+use okf_jawn_core::conventions::{CompiledRules, Subject, name_new_item};
 use okf_jawn_core::conversion::{
     Conversion, ConversionInput, ConversionRecord, ConvertedDocument, PageCount, RetainedAsset,
 };
@@ -192,6 +201,10 @@ pub const MAX_RETAINED_OUTPUT_BYTES: u64 = 1 << 30;
 /// deleted the pending card meanwhile.
 pub const CARD_NOT_WRITTEN: &str = "import_card_not_written";
 
+/// The completion warning of an import that applies the naming rules when none are saved at its
+/// base: the cards are named without them.
+pub const NAMING_RULES_ABSENT: &str = "naming_rules_absent";
+
 /// How many entries one folder listing asks for.
 const LIST_PAGE: u16 = 500;
 
@@ -206,17 +219,11 @@ pub(crate) async fn import(
     scope: &StorageScope,
     request: ImportRequest<'_>,
 ) -> Result<Done, ApiError> {
-    if request.apply_naming_rules {
-        return Err(ApiError::new(
-            ErrorCode::NotImplemented,
-            "naming rules at import wait for core's rule function (request R-I4); import without them",
-        ));
-    }
     // Conflict from the batch check (an upload another job took, or took meanwhile, or a purge
     // that names the workspace) refuses the job for good, like a collision: retrying it meets
     // the same refusal.
-    let cards = match pending_cards(ports, attempt.claimed, scope, &request).await {
-        Ok(cards) => cards,
+    let (cards, naming) = match pending_cards(ports, attempt.claimed, scope, &request).await {
+        Ok(named) => named,
         Err(error) if error.code == ErrorCode::Conflict => return Ok(refused_as(error)),
         Err(error) => return Err(error),
     };
@@ -251,9 +258,10 @@ pub(crate) async fn import(
     let pending_revision = pending.revision.clone();
     let mut done = Done {
         revision: Some(pending.revision),
-        warnings: pending.warnings,
+        warnings: naming,
         ..Done::default()
     };
+    done.warnings.extend(pending.warnings);
     let total = u32::try_from(cards.len()).unwrap_or(u32::MAX);
     for ((mut card, local), ordinal) in cards.into_iter().zip(1_u32..) {
         let file_name = observed_name(&card);
@@ -424,12 +432,16 @@ fn refused_as(error: ApiError) -> Done {
 /// them or none). Another job that consumed one of them between this check and that call is a
 /// concurrent import of the same upload: the store refuses the whole batch with `Conflict` and
 /// marks none, so two imports that share uploads never hold some of them each (R-I13).
+///
+/// The card paths are chosen before anything is consumed, with the naming rules when the
+/// request applies them (`ruled_paths`), and answered beside the cards with the warnings naming
+/// them gave.
 async fn pending_cards(
     ports: &HandlerPorts,
     claimed: &ClaimedJob,
     scope: &StorageScope,
     request: &ImportRequest<'_>,
-) -> Result<Vec<(SourceCard, LocalSource)>, ApiError> {
+) -> Result<(Vec<(SourceCard, LocalSource)>, Vec<Warning>), ApiError> {
     let job = claimed.lease.job_id;
     let mut sources = Vec::new();
     for (index, upload_id) in request.upload_ids.iter().enumerate() {
@@ -451,19 +463,18 @@ async fn pending_cards(
         }
         sources.push((upload, object));
     }
-    let mut taken = taken_keys(ports, scope, request.base_revision, request.destination).await?;
-    let paths = sources
+    let names: Vec<&str> = sources
         .iter()
-        .enumerate()
-        .map(|(index, (upload, _object))| {
-            free_path(
-                request.destination,
-                &upload.filename,
-                &format!("/upload_ids/{index}"),
-                &mut taken,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|(upload, _object)| upload.filename.as_str())
+        .collect();
+    let (paths, naming) = if request.apply_naming_rules {
+        ruled_paths(ports, scope, request, &names).await?
+    } else {
+        (
+            unruled_paths(ports, scope, request, &names).await?,
+            Vec::new(),
+        )
+    };
     let batch: Vec<UploadId> = sources.iter().map(|(upload, _object)| upload.id).collect();
     let _consumed = ports.uploads.consume_batch(scope, &batch, job).await?;
     let mut cards = Vec::new();
@@ -496,7 +507,120 @@ async fn pending_cards(
             local,
         ));
     }
-    Ok(cards)
+    Ok((cards, naming))
+}
+
+/// The card paths of `names` without naming rules: `free_path` of each, in order, against the
+/// destination folder at the base and the cards named before it.
+async fn unruled_paths(
+    ports: &HandlerPorts,
+    scope: &StorageScope,
+    request: &ImportRequest<'_>,
+    names: &[&str],
+) -> Result<Vec<WorkspacePath>, ApiError> {
+    let mut taken = taken_keys(ports, scope, request.base_revision, request.destination).await?;
+    names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            free_path(
+                request.destination,
+                name,
+                &format!("/upload_ids/{index}"),
+                &mut taken,
+            )
+        })
+        .collect()
+}
+
+/// The card paths of `names` under the naming rules saved at the import's base, and the
+/// warnings naming them gave (the module header, step 2). Each card's path without rules is
+/// its subject (`destination/source_card_name`), of type `SOURCE_CARD_TYPE`, with its file
+/// name as the original's; the keys taken are every item's and folder's of the whole tree at
+/// the base and every card's named before it.
+///
+/// # Errors
+/// Returns `InvalidInput` on `/apply_naming_rules` for rules that do not read or that this
+/// build cannot apply (their first problem), `InvalidInput` on `/upload_ids/<index>` for a file
+/// name that gives no workspace path, or any port error.
+async fn ruled_paths(
+    ports: &HandlerPorts,
+    scope: &StorageScope,
+    request: &ImportRequest<'_>,
+    names: &[&str],
+) -> Result<(Vec<WorkspacePath>, Vec<Warning>), ApiError> {
+    let base = request.base_revision;
+    let Some(file) = ports.versions.rules(scope, base).await? else {
+        let paths = unruled_paths(ports, scope, request, names).await?;
+        return Ok((
+            paths,
+            vec![Warning {
+                code: NAMING_RULES_ABSENT.to_owned(),
+                message: "no naming rules are saved at the import's base, so the cards are \
+                          named without them"
+                    .to_owned(),
+                location: None,
+            }],
+        ));
+    };
+    let unusable = |why: String| {
+        ApiError::new(
+            ErrorCode::InvalidInput,
+            format!("the naming rules saved at the import's base cannot be applied: {why}"),
+        )
+        .with_field("/apply_naming_rules")
+    };
+    let saved = file.parsed.map_err(|error| unusable(error.message))?;
+    let rules = CompiledRules::compile(&saved, "").map_err(|error| match error.field {
+        Some(field) => unusable(format!("{field}: {}", error.message)),
+        None => unusable(error.message),
+    })?;
+    let tree = ports.versions.tree(scope, base).await?;
+    let mut taken: BTreeSet<String> = tree
+        .items
+        .iter()
+        .map(|item| item.summary.path.collision_key())
+        .chain(tree.folders.iter().map(WorkspacePath::collision_key))
+        .collect();
+    let mut paths = Vec::new();
+    let mut warnings = Vec::new();
+    for (index, name) in names.iter().enumerate() {
+        let field = format!("/upload_ids/{index}");
+        let unruled = card_path(request.destination, &source_card_name(name), name, &field)?;
+        let chosen = name_new_item(
+            &rules,
+            &Subject {
+                path: &unruled,
+                type_name: SOURCE_CARD_TYPE,
+                original_name: Some(name),
+            },
+            &mut taken,
+        )?;
+        paths.push(chosen.path);
+        warnings.extend(chosen.warnings);
+    }
+    Ok((paths, warnings))
+}
+
+/// The workspace path of a card named `card` in `destination`, for the upload named `name`;
+/// `InvalidInput` on `field` when it gives none.
+fn card_path(
+    destination: Option<&WorkspacePath>,
+    card: &str,
+    name: &str,
+    field: &str,
+) -> Result<WorkspacePath, ApiError> {
+    let full = match destination {
+        Some(folder) => format!("{}/{card}", folder.as_str()),
+        None => card.to_owned(),
+    };
+    WorkspacePath::from_supplied(&full).map_err(|error| {
+        ApiError::new(
+            ErrorCode::InvalidInput,
+            format!("the file name {name:?} gives no workspace path: {error}"),
+        )
+        .with_field(field)
+    })
 }
 
 /// Run a `Redigest` job: convert the source again and replace its card.
@@ -1122,17 +1246,7 @@ fn free_path(
 ) -> Result<WorkspacePath, ApiError> {
     for number in 1_u32.. {
         let candidate = numbered_source_card_name(file_name, number);
-        let full = match destination {
-            Some(folder) => format!("{}/{candidate}", folder.as_str()),
-            None => candidate,
-        };
-        let path = WorkspacePath::from_supplied(&full).map_err(|error| {
-            ApiError::new(
-                ErrorCode::InvalidInput,
-                format!("the file name {file_name:?} gives no workspace path: {error}"),
-            )
-            .with_field(field)
-        })?;
+        let path = card_path(destination, &candidate, file_name, field)?;
         if taken.insert(path.collision_key()) {
             return Ok(path);
         }

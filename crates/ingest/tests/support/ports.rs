@@ -86,7 +86,7 @@ pub struct FakeVersions {
     pub at_base: Mutex<Vec<SourceCard>>,
     /// The warnings the check gave for each commit this store wrote, by its mutation.
     pub warnings: Mutex<Vec<(MutationId, Vec<Warning>)>>,
-    /// The naming rules file every revision holds; `None` is no rules saved.
+    /// The naming rules file every revision holds (`put_rules`); `None` is no rules saved.
     pub rules: Mutex<Option<RulesFile>>,
 }
 
@@ -276,6 +276,15 @@ impl FakeVersions {
             warnings: Mutex::new(Vec::new()),
             rules: Mutex::new(None),
         }
+    }
+
+    /// Hold `file` as the naming rules file at every revision.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn put_rules(&self, file: RulesFile) -> Result<(), ApiError> {
+        *self.rules.lock().map_err(|_| poisoned())? = Some(file);
+        Ok(())
     }
 
     /// Forget the warnings kept for every commit so far, as a store that wrote those commits
