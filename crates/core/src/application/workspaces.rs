@@ -10,8 +10,9 @@
 //! `AccessControl::grants`, which the hosted grant cache always forwards to its source, and
 //! never from the grant dispatch looked up for the `read` check: under that cache, the grant
 //! dispatch holds carries only `read`, `write` and `propose`. So list and open answer the same
-//! permissions, and a workspace the adapter authorized but lists no grant on is `Internal`,
-//! never shown with no permissions. Each call reads every grant of the caller (one adapter
+//! permissions. A workspace dispatch authorized but the fresh listing names no grant on is
+//! refused as `Forbidden`, never shown with no permissions: the hosted cache may hold a `read`
+//! grant for up to 60 seconds after it was revoked (SPEC section 11), and the fresh answer wins. Each call reads every grant of the caller (one adapter
 //! call; O(workspaces of the tenant) for the local adapter). `list_workspaces` lists, in
 //! creation order, only the workspaces whose effective permissions include `read`, and archived
 //! ones only with `include_archived`. Its cursor names the last workspace a page listed and the
@@ -232,12 +233,7 @@ pub(super) async fn open_workspace(
     let permissions = caller_permissions(service, &context.principal)
         .await?
         .remove(&scope.workspace_id)
-        .ok_or_else(|| {
-            ApiError::new(
-                ErrorCode::Internal,
-                "The access adapter lists no grant of the caller on a workspace it authorized",
-            )
-        })?;
+        .ok_or_else(|| ApiError::new(ErrorCode::Forbidden, "Required capability is not granted"))?;
     let workspace = service.ports().catalog.open(&scope).await?;
     Ok(workspace_with_permissions(workspace, permissions))
 }

@@ -643,12 +643,15 @@ async fn open_and_list_answer_the_same_permissions_whatever_grant_dispatch_holds
 }
 
 #[tokio::test]
-async fn an_open_of_a_workspace_the_adapter_lists_no_grant_on_is_internal() -> TestResult {
+async fn an_open_of_a_workspace_the_adapter_lists_no_grant_on_is_forbidden() -> TestResult {
     let tenancy = Tenancy::new()?;
     tenancy
         .catalog
         .put(&scope()?.tenant_id, workspace(1, "home", 'a', false)?)?;
-    // Dispatch was answered a grant; the adapter's listing names none.
+    // Dispatch was answered a grant, and the adapter's fresh listing names none: a `read` grant
+    // cached for dispatch's check (at most 60 seconds, SPEC section 11) can outlive a revocation
+    // the listing already shows. The fresh answer wins, as a refusal, never a server error and
+    // never an empty list.
     let caller = context(
         principal(ALICE, AccessRoute::LocalOwner)?,
         OperationName::OpenWorkspace,
@@ -667,7 +670,7 @@ async fn an_open_of_a_workspace_the_adapter_lists_no_grant_on_is_internal() -> T
             )
             .await,
     )?;
-    assert_eq!(refused.code, ErrorCode::Internal, "never an empty list");
+    assert_eq!(refused.code, ErrorCode::Forbidden, "{}", refused.message);
     // A listed grant of another tenant is refused too.
     tenancy.access.grant(ALICE, id(1), EVERY.to_vec())?;
     tenancy.access.answer_for(StorageScope {
