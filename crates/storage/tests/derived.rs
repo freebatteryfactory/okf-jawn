@@ -108,6 +108,22 @@ fn card(item: u32) -> Fallible<TreeEdit> {
 }
 
 /// A workspace with three notes linking to one another and an unsupported source.
+/// A `changed` event of `revision`, naming nothing else.
+fn changed_at(revision: Revision) -> NewEvent {
+    NewEvent {
+        kind: EventKind::Changed,
+        revision: Some(revision),
+        item_id: None,
+        job_id: None,
+        connector_id: None,
+        actor: None,
+        operation: None,
+        transport: None,
+        proposal_id: None,
+        count: None,
+    }
+}
+
 async fn populated(directory: &Path) -> Fallible<(Storage, StorageScope, Revision)> {
     let storage = Storage::open(directory)?;
     let tenant = TenantId::try_from("local".to_owned())?;
@@ -470,18 +486,7 @@ async fn an_event_for_a_workspace_the_tenant_does_not_hold_goes_to_the_tenant_lo
     let directory = tempfile::tempdir()?;
     let (storage, scope, revision) = populated(directory.path()).await?;
     let events = storage.events();
-    let changed = NewEvent {
-        kind: EventKind::Changed,
-        revision: Some(revision),
-        item_id: None,
-        job_id: None,
-        connector_id: None,
-        actor: None,
-        operation: None,
-        transport: None,
-        proposal_id: None,
-        count: None,
-    };
+    let changed = changed_at(revision);
     let held = events
         .append(
             &EventScope::Workspace(scope.clone()),
