@@ -34,6 +34,7 @@ mod sources;
 mod status;
 #[path = "../support/tenancy.rs"]
 mod tenancy;
+mod views;
 mod workspaces;
 
 #[path = "../../../../tests/support/check.rs"]

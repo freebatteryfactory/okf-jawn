@@ -179,7 +179,7 @@ pub(super) async fn diff_items(
 /// The commit that last changed each selected line of an item at the resolved revision.
 ///
 /// The citation is the server's: the lines attributed, of the item's shown text, located in the
-/// original as a read of those lines locates them (`sources::computed_locations`). The lines
+/// original as a read of those lines locates them (`reading::computed_locations`). The lines
 /// returned are recorded in a receipt, as every read of content is.
 ///
 /// # Errors

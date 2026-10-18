@@ -606,5 +606,6 @@ pub fn pointer_token(key: &str) -> String {
 }
 
 pub mod layout;
+pub mod resolve;
 pub mod schemas;
 pub mod validate;
