@@ -8,9 +8,13 @@
 //! sandbox capabilities), `sources` (citations and object reads), `history` (Timeline, Changes,
 //! Who, Snapshot and Rewind), `navigation` (search, links and the graph), `proposals`
 //! (proposals, their acceptance and discussion), `reviews` (confirmations and reviews),
-//! `status` (health, readiness and the session) and `purges` (recording, resuming and reading
-//! a workspace purge), over the shared steps in `shared` (revision resolution, commits,
-//! receipts).
+//! `status` (health, readiness and the session), `purges` (recording, resuming and reading
+//! a workspace purge), `workspaces` (the catalog, archive, export, backup and restore),
+//! `events` (receipts and the two event logs) and `connectors` (local connector credentials),
+//! over the shared steps in `shared` (revision resolution, commits, receipts). Besides the
+//! operations, the service answers dispatch's archive question (`Application::archived_at`)
+//! from its catalog and records a sign-in for the server's session routes
+//! (`ApplicationService::record_sign_in`).
 //!
 //! Operations whose part of the construction plan has not landed answer `NotImplemented`,
 //! naming the operation; nothing here claims an operation works that is not built, and no
@@ -23,8 +27,9 @@ use std::str::FromStr as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use okf_jawn_contract::access::Principal;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::identity::{TenantId, WorkspaceId};
+use okf_jawn_contract::identity::{TenantId, Timestamp, WorkspaceId};
 use okf_jawn_contract::import::DEFAULT_MAX_UPLOAD_BYTES;
 use time::OffsetDateTime;
 
@@ -35,7 +40,7 @@ use crate::context::OperationContext;
 use crate::conversion::Converter;
 use crate::credentials::CredentialStore;
 use crate::drafts::DraftStore;
-use crate::events::EventLog;
+use crate::events::{EventLog, record_sign_in};
 use crate::jobs::{JobQueue, RecordStore};
 use crate::mutations::MutationStore;
 use crate::ports::{Application, PortFuture};
@@ -133,6 +138,54 @@ macro_rules! route {
     (get_session) => {
         status::get_session
     };
+    (list_workspaces) => {
+        workspaces::list_workspaces
+    };
+    (create_workspace) => {
+        workspaces::create_workspace
+    };
+    (open_workspace) => {
+        workspaces::open_workspace
+    };
+    (update_workspace) => {
+        workspaces::update_workspace
+    };
+    (archive_workspace) => {
+        workspaces::archive_workspace
+    };
+    (unarchive_workspace) => {
+        workspaces::unarchive_workspace
+    };
+    (export_workspace) => {
+        workspaces::export_workspace
+    };
+    (backup_workspace) => {
+        workspaces::backup_workspace
+    };
+    (restore_workspace) => {
+        workspaces::restore_workspace
+    };
+    (backup_installation) => {
+        workspaces::backup_installation
+    };
+    (get_receipt) => {
+        events::get_receipt
+    };
+    (list_events) => {
+        events::list_events
+    };
+    (list_tenant_events) => {
+        events::list_tenant_events
+    };
+    (create_connector) => {
+        connectors::create_connector
+    };
+    (list_connectors) => {
+        connectors::list_connectors
+    };
+    (revoke_connector) => {
+        connectors::revoke_connector
+    };
     (purge_workspace) => {
         purges::purge_workspace
     };
@@ -183,6 +236,11 @@ macro_rules! application_operations {
                 -> PortFuture<'a, $response> {
                 Box::pin(route!($id)(self, context, request))
             })*
+
+            fn archived_at<'a>(&'a self, scope: &'a StorageScope)
+                -> PortFuture<'a, Option<Timestamp>> {
+                Box::pin(workspaces::archived_at(self, scope))
+            }
         }
     };
 }
@@ -379,6 +437,16 @@ impl ApplicationService {
     pub fn conformance(&self) -> Arc<dyn CandidateCheck> {
         Arc::clone(&self.conformance)
     }
+
+    /// Append `signed_in` for `principal` to its tenant's log (Stage 1b design section 7), by
+    /// the one rule `events::record_sign_in` holds; the server's session routes record a
+    /// sign-in by that rule too, before they send the session's cookies.
+    ///
+    /// # Errors
+    /// Returns the event log's error; a caller that opened a session undoes and refuses it.
+    pub async fn record_sign_in(&self, principal: &Principal) -> Result<(), ApiError> {
+        record_sign_in(self.ports.events.as_ref(), principal).await
+    }
 }
 
 okf_jawn_contract::for_each_operation!(application_operations);
@@ -447,7 +515,9 @@ fn is_origin(text: &str) -> bool {
     host_ok && port_ok
 }
 
+mod connectors;
 mod drafts;
+mod events;
 mod history;
 mod items;
 mod navigation;
@@ -458,3 +528,4 @@ mod reviews;
 mod shared;
 mod sources;
 mod status;
+mod workspaces;

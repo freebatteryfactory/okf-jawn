@@ -287,7 +287,11 @@ pub trait RecordStore: Send + Sync {
     /// whatever state it has reached. The returned `Job::kind` is `job.spec.kind()`, and a
     /// tenant job's `Job::workspace_id` is absent. Refuses with `Internal` a specification that
     /// does not fit the scope (`JobSpec::fits`). Refuses with `Conflict`, naming the purge, a
-    /// job of a workspace a purge is recorded for, a repeated id included (`Purger`).
+    /// job of a workspace a purge is recorded for, a repeated id included (`Purger`). Refuses
+    /// with `Conflict` and `ErrorDetail::WorkspaceArchived` an import, redigest or restore job
+    /// of an archived workspace, a repeated id included, in the insert's own transaction, so
+    /// that an archive (`WorkspaceCatalog::archive`) and such an insert racing end with one of
+    /// them refused (contract ruling 25).
     fn create_job<'a>(&'a self, scope: &'a JobScope, job: NewJob) -> PortFuture<'a, Job>;
     /// Read one durable job within its scope.
     fn get_job<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, Job>;
@@ -352,7 +356,9 @@ pub trait RecordStore: Send + Sync {
     /// Unique on `mutation_id`: a repeated id does not queue the job a second time, even when
     /// the job has run and failed again since, and returns the job row as it stands. Refuses
     /// with `Conflict`, naming the purge, a job of a workspace a purge is recorded for, a
-    /// repeated id included (`Purger`).
+    /// repeated id included (`Purger`). Refuses with `Conflict` and
+    /// `ErrorDetail::WorkspaceArchived` an import, redigest or restore job of an archived
+    /// workspace, a repeated id included, in the retry's own transaction (contract ruling 25).
     fn retry_job<'a>(
         &'a self,
         scope: &'a JobScope,
