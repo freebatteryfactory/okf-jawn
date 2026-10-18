@@ -136,10 +136,11 @@ impl<'ast> Visit<'ast> for ZipUse {
         {
             self.findings.insert(STREAMS);
         }
+        // Any path ending in an extraction counts, a one-segment one included: the qualified
+        // self of `<ZipArchive<File>>::extract` is kept apart from the path's segments.
         if names
             .last()
             .is_some_and(|last| EXTRACTING.contains(&last.as_str()))
-            && names.len() > 1
         {
             self.extracts = true;
         }
@@ -157,11 +158,7 @@ impl<'ast> Visit<'ast> for ZipUse {
         if item.content.is_none() {
             self.reaches_out = true;
         }
-        if item
-            .attrs
-            .iter()
-            .any(|attribute| attribute.path().is_ident("path"))
-        {
+        if item.attrs.iter().any(names_a_path_attribute) {
             self.findings.insert(PATH_MODULE);
         }
         syn::visit::visit_item_mod(self, item);
@@ -397,6 +394,19 @@ fn zip_violations(relative: &str, file: &syn::File) -> Vec<String> {
     violations
 }
 
+/// Whether an attribute is `#[path = ..]`, or a `#[cfg_attr(..)]` that may apply one.
+fn names_a_path_attribute(attribute: &syn::Attribute) -> bool {
+    if attribute.path().is_ident("path") {
+        return true;
+    }
+    attribute.path().is_ident("cfg_attr")
+        && matches!(&attribute.meta, syn::Meta::List(list) if list
+            .tokens
+            .to_string()
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .any(|token| token == "path"))
+}
+
 /// Whether a `use` tree begins at the zip crate (`zip::…`).
 fn roots_at_zip(tree: &syn::UseTree) -> bool {
     match tree {
@@ -525,6 +535,11 @@ mod tests {
             "//! x\nuse zip::ZipArchive;\nfn f(a: &mut ZipArchive<File>) { a.extract(dir); }\n",
         )?;
         assert!(says(&by_method, "calls extract"), "{by_method:?}");
+        let qualified_self = zip(
+            ZIP_READER_FILE,
+            "//! x\nuse zip::ZipArchive;\nfn f(a: &mut ZipArchive<File>) { <ZipArchive<File>>::extract(a, dir); }\n",
+        )?;
+        assert!(says(&qualified_self, "calls extract"), "{qualified_self:?}");
         let by_path = zip(
             ZIP_READER_FILE,
             "//! x\nuse zip::ZipArchive;\nfn f(a: &mut ZipArchive<File>) { ZipArchive::extract_unwrapped_root_dir(a, dir); }\n",
@@ -638,6 +653,11 @@ mod tests {
             "//! x\n#[path = \"../../tests/helper.rs\"]\nmod helper;\n",
         )?;
         assert!(says(&production, "#[path]"), "{production:?}");
+        let conditional = zip(
+            "crates/storage/src/backup/mod.rs",
+            "//! x\n#[cfg_attr(not(test), path = \"../../tests/helper.rs\")]\nmod helper;\n",
+        )?;
+        assert!(says(&conditional, "#[path]"), "{conditional:?}");
         let test = zip(
             "crates/storage/tests/backup.rs",
             "//! x\n#[path = \"support/check.rs\"]\nmod check;\n",
