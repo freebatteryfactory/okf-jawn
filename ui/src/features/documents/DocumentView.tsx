@@ -80,7 +80,7 @@ import { ConflictNotice } from '../drafts/ConflictNotice';
 import { DraftEditor } from '../drafts/DraftEditor';
 import { KeptText } from '../drafts/KeptText';
 import { draftMarkOf } from '../drafts/marks';
-import { beginSession, claimEditor, refuseSaving, releaseEditor } from '../drafts/saving';
+import { beginSession, claimEditor, mayDraft, refuseSaving, releaseEditor } from '../drafts/saving';
 import { saveStateOf, useConflict, useDraftSession } from '../drafts/sessions';
 import type { Snapshotted } from '../drafts/snapshot';
 import { FailureNotice } from '../errors/FailureNotice';
@@ -371,13 +371,14 @@ export function DocumentView({
 
   // Reading or editing. Until the person chooses, an item with a draft opens on the draft.
   const session = useDraftSession(workspaceId, itemId);
-  // Editing is for Notes: a Source's text is changed through corrections and a View has its own
-  // editor, so neither is offered "Edit". What kind the item is, is what the last `get_item` that
+  // Editing is for Notes, and for a Source's properties: a Source's text is changed through
+  // corrections, so its draft changes its properties alone ("Edit properties", no text box), and a
+  // View has its own editor, so it is offered no "Edit". What kind the item is, is what the last `get_item` that
   // answered said. It is read with every read, not kept from the first: no sentence of SPEC or of
   // the contract says an item's kind stays what it was (`ItemKind` is its "built-in rendering
   // role", a field of each answer). While the item is read again at another revision the last
   // answer stands, so the switch does not leave under keyboard focus for the time of a read. A
-  // session is begun only for a Note, and while there is one its editor stays, with its text.
+  // session is begun only for a Note or a Source, and while there is one its editor stays.
   const atShown = canWrite && revision === head;
   const [kind, setKind] = useState<ItemSummary['kind'] | null>(null);
   if (document !== undefined && kind !== document.summary.kind) setKind(document.summary.kind);
@@ -386,7 +387,11 @@ export function DocumentView({
   if (document !== undefined && typeName !== document.summary.type_name) {
     setTypeName(document.summary.type_name);
   }
-  const isNote = session !== undefined || kind === 'note';
+  const isNote = session !== undefined || kind === 'note' || kind === 'source';
+  // A Source's draft keeps its text: no text box is drawn, and focus is not sent to one. A session
+  // whose text was changed (it began on a Note) keeps its text box until the read refuses it, so
+  // what this pane draws still follows the session.
+  const textFixed = kind === 'source' && (session === undefined || mayDraft('source', session));
   // The session is told what each read says the item is: one that is not a Note refuses it, and a
   // Note lifts that (`saving.ts` says what a refused session is). What this pane draws follows the
   // session, not the read: the editor leaves only once the session is refused, so the save the
@@ -603,7 +608,7 @@ export function DocumentView({
     if (takeHeld(heldNotice)) (keptRef.current ?? switchRef.current ?? pageHeading())?.focus();
     if (takeHeld(heldKept) && editing && notANote === null) {
       switchRef.current?.focus();
-      focusNext.current = 'text';
+      if (!textFixed) focusNext.current = 'text';
     }
   });
   const reading = JSON.stringify(request);
@@ -747,7 +752,7 @@ export function DocumentView({
                 claimEditor(workspaceId, itemId, pane, true);
                 // Into the text box, which the next drawing has unless the session is refused:
                 // that drawing shows the kept text ("Show your draft"), and focus stays here.
-                if (notANote === null) focusNext.current = 'text';
+                if (notANote === null && !textFixed) focusNext.current = 'text';
                 setChosen('edit');
               }
             }}
@@ -760,7 +765,9 @@ export function DocumentView({
                   ? 'Edit here'
                   : hasDraft
                     ? 'Edit your draft'
-                    : 'Edit'}
+                    : textFixed
+                      ? 'Edit properties'
+                      : 'Edit'}
           </button>
         </p>
       )}
@@ -826,6 +833,7 @@ export function DocumentView({
               <DraftEditor
                 session={session}
                 title={title}
+                textFixed={textFixed}
                 onDiscarded={() => {
                   focusNext.current = 'switch';
                   setChosen('read');
