@@ -9167,6 +9167,111 @@ async fn rr9_a_workspace_holding_its_own_backup_restores_without_the_rows_naming
     Ok(())
 }
 
+/// Complete a job of `spec` in `workspace` under mutation `mutation` whose artifact is a new
+/// object `bytes` of `kind`; answers the artifact's identity.
+async fn finished_with_artifact(
+    storage: &Storage,
+    workspace: &StorageScope,
+    mutation: u32,
+    spec: JobSpec,
+    (kind, bytes): (ArtifactKind, &[u8]),
+) -> Fallible<String> {
+    let scope = JobScope::Workspace(workspace.clone());
+    let records = storage.records();
+    let job = records
+        .create_job(
+            &scope,
+            NewJob {
+                mutation_id: uuid!(mutation)?,
+                initiator: person("ana"),
+                spec,
+            },
+        )
+        .await?;
+    let claimed = some(records.claim_job(job.id).await?, "the claimed job")?;
+    let object = put(storage, workspace, bytes).await?;
+    let artifact = records
+        .record_artifact(
+            &scope,
+            claimed.mutation_id,
+            NewArtifact {
+                kind,
+                object: object.clone(),
+                media_type: "application/zip".to_owned(),
+                created_by_job: job.id,
+            },
+        )
+        .await?;
+    records
+        .complete_job(JobCompletion {
+            lease: claimed.lease,
+            revision: None,
+            item_ids: Vec::new(),
+            artifact: Some(artifact.id),
+            restore: None,
+            backup: None,
+            outputs: vec![object.digest],
+            warnings: Vec::new(),
+        })
+        .await?;
+    Ok(artifact.id.0.to_string())
+}
+
+/// MKEPTART (pass-3 re-review): the archive's scrub of job download descriptors removes only
+/// the descriptor of an artifact the archive leaves out. A finished export job keeps its
+/// descriptor, naming its export, which the archive keeps; a finished backup job loses its
+/// descriptor with its workspace backup artifact.
+#[tokio::test]
+async fn backup_a_kept_exports_download_descriptor_survives_the_scrub() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let workspace = notes_workspace(&storage).await?;
+    let head = storage.versions().head(&workspace).await?;
+    let export = finished_with_artifact(
+        &storage,
+        &workspace,
+        30,
+        JobSpec::ExportWorkspace {
+            revision: head,
+            include_history: false,
+        },
+        (ArtifactKind::Export, b"mkeptart an export archive"),
+    )
+    .await?;
+    let backup = finished_with_artifact(
+        &storage,
+        &workspace,
+        31,
+        JobSpec::BackupWorkspace,
+        (ArtifactKind::WorkspaceBackup, b"mkeptart a backup archive"),
+    )
+    .await?;
+    let bytes = archive_bytes(&storage, &workspace).await?;
+    let staged = directory.path().join("archived.sqlite");
+    std::fs::write(&staged, entry_bytes_of(&bytes, "records.sqlite")?)?;
+    let described = |artifact: &str| -> Fallible<i64> {
+        count(
+            &staged,
+            &format!(
+                "SELECT count(*) FROM jobs
+                 WHERE json_extract(record, '$.artifact.artifact_id') = '{artifact}'"
+            ),
+        )
+    };
+    assert_eq!(described(&export)?, 1, "the export job keeps its download");
+    assert_eq!(
+        described(&backup)?,
+        0,
+        "the backup job's download is scrubbed"
+    );
+    assert_eq!(
+        count(&staged, "SELECT count(*) FROM jobs")?,
+        2,
+        "both jobs are kept"
+    );
+    Ok(())
+}
+
 // Round 4 re-review (`rr10_`, b1r4): B4-1, a pack lacking a blob only its history or its head
 // needs, and what a refused import leaves working; N-20, the `.okf` and `sources` trees; N-21,
 // the count against other workspaces' rows; N-22, a survivor whose repository does not open.
