@@ -66,7 +66,7 @@
       "description": "Stable application item identity; paths remain the portable OKF identity."
     },
     "refresh_live": {
-      "description": "Only live views may request current input resolution.",
+      "description": "Only live views may request current input resolution; `true` on a pinned View is\n`invalid_input` on `/refresh_live`.",
       "type": "boolean"
     },
     "workspace_id": {

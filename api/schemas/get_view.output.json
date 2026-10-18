@@ -737,10 +737,11 @@
   "description": "An editable visual artifact with prose and explicit source bindings.",
   "properties": {
     "bindings": {
-      "description": "Cited input datasets and passages.",
+      "description": "Cited input datasets and passages, at most `MAX_VIEW_BINDINGS`.",
       "items": {
         "$ref": "#/$defs/ViewBinding"
       },
+      "maxItems": 50,
       "type": "array"
     },
     "charts": {
