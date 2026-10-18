@@ -750,10 +750,10 @@ impl VersionState {
     ///
     /// - `EditItem`: the item's document with the edit's body and properties.
     /// - `MoveItem` ("Move an item"): the item is at its destination afterwards; `NotFound`
-    ///   for an item the tree does not hold, and `Conflict` when a path of the tree has the
-    ///   destination's collision key (the item's own path included, so a move that changes
-    ///   only letter case is refused, as storage refuses it). A move to the path the item
-    ///   holds changes nothing.
+    ///   for an item the tree does not hold, and `Conflict` when another item's path has the
+    ///   destination's collision key (the item's own does not count, so a move that changes
+    ///   only letter case lands, as storage moves it). A move to the path the item holds
+    ///   changes nothing.
     /// - `RestoreItem`: the item as `from` holds it, its source appearance (the companion
     ///   files) included; an item absent at `from` is removed. Consecutive `RestoreItem`
     ///   edits are one group: every item of the group is looked up first (`NotFound` for one
@@ -2961,16 +2961,17 @@ fn paged_listing(
 }
 
 /// Apply one `MoveItem` to the fake's tree, and say whether the item changed path: `NotFound`
-/// for an item the tree does not hold, `Conflict` when a path of the tree (the item's own
-/// included) has the destination's collision key and the item is not already there.
+/// for an item the tree does not hold, `Conflict` when another item's path has the destination's
+/// collision key. The item's own path does not count, so a move that changes only letter case
+/// lands, as storage takes it (one move through a parked name, PR #34).
 fn move_in(
     tree: &mut [ItemDocument],
     item: ItemId,
     destination: &WorkspacePath,
 ) -> Result<bool, ApiError> {
-    let taken = tree
-        .iter()
-        .any(|held| held.summary.path.collision_key() == destination.collision_key());
+    let taken = tree.iter().any(|held| {
+        held.summary.id != item && held.summary.path.collision_key() == destination.collision_key()
+    });
     let moved = tree
         .iter_mut()
         .find(|held| held.summary.id == item)

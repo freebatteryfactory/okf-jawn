@@ -416,11 +416,12 @@ pub(super) async fn restore_items(
 /// 3. `RestoreItem` from `target`, which sets the item and its companions to their state there.
 ///
 /// The move separates the two restores, so the store applies them in order and not as one
-/// group. In every other case the links have nothing to follow, and the Rewind is the one
-/// `RestoreItem`: the item's last path is its path at `target`, or another spelling of it (the
-/// two have one collision key, `WorkspacePath::collision_key`, so the store holds one file for
-/// both and refuses a move between them; the links then keep the spelling they have, which may
-/// be the last path's and not the restored one's); another item, or a folder, took that last
+/// group. A last path that is another spelling of the path at `target` (one collision key,
+/// `WorkspacePath::collision_key`: `notes/Report.md` and `notes/report.md`) takes the three
+/// edits too: the store moves between two spellings of one path as one move through a parked
+/// name (`TreeEdit::MoveItem`), so the links follow the item to the restored spelling. In every
+/// other case the links have nothing to follow, and the Rewind is the one `RestoreItem`: the
+/// item's last path is exactly its path at `target`; another item, or a folder, took that last
 /// path since (its links are that one's now); or the history of `base` never held the item.
 ///
 /// The last holder is the first parent of the newest commit, at or before `base`, that changed
@@ -474,9 +475,9 @@ async fn item_restore(
     let Some(last_path) = path_at(service, scope, &last, item).await? else {
         return Ok(vec![restore]);
     };
-    // Compared as the store compares them: a move between two spellings of one path is refused.
-    let same_path = last_path.collision_key() == destination.collision_key();
-    if same_path || taken(service, scope, base, &last_path).await? {
+    // Exactly the restored path: the links already name it. Another spelling of it is moved like
+    // any other path, since the store moves between spellings of one path.
+    if last_path == destination || taken(service, scope, base, &last_path).await? {
         return Ok(vec![restore]);
     }
     Ok(vec![
