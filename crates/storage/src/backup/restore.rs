@@ -53,7 +53,8 @@ use crate::blobs::file_reader;
 use crate::data::io_error;
 use crate::db::{conflict, internal, sql};
 use crate::git::repo::{
-    HEAD_REF, git, head, message_with_trailer, respelled_in_archive, sync_directories, trailer_of,
+    HEAD_REF, git, git_message, head, message_with_trailer, respelled_in_archive, sync_directories,
+    trailer_of,
 };
 use crate::pins::Pinned;
 use crate::purge::references::{self, Rows};
@@ -405,7 +406,7 @@ fn refuse_unpackable(scratch: &Repository, tips: &[Oid]) -> Result<(), ApiError>
         if error.code() == git2::ErrorCode::NotFound {
             invalid(&format!(
                 "the history does not hold an object a commit needs: {}",
-                error.message()
+                git_message(&error)
             ))
         } else {
             git(&error)

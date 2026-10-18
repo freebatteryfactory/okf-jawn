@@ -9241,6 +9241,40 @@ async fn rr10_a_survivor_whose_repository_does_not_open_fails_the_purge_naming_i
     .await
 }
 
+/// Git errors name no machine path (sweep 2a, ruling 10): libgit2's message for a survivor's
+/// repository that does not open carries the repository's absolute path; the purge's failure
+/// names it relative to the data directory, with libgit2's class and code, and holds no part of
+/// the data directory's absolute path.
+#[tokio::test]
+async fn a_survivor_that_does_not_open_is_named_without_a_machine_path() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (survivor, _) = create(&storage, "local", 1, "Survivor").await?;
+    let (target, _) = create(&storage, "local", 2, "Target").await?;
+    std::fs::remove_file(
+        storage
+            .data()
+            .repositories_path()
+            .join("local")
+            .join(format!("{}.git", survivor.workspace_id.0))
+            .join("HEAD"),
+    )?;
+    let error = err_of(rr8_purge(&storage, &target).await?)?;
+    assert_eq!(error.code, ErrorCode::Unavailable, "{error}");
+    let relative = format!("repositories/local/{}.git", survivor.workspace_id.0);
+    assert!(error.message.contains(&relative), "{error}");
+    assert!(error.message.contains("(Repository, NotFound)"), "{error}");
+    let root = directory.path().to_string_lossy();
+    let forward = root.replace('\\', "/");
+    for part in [root.as_ref(), forward.as_str()]
+        .into_iter()
+        .chain(forward.split('/').filter(|part| !part.is_empty()))
+    {
+        assert!(!error.message.contains(part), "{part:?} is in {error}");
+    }
+    Ok(())
+}
+
 /// N-22: a survivor whose repository opens but whose references do not list (its `packed-refs`
 /// does not parse) is named too.
 #[tokio::test]

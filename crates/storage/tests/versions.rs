@@ -1109,6 +1109,59 @@ async fn a_refusal_never_names_the_server_staging_directory() -> TestResult {
     Ok(())
 }
 
+/// Assert that `message` holds no part of the absolute path of the data directory `data`: not
+/// the path in either separator, not any of its components, not its drive letter.
+fn assert_names_no_machine_path(message: &str, data: &Path) {
+    let root = data.to_string_lossy();
+    let forward = root.replace('\\', "/");
+    for part in [root.as_ref(), forward.as_str()]
+        .into_iter()
+        .chain(forward.split('/').filter(|part| !part.is_empty()))
+    {
+        assert!(!message.contains(part), "{part:?} is in {message:?}");
+    }
+}
+
+/// Git errors name no machine path (sweep 2a, ruling 10): a commit whose reference move libgit2
+/// refuses (a lock file another writer left on `refs/heads/main`) is the version store's
+/// `Unavailable`, with libgit2's class and code, and names the locked file relative to the data
+/// directory, never by its absolute path, a user name or a drive letter.
+#[tokio::test]
+async fn a_git_failure_names_its_path_relative_to_the_data_directory() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let repository = repository_path(directory.path(), &scope);
+    std::fs::write(repository.join("refs").join("heads").join("main.lock"), b"")?;
+    let error = err_of(
+        storage
+            .versions()
+            .commit(
+                &scope,
+                changes(20, &initial, vec![note(uuid!(10)?, "a.md", "A.")?])?,
+                Arc::new(Counting::default()),
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Unavailable, "{}", error.message);
+    // libgit2's class and code of the failure: `Os` (the lock file is a filesystem fault),
+    // `Locked`.
+    assert!(
+        error
+            .message
+            .starts_with("the version store failed (Os, Locked): "),
+        "{}",
+        error.message
+    );
+    let relative = format!(
+        "repositories/local/{}.git/refs/heads/main.lock",
+        scope.workspace_id.0
+    );
+    assert!(error.message.contains(&relative), "{}", error.message);
+    assert_names_no_machine_path(&error.message, directory.path());
+    assert_eq!(storage.versions().head(&scope).await?, initial);
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_move_or_folder_onto_a_reserved_name_is_refused_naming_the_path() -> TestResult {
     let directory = tempfile::tempdir()?;

@@ -45,6 +45,12 @@ const BLOB_MODE: i32 = 0o100_644;
 const TREE_MODE: i32 = 0o040_000;
 /// The length of a commit id these repositories write: SHA-1, in hex.
 const SHA1_HEX_LEN: usize = 40;
+/// The folders of the data directory whose contents libgit2 reads and writes: the
+/// repositories, and the staging directories of candidates, archives and restores (a restore's
+/// scratch repository among them). Every path a Git failure here names lies under one of them.
+const GIT_FOLDERS: [&str; 2] = ["repositories", "staging"];
+/// How a Git failure's message names an absolute path under neither of `GIT_FOLDERS`.
+const OUTSIDE: &str = "a path outside the data directory";
 
 impl Repositories {
     /// The repositories and staging directory of the locked `data` directory.
@@ -587,12 +593,120 @@ pub(crate) fn blob_bytes(repository: &Repository, oid: Oid) -> Result<Vec<u8>, A
         .to_vec())
 }
 
-/// A Git failure as an unavailable store.
+/// A Git failure as an unavailable store: libgit2's class and code of the failure, and its
+/// message with every absolute path named relative to the data directory (`git_message`).
 pub(crate) fn git(error: &git2::Error) -> ApiError {
     ApiError::new(
         ErrorCode::Unavailable,
-        format!("the version store failed: {}", error.message()),
+        format!(
+            "the version store failed ({:?}, {:?}): {}",
+            error.class(),
+            error.code(),
+            git_message(error)
+        ),
     )
+}
+
+/// libgit2's message of `error` with every absolute path in it (`'D:/data/repositories/...'`,
+/// `/home/...`, `\\?\C:\...`) named relative to the data directory (`relative_to_data`), so an
+/// error mapped from Git never carries a machine path, a user name or a drive letter; the rest
+/// of the message is kept. Every message of a Git failure goes through here.
+pub(crate) fn git_message(error: &git2::Error) -> String {
+    without_machine_paths(error.message())
+}
+
+/// `message` with each absolute path in it replaced by `relative_to_data` of it. A path starts
+/// at the start of the message or after a space, a quote, `(`, `=` or `,`; a quoted one ends at
+/// its closing quote (one followed by the end, a space or punctuation, so a quote inside a
+/// path does not end it), an unquoted one at the next space or quote, without the punctuation
+/// that follows it.
+fn without_machine_paths(message: &str) -> String {
+    let mut kept = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some((start, quote)) = absolute_start(rest) {
+        let Some((before, from)) = rest.split_at_checked(start) else {
+            break;
+        };
+        let Some((path, after)) = from.split_at_checked(path_end(from, quote)) else {
+            kept.push_str(before);
+            kept.push_str(OUTSIDE);
+            return kept;
+        };
+        kept.push_str(before);
+        kept.push_str(&relative_to_data(path));
+        rest = after;
+    }
+    kept.push_str(rest);
+    kept
+}
+
+/// Where the first absolute path of `text` starts, and the quote just before it, if any.
+fn absolute_start(text: &str) -> Option<(usize, Option<char>)> {
+    let mut previous = None;
+    for (at, character) in text.char_indices() {
+        let opens = previous.is_none_or(|before: char| {
+            before.is_whitespace() || matches!(before, '\'' | '"' | '(' | '=' | ',')
+        });
+        if opens && text.get(at..).is_some_and(is_absolute) {
+            return Some((at, previous.filter(|before| matches!(before, '\'' | '"'))));
+        }
+        previous = Some(character);
+    }
+    None
+}
+
+/// Whether `text` starts with an absolute path: `/`, `\\` (a UNC or `\\?\` path) or a drive
+/// letter and its separator.
+fn is_absolute(text: &str) -> bool {
+    let mut characters = text.chars();
+    match (characters.next(), characters.next(), characters.next()) {
+        (Some('/'), ..) | (Some('\\'), Some('\\'), _) => true,
+        (Some(drive), Some(':'), Some('/' | '\\')) => drive.is_ascii_alphabetic(),
+        _ => false,
+    }
+}
+
+/// The length of the path `from` starts with (see `without_machine_paths`).
+fn path_end(from: &str, quote: Option<char>) -> usize {
+    let ends = |after: Option<char>| {
+        after.is_none_or(|after| {
+            after.is_whitespace() || matches!(after, ':' | ',' | ';' | ')' | '.')
+        })
+    };
+    if let Some(quote) = quote {
+        return from
+            .char_indices()
+            .find(|(at, character)| {
+                *character == quote
+                    && ends(
+                        from.get(at.saturating_add(1)..)
+                            .and_then(|after| after.chars().next()),
+                    )
+            })
+            .map_or(from.len(), |(at, _)| at);
+    }
+    let token = from
+        .char_indices()
+        .find(|(_, character)| character.is_whitespace() || matches!(character, '\'' | '"'))
+        .map_or(from, |(at, _)| from.get(..at).unwrap_or(from));
+    token.trim_end_matches([':', ',', ';', ')', '.']).len()
+}
+
+/// An absolute path named from its last `repositories` or `staging` component on, the folders
+/// of the data directory that libgit2 reads and writes (`GIT_FOLDERS`); `OUTSIDE` for a path
+/// under neither, such as a configuration file in a home directory. Known limit: a tenant, or a
+/// reference name in a crafted archive, spelled exactly `repositories` or `staging` makes the
+/// named path start after the data directory's own folder, never before it.
+fn relative_to_data(path: &str) -> String {
+    let parts: Vec<&str> = path
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    parts
+        .iter()
+        .rposition(|part| GIT_FOLDERS.contains(part))
+        .and_then(|at| parts.get(at..))
+        .map_or_else(|| OUTSIDE.to_owned(), |inside| inside.join("/"))
 }
 
 pub(crate) fn internal(message: impl Into<String>) -> ApiError {
@@ -618,5 +732,54 @@ fn sanitize(text: &str) -> String {
         "unknown".to_owned()
     } else {
         cleaned
+    }
+}
+
+/// Unit tests here, not in a test target: the path scrub is private to the crate.
+#[cfg(test)]
+mod tests {
+    use super::without_machine_paths;
+
+    /// Messages of the shapes libgit2 writes, with the data directory's absolute path in them,
+    /// and what each becomes: every path relative to the data directory, every other word kept.
+    #[test]
+    fn a_git_message_names_every_path_relative_to_the_data_directory() {
+        let cases = [
+            (
+                "failed to lock file 'D:/okf/tmp/.tmpAb12/repositories/local/w.git/refs/heads/main.lock' for writing: File exists",
+                "failed to lock file 'repositories/local/w.git/refs/heads/main.lock' for writing: File exists",
+            ),
+            (
+                "could not find repository at '/home/ana/.local/share/okf/repositories/local/w.git/'",
+                "could not find repository at 'repositories/local/w.git'",
+            ),
+            (
+                r"failed to resolve path '\\?\C:\Users\ana\data\staging\restore-1\history-check.git': gone",
+                "failed to resolve path 'staging/restore-1/history-check.git': gone",
+            ),
+            (
+                "failed to map '/srv/okf/repositories/local/w.git/objects/pack/p.pack': denied, and \"C:/x/staging/a\"",
+                "failed to map 'repositories/local/w.git/objects/pack/p.pack': denied, and \"staging/a\"",
+            ),
+            (
+                "unquoted /var/okf/repositories/local/w.git/config: bad",
+                "unquoted repositories/local/w.git/config: bad",
+            ),
+            (
+                "failed to parse config file 'C:/Users/O'Brien/.gitconfig' (in line 2)",
+                "failed to parse config file 'a path outside the data directory' (in line 2)",
+            ),
+            (
+                "object not found - no match for id (0123abcd)",
+                "object not found - no match for id (0123abcd)",
+            ),
+            (
+                "reference 'refs/heads/main' not found",
+                "reference 'refs/heads/main' not found",
+            ),
+        ];
+        for (message, kept) in cases {
+            assert_eq!(without_machine_paths(message), kept, "{message}");
+        }
     }
 }
