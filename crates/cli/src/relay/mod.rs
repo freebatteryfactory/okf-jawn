@@ -29,8 +29,11 @@
 //!   any length that differ in one digit are two ids. A service that writes a number id back
 //!   in another spelling has therefore not answered: its text is passed on, and the request
 //!   gets the relay's own error besides. A string id is the characters it spells;
-//! - a line of the client that is valid JSON nested deeper than 128 levels is answered as not
-//!   JSON (`-32700`): the JSON library stops there;
+//! - a line of the client has no limit on depth in the relay. It is read for the members the
+//!   relay acts on and nothing else (`message`), and the JSON library's limit of 128 levels
+//!   counts only the levels it reads into, never more than four; what it skips it checks by
+//!   its grammar with a byte for each level. So a line nested deeper than 128 levels is
+//!   forwarded, and the service judges it;
 //! - an answer of the service has no limit on depth. The relay's reader (`json`) does not
 //!   recurse and holds a bit for each level, so an answer nested a million deep is passed on
 //!   as it is, and a client whose JSON library has a limit may then refuse it;

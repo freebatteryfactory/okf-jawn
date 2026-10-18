@@ -59,19 +59,23 @@
 //!   often as four times more (as written, as read, in the name the relay calls the message
 //!   by, and for the error it owes if its exchange ends abnormally), which matters only for an
 //!   id of megabytes.
-//! - One request line at a time is read into a tree of values while it is prepared. A line
-//!   of 16 MiB that is one string costs about 50 MiB for that moment; one that is an array of
-//!   8 million numbers was measured at 403 MiB.
+//! - A request line is never read into a tree of values: `message::prepare` reads it once for
+//!   the members the relay acts on, and sends it in the buffer it was read into. Beside the
+//!   line it holds those members (each at most the line), and a byte and a bit for each level
+//!   of nesting it skips. Measured on the built relay of the test profile, Windows 11, peak
+//!   private bytes of the whole process: one line of 16 MiB that holds 8 million numbers, read,
+//!   forwarded and answered, costs 27 MiB (`wire::mcp_stdio_a_request_line_of_the_full_limit_costs_a_bounded_memory`,
+//!   whose bound is 64 MiB); read into a tree of values, as it was before, it cost 403 MiB.
 //! - A buffer that grows may be held twice for a moment, so a growing answer can take half
 //!   as much again as its room; an answer whose length the service announced never grows.
 //! - What the HTTP library holds for a connection, and a bit for each level an answer is
 //!   nested, in a buffer that grows by doubling (a quarter of its length at most).
 //!
-//! The worst case is therefore about 0.9 GiB: 192 MiB for answers (the budget, and half as
+//! The worst case is therefore about 0.5 GiB: 192 MiB for answers (the budget, and half as
 //! much again while buffers grow), 256 MiB for sixteen request lines of 16 MiB, 16 MiB for the
-//! line that waits for a turn, and about 400 MiB for the one line being prepared. Ids of 16
-//! MiB would bring it to about 1.6 GiB. The service can cause the first 192 MiB of it; the
-//! rest takes a client that writes lines of megabytes.
+//! line that waits for a turn, and up to twice the line being prepared (32 MiB) for what is
+//! read of it. Ids of 16 MiB would bring it to about 1.5 GiB. The service can cause the first
+//! 192 MiB of it; the rest takes a client that writes lines of megabytes.
 //!
 //! Measured on the built relay of the test profile, Windows 11, peak private bytes of the
 //! process: one answer of 60 MiB costs 65 MiB when it is one long string, 66 MiB when it is
@@ -858,7 +862,7 @@ async fn forward<T: Transport, I: AsyncRead + Unpin>(
                 break;
             }
         };
-        let outgoing = match prepare(&bytes, &mut lifecycle) {
+        let outgoing = match prepare(bytes, &mut lifecycle) {
             Ok(Some(outgoing)) => outgoing,
             Ok(None) => continue,
             Err(Refusal::Answer(answer)) => {
@@ -871,7 +875,6 @@ async fn forward<T: Transport, I: AsyncRead + Unpin>(
                 continue;
             }
         };
-        drop(bytes);
         let name = called(&outgoing.kind, &desk.secret);
         if outgoing.initialize {
             let alone = async {

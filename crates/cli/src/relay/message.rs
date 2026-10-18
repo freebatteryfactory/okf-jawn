@@ -19,8 +19,28 @@
 //! An error the relay writes for a message whose id it could not read has no `id` member, as
 //! the `2026-07-28` revision says. A batch (a JSON array) is refused: `rmcp` 3.5.0 has no batch
 //! message.
+//!
+//! A line is never read into a tree of values. It is read once, by the JSON library, for the
+//! members the relay acts on and nothing else (`Line`, `Members`, `Params`): `jsonrpc`, `id`,
+//! `method`, whether `result` or `error` stands there, and of `params` the protocol version in
+//! its `_meta` and the name, URI or task id `Mcp-Name` repeats. Every other value is checked by
+//! its grammar and skipped (`IgnoredAny`), so a line of 16 MiB that holds eight million numbers
+//! costs no more than one that holds one string. When a member occurs twice the last one
+//! counts, as it does for the JSON parsers a client is likely to use. The line is then sent in
+//! the buffer it was read into, as the client wrote it.
+//!
+//! What reading holds beside the line: the members it reads (each at most the line; a key or a
+//! string with escapes is spelled out once), and, for each level of nesting it skips, a byte of
+//! the JSON library's own and a bit of the reader that finds the id as written (`json`). There
+//! is no limit on that depth: the JSON library's limit of 128 levels counts only the levels the
+//! relay reads into, never more than four (the message, `params`, its `_meta`, and a value
+//! there), so a line nested deeper is forwarded and the service judges it.
 
-use serde_json::{Map, Value};
+use std::fmt::{self, Formatter};
+use std::marker::PhantomData;
+
+use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde_json::{Number, Value};
 
 use super::json::{Noted, Span, noted};
 use super::transport::Post;
@@ -72,6 +92,115 @@ pub(super) enum Refusal {
     /// Nothing can be answered (a notification or a response): say on the error stream that
     /// this message was not sent, and why. The session names it, in bounded and visible words.
     Log(Kind, String),
+}
+
+/// A key the relay looks for in an object it reads, at whatever level it reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Key {
+    Error,
+    Id,
+    Jsonrpc,
+    Meta,
+    Method,
+    Name,
+    Other,
+    Params,
+    Result,
+    TaskId,
+    Uri,
+    Version,
+}
+
+/// One line of the input, as far as the relay reads it.
+#[derive(Debug)]
+enum Line {
+    /// A JSON array: a batch.
+    Batch,
+    /// A JSON object: a message.
+    Message(Members),
+    /// Any other JSON value.
+    Other,
+}
+
+/// The value of one member the relay reads.
+#[derive(Debug, Default)]
+enum Member {
+    /// The member is not there.
+    #[default]
+    Absent,
+    /// A number.
+    Number(Number),
+    /// Any other value: `null`, a boolean, an array or an object, read only to be skipped.
+    Other,
+    /// A string, as the characters it spells.
+    Text(String),
+}
+
+/// What the relay reads of a message.
+#[derive(Debug, Default)]
+struct Members {
+    /// Whether an `error` member stands there, whatever its value.
+    error: bool,
+    id: Member,
+    jsonrpc: Member,
+    method: Member,
+    params: Params,
+    /// Whether a `result` member stands there, whatever its value.
+    result: bool,
+}
+
+/// The `_meta` of `params`: the protocol version it names, when that is a string.
+#[derive(Debug, Default)]
+struct Meta(Option<String>);
+
+/// What the headers need of `params`, each when it is a string: the protocol version in its
+/// `_meta`, and the `name`, `uri` and `taskId` that `Mcp-Name` repeats. Anything but an
+/// object is a `params` that holds none of them.
+#[derive(Debug, Default)]
+struct Params {
+    name: Option<String>,
+    task: Option<String>,
+    uri: Option<String>,
+    version: Option<String>,
+}
+
+/// Reads one JSON value as `T` makes of it ([`Shape`]).
+struct Reading<T>(PhantomData<T>);
+
+/// What one kind of value the relay reads makes of each kind of JSON value. A kind it does not
+/// read is skipped, checked by its grammar alone and held nowhere.
+trait Shape: Sized {
+    /// What an array makes; by default it is skipped.
+    ///
+    /// # Errors
+    /// Returns the JSON library's error for a text that is not JSON.
+    fn array<'de, A: SeqAccess<'de>>(items: A) -> Result<Self, A::Error> {
+        skip_items(items)?;
+        Ok(Self::skipped())
+    }
+
+    /// What a number makes; by default it is skipped.
+    fn number(_number: Number) -> Self {
+        Self::skipped()
+    }
+
+    /// What an object makes; by default it is skipped.
+    ///
+    /// # Errors
+    /// Returns the JSON library's error for a text that is not JSON.
+    fn object<'de, A: MapAccess<'de>>(members: A) -> Result<Self, A::Error> {
+        skip_members(members)?;
+        Ok(Self::skipped())
+    }
+
+    /// What a value makes that is read only to be skipped: `null`, a boolean, and each kind
+    /// whose method above is not overridden.
+    fn skipped() -> Self;
+
+    /// What a string makes, given the characters it spells; by default it is skipped.
+    fn text(_text: &str) -> Self {
+        Self::skipped()
+    }
 }
 
 /// JSON-RPC: the service or the relay failed while handling a request.
@@ -127,6 +256,188 @@ impl Kind {
     }
 }
 
+impl Member {
+    /// The string, when the member is one.
+    fn into_text(self) -> Option<String> {
+        match self {
+            Self::Text(text) => Some(text),
+            Self::Absent | Self::Number(_) | Self::Other => None,
+        }
+    }
+}
+
+impl<'de, T: Shape> DeserializeSeed<'de> for Reading<T> {
+    type Value = T;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<T, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de, T: Shape> Visitor<'de> for Reading<T> {
+    type Value = T;
+
+    fn expecting(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, _value: bool) -> Result<T, E> {
+        Ok(T::skipped())
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<T, E> {
+        Ok(T::number(Number::from(value)))
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<T, E> {
+        Ok(T::number(Number::from(value)))
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<T, E> {
+        Ok(Number::from_f64(value).map_or_else(T::skipped, T::number))
+    }
+
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<T, E> {
+        Ok(T::text(value))
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<T, E> {
+        Ok(T::skipped())
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, items: A) -> Result<T, A::Error> {
+        T::array(items)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, members: A) -> Result<T, A::Error> {
+        T::object(members)
+    }
+}
+
+impl Shape for Key {
+    fn skipped() -> Self {
+        Self::Other
+    }
+
+    fn text(text: &str) -> Self {
+        match text {
+            "error" => Self::Error,
+            "id" => Self::Id,
+            "jsonrpc" => Self::Jsonrpc,
+            "_meta" => Self::Meta,
+            "method" => Self::Method,
+            "name" => Self::Name,
+            "params" => Self::Params,
+            "result" => Self::Result,
+            "taskId" => Self::TaskId,
+            "uri" => Self::Uri,
+            META_PROTOCOL_VERSION => Self::Version,
+            _ => Self::Other,
+        }
+    }
+}
+
+impl Shape for Line {
+    fn array<'de, A: SeqAccess<'de>>(items: A) -> Result<Self, A::Error> {
+        skip_items(items)?;
+        Ok(Self::Batch)
+    }
+
+    fn object<'de, A: MapAccess<'de>>(mut members: A) -> Result<Self, A::Error> {
+        let mut read = Members::default();
+        while let Some(key) = members.next_key_seed(reading::<Key>())? {
+            match key {
+                Key::Error => {
+                    members.next_value::<IgnoredAny>()?;
+                    read.error = true;
+                }
+                Key::Id => read.id = members.next_value_seed(reading::<Member>())?,
+                Key::Jsonrpc => read.jsonrpc = members.next_value_seed(reading::<Member>())?,
+                Key::Method => read.method = members.next_value_seed(reading::<Member>())?,
+                Key::Params => read.params = members.next_value_seed(reading::<Params>())?,
+                Key::Result => {
+                    members.next_value::<IgnoredAny>()?;
+                    read.result = true;
+                }
+                Key::Meta | Key::Name | Key::Other | Key::TaskId | Key::Uri | Key::Version => {
+                    members.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(Self::Message(read))
+    }
+
+    fn skipped() -> Self {
+        Self::Other
+    }
+}
+
+impl Shape for Member {
+    fn number(number: Number) -> Self {
+        Self::Number(number)
+    }
+
+    fn skipped() -> Self {
+        Self::Other
+    }
+
+    fn text(text: &str) -> Self {
+        Self::Text(text.to_owned())
+    }
+}
+
+impl Shape for Meta {
+    fn object<'de, A: MapAccess<'de>>(mut members: A) -> Result<Self, A::Error> {
+        let mut version = None;
+        while let Some(key) = members.next_key_seed(reading::<Key>())? {
+            if key == Key::Version {
+                version = members.next_value_seed(reading::<Member>())?.into_text();
+            } else {
+                members.next_value::<IgnoredAny>()?;
+            }
+        }
+        Ok(Self(version))
+    }
+
+    fn skipped() -> Self {
+        Self(None)
+    }
+}
+
+impl Shape for Params {
+    fn object<'de, A: MapAccess<'de>>(mut members: A) -> Result<Self, A::Error> {
+        let mut read = Self::default();
+        while let Some(key) = members.next_key_seed(reading::<Key>())? {
+            let place = match key {
+                Key::Meta => {
+                    read.version = members.next_value_seed(reading::<Meta>())?.0;
+                    continue;
+                }
+                Key::Name => &mut read.name,
+                Key::TaskId => &mut read.task,
+                Key::Uri => &mut read.uri,
+                Key::Error
+                | Key::Id
+                | Key::Jsonrpc
+                | Key::Method
+                | Key::Other
+                | Key::Params
+                | Key::Result
+                | Key::Version => {
+                    members.next_value::<IgnoredAny>()?;
+                    continue;
+                }
+            };
+            *place = members.next_value_seed(reading::<Member>())?.into_text();
+        }
+        Ok(read)
+    }
+
+    fn skipped() -> Self {
+        Self::default()
+    }
+}
+
 /// Whether a value can travel as an HTTP header value as it is: printable ASCII with no
 /// leading or trailing blank, and not shaped like the Base64 sentinel.
 fn bare(value: &str) -> bool {
@@ -155,7 +466,7 @@ pub(super) fn error_line(id: Option<&str>, code: i64, message: &str) -> String {
 /// sent. A message that is refused here leaves it as it was, so the protocol version a
 /// refused request names is not in force for the messages that follow.
 fn headers(
-    message: &Map<String, Value>,
+    params: &Params,
     method: Option<&str>,
     request: bool,
     lifecycle: &mut Lifecycle,
@@ -163,12 +474,7 @@ fn headers(
     if request && method == Some("initialize") {
         return Ok(Vec::new());
     }
-    let inline = message
-        .get("params")
-        .and_then(|params| params.get("_meta"))
-        .and_then(|meta| meta.get(META_PROTOCOL_VERSION))
-        .and_then(Value::as_str)
-        .filter(|_| request);
+    let inline = params.version.as_deref().filter(|_| request);
     if inline.is_some_and(|version| !usable_version(version)) {
         return Err(
             "The protocol version in the request's _meta cannot travel in an HTTP header"
@@ -190,7 +496,7 @@ fn headers(
             return Err("The method cannot travel in the Mcp-Method header".to_owned());
         }
         headers.push((HEADER_METHOD, method.to_owned()));
-        if let Some(name) = name_of(method, message.get("params")) {
+        if let Some(name) = name_of(method, params) {
             if !bare(name) {
                 return Err(format!(
                     "The {HEADER_NAME} header of {method} needs the Base64 form, which this \
@@ -214,11 +520,6 @@ pub(super) fn has_error_object(text: &str, noted: &Noted) -> bool {
         .is_some_and(|(start, _)| text.as_bytes().get(start) == Some(&b'{'))
 }
 
-/// Whether a JSON value is one JSON-RPC 2.0 message.
-pub(super) fn is_message(value: &Value) -> bool {
-    value.get("jsonrpc").and_then(Value::as_str) == Some("2.0") && value.is_object()
-}
-
 /// Whether `text`, of which `noted` was noted, is one JSON-RPC 2.0 message: an object whose
 /// `jsonrpc` is the string `2.0`, whatever escapes spell it.
 pub(super) fn is_version_2(text: &str, noted: &Noted) -> bool {
@@ -227,102 +528,151 @@ pub(super) fn is_version_2(text: &str, noted: &Noted) -> bool {
 }
 
 /// The value the `Mcp-Name` header repeats, for the methods that have one.
-fn name_of<'message>(method: &str, params: Option<&'message Value>) -> Option<&'message str> {
-    let key = match method {
-        "tools/call" | "prompts/get" => "name",
-        "resources/read" | "resources/subscribe" | "resources/unsubscribe" => "uri",
-        "tasks/get" | "tasks/update" | "tasks/cancel" => "taskId",
-        _ => return None,
-    };
-    params?.get(key)?.as_str()
+fn name_of<'message>(method: &str, params: &'message Params) -> Option<&'message str> {
+    match method {
+        "tools/call" | "prompts/get" => params.name.as_deref(),
+        "resources/read" | "resources/subscribe" | "resources/unsubscribe" => params.uri.as_deref(),
+        "tasks/get" | "tasks/update" | "tasks/cancel" => params.task.as_deref(),
+        _ => None,
+    }
 }
 
-/// Turn one input line into a message to send.
+/// Turn one input line into a message to send, in the buffer the line was read into.
 ///
-/// `Ok(None)` is a blank line, which is skipped.
-pub(super) fn prepare(line: &[u8], lifecycle: &mut Lifecycle) -> Result<Option<Outgoing>, Refusal> {
-    let line = line.strip_prefix(BYTE_ORDER_MARK).unwrap_or(line);
+/// `Ok(None)` is a blank line, which is skipped. A byte order mark at its start is dropped.
+pub(super) fn prepare(
+    mut line: Vec<u8>,
+    lifecycle: &mut Lifecycle,
+) -> Result<Option<Outgoing>, Refusal> {
+    if line.starts_with(BYTE_ORDER_MARK) {
+        line.drain(..BYTE_ORDER_MARK.len());
+    }
     if line.iter().all(u8::is_ascii_whitespace) {
         return Ok(None);
     }
-    let value = serde_json::from_slice::<Value>(line).map_err(|error| {
+    let mut outgoing = read_message(&line, lifecycle)?;
+    // Sent as the client wrote it, in the buffer it was read into: nothing copies it.
+    outgoing.post.body = line;
+    Ok(Some(outgoing))
+}
+
+/// The message on `line`, with its headers and an empty body: read in one pass for the members
+/// the relay acts on (the header of this module says how).
+fn read_message(line: &[u8], lifecycle: &mut Lifecycle) -> Result<Outgoing, Refusal> {
+    let unreadable = |error: &dyn fmt::Display| {
         Refusal::Answer(error_line(
             None,
             PARSE_ERROR,
             &format!("Parse error: the line is not JSON ({error})"),
         ))
-    })?;
+    };
+    let text = std::str::from_utf8(line).map_err(|error| unreadable(&error))?;
+    let mut reader = serde_json::Deserializer::from_str(text);
+    let read = reading::<Line>()
+        .deserialize(&mut reader)
+        .and_then(|read| reader.end().map(|()| read))
+        .map_err(|error| unreadable(&error))?;
     let invalid =
         |id: Option<&str>, why: &str| Refusal::Answer(error_line(id, INVALID_REQUEST, why));
-    let Value::Object(message) = &value else {
-        return Err(invalid(
-            None,
-            if value.is_array() {
-                "Invalid request: a JSON-RPC batch is not accepted; send one message per line"
-            } else {
-                "Invalid request: a message is a JSON object"
-            },
-        ));
+    let message = match read {
+        Line::Message(message) => message,
+        Line::Batch => {
+            return Err(invalid(
+                None,
+                "Invalid request: a JSON-RPC batch is not accepted; send one message per line",
+            ));
+        }
+        Line::Other => return Err(invalid(None, "Invalid request: a message is a JSON object")),
     };
-    let id = message
-        .get("id")
-        .filter(|id| id.is_string() || id.is_number());
     // The id is written back as the client wrote it: a number is not read and spelled again.
-    let written = id.map(|id| written_id(line).unwrap_or_else(|| id.to_string()));
-    let id = id.zip(written.clone());
-    let written = written.as_deref();
-    if !is_message(&value) {
-        return Err(invalid(written, "Invalid request: jsonrpc must be \"2.0\""));
+    let written = match &message.id {
+        Member::Text(spelled) => {
+            Some(written_id(text).unwrap_or_else(|| Value::from(spelled.as_str()).to_string()))
+        }
+        Member::Number(number) => Some(written_id(text).unwrap_or_else(|| number.to_string())),
+        Member::Absent | Member::Other => None,
+    };
+    if !matches!(&message.jsonrpc, Member::Text(version) if version == "2.0") {
+        return Err(invalid(
+            written.as_deref(),
+            "Invalid request: jsonrpc must be \"2.0\"",
+        ));
     }
-    let (kind, method) = match (message.get("method"), message.get("id"), id) {
-        (Some(Value::String(method)), _, Some((id, written))) => (
-            Kind::Request {
-                written,
-                spelled: id.as_str().map(str::to_owned),
+    let kind = match (&message.method, &message.id, written) {
+        (Member::Text(_), id, Some(written)) => Kind::Request {
+            written,
+            spelled: match id {
+                Member::Text(spelled) => Some(spelled.clone()),
+                Member::Absent | Member::Number(_) | Member::Other => None,
             },
-            Some(method.as_str()),
-        ),
-        (Some(Value::String(method)), None, None) => (
-            Kind::Notification {
-                method: method.clone(),
-            },
-            Some(method.as_str()),
-        ),
-        (Some(Value::String(_)), Some(_), None) => {
+        },
+        (Member::Text(method), Member::Absent, None) => Kind::Notification {
+            method: method.clone(),
+        },
+        (Member::Text(_), _, None) => {
             return Err(invalid(
                 None,
                 "Invalid request: an id is a string or a number",
             ));
         }
-        (Some(_), _, _) => {
-            return Err(invalid(written, "Invalid request: method must be a string"));
-        }
-        (None, _, Some(_)) if message.contains_key("result") || message.contains_key("error") => {
-            (Kind::Response, None)
-        }
-        (None, _, _) => {
+        (Member::Absent, _, Some(_)) if message.result || message.error => Kind::Response,
+        (Member::Absent, _, written) => {
             return Err(invalid(
-                written,
+                written.as_deref(),
                 "Invalid request: a message has a method, or an id with a result or an error",
             ));
         }
+        (Member::Number(_) | Member::Other, _, written) => {
+            return Err(invalid(
+                written.as_deref(),
+                "Invalid request: method must be a string",
+            ));
+        }
+    };
+    let method = match &message.method {
+        Member::Text(method) => Some(method.as_str()),
+        Member::Absent | Member::Number(_) | Member::Other => None,
     };
     let request = matches!(kind, Kind::Request { .. });
     let initialize = request && method == Some("initialize");
-    let headers = headers(message, method, request, lifecycle).map_err(|why| match &kind {
-        Kind::Request { written, .. } => {
-            Refusal::Answer(error_line(Some(written), INVALID_REQUEST, &why))
-        }
-        Kind::Notification { .. } | Kind::Response => Refusal::Log(kind.clone(), why),
-    })?;
-    Ok(Some(Outgoing {
+    let headers =
+        headers(&message.params, method, request, lifecycle).map_err(|why| match &kind {
+            Kind::Request { written, .. } => {
+                Refusal::Answer(error_line(Some(written), INVALID_REQUEST, &why))
+            }
+            Kind::Notification { .. } | Kind::Response => Refusal::Log(kind.clone(), why),
+        })?;
+    Ok(Outgoing {
         post: Post {
-            body: line.to_vec(),
+            body: Vec::new(),
             headers,
         },
         kind,
         initialize,
-    }))
+    })
+}
+
+/// A reader of one JSON value as `T` makes of it.
+fn reading<T: Shape>() -> Reading<T> {
+    Reading(PhantomData)
+}
+
+/// Skip every item of an array, each checked by its grammar alone.
+///
+/// # Errors
+/// Returns the JSON library's error for a text that is not JSON.
+fn skip_items<'de, A: SeqAccess<'de>>(mut items: A) -> Result<(), A::Error> {
+    while items.next_element::<IgnoredAny>()?.is_some() {}
+    Ok(())
+}
+
+/// Skip every member of an object, each checked by its grammar alone.
+///
+/// # Errors
+/// Returns the JSON library's error for a text that is not JSON.
+fn skip_members<'de, A: MapAccess<'de>>(mut members: A) -> Result<(), A::Error> {
+    while members.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+    Ok(())
 }
 
 /// The string that stands at `place` in `text`, when a string stands there that is no longer
@@ -345,9 +695,8 @@ pub(super) fn usable_version(version: &str) -> bool {
     !version.is_empty() && bare(version)
 }
 
-/// The id of the message on `line`, as the client wrote it.
-fn written_id(line: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(line).ok()?;
+/// The id of the message `text` holds, as the client wrote it.
+fn written_id(text: &str) -> Option<String> {
     let (start, end) = noted(text)?.id?;
     Some(text.get(start..end)?.to_owned())
 }
