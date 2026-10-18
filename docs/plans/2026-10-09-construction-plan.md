@@ -750,14 +750,14 @@ from the lanes or the composed server.
 
 ### Owner (product behaviour)
 
-- **O1. `ingest-locates-unlocated-items`: does the product bound the distance?** ingest asks before
+- **O1. `ingest-locates-unlocated-items`: does the product bound the distance? Decided 2026-10-17: no bound, the default below; the gate text says so.** ingest asks before
   it builds the gate. Recommended default: no bound. Every location found through the text layer
   is recorded as `inferred`, and SPEC section 5 says the interface never presents an inferred
   location with the certainty of a direct one. The contract carries no distance, so a bound could
   only drop locations. Revisit if acceptance finds a wrong placement that readers rely on.
   Recording the decision changes the gate text pinned at `tests/foundation/records.test.mjs:261`,
   which ends "open until this gate is built", in the same change.
-- **O2. Charts over approved agent-supplied text, or human-corrected text.** These are refused
+- **O2. Charts over approved agent-supplied text, or human-corrected text. Decided 2026-10-17: keep refusing, the default below.** These are refused
   today: `views::materialize` returns `DatasetUnavailable` (R5). Recommended default: keep
   refusing. The refusal is that chart's own alert, and it says why: the source's shown text is
   not the converter's, and whether it was corrected or supplied by an agent. A dataset is read
@@ -772,7 +772,7 @@ from the lanes or the composed server.
   - macOS: a supervisor watchdog. It samples the child's memory every 50 to 100 ms through a
     crate with a safe API, kills the child at the cap, and records the window as
     `Failure(MemoryLimit)` / `not_converted` pages. [inferred: macOS enforces no address-space
-    limit] **Owner to confirm that the watchdog counts as the hard cap on macOS.**
+    limit] **Decided 2026-10-17: the watchdog counts as the hard cap on macOS.**
 - **O4. How a construction gate is recorded as closed.** The status vocabulary is closed
   (`tests/foundation/records.test.mjs:272`), and statuses are never typed. Recommended default: no
   status change during construction; the evidence is the lane log and the merge commit's
