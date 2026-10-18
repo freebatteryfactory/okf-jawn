@@ -13,7 +13,13 @@
 //! - no type alias names `ZipArchive`, and no item visible outside its module (a `pub` or
 //!   `pub(..)` function, method, field, constant, static, enum or trait) has it in its signature,
 //!   so the reader never leaves the file that holds it;
-//! - a file that names `ZipArchive` calls no `extract` and no `extract_unwrapped_root_dir`;
+//! - a file that names `ZipArchive` calls no `extract` and no `extract_unwrapped_root_dir`, and
+//!   declares no child module in another file and includes no other file (`include!`), so every
+//!   module that can reach its private fields (its descendants) is in that same file; the
+//!   identifiers inside macros, definitions and invocations alike, are read for the same names
+//!   (string literals are not). Tests are exempt from the child-module part: a test target's
+//!   support modules (`#[path]` `check.rs`) are read on their own, and tests read archives
+//!   they wrote, never one a caller supplied;
 //! - nothing names `ZipStreamReader`, `read_zipfile_from_stream` or the `zip::read::stream`
 //!   module.
 //!
@@ -38,6 +44,7 @@ struct Attributes {
 struct ZipUse {
     names_reader: bool,
     extracts: bool,
+    reaches_out: bool,
     findings: BTreeSet<&'static str>,
 }
 
@@ -132,6 +139,22 @@ impl<'ast> Visit<'ast> for ZipUse {
         syn::visit::visit_expr_method_call(self, call);
     }
 
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if item.content.is_none() {
+            self.reaches_out = true;
+        }
+        syn::visit::visit_item_mod(self, item);
+    }
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if mac.path.is_ident("include") {
+            self.reaches_out = true;
+        }
+        let buffer = syn::buffer::TokenBuffer::new2(mac.tokens.clone());
+        self.read_tokens(buffer.begin());
+        syn::visit::visit_macro(self, mac);
+    }
+
     fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
         if roots_at_zip(&item.tree) {
             if !matches!(item.vis, syn::Visibility::Inherited) {
@@ -219,6 +242,34 @@ impl<'ast> Visit<'ast> for ZipUse {
     }
 }
 
+impl ZipUse {
+    /// Read a macro's tokens for the rule's names: identifiers only, in every group, so a string
+    /// literal that holds one of the words is not taken for code.
+    fn read_tokens(&mut self, mut cursor: syn::buffer::Cursor<'_>) {
+        while !cursor.eof() {
+            if let Some((ident, next)) = cursor.ident() {
+                if ident == "ZipArchive" {
+                    self.names_reader = true;
+                }
+                if EXTRACTING.iter().any(|name| ident == name) {
+                    self.extracts = true;
+                }
+                if STREAMING.iter().any(|name| ident == name) {
+                    self.findings.insert(STREAMS);
+                }
+                cursor = next;
+            } else if let Some((inside, _, _, next)) = cursor.any_group() {
+                self.read_tokens(inside);
+                cursor = next;
+            } else if let Some((_, next)) = cursor.token_tree() {
+                cursor = next;
+            } else {
+                break;
+            }
+        }
+    }
+}
+
 pub(crate) fn check(root: &Path) -> Result<(), Box<dyn Error>> {
     let mut paths = Vec::new();
     collect(&root.join("crates"), &mut paths)?;
@@ -269,6 +320,12 @@ fn zip_violations(relative: &str, file: &syn::File) -> Vec<String> {
     if found.names_reader && found.extracts {
         violations.push(
             "calls extract in a file that names ZipArchive; read named entries with by_name or by_index (the zip rule)"
+                .to_owned(),
+        );
+    }
+    if found.names_reader && found.reaches_out && !test_code {
+        violations.push(
+            "names ZipArchive in a file that declares a child module in another file or includes one; a child module could reach its private fields (the zip rule)"
                 .to_owned(),
         );
     }
@@ -439,6 +496,55 @@ mod tests {
             "//! x\nuse zip::ZipArchive;\nstruct O;\nimpl O { pub(super) fn inner(&mut self) -> &mut ZipArchive<File> { todo() } }\n",
         )?;
         assert!(says(&method, "visible outside"), "{method:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn no_child_module_of_the_reader_lives_in_another_file() -> TestResult {
+        let child = zip(
+            ZIP_READER_FILE,
+            "//! x\nuse zip::ZipArchive;\nstruct Opened { zip: ZipArchive<File> }\nmod child;\n",
+        )?;
+        assert!(says(&child, "child module"), "{child:?}");
+        let included = zip(
+            ZIP_READER_FILE,
+            "//! x\nuse zip::ZipArchive;\nstruct Opened { zip: ZipArchive<File> }\ninclude!(\"more.rs\");\n",
+        )?;
+        assert!(says(&included, "child module"), "{included:?}");
+        let inline = zip(
+            ZIP_READER_FILE,
+            "//! x\nuse zip::ZipArchive;\nstruct Opened { zip: ZipArchive<File> }\nmod inner { fn f(o: &mut super::Opened) { o.zip.by_index(0); } }\n",
+        )?;
+        assert_eq!(
+            inline,
+            Vec::<String>::new(),
+            "an inline child is read with its file"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_string_literal_in_a_macro_is_not_code() -> TestResult {
+        let found = zip(
+            "xtask/src/report.rs",
+            "//! x\nfn f() { let words = format!(\"ZipArchive cannot extract here\"); }\n",
+        )?;
+        assert_eq!(found, Vec::<String>::new());
+        Ok(())
+    }
+
+    #[test]
+    fn a_macro_is_read_for_the_same_names() -> TestResult {
+        let defined = zip(
+            ZIP_READER_FILE,
+            "//! x\nuse zip::ZipArchive;\nmacro_rules! out { ($a:expr) => { $a.extract(dir) }; }\nfn f(a: &mut ZipArchive<File>) { out!(a); }\n",
+        )?;
+        assert!(says(&defined, "calls extract"), "{defined:?}");
+        let invoked = zip(
+            "crates/storage/tests/purge.rs",
+            "//! x\nfn t() { run!(zip::ZipArchive::new(file).extract(dir)); }\n",
+        )?;
+        assert!(says(&invoked, "calls extract"), "{invoked:?}");
         Ok(())
     }
 
