@@ -192,7 +192,8 @@ pub struct ViewDocument {
     pub mode: ViewMode,
     /// Declarative renderer grammar.
     pub grammar: RenderGrammar,
-    /// Cited input datasets and passages.
+    /// Cited input datasets and passages, at most `MAX_VIEW_BINDINGS`.
+    #[schemars(length(max = MAX_VIEW_BINDINGS))]
     pub bindings: Vec<ViewBinding>,
     /// Validated renderer specification with no arbitrary code or external fetching.
     pub spec: serde_json::Value,
@@ -260,7 +261,8 @@ pub struct ResolveViewRequest {
     pub item_id: crate::identity::ItemId,
     /// Requested revision selector; latest is resolved once before reading.
     pub at: crate::identity::At,
-    /// Only live views may request current input resolution.
+    /// Only live views may request current input resolution; `true` on a pinned View is
+    /// `invalid_input` on `/refresh_live`.
     pub refresh_live: bool,
 }
 
@@ -308,6 +310,10 @@ pub struct CatalogResponse {
     /// Schema for persisted View documents.
     pub view_schema: serde_json::Value,
 }
+
+/// The most bindings one View holds (core M1.6 rulings, E9); a saved or presented View with more
+/// is refused.
+pub const MAX_VIEW_BINDINGS: usize = 50;
 
 impl Dataset {
     /// Refuse a dataset whose rows do not fit its columns.
