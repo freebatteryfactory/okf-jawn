@@ -413,6 +413,7 @@ async fn events_of_one_mutation_that_differ_in_proposal_or_count_are_each_kept()
             connector_id: None,
             actor: None,
             operation: None,
+            transport: None,
             proposal_id: Some(uuid!(proposal)?),
             count,
         })
@@ -438,6 +439,7 @@ async fn events_of_one_mutation_that_differ_in_proposal_or_count_are_each_kept()
         connector_id: None,
         actor: None,
         operation: None,
+        transport: None,
         proposal_id: None,
         count: None,
     };
@@ -476,6 +478,7 @@ async fn an_event_for_a_workspace_the_tenant_does_not_hold_goes_to_the_tenant_lo
         connector_id: None,
         actor: None,
         operation: None,
+        transport: None,
         proposal_id: None,
         count: None,
     };

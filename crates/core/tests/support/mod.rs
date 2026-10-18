@@ -573,6 +573,7 @@ fn wire_event(cursor: usize, scope: &EventScope, event: NewEvent) -> Result<Even
         connector_id: event.connector_id,
         actor: event.actor,
         operation: event.operation,
+        transport: None,
         proposal_id: event.proposal_id,
         count: event.count,
     })
