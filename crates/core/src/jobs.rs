@@ -356,7 +356,9 @@ pub trait RecordStore: Send + Sync {
     /// Unique on `mutation_id`: a repeated id does not queue the job a second time, even when
     /// the job has run and failed again since, and returns the job row as it stands. Refuses
     /// with `Conflict`, naming the purge, a job of a workspace a purge is recorded for, a
-    /// repeated id included (`Purger`).
+    /// repeated id included (`Purger`). Refuses with `Conflict` and
+    /// `ErrorDetail::WorkspaceArchived` an import, redigest or restore job of an archived
+    /// workspace, a repeated id included, in the retry's own transaction (contract ruling 25).
     fn retry_job<'a>(
         &'a self,
         scope: &'a JobScope,

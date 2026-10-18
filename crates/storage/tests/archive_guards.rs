@@ -284,6 +284,65 @@ async fn a_repeated_job_mutation_is_refused_too_once_the_workspace_is_archived()
     Ok(())
 }
 
+/// A failed content job holds no archive off (it is neither queued nor running), so a retry
+/// could queue it again after the workspace was archived; the retry's own transaction refuses
+/// that, as an insert's does, and the job stays failed. A job that does not change content is
+/// queued again (dispatch, not the store, refuses `retry_job` in an archived workspace).
+#[tokio::test]
+async fn a_failed_content_job_is_not_queued_again_once_the_workspace_is_archived() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let records = storage.records();
+    let (workspace, _) = create(&storage, 1).await?;
+    for (index, (changes_content, spec)) in specs(&workspace.head)?.into_iter().enumerate() {
+        let n = u32::try_from(index)?.saturating_mul(10).saturating_add(200);
+        let (created, scope) = create(&storage, n).await?;
+        let jobs = JobScope::Workspace(scope.clone());
+        let kind = format!("{:?}", spec.kind());
+        let queued = records
+            .create_job(&jobs, job(n.saturating_add(1), spec)?)
+            .await?;
+        let claimed = some(records.claim_job(queued.id).await?, "the claim")?;
+        records
+            .fail_job(
+                claimed.lease,
+                ApiError::new(ErrorCode::Unavailable, "the converter stopped"),
+                true,
+            )
+            .await?;
+        let archived = archive(&storage, &scope, &created.head, n.saturating_add(2)).await?;
+        let at = some(archived.archived_at.clone(), "the archive instant")?;
+        let retried = records
+            .retry_job(&jobs, mutation(n.saturating_add(3))?, queued.id)
+            .await;
+        if changes_content {
+            let refused = err_of(retried)?;
+            assert_eq!(refused.code, ErrorCode::Conflict, "{kind}");
+            assert!(
+                matches!(
+                    refused.detail.as_deref(),
+                    Some(ErrorDetail::WorkspaceArchived { archived_at }) if *archived_at == at
+                ),
+                "{kind}: {refused:?}"
+            );
+            let kept = records.get_job(&jobs, queued.id).await?;
+            assert_eq!(
+                kept.state,
+                okf_jawn_contract::import::JobState::Failed,
+                "{kind}: still failed"
+            );
+        } else {
+            let again = retried?;
+            assert_eq!(
+                again.state,
+                okf_jawn_contract::import::JobState::Queued,
+                "{kind}: queued again"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// A smoke test: whichever side the scheduler lets win a round, exactly one of the two is
 /// refused, and the winner is what the store holds. It does not show that both orders occur
 /// (one side may win every round); each order is driven explicitly, with its outcome, by the

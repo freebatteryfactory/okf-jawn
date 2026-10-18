@@ -8,8 +8,9 @@
 //! written and handed back unchanged on every claim. The job lease is `JOB_LEASE_SECONDS`.
 //! `create_job` refuses, before it inserts, a job of a workspace a purge names (`purge::guard`)
 //! and an import, redigest or restore job of an archived workspace
-//! (`catalog::refuse_content_job_while_archived`), a repeated id included. A job its running
-//! claim sealed (`seal`, the `sealed` column of records schema 4) refuses its cancellation, in
+//! (`catalog::refuse_content_job_while_archived`), a repeated id included; `retry_job` refuses
+//! to queue such a job again for an archived workspace by the same check, in its own
+//! transaction. A job its running claim sealed (`seal`, the `sealed` column of records schema 4) refuses its cancellation, in
 //! the cancellation's own transaction, while it is queued or running.
 
 use okf_jawn_contract::error::ApiError;
@@ -884,6 +885,14 @@ fn control(
         )
         .map_err(|error| sql(&error))?;
     let mut job = decode_job(&record)?;
+    // A failed content job holds no archive off, so the archive may have landed since: the retry
+    // refuses to queue it again in an archived workspace, in this transaction, as an insert does
+    // (a repeated id included).
+    if action == "retry"
+        && let Some(workspace) = &workspace
+    {
+        catalog::refuse_content_job_while_archived(transaction, &tenant, workspace, job.kind)?;
+    }
     if inserted == 0 {
         return Ok(job);
     }

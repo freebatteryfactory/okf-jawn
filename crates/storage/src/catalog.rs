@@ -23,7 +23,9 @@
 //! and exactly one of them is refused. A job already queued or running holds the archive off;
 //! a repeated archive of an archived workspace finds none, since none could be inserted. A
 //! failed job is neither queued nor running; queueing it again is `retry_job`, which core's
-//! dispatch refuses in an archived workspace.
+//! dispatch refuses in an archived workspace, and which `RecordStore::retry_job` refuses too, by
+//! the same check in the retry's own transaction, so an archive that lands between dispatch's
+//! question and the retry is ordered by the database as an insert is.
 
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::{MutationId, TenantId, WorkspaceId};
