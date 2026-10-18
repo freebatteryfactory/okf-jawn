@@ -157,14 +157,15 @@ fn graph(folder: Option<&str>, max_nodes: u32, at: At) -> Built<GetGraphRequest>
     })
 }
 
-fn link(from: u128, to: u128, line: u32) -> Link {
-    Link {
+fn link(from: u128, to: u128, line: u32) -> Built<Link> {
+    Ok(Link {
         from: item(from),
+        from_path: path(&format!("notes/{from}.md"))?,
         to_path: format!("notes/{to}.md"),
         to: Some(item(to)),
         label: format!("to {to}"),
         line,
-    }
+    })
 }
 
 fn hit_items(response: &okf_jawn_contract::search::SearchResponse) -> Vec<ItemId> {
@@ -371,7 +372,7 @@ async fn a_query_at_a_revision_the_index_has_not_built_indexes_it_and_asks_again
     world
         .search
         .put_entry(&at, summary(NOTE, "notes/plan.md")?, "plan")?;
-    world.search.put_link(&at, link(NOTE, OTHER, 3))?;
+    world.search.put_link(&at, link(NOTE, OTHER, 3)?)?;
     let response = world
         .service
         .search_items(
@@ -385,7 +386,7 @@ async fn a_query_at_a_revision_the_index_has_not_built_indexes_it_and_asks_again
     assert_eq!(world.search.queries()?.len(), 3);
     // Links and the graph of another unbuilt revision build it the same way.
     let older = revision('b')?;
-    world.search.put_link(&older, link(NOTE, OTHER, 4))?;
+    world.search.put_link(&older, link(NOTE, OTHER, 4)?)?;
     // The receipt cites the linking item, read at that revision.
     world.versions.put_document(
         &older,
@@ -741,8 +742,8 @@ async fn get_links_reads_one_direction_of_one_item_at_the_resolved_revision() ->
     let world = World::new()?;
     let at = revision('a')?;
     world.search.mark_indexed(&at)?;
-    world.search.put_link(&at, link(NOTE, OTHER, 3))?;
-    world.search.put_link(&at, link(THIRD, NOTE, 7))?;
+    world.search.put_link(&at, link(NOTE, OTHER, 3)?)?;
+    world.search.put_link(&at, link(THIRD, NOTE, 7)?)?;
     linking_items(&world, &at)?;
     let caller = alice(OperationName::GetLinks, None)?;
     let mut lines = Vec::new();
@@ -894,7 +895,7 @@ async fn an_items_links_of_three_pages_read_every_page_at_the_revision_the_first
     let at = revision('a')?;
     world.search.mark_indexed(&at)?;
     for line in 1..=5_u32 {
-        world.search.put_link(&at, link(NOTE, OTHER, line))?;
+        world.search.put_link(&at, link(NOTE, OTHER, line)?)?;
     }
     linking_items(&world, &at)?;
     let mut lines = Vec::new();
@@ -929,9 +930,9 @@ async fn an_items_links_continue_at_the_revision_their_first_page_resolved() -> 
     let world = World::new()?;
     let at = revision('a')?;
     world.search.mark_indexed(&at)?;
-    world.search.put_link(&at, link(NOTE, OTHER, 3))?;
-    world.search.put_link(&at, link(THIRD, NOTE, 7))?;
-    world.search.put_link(&at, link(NOTE, THIRD, 2))?;
+    world.search.put_link(&at, link(NOTE, OTHER, 3)?)?;
+    world.search.put_link(&at, link(THIRD, NOTE, 7)?)?;
+    world.search.put_link(&at, link(NOTE, THIRD, 2)?)?;
     linking_items(&world, &at)?;
     let page = |at: At, cursor: Option<String>| -> Built<GetLinksRequest> {
         let mut request = links(LinkDirection::Both, at)?;
@@ -1045,13 +1046,14 @@ async fn get_links_records_one_reference_per_link_by_its_body_line() -> TestResu
     let world = World::new()?;
     let at = revision('a')?;
     world.search.mark_indexed(&at)?;
-    world.search.put_link(&at, link(NOTE, OTHER, 3))?;
-    world.search.put_link(&at, link(THIRD, NOTE, 7))?;
+    world.search.put_link(&at, link(NOTE, OTHER, 3)?)?;
+    world.search.put_link(&at, link(THIRD, NOTE, 7)?)?;
     // A broken link names no item; it still cites the item it is written in.
     world.search.put_link(
         &at,
         Link {
             from: item(NOTE),
+            from_path: path(&format!("notes/{NOTE}.md"))?,
             to_path: "notes/missing.md".to_owned(),
             to: None,
             label: "gone".to_owned(),
@@ -1103,10 +1105,10 @@ async fn a_link_cited_from_a_source_card_carries_the_cards_computed_locations() 
     world
         .blobs
         .put_object(digest('b')?, serde_json::to_vec(&record(Vec::new())?)?)?;
-    world.search.put_link(&at, link(CARD, NOTE, 6))?;
-    world.search.put_link(&at, link(CARD, NOTE, 2))?;
+    world.search.put_link(&at, link(CARD, NOTE, 6)?)?;
+    world.search.put_link(&at, link(CARD, NOTE, 2)?)?;
     // Line 4 is the blank line between the two pages: the record locates nothing there.
-    world.search.put_link(&at, link(CARD, NOTE, 4))?;
+    world.search.put_link(&at, link(CARD, NOTE, 4)?)?;
     let response = world
         .service
         .get_links(
@@ -1150,7 +1152,7 @@ async fn get_links_whose_linking_item_cannot_be_read_fails_and_records_no_receip
     let world = World::new()?;
     let at = revision('a')?;
     world.search.mark_indexed(&at)?;
-    world.search.put_link(&at, link(NOTE, OTHER, 3))?;
+    world.search.put_link(&at, link(NOTE, OTHER, 3)?)?;
     linking_items(&world, &at)?;
     world.versions.fail_next_show(ErrorCode::Unavailable)?;
     let failed = err_of(
@@ -1181,7 +1183,7 @@ async fn get_graph_reads_a_bounded_graph_of_one_folder_and_refuses_no_room() -> 
     world
         .search
         .put_entry(&at, summary(THIRD, "elsewhere/c.md")?, "c")?;
-    world.search.put_link(&at, link(NOTE, OTHER, 1))?;
+    world.search.put_link(&at, link(NOTE, OTHER, 1)?)?;
     linking_items(&world, &at)?;
     let caller = alice(OperationName::GetGraph, None)?;
     let whole = world
