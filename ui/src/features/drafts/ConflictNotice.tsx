@@ -4,9 +4,11 @@
  *
  * The diff is the one the service sent with the conflict (`DraftConflictItem.changes`): for each
  * file of the item, the lines removed and added between the draft's base and the current
- * revision, with the unchanged lines around them. At most 2,000 of its lines are put on the page
- * and the rest are counted; a very long line is cut and says so. It is read-only text; added and removed lines
- * are `ins` and `del`, each also marked with a sign, so the difference does not rest on color.
+ * revision, with the unchanged lines around them, read for the page by the one diff reader that
+ * shows every comparison (`history/changed-files.tsx`). At most 2,000 of its lines are put on the
+ * page and the rest are counted; a very long line is cut and says so. It is read-only text; added
+ * and removed lines are `ins` and `del`, each also marked with a sign, so the difference does not
+ * rest on color.
  *
  * - "Keep mine" saves the draft again on the current revision (`save_draft` with `base_revision`
  *   set to `current_revision`, sent by the session's own save) and then takes the Snapshot of this
@@ -24,18 +26,12 @@
  */
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useId, useRef, useState } from 'react';
-import { keyed } from '../../lib/keys';
 import { short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
-import { MAX_DIFF_LINES, type PatchHunk, readPatch } from './patch';
+import { ChangedFile, keyedFiles, MoreLines, readChanges } from '../history/changed-files';
 import { DraftNotKept, discardSession, rebaseSession } from './saving';
-import {
-  type ConflictItem,
-  type SnapshotConflict,
-  useDraftSession,
-  useDraftSessions,
-} from './sessions';
+import { type SnapshotConflict, useDraftSession, useDraftSessions } from './sessions';
 import { draftConflictsOf, type Snapshotted, saySnapshotted, takeSnapshot } from './snapshot';
 
 export interface ConflictNoticeProps {
@@ -47,70 +43,6 @@ export interface ConflictNoticeProps {
   onSnapshotted: (snapshotted: Snapshotted) => void;
   /** The conflict is over, either way: the notice is about to go. */
   onResolved: () => void;
-}
-
-const KIND = { added: 'Added', modified: 'Changed', moved: 'Moved', removed: 'Deleted' } as const;
-
-type FileChange = ConflictItem['changes'][number];
-
-function paths(change: FileChange): string {
-  const from = change.old_path ?? null;
-  const to = change.new_path ?? null;
-  if (from !== null && to !== null && from !== to) return `${from}, now ${to}`;
-  return to ?? from ?? 'this item';
-}
-
-/** The mark after a line that was cut, in words: it is read out as well as seen. */
-const CUT = ' … (a long line, cut here)';
-
-function ChangedFile({ change, hunks }: { change: FileChange; hunks: PatchHunk[] }) {
-  return (
-    <div className="changed-file">
-      <p>
-        <strong>{KIND[change.kind]}:</strong> {paths(change)}
-      </p>
-      {change.binary ? (
-        <p>This file is not text, so its lines cannot be compared.</p>
-      ) : hunks.length === 0 ? (
-        <p>No line of its text changed.</p>
-      ) : (
-        keyed(hunks, (hunk) => `${hunk.oldStart}:${hunk.newStart}`).map(({ key, value: hunk }) => (
-          <div key={key} className="hunk">
-            <p className="meta">From line {hunk.newStart} of the file</p>
-            <pre className="patch-lines">
-              {keyed(hunk.lines, (line) => `${line.kind}:${line.text}`).map(
-                ({ key: lineKey, value: line }) =>
-                  line.kind === 'added' ? (
-                    <ins key={lineKey}>
-                      <span className="sr-only">Added: </span>
-                      <span aria-hidden="true">+ </span>
-                      {line.text}
-                      {line.cut ? CUT : ''}
-                      {'\n'}
-                    </ins>
-                  ) : line.kind === 'removed' ? (
-                    <del key={lineKey}>
-                      <span className="sr-only">Removed: </span>
-                      <span aria-hidden="true">− </span>
-                      {line.text}
-                      {line.cut ? CUT : ''}
-                      {'\n'}
-                    </del>
-                  ) : (
-                    <span key={lineKey}>
-                      {'  '}
-                      {line.text}
-                      {line.cut ? CUT : ''}
-                      {'\n'}
-                    </span>
-                  ),
-              )}
-            </pre>
-          </div>
-        ))
-      )}
-    </div>
-  );
 }
 
 export function ConflictNotice({
@@ -128,15 +60,7 @@ export function ConflictNotice({
   const heldBack = session !== undefined && session.heldBack !== null;
   const item = conflict.conflict;
   // The diff on the page is bounded: so many lines over all of the item's files, the rest counted.
-  const files: Array<{ change: FileChange; hunks: PatchHunk[] }> = [];
-  let room = MAX_DIFF_LINES;
-  let more = 0;
-  for (const change of item.changes) {
-    const read = readPatch(change.patch, room);
-    files.push({ change, hunks: read.hunks });
-    room -= read.shown;
-    more += read.more;
-  }
+  const { files, more } = readChanges(item.changes);
   const keepRef = useRef<HTMLButtonElement | null>(null);
   const theirsRef = useRef<HTMLButtonElement | null>(null);
   const keepDraftRef = useRef<HTMLButtonElement | null>(null);
@@ -220,18 +144,11 @@ export function ConflictNotice({
       {item.changes.length === 0 ? (
         <p>The service listed no changed file.</p>
       ) : (
-        keyed(files, ({ change }) => JSON.stringify([change.old_path, change.new_path])).map(
-          ({ key, value: file }) => (
-            <ChangedFile key={key} change={file.change} hunks={file.hunks} />
-          ),
-        )
+        keyedFiles(files).map(({ key, value: file }) => (
+          <ChangedFile key={key} change={file.change} hunks={file.hunks} />
+        ))
       )}
-      {more > 0 && (
-        <p className="meta">
-          and {more.toLocaleString('en')} more {more === 1 ? 'line' : 'lines'}: this change is too
-          long to show whole.
-        </p>
-      )}
+      <MoreLines more={more} />
       {item.deleted ? (
         <p>
           A draft of a deleted item cannot be snapshotted. Your text stays in the editor until you
