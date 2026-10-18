@@ -10,9 +10,14 @@
 //! - production code names `ZipArchive` in `ZIP_READER_FILE` only; tests may name it, since no
 //!   production code can import a test;
 //! - nothing imports from the zip crate with a rename or a glob, or re-exports it;
-//! - no type alias names `ZipArchive`, and no item visible outside its module (a `pub` or
+//! - no type alias names `ZipArchive`, no item visible outside its module (a `pub` or
 //!   `pub(..)` function, method, field, constant, static, enum or trait) has it in its signature,
-//!   so the reader never leaves the file that holds it;
+//!   and no trait implementation names it (its trait, its self type, or the signature, associated
+//!   type or constant of any item: `AsMut<ZipArchive<_>>`, `Deref<Target = ZipArchive<_>>` and
+//!   the like are callable from anywhere, though written without `pub`), so the reader never
+//!   leaves the file that holds it;
+//! - production code names `ZipArchive` in no macro, a definition or an invocation, because the
+//!   rule cannot read what a macro expands to (an alias, an impl);
 //! - a file that names `ZipArchive` calls no `extract` and no `extract_unwrapped_root_dir`, and
 //!   declares no child module in another file and includes no other file (`include!`), so every
 //!   module that can reach its private fields (its descendants) is in that same file; the
@@ -25,7 +30,10 @@
 //!
 //! The rule reads syntax, not types: a method named `extract` on another type in a file that
 //! names `ZipArchive` is refused too (none exists; rename it), which keeps the rule simple and
-//! never too lenient.
+//! never too lenient. What it cannot see, stated rather than hidden: code a build script or a
+//! procedural macro (a derive or an attribute) generates, and a reader reached through generic
+//! code bounded by a trait the reader implements. None of these exists here, the reader file
+//! derives nothing that hands its fields out, and authored `unsafe` is forbidden workspace-wide.
 
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -64,8 +72,9 @@ const STREAMS: &str =
 const RENAMES: &str = "imports from the zip crate with a rename or a glob (the zip rule)";
 const RE_EXPORTS: &str = "re-exports the zip crate or its reader (the zip rule)";
 const ALIASES: &str = "aliases ZipArchive with a type alias (the zip rule)";
-const EXPOSES: &str =
-    "has ZipArchive in the signature of an item visible outside its module (the zip rule)";
+const EXPOSES: &str = "has ZipArchive in the signature of an item visible outside its module, or in a trait implementation (the zip rule)";
+const IN_MACRO: &str =
+    "names ZipArchive inside a macro, whose expansion the rule cannot read (the zip rule)";
 
 impl<'ast> Visit<'ast> for Attributes {
     fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
@@ -227,6 +236,28 @@ impl<'ast> Visit<'ast> for ZipUse {
         syn::visit::visit_item_static(self, item);
     }
 
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        if let Some((trait_path, _)) = &item.trait_ {
+            let carries = names_reader(|visitor| {
+                visitor.visit_path(trait_path);
+                visitor.visit_type(&item.self_ty);
+                visitor.visit_generics(&item.generics);
+                for member in &item.items {
+                    match member {
+                        syn::ImplItem::Fn(function) => visitor.visit_signature(&function.sig),
+                        syn::ImplItem::Type(associated) => visitor.visit_type(&associated.ty),
+                        syn::ImplItem::Const(constant) => visitor.visit_type(&constant.ty),
+                        _ => {}
+                    }
+                }
+            });
+            if carries {
+                self.findings.insert(EXPOSES);
+            }
+        }
+        syn::visit::visit_item_impl(self, item);
+    }
+
     fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
         if visible(&item.vis) && names_reader(|visitor| visitor.visit_item_enum(item)) {
             self.findings.insert(EXPOSES);
@@ -250,6 +281,7 @@ impl ZipUse {
             if let Some((ident, next)) = cursor.ident() {
                 if ident == "ZipArchive" {
                     self.names_reader = true;
+                    self.findings.insert(IN_MACRO);
                 }
                 if EXTRACTING.iter().any(|name| ident == name) {
                     self.extracts = true;
@@ -329,7 +361,13 @@ fn zip_violations(relative: &str, file: &syn::File) -> Vec<String> {
                 .to_owned(),
         );
     }
-    violations.extend(found.findings.iter().map(|finding| (*finding).to_owned()));
+    violations.extend(
+        found
+            .findings
+            .iter()
+            .filter(|finding| !(test_code && **finding == IN_MACRO))
+            .map(|finding| (*finding).to_owned()),
+    );
     violations
 }
 
@@ -519,6 +557,45 @@ mod tests {
             inline,
             Vec::<String>::new(),
             "an inline child is read with its file"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_trait_implementation_never_hands_out_the_reader() -> TestResult {
+        let as_mut = zip(
+            ZIP_READER_FILE,
+            "//! x\nuse zip::ZipArchive;\nstruct Opened { zip: ZipArchive<File> }\nimpl AsMut<ZipArchive<File>> for Opened { fn as_mut(&mut self) -> &mut ZipArchive<File> { &mut self.zip } }\n",
+        )?;
+        assert!(says(&as_mut, "trait implementation"), "{as_mut:?}");
+        let deref = zip(
+            ZIP_READER_FILE,
+            "//! x\nuse zip::ZipArchive;\nstruct Opened { zip: ZipArchive<File> }\nimpl std::ops::Deref for Opened { type Target = ZipArchive<File>; fn deref(&self) -> &Self::Target { &self.zip } }\n",
+        )?;
+        assert!(says(&deref, "trait implementation"), "{deref:?}");
+        let unrelated = zip(
+            ZIP_READER_FILE,
+            "//! x\nuse zip::ZipArchive;\nstruct Opened { zip: ZipArchive<File> }\nstruct Hashing;\nimpl std::io::Write for Hashing { fn flush(&mut self) -> std::io::Result<()> { Ok(()) } }\n",
+        )?;
+        assert_eq!(unrelated, Vec::<String>::new());
+        Ok(())
+    }
+
+    #[test]
+    fn production_code_names_the_reader_in_no_macro() -> TestResult {
+        let alias = zip(
+            ZIP_READER_FILE,
+            "//! x\nuse zip::ZipArchive;\nmacro_rules! alias { () => { pub(crate) type Archive = ZipArchive<File>; }; }\nalias!();\n",
+        )?;
+        assert!(says(&alias, "inside a macro"), "{alias:?}");
+        let in_test = zip(
+            "crates/storage/tests/backup.rs",
+            "//! x\nfn t() { assert!(zip::ZipArchive::new(file).is_ok()); }\n",
+        )?;
+        assert_eq!(
+            in_test,
+            Vec::<String>::new(),
+            "a test reads it in an assertion"
         );
         Ok(())
     }
