@@ -28,6 +28,8 @@
 //!   they wrote, never one a caller supplied;
 //! - nothing names `ZipStreamReader`, `read_zipfile_from_stream` or the `zip::read::stream`
 //!   module;
+//! - production code includes no file (`include!`), which the rule cannot read, and renames
+//!   `ZipArchive` nowhere, wherever the `use` starts (`use self::ZipArchive as Archive`);
 //! - production code declares no module by `#[path]`: the rule judges a file production or test
 //!   by where it lives, so a production module taken from a `tests` folder would be judged as a
 //!   test (none exists, and source code never includes test support).
@@ -78,6 +80,7 @@ const RE_EXPORTS: &str = "re-exports the zip crate or its reader (the zip rule)"
 const ALIASES: &str = "aliases ZipArchive with a type alias (the zip rule)";
 const EXPOSES: &str = "has ZipArchive in the signature of an item visible outside its module, or in a trait implementation (the zip rule)";
 const PATH_MODULE: &str = "declares a module by #[path] in production code, whose file the rule would judge by another place (the zip rule)";
+const INCLUDES: &str = "includes another file (include!) in production code, which the rule cannot read (the zip rule)";
 const IN_MACRO: &str =
     "names ZipArchive inside a macro, whose expansion the rule cannot read (the zip rule)";
 
@@ -167,6 +170,7 @@ impl<'ast> Visit<'ast> for ZipUse {
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         if mac.path.is_ident("include") {
             self.reaches_out = true;
+            self.findings.insert(INCLUDES);
         }
         let buffer = syn::buffer::TokenBuffer::new2(mac.tokens.clone());
         self.read_tokens(buffer.begin());
@@ -184,6 +188,9 @@ impl<'ast> Visit<'ast> for ZipUse {
         }
         if use_names(&item.tree, &STREAMING) {
             self.findings.insert(STREAMS);
+        }
+        if renames_reader(&item.tree) {
+            self.findings.insert(RENAMES);
         }
         if use_names(&item.tree, &["ZipArchive"]) {
             self.names_reader = true;
@@ -388,7 +395,10 @@ fn zip_violations(relative: &str, file: &syn::File) -> Vec<String> {
         found
             .findings
             .iter()
-            .filter(|finding| !(test_code && (**finding == IN_MACRO || **finding == PATH_MODULE)))
+            .filter(|finding| {
+                !(test_code
+                    && (**finding == IN_MACRO || **finding == PATH_MODULE || **finding == INCLUDES))
+            })
             .map(|finding| (*finding).to_owned()),
     );
     violations
@@ -425,6 +435,16 @@ fn renames_or_globs(tree: &syn::UseTree) -> bool {
         syn::UseTree::Name(_) => false,
         syn::UseTree::Rename(_) | syn::UseTree::Glob(_) => true,
         syn::UseTree::Group(group) => group.items.iter().any(renames_or_globs),
+    }
+}
+
+/// Whether a `use` tree renames `ZipArchive`, wherever the tree starts (`self::ZipArchive as ..`).
+fn renames_reader(tree: &syn::UseTree) -> bool {
+    match tree {
+        syn::UseTree::Path(path) => renames_reader(&path.tree),
+        syn::UseTree::Rename(rename) => rename.ident == "ZipArchive",
+        syn::UseTree::Name(_) | syn::UseTree::Glob(_) => false,
+        syn::UseTree::Group(group) => group.items.iter().any(renames_reader),
     }
 }
 
@@ -513,6 +533,16 @@ mod tests {
         assert!(says(&found, "a rename or a glob"), "{found:?}");
         let glob = zip(ZIP_READER_FILE, "//! x\nuse zip::*;\n")?;
         assert!(says(&glob, "a rename or a glob"), "{glob:?}");
+        let chained = zip(
+            ZIP_READER_FILE,
+            "//! x\nuse zip::ZipArchive;\nuse self::ZipArchive as Archive;\n",
+        )?;
+        assert!(says(&chained, "a rename or a glob"), "{chained:?}");
+        let included = zip(
+            "crates/storage/src/backup/mod.rs",
+            "//! x\ninclude!(\"../../../tests/helper.inc\");\n",
+        )?;
+        assert!(says(&included, "include!"), "{included:?}");
         let crate_alias = zip(ZIP_READER_FILE, "//! x\nextern crate zip as archive;\n")?;
         assert!(says(&crate_alias, "a rename or a glob"), "{crate_alias:?}");
         Ok(())
