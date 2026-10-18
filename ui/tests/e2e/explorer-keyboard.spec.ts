@@ -241,7 +241,8 @@ test.describe('Explorer from the keyboard', () => {
     await expect(page.getByRole('tree', { name: 'Folders' })).toBeVisible();
     const box = page.getByRole('searchbox', { name: 'Search this workspace' });
     let guard = 0;
-    while (!(await focused(page)).startsWith('input') && guard < 10) {
+    // The bar holds ten links and buttons before the box (Timeline, Proposals and Graph since M3).
+    while (!(await focused(page)).startsWith('input') && guard < 15) {
       await page.keyboard.press('Tab');
       guard += 1;
     }
