@@ -15,8 +15,11 @@
 //! call; O(workspaces of the tenant) for the local adapter). `list_workspaces` lists, in
 //! creation order, only the workspaces whose effective permissions include `read`, and archived
 //! ones only with `include_archived`. Its cursor names the last workspace a page listed and the
-//! tenant's workspace that came after it, so a workspace archived, unarchived or purged between
-//! two pages neither repeats an entry nor skips one. Known limit: when both of those are purged
+//! first one the next page lists, so a workspace archived, unarchived or purged between two pages
+//! neither repeats an entry nor skips one. A cursor is base64url JSON the caller can read, so it
+//! names only workspaces the listing showed or will show, never one it left out; it carries the
+//! next entry's position in the tenant's catalog, which says how many workspaces precede it, not
+//! which. Known limit: when both of those are purged
 //! before the next page, the listing resumes at the place the second held, which skips as many
 //! entries as were purged before it.
 //! `open_workspace` answers an archived workspace too, with its `archived_at`.
@@ -109,10 +112,11 @@ struct ListingCursor {
     op: String,
     /// The last workspace the earlier page listed.
     after: WorkspaceId,
-    /// The tenant's workspace that came after `after` in creation order when the cursor was
-    /// issued, listed or not; the listing resumes at it when `after` is gone (purged).
+    /// The first workspace the next page lists, as the listing stood when the cursor was
+    /// issued (one the caller may read); the listing resumes at it when `after` is gone (purged).
     next: Option<WorkspaceId>,
-    /// Where `next` stood then; the listing resumes there when both are gone.
+    /// Where `next` stood in the tenant's catalog then; the listing resumes there when both are
+    /// gone.
     from: usize,
 }
 
@@ -144,8 +148,7 @@ pub(super) async fn list_workspaces(
     let start = listing_start(context.operation, request.page.cursor.as_deref(), &every)?;
     let limit = usize::from(request.page.limit.max(1));
     let mut items: Vec<Workspace> = Vec::new();
-    let mut last_position = start;
-    let mut more = false;
+    let mut next: Option<(usize, WorkspaceId)> = None;
     for (position, workspace) in every.iter().enumerate().skip(start) {
         let Some(permissions) = readable.get(&workspace.id) else {
             continue;
@@ -154,22 +157,18 @@ pub(super) async fn list_workspaces(
             continue;
         }
         if items.len() >= limit {
-            more = true;
+            next = Some((position, workspace.id));
             break;
         }
-        last_position = position;
         items.push(workspace_with_permissions(
             workspace.clone(),
             permissions.clone(),
         ));
     }
-    let next_cursor = match items.last() {
-        Some(last) if more => Some(listing_cursor(
-            context.operation,
-            last.id,
-            &every,
-            last_position,
-        )?),
+    let next_cursor = match (items.last(), next) {
+        (Some(last), Some((position, next))) => {
+            Some(listing_cursor(context.operation, last.id, next, position)?)
+        }
         _ => None,
     };
     Ok(ListWorkspacesResponse { items, next_cursor })
@@ -640,21 +639,21 @@ fn listing_start(
         .unwrap_or_else(|| cursor.from.min(every.len())))
 }
 
-/// The cursor of the page after one that ended with `after`, at `position` of `every`.
+/// The cursor of the page after one that ended with `after`, whose first entry is `next`,
+/// at `from` of the tenant's catalog.
 ///
 /// # Errors
 /// Returns `Internal` when the cursor cannot be serialized.
 fn listing_cursor(
     operation: OperationName,
     after: WorkspaceId,
-    every: &[Workspace],
-    position: usize,
+    next: WorkspaceId,
+    from: usize,
 ) -> Result<String, ApiError> {
-    let from = position.saturating_add(1);
     serde_json::to_vec(&ListingCursor {
         op: operation.as_str().to_owned(),
         after,
-        next: every.get(from).map(|workspace| workspace.id),
+        next: Some(next),
         from,
     })
     .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))

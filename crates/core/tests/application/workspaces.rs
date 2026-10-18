@@ -345,6 +345,44 @@ async fn a_listing_resumes_where_it_stood_when_a_workspace_is_archived_or_purged
     Ok(())
 }
 
+/// A cursor is base64url JSON a caller can read, so it names only workspaces the listing
+/// showed or will show: never the unreadable one that follows the last listed entry.
+#[tokio::test]
+async fn a_listing_cursor_names_no_workspace_the_caller_may_not_read() -> TestResult {
+    let tenancy = Tenancy::new()?;
+    let tenant = scope()?.tenant_id;
+    for (number, name) in [(11, "one"), (12, "two"), (13, "three")] {
+        tenancy
+            .catalog
+            .put(&tenant, workspace(number, name, 'a', false)?)?;
+    }
+    tenancy
+        .access
+        .grant(ALICE, id(11), vec![Permission::Read])?;
+    tenancy
+        .access
+        .grant(ALICE, id(13), vec![Permission::Read])?;
+    let caller = owner(OperationName::ListWorkspaces, None)?;
+    let first = tenancy
+        .service
+        .list_workspaces(&caller, listing(1, None, None))
+        .await?;
+    assert_eq!(ids(&first), vec![id(11)]);
+    let cursor = some(first.next_cursor.clone(), "a cursor to the next page")?;
+    let decoded = String::from_utf8(URL_SAFE_NO_PAD.decode(cursor.as_bytes())?)?;
+    assert!(
+        !decoded.contains(&serde_json::to_string(&id(12))?),
+        "the cursor names the unreadable workspace: {decoded}"
+    );
+    let second = tenancy
+        .service
+        .list_workspaces(&caller, listing(1, first.next_cursor.clone(), None))
+        .await?;
+    assert_eq!(ids(&second), vec![id(13)]);
+    assert_eq!(second.next_cursor, None);
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_listing_cursor_this_operation_did_not_issue_is_refused() -> TestResult {
     let tenancy = five_workspaces()?;
