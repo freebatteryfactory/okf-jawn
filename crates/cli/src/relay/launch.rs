@@ -69,7 +69,8 @@ pub enum Detachment {
 /// end of the relay's output does not see it while that server runs. Nothing the server
 /// prints goes there. Keeping the handles back takes `SetHandleInformation`, which is not
 /// safe Rust, or `CommandExt::inherit_handles`, which is not stable; on Unix the child holds
-/// none of them.
+/// none of them. The test of it, `mcp_stdio_the_started_server_does_not_hold_the_relay_s_stdout_open`,
+/// fails on Windows and is ignored there until that call is made.
 #[derive(Debug)]
 pub struct ProcessLauncher {
     program: Option<PathBuf>,
