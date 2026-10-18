@@ -3622,6 +3622,55 @@ async fn a_workspace_archive_and_a_written_history_land_their_pending_puts() -> 
     Ok(())
 }
 
+/// The objects of `workspace`'s pending puts in the data directory `data`, sorted.
+fn pending_objects(data: &Path, workspace: &StorageScope) -> Fallible<Vec<String>> {
+    let records = rusqlite::Connection::open(data.join("records.sqlite"))?;
+    let mut statement = records
+        .prepare("SELECT digest FROM pending_puts WHERE workspace_id = ?1 ORDER BY digest")?;
+    let digests = statement
+        .query_map([workspace.workspace_id.0.to_string()], |row| row.get(0))?
+        .collect::<Result<Vec<String>, _>>()?;
+    Ok(digests)
+}
+
+/// MCLEAR (p1s re-review): a workspace archive's record and a written history's record each land
+/// only the pending put of the object they stored. Another pending put of the same workspace,
+/// a derivative whose record has not landed, survives both, so the workspace's next purge still
+/// treats its bytes as the workspace's own unreferenced bytes.
+#[tokio::test]
+async fn an_archive_and_a_written_history_land_only_their_own_pending_put() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, head) = create(&storage, 1, "Trip").await?;
+    let waiting = put(
+        &storage,
+        &target,
+        b"a derivative whose record has not landed",
+    )
+    .await?;
+    let left = vec![waiting.digest.as_str().to_owned()];
+    assert_eq!(pending_objects(directory.path(), &target)?, left);
+    storage
+        .backups()
+        .write_workspace_archive(&target, uuid!(70)?)
+        .await?;
+    assert_eq!(
+        pending_objects(directory.path(), &target)?,
+        left,
+        "an archive"
+    );
+    storage
+        .versions()
+        .write_history(&target, &head, uuid!(71)?)
+        .await?;
+    assert_eq!(
+        pending_objects(directory.path(), &target)?,
+        left,
+        "a history"
+    );
+    Ok(())
+}
+
 /// The failure a retried purge job is given while the store is busy.
 fn busy() -> ApiError {
     ApiError::new(ErrorCode::Unavailable, "busy")
