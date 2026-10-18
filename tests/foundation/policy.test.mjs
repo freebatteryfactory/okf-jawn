@@ -88,26 +88,6 @@ test('core writes no file: no source under crates/core/src names std::fs, tempfi
  }
  assert.deepEqual(found,[],'the application service writes no file; file access belongs to a port\'s adapter');
 });
-/** Where a Rust source could unpack an archive to disk with the zip crate (RUSTSEC-2026-0367, -0368 and -0369, waived for zip 8.6 in .cargo/audit.toml and deny.toml only because nothing does). Storage's `Opened::extract` writes one named entry into a file storage names; it is defined in a file that calls no `.extract(`, and called from files that never name the zip crate. */
-const zipExtraction=source=>{
- const found=[];
- if(/\bZipStreamReader\b|\bextract_unwrapped_root_dir\b|\bzip::read::stream\b/.test(source))found.push('a zip stream reader or a root-folder extraction');
- if(/\bZipArchive\b|\bzip::/.test(source)&&/\.extract\s*\(/.test(source))found.push('an .extract( call beside the zip crate');
- return found;
-};
-test('the zip guard tells an archive unpacked to disk from a named entry read',()=>{
- assert.deepEqual(zipExtraction('use zip::ZipArchive;\nfn f(a: &mut ZipArchive<File>) { a.extract(dir)?; }\n'),['an .extract( call beside the zip crate']);
- assert.deepEqual(zipExtraction('use zip::read::stream::ZipStreamReader;\n'),['a zip stream reader or a root-folder extraction']);
- assert.deepEqual(zipExtraction('use zip::ZipArchive;\nfn f(a: &mut ZipArchive<File>) { a.by_name(name)?; }\n'),[]);
- assert.deepEqual(zipExtraction('fn f(opened: &mut Opened) { opened.extract(RECORDS, &records)?; }\n'),[]);
-});
-test('no authored Rust unpacks a zip archive to disk (the zip advisories are waived only while this holds)',async()=>{
- const sources=(await files(root)).filter(f=>f.endsWith('.rs'));
- assert.ok(sources.length>100,`the scan read only ${sources.length} Rust sources`);
- const found=[];
- for(const file of sources)for(const what of zipExtraction(await readFile(join(root,file),'utf8')))found.push(`${file}: ${what}`);
- assert.deepEqual(found,[],'read named entries with by_name or by_index into a file you name; zip 8.6 extraction to disk is RUSTSEC-2026-0367, -0368 and -0369');
-});
 test('test-support applications are included only by test targets',async()=>{
  for(const file of (await files(root)).filter(f=>f.endsWith('.rs'))){
   const normalized=file.replaceAll('\\','/');

@@ -21,8 +21,8 @@
 # an archive to disk with `ZipArchive::extract` or `ZipStreamReader::extract`. Owner decision 2026-10-17.
 # Nothing here calls them: storage reads named entries (`by_name`, `by_index`) into files it names
 # itself, and calamine 0.36.1 and docling 2.3.0 (each `zip ^8.6`, as is the newest of each) only read
-# entries. tests/foundation/policy.test.mjs fails on any authored call. Re-check both crates at every
-# bump. Removal: calamine and docling accept zip 9; then storage and ingest take it too.
+# entries. The zip rule of `xtask source-policy` (xtask/src/source_policy.rs) confines the reader so no
+# authored code can extract. Re-check both crates at every bump. Removal: calamine and docling accept zip 9; then storage and ingest take it too.
 
 [advisories]
 ignore = ["RUSTSEC-2024-0436", "RUSTSEC-2026-0192", "RUSTSEC-2023-0071", "RUSTSEC-2026-0367", "RUSTSEC-2026-0368", "RUSTSEC-2026-0369"]
