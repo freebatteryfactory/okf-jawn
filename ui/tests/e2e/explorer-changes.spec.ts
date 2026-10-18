@@ -648,6 +648,53 @@ test.describe('changing the tree and the naming rules', () => {
     expect(played.sent).toEqual([]);
   });
 
+  // Carried to UI M3 from the UI M2 integration re-check: no guard holds a start-again of the box
+  // back during an IME composition. Probed in Chromium, whose DevTools protocol composes text as
+  // an input method does (`Input.imeSetComposition`, then `Input.insertText` to commit it).
+  // Playwright's WebKit has no way to compose, so that engine is left to the Wave 3 journey with
+  // a real input method.
+  test('a Refresh that lands while text is being composed in the YAML box loses none of it', async ({
+    page,
+    browserName,
+  }) => {
+    test.skip(browserName !== 'chromium', 'Playwright composes text only through Chromium');
+    const played = await service();
+    await routeApi(page, played.answers);
+    await page.goto(`${server.origin()}/w/${WS}`);
+    await expect(row(page, 'notes')).toBeVisible();
+    await press(page, 'Naming rules');
+    await page.getByRole('tab', { name: 'Form' }).focus();
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Enter');
+    const box = page.getByRole('textbox', { name: 'The naming rules as YAML' });
+    await expect(box).toContainText('prefix: ""');
+    // Someone else saves other rules; the person refreshes, and the answer is slow to come.
+    played.othersSave({ schema_version: 1, rules: [{ ...rule, prefix: 'newest-' }] });
+    const answer = played.holdWorkspace();
+    await press(page, 'Refresh');
+    await box.focus();
+    await page.keyboard.press('ControlOrMeta+End');
+    // A composition begins, and the Refresh answers while it is still under way.
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Input.imeSetComposition', { text: 'に', selectionStart: 1, selectionEnd: 1 });
+    answer();
+    // The Refresh has answered, with the composition still open.
+    await expect(page.getByRole('status').filter({ hasText: /^Refreshed: / })).toHaveCount(1);
+    await cdp.send('Input.imeSetComposition', {
+      text: 'にほん',
+      selectionStart: 3,
+      selectionEnd: 3,
+    });
+    await cdp.send('Input.insertText', { text: '日本' });
+    // What was composed is in the box, once, and focus is still there. The composition is the
+    // person's text as it is composed, so the box was not started again from the newer rules.
+    await expect(box).toContainText('日本');
+    await expect(box).not.toContainText('newest-');
+    expect(((await box.textContent()) ?? '').split('日本').length - 1).toBe(1);
+    expect(await focusSettled(page)).toBe('textbox:The naming rules as YAML');
+    expect(played.sent).toEqual([]);
+  });
+
   test('reading YAML never stalls the page: the worker is ended at its limit, and the text stays', async ({
     page,
   }) => {
