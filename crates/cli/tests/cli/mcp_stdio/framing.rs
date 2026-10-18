@@ -101,6 +101,67 @@ async fn a_very_long_line_is_dropped_and_the_next_line_is_read() -> TestResult {
     Ok(())
 }
 
+/// C5: an input that ends inside a line already over the limit gives that line as too long,
+/// and then the end, not the end alone: whether the line passed the limit by the byte that is
+/// kept for a carriage return, by two bytes, or by far, and whether it arrived whole or in
+/// pieces of two bytes, the reader's own buffer being smaller than the line.
+#[tokio::test]
+async fn an_input_that_ends_inside_a_line_over_the_limit_gives_that_line_as_too_long() -> TestResult
+{
+    let far = vec![b'a'; 4096];
+    let cases: [&[u8]; 6] = [
+        b"123456789",
+        b"1234567890",
+        b"12345678901234567890",
+        &far,
+        b"ok\n1234567890",
+        b"1234567890\r",
+    ];
+    for input in cases {
+        let expected = if input.starts_with(b"ok\n") {
+            vec![line("ok"), Frame::TooLong, Frame::End]
+        } else {
+            vec![Frame::TooLong, Frame::End]
+        };
+        assert_eq!(frames(input, 8).await?, expected, "{} bytes", input.len());
+        let mut frames = Frames::new(tokio::io::BufReader::with_capacity(2, input), 8);
+        let mut pieces = Vec::new();
+        loop {
+            let frame = frames.next().await?;
+            let ended = frame == Frame::End;
+            pieces.push(frame);
+            if ended {
+                break;
+            }
+        }
+        assert_eq!(pieces, expected, "{} bytes in pieces of two", input.len());
+    }
+    // Through the relay: the client is told the line is too long, and nothing is forwarded.
+    let transport = FakeTransport::echoing();
+    let mut setup = Setup::new(&transport);
+    setup.limits = Limits {
+        line_bytes: 16,
+        ..Limits::default()
+    };
+    let ran = relay(setup, b"{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":1}").await?;
+    assert_eq!((ran.code, ran.stderr.as_str()), (0, ""));
+    let answers = ran.lines()?;
+    assert_eq!(answers.len(), 1, "{}", ran.stdout);
+    let refused = some(answers.first(), "the refusal")?;
+    assert_eq!(
+        (refused.get("id"), refused.pointer("/error/code")),
+        (None, Some(&json!(-32600)))
+    );
+    assert!(
+        ran.stdout
+            .contains("the line is longer than the request limit of 16 bytes"),
+        "{}",
+        ran.stdout
+    );
+    assert_eq!(transport.posts()?, Vec::new());
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_line_over_the_limit_gets_an_error_and_is_never_forwarded() -> TestResult {
     let transport = FakeTransport::echoing();
