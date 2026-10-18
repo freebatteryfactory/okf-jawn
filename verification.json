@@ -52,6 +52,24 @@
         "path": "server → jsonwebtoken (rust_crypto) → rsa"
       },
       {
+        "id": "RUSTSEC-2026-0367",
+        "crate": "zip",
+        "label": "extraction keeps SUID and SGID bits; no archive is extracted to disk",
+        "path": "storage, ingest; calamine and docling (zip ^8.6)"
+      },
+      {
+        "id": "RUSTSEC-2026-0368",
+        "crate": "zip",
+        "label": "extraction writes symlinks outside the destination; no archive is extracted to disk",
+        "path": "storage, ingest; calamine and docling (zip ^8.6)"
+      },
+      {
+        "id": "RUSTSEC-2026-0369",
+        "crate": "zip",
+        "label": "extraction applies permissions through symlinks; no archive is extracted to disk",
+        "path": "storage, ingest; calamine and docling (zip ^8.6)"
+      },
+      {
         "id": "GHSA-vfj7-8cjw-p6xm",
         "package": "braces@3.0.3",
         "label": "build-time tooling",
