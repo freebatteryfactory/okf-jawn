@@ -5,9 +5,13 @@
 //! followed by a read of the row that holds that id, so the unique column, not a lookup, makes
 //! a repeated id a no-op that returns the prior row. A job's wire `Job` is kept as JSON with its
 //! state, scope and lease in columns; the specification and initiator are kept exactly as
-//! written and handed back unchanged on every claim. The job lease is `JOB_LEASE_SECONDS`. A
-//! job its running claim sealed (`seal`, the `sealed` column of records schema 4) refuses its
-//! cancellation, in the cancellation's own transaction, while it is queued or running.
+//! written and handed back unchanged on every claim. The job lease is `JOB_LEASE_SECONDS`.
+//! `create_job` refuses, before it inserts, a job of a workspace a purge names (`purge::guard`)
+//! and an import, redigest or restore job of an archived workspace
+//! (`catalog::refuse_content_job_while_archived`), a repeated id included; `retry_job` refuses
+//! to queue such a job again for an archived workspace by the same check, in its own
+//! transaction. A job its running claim sealed (`seal`, the `sealed` column of records schema 4) refuses its cancellation, in
+//! the cancellation's own transaction, while it is queued or running.
 
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::events::Receipt;
@@ -25,6 +29,7 @@ use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{ObjectInfo, Page, Provenance, StorageScope};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
+use crate::catalog;
 use crate::db::{
     Db, conflict, cursor, internal, job_scope_key, json, not_found, page_limit, paged, scope_key,
     sql, to_i64, to_u64,
@@ -97,10 +102,18 @@ impl RecordStore for SqliteRecords {
         // A job of a workspace a purge names is refused inside the transaction that would
         // record it (`purge::guard`), as are its retries and claims: core cancels and drains
         // the jobs that already run.
+        // An archived workspace accepts no import, redigest or restore job, refused in the same
+        // transaction, so an archive racing this insert is ordered by the database (`catalog`).
         Box::pin(self.db.transaction(move |transaction| {
             let (tenant, workspace) = job_scope_key(&scope);
             if let Some(workspace) = &workspace {
                 guard::refuse(transaction, &tenant, workspace)?;
+                catalog::refuse_content_job_while_archived(
+                    transaction,
+                    &tenant,
+                    workspace,
+                    job.spec.kind(),
+                )?;
             }
             insert_job(transaction, &scope, &job)
         }))
@@ -872,6 +885,14 @@ fn control(
         )
         .map_err(|error| sql(&error))?;
     let mut job = decode_job(&record)?;
+    // A failed content job holds no archive off, so the archive may have landed since: the retry
+    // refuses to queue it again in an archived workspace, in this transaction, as an insert does
+    // (a repeated id included).
+    if action == "retry"
+        && let Some(workspace) = &workspace
+    {
+        catalog::refuse_content_job_while_archived(transaction, &tenant, workspace, job.kind)?;
+    }
     if inserted == 0 {
         return Ok(job);
     }

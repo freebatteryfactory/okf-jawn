@@ -32,7 +32,7 @@ use okf_jawn_contract::common::{MutationResult, PageRequest};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::events::{EventKind, Receipt, ReceiptAudience};
 use okf_jawn_contract::identity::{
-    At, ItemId, MutationId, ReceiptId, Revision, Timestamp, WorkspacePath,
+    At, ItemId, MutationId, ReceiptId, Revision, TenantId, Timestamp, WorkspacePath,
 };
 use okf_jawn_contract::item::ItemDocument;
 use okf_jawn_contract::metadata::OperationName;
@@ -108,6 +108,24 @@ pub(super) fn workspace_scope(context: &OperationContext) -> Result<StorageScope
             ApiError::new(
                 ErrorCode::Internal,
                 "the operation was authorized for no workspace",
+            )
+        })
+}
+
+/// The tenant the operation was authorized at (its `Deployment` target).
+///
+/// # Errors
+/// Returns `Internal` when dispatch authorized no tenant, which only a request without a
+/// `Deployment` target could cause.
+pub(super) fn tenant_scope(context: &OperationContext) -> Result<TenantId, ApiError> {
+    context
+        .tenant
+        .as_ref()
+        .map(|grant| grant.tenant_id.clone())
+        .ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::Internal,
+                "the operation was authorized for no tenant",
             )
         })
 }
@@ -273,9 +291,10 @@ pub(super) async fn commit(
 }
 
 /// Name the request's `/base_revision` on the store's refusal of a base that is not the head
-/// (`ErrorDetail::StaleBase`); every request this module commits names its base so. The store
-/// names no field on that refusal (`VersionStore::commit`): the field is the caller's to name.
-fn on_the_base(error: ApiError) -> ApiError {
+/// (`ErrorDetail::StaleBase`); every request this module commits names its base so, and so do
+/// the workspace metadata changes (`WorkspaceCatalog::update`, `archive`). The store names no
+/// field on that refusal (`VersionStore::commit`): the field is the caller's to name.
+pub(super) fn on_the_base(error: ApiError) -> ApiError {
     if matches!(error.detail.as_deref(), Some(ErrorDetail::StaleBase { .. })) {
         error.with_field("/base_revision")
     } else {

@@ -766,7 +766,7 @@ mod tests {
     use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
     use okf_jawn_contract::error::{ApiError, ErrorCode};
     use okf_jawn_contract::events::{Event, ListEventsResponse};
-    use okf_jawn_contract::identity::{Digest, MutationId, TenantId, WorkspaceId};
+    use okf_jawn_contract::identity::{Digest, MutationId, TenantId, Timestamp, WorkspaceId};
     use okf_jawn_contract::metadata::OperationName;
     use okf_jawn_core::access::AccessControl;
     use okf_jawn_core::context::{OperationContext, TenantGrant, WorkspaceGrant};
@@ -788,6 +788,12 @@ mod tests {
                     -> PortFuture<'a, $response> {
                     Box::pin(async { Err(not_reached()) })
                 })*
+
+                /// Dispatch asks this only after authorization, which these tests never pass.
+                fn archived_at<'a>(&'a self, _scope: &'a StorageScope)
+                    -> PortFuture<'a, Option<Timestamp>> {
+                    Box::pin(async { Err(not_reached()) })
+                }
             }
         };
     }

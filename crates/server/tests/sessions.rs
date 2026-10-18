@@ -12,7 +12,7 @@ use axum::http::{Request, StatusCode};
 use axum::response::Response;
 use okf_jawn_contract::access::{AccessRoute, CSRF_HEADER, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::events::{Event, EventKind, ListEventsResponse};
+use okf_jawn_contract::events::{Event, EventActor, EventKind, ListEventsResponse};
 use okf_jawn_contract::identity::{MutationId, TenantId, Timestamp};
 use okf_jawn_core::credentials::{CredentialStore, SessionRecord};
 use okf_jawn_core::events::{EventLog, EventQuery, EventScope, NewEvent};
@@ -225,6 +225,24 @@ async fn the_launch_token_opens_a_strict_http_only_session_and_records_the_sign_
         event.actor.as_ref().map(|actor| actor.route.clone()),
         Some(AccessRoute::LocalOwner)
     );
+    // Every field, written out: the session's principal as the actor, and nothing else.
+    let expected = NewEvent {
+        kind: EventKind::SignedIn,
+        revision: None,
+        item_id: None,
+        job_id: None,
+        connector_id: None,
+        actor: Some(EventActor {
+            subject: OWNER.to_owned(),
+            route: AccessRoute::LocalOwner,
+            client_id: None,
+        }),
+        operation: None,
+        proposal_id: None,
+        count: None,
+    };
+    assert_eq!(event, &expected);
+    assert_eq!(appended.len(), 1, "one event for one sign-in");
     Ok(())
 }
 
