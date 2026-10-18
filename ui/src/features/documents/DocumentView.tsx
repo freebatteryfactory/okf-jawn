@@ -41,6 +41,13 @@
  * was being edited here, saved or not; else the draft the service holds, which `get_item` answers
  * beside the item at the revision the delete was made on (the last one that holds it). After the
  * discard, keyboard focus is on "Close this tab".
+ *
+ * The notice of a deleted item offers to bring it back (`history/BringBack.tsx`: Rewind of the
+ * item to the last version that held it). Once it is back, the notice leaves; focus that was in
+ * it goes to the page's heading.
+ *
+ * Below the properties, the item's own history is offered on demand (`history/ItemHistory.tsx`):
+ * its Timeline and Who changed each line, at the revision the tab reads.
  */
 import {
   type UseQueryResult,
@@ -78,6 +85,8 @@ import { FailureNotice } from '../errors/FailureNotice';
 import { type FailureRetry, useRetry } from '../errors/retry';
 import type { ItemSelection } from '../explorer/search-params';
 import { useDeletedItem, useExplorerStore } from '../explorer/store';
+import { BringBack } from '../history/BringBack';
+import { ItemHistory } from '../history/ItemHistory';
 import { ItemActions } from '../tree/ItemActions';
 import { ConversionState } from './ConversionState';
 import { describeSelection, short, textLabels } from './describe';
@@ -540,6 +549,13 @@ export function DocumentView({
   useLayoutEffect(() => {
     if (takeHeld(heldInLeft)) (closeRef.current ?? pageHeading())?.focus();
   });
+  // The notice of a deleted item leaves when the item is there again (it was brought back by a
+  // Rewind from this notice): focus that was in it goes to the page's heading, never the body.
+  const heldInDeleted = useRef<HTMLElement | null>(null);
+  const [, deletedRef] = useWatchedPart<HTMLDivElement>(heldInDeleted);
+  useLayoutEffect(() => {
+    if (takeHeld(heldInDeleted)) pageHeading()?.focus();
+  });
   const heldFailure = useRetry({
     request: `${workspaceId}/${itemId}`,
     failed: gone && lastHeld.isError,
@@ -634,7 +650,7 @@ export function DocumentView({
       </header>
 
       {deletedTitle !== undefined && (
-        <div role="note" className="notice">
+        <div ref={deletedRef} role="note" className="notice">
           <p>
             <strong>You deleted this item.</strong> It is not in the workspace as it is now; its
             history is kept.{' '}
@@ -648,6 +664,14 @@ export function DocumentView({
           <button type="button" ref={closeRef} onClick={onClose}>
             Close this tab
           </button>
+          {deleted !== undefined && (
+            <BringBack
+              workspaceId={workspaceId}
+              itemId={itemId}
+              title={deleted.title}
+              at={deleted.at}
+            />
+          )}
         </div>
       )}
       {heldFailure.shown && (
@@ -835,6 +859,16 @@ export function DocumentView({
                 </ol>
               </nav>
             </details>
+          )}
+
+          {document !== undefined && (
+            <ItemHistory
+              workspaceId={workspaceId}
+              itemId={itemId}
+              title={title}
+              revision={revision}
+              body={document.body}
+            />
           )}
 
           {textLabels(extraction).map((label) => (
