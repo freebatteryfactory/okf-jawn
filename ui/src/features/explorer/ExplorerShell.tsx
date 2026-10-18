@@ -367,6 +367,7 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
     workspaceId,
     head,
     canWrite,
+    rights: { permissions: workspace.permissions, archivedAt: workspace.archived_at ?? null },
     refresh: headState.refresh,
     onChanged: followSnapshot,
   };

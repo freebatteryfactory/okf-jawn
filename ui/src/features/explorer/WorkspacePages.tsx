@@ -1,6 +1,7 @@
 /**
  * The workspace's own pages, beside its documents: bringing files in (`/import`), its jobs
- * (`/jobs`) and its Attention warnings (`/attention`). Each has a URL, which the router owns.
+ * (`/jobs`), its Attention warnings (`/attention`) and its Timeline (`/timeline`: its versions,
+ * their Changes and Rewind). Each has a URL, which the router owns.
  *
  * A page is shown in place of the documents, between the same navigation and source columns. The
  * open tabs are kept in the Explorer store and are there again under "Documents", which goes back
@@ -17,12 +18,13 @@ import type { MouseEvent } from 'react';
 import type { Revision } from '../../api/generated/types.gen';
 import { AttentionLink } from '../attention/AttentionLink';
 import { AttentionPage } from '../attention/AttentionPage';
+import { TimelineView } from '../history/TimelineView';
 import { ImportPage } from '../imports/ImportPage';
 import { JobsPage } from '../jobs/JobsPage';
 import { DocumentPanes, type DocumentPanesProps } from './DocumentPanes';
 import { type Pane, tabLocation } from './store';
 
-export type WorkspacePage = 'import' | 'jobs' | 'attention';
+export type WorkspacePage = 'import' | 'jobs' | 'attention' | 'timeline';
 
 /**
  * The page the URL names; null when it names the documents.
@@ -36,6 +38,7 @@ export function useWorkspacePage(): WorkspacePage | null {
   if (route === '/w/$workspaceId/import') return 'import';
   if (route === '/w/$workspaceId/jobs') return 'jobs';
   if (route === '/w/$workspaceId/attention') return 'attention';
+  if (route === '/w/$workspaceId/timeline') return 'timeline';
   return null;
 }
 
@@ -53,6 +56,15 @@ export function DocumentsOrPage({
       )}
       {page === 'jobs' && <JobsPage workspaceId={workspaceId} />}
       {page === 'attention' && <AttentionPage workspaceId={workspaceId} head={head} />}
+      {page === 'timeline' && (
+        <TimelineView
+          workspaceId={workspaceId}
+          revision={head}
+          item={null}
+          title="Timeline"
+          level={2}
+        />
+      )}
     </div>
   );
 }
@@ -112,6 +124,9 @@ export function WorkspaceNav({ workspaceId, head, query, documents, onFollow }: 
         Jobs
       </Link>
       <AttentionLink workspaceId={workspaceId} head={head} search={kept} onFollow={onFollow} />
+      <Link to="/w/$workspaceId/timeline" params={params} search={kept} onClick={onFollow}>
+        Timeline
+      </Link>
     </nav>
   );
 }
