@@ -1,8 +1,8 @@
 /**
  * The workspace's own pages, beside its documents: bringing files in (`/import`), its jobs
  * (`/jobs`), its Attention warnings (`/attention`), its Timeline (`/timeline`: its versions,
- * their Changes and Rewind) and its proposals (`/proposals`, and one proposal at
- * `/proposals/<id>`). Each has a URL, which the router owns.
+ * their Changes and Rewind), its proposals (`/proposals`, and one proposal at `/proposals/<id>`)
+ * and its graph (`/graph`). Each has a URL, which the router owns.
  *
  * A page is shown in place of the documents, between the same navigation and source columns. The
  * open tabs are kept in the Explorer store and are there again under "Documents", which goes back
@@ -19,6 +19,7 @@ import type { MouseEvent } from 'react';
 import type { Revision } from '../../api/generated/types.gen';
 import { AttentionLink } from '../attention/AttentionLink';
 import { AttentionPage } from '../attention/AttentionPage';
+import { GraphPage } from '../graph/GraphPage';
 import { TimelineView } from '../history/TimelineView';
 import { ImportPage } from '../imports/ImportPage';
 import { JobsPage } from '../jobs/JobsPage';
@@ -33,6 +34,7 @@ export type WorkspacePage =
   | 'attention'
   | 'timeline'
   | 'proposals'
+  | 'graph'
   | { proposal: string };
 
 /**
@@ -55,6 +57,7 @@ export function useWorkspacePage(): WorkspacePage | null {
   if (route === '/w/$workspaceId/attention') return 'attention';
   if (route === '/w/$workspaceId/timeline') return 'timeline';
   if (route === '/w/$workspaceId/proposals') return 'proposals';
+  if (route === '/w/$workspaceId/graph') return 'graph';
   if (route === '/w/$workspaceId/proposals/$proposalId' && proposalId !== undefined) {
     return { proposal: proposalId };
   }
@@ -76,6 +79,7 @@ export function DocumentsOrPage({
       {page === 'jobs' && <JobsPage workspaceId={workspaceId} />}
       {page === 'attention' && <AttentionPage workspaceId={workspaceId} head={head} />}
       {page === 'proposals' && <ProposalsPage workspaceId={workspaceId} />}
+      {page === 'graph' && <GraphPage workspaceId={workspaceId} head={head} />}
       {typeof page === 'object' && (
         <ProposalPage key={page.proposal} workspaceId={workspaceId} proposalId={page.proposal} />
       )}
@@ -152,6 +156,9 @@ export function WorkspaceNav({ workspaceId, head, query, documents, onFollow }: 
       </Link>
       <Link to="/w/$workspaceId/proposals" params={params} search={kept} onClick={onFollow}>
         Proposals
+      </Link>
+      <Link to="/w/$workspaceId/graph" params={params} search={kept} onClick={onFollow}>
+        Graph
       </Link>
     </nav>
   );
