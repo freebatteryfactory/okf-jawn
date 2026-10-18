@@ -42,8 +42,8 @@ use edit::{Staged, apply, maintain};
 use item::Holder;
 use repo::{
     HEAD_REF, Repositories, commit_of, find_on_line, find_trailer, git, head, internal,
-    materialize, message_with_trailer, reference_target, revision_of, signature, staged_tree,
-    sync_directories,
+    materialize, message_with_trailer, oid_of, reference_target, revision_of, signature,
+    staged_tree, sync_directories,
 };
 
 /// `VersionStore` over one Git repository per workspace.
@@ -395,7 +395,7 @@ impl VersionStore for GitVersions {
                 refuse_locked(&records, scope)?;
                 let repository = repositories.open_durable(scope)?;
                 let name = proposal_reference(proposal_id);
-                let base = oid(&changes.base)?;
+                let base = oid_of(&changes.base)?;
                 commit_of(&repository, &changes.base)?;
                 let retained = reference_target(&repository, &name)?;
                 if let Some(retained) = retained {
@@ -620,7 +620,7 @@ fn promote(
         return Err(moved_head(repository));
     }
     let retained = reference_target(repository, &proposal_reference(promotion.proposal_id))?;
-    let candidate = oid(&promotion.candidate)?;
+    let candidate = oid_of(&promotion.candidate)?;
     if retained != Some(candidate) {
         return Err(ApiError::new(
             ErrorCode::Conflict,
@@ -714,18 +714,15 @@ fn moved_head(repository: &Repository) -> ApiError {
 
 /// The commit an `expected_head` names. One the repository does not hold (stale after a
 /// purge rewrote the line, or never held) cannot be the head, so it answers `Conflict` like a
-/// moved head, not `Unavailable`.
+/// moved head, not `Unavailable`. One that cannot name a commit here at all (64 hex
+/// characters, `repo::oid_of`) is `NotFound`.
 fn held_head(repository: &Repository, expected: &Revision) -> Result<Oid, ApiError> {
-    let id = oid(expected)?;
+    let id = oid_of(expected)?;
     match repository.find_commit(id) {
         Ok(_) => Ok(id),
         Err(error) if error.code() == git2::ErrorCode::NotFound => Err(moved_head(repository)),
         Err(error) => Err(git(&error)),
     }
-}
-
-fn oid(revision: &Revision) -> Result<Oid, ApiError> {
-    Oid::from_str(revision.as_str()).map_err(|error| git(&error))
 }
 
 /// The name of the test-only pause point (`crate::pause`) of a written history under

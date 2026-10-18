@@ -226,6 +226,7 @@ pub(super) async fn create_review(
                 connector_id: None,
                 actor: None,
                 operation: None,
+                transport: None,
                 proposal_id: None,
                 count: None,
             },

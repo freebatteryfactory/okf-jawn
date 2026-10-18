@@ -1703,7 +1703,8 @@ export type Event = {
      */
     kind: EventKind;
     /**
-     * The refused operation of a `permission_denied` event.
+     * The refused operation of a `permission_denied` event; absent when a byte transport was
+     * refused (`transport`).
      */
     operation?: OperationName | null;
     /**
@@ -1714,6 +1715,11 @@ export type Event = {
      * Content revision when applicable.
      */
     revision?: Revision | null;
+    /**
+     * The refused byte transport of a `permission_denied` event (a download, or an upload's
+     * bytes, which are not operations); `operation` is then absent.
+     */
+    transport?: TransportName | null;
     /**
      * Workspace whose permissions and storage scope apply; absent for a tenant-level event.
      */
@@ -2642,6 +2648,10 @@ export type Link = {
      * Linking item.
      */
     from: ItemId;
+    /**
+     * The linking item's path at the revision read, so a backlink is shown by its name.
+     */
+    from_path: WorkspacePath;
     /**
      * Link label.
      */
@@ -4171,7 +4181,8 @@ export type ResolveViewRequest = {
      */
     item_id: ItemId;
     /**
-     * Only live views may request current input resolution.
+     * Only live views may request current input resolution; `true` on a pinned View is
+     * `invalid_input` on `/refresh_live`.
      */
     refresh_live: boolean;
     /**
@@ -4257,7 +4268,8 @@ export type RestoreRequest = {
 /**
  * Fill a blank workspace of this installation from an uploaded workspace archive.
  *
- * The restore keeps item ids, rewrites View bindings to this workspace, gives each draft
+ * The restore keeps item ids (a View's file names no workspace, so a restored View binds to
+ * this one), gives each draft
  * whose editor is a validated subject with `write` here back to that editor, and keeps the
  * others in the archive, unassigned and counted. An archive of this tenant whose workspace
  * still exists, or has a purge record, is refused: purged content never comes back through
@@ -4893,6 +4905,12 @@ export type TextRange = {
 export type Timestamp = string;
 
 /**
+ * A byte transport by name, as a refused one is recorded (`Event::transport`); each is one entry
+ * of `TRANSPORTS`, whose `id` is its `as_str`.
+ */
+export type TransportName = 'upload_content' | 'download_object' | 'download_artifact' | 'download_tenant_artifact';
+
+/**
  * A user-defined type schema and UI hints.
  */
 export type TypeDefinition = {
@@ -5099,7 +5117,7 @@ export type ViewBinding = {
  */
 export type ViewDocument = {
     /**
-     * Cited input datasets and passages.
+     * Cited input datasets and passages, at most `MAX_VIEW_BINDINGS`.
      */
     bindings: Array<ViewBinding>;
     /**

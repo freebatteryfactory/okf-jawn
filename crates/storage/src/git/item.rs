@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use okf_core::yaml::{Mapping, Value as Yaml};
 use okf_core::{Document, Frontmatter};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath};
+use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath, collision_key_of};
 use okf_jawn_contract::item::{APP_HEADER_KEY, ItemKind, ItemStatus, ItemSummary};
 use okf_jawn_contract::source::SourceAppearance;
 use okf_jawn_core::items::ApplicationHeader;
@@ -242,7 +242,9 @@ impl Respelled {
     /// spelled another way (one that differs from it in how its characters are encoded only
     /// macOS would merge with it), two spellings that differ only in letter case (Windows and
     /// macOS keep them as one), or two names that differ in how their characters are encoded,
-    /// Unicode normalization (only macOS keeps those as one), alone or with letter case.
+    /// Unicode normalization (only macOS keeps those as one), alone or with letter case. When the
+    /// NFC of either is not known here (`nfc`: a segment Windows refuses), the words say only
+    /// that they differ in how their characters are encoded.
     fn what(&self) -> &'static str {
         if self.server && self.encoded() {
             "spells a path the server writes another way, which macOS would merge with it"
@@ -251,22 +253,38 @@ impl Respelled {
              it"
         } else if !self.encoded() {
             "holds two spellings of one path, which Windows and macOS keep as one"
-        } else if nfc(&self.path) == nfc(&self.other) {
-            "holds two names that differ only in how their characters are encoded, which macOS \
-             keeps as one"
         } else {
-            "holds two names that differ in letter case and in how their characters are encoded, \
-             which macOS keeps as one"
+            match (nfc(&self.path), nfc(&self.other)) {
+                (Some(path), Some(other)) if path == other => {
+                    "holds two names that differ only in how their characters are encoded, which \
+                     macOS keeps as one"
+                }
+                (Some(_), Some(_)) => {
+                    "holds two names that differ in letter case and in how their characters are \
+                     encoded, which macOS keeps as one"
+                }
+                _ => {
+                    "holds two names that differ in how their characters are encoded, which macOS \
+                     keeps as one"
+                }
+            }
         }
     }
 
     /// Whether the two spellings differ beyond letter case: in how their characters are
     /// encoded, which only normalization makes one (they share a collision key). That is so
-    /// when either is not in NFC (`nfc`), even where lower-casing alone would make them one:
-    /// the Kelvin sign (U+212A) lower-cases to `k` but is `K` in NFC, and NTFS keeps it apart
-    /// from both, so `\u{212A}` beside `k` is not a pair that Windows keeps as one.
+    /// when their lower-case spellings differ (two spellings with one key whose lower cases
+    /// differ are not both in NFC), and when either is not in NFC (`nfc`), even where
+    /// lower-casing alone would make them one: the Kelvin sign (U+212A) lower-cases to `k` but is
+    /// `K` in NFC, and NTFS keeps it apart from both, so `\u{212A}` beside `k` is not a pair that
+    /// Windows keeps as one. Known limit: a segment whose NFC is not known here counts by the
+    /// first test alone, so a Kelvin sign in a segment Windows refuses, beside `k`, reads as a
+    /// pair Windows keeps as one; the pair is refused all the same.
     fn encoded(&self) -> bool {
-        nfc(&self.path) != self.path || nfc(&self.other) != self.other
+        self.path.to_lowercase() != self.other.to_lowercase()
+            || [&self.path, &self.other]
+                .into_iter()
+                .any(|spelling| nfc(spelling).is_some_and(|normal| normal != *spelling))
     }
 }
 
@@ -319,11 +337,11 @@ fn in_lower_case(path: &str) -> Option<String> {
 /// `notes/INDEX.md` is the folder index every commit regenerates, so an item there would be
 /// overwritten, and a folder `a/INDEX.MD/` would merge with the file `a/index.md`.
 pub(crate) fn is_reserved(path: &str) -> bool {
-    collision_key(path).split('/').any(|segment| {
+    collision_key_of(path).split('/').any(|segment| {
         segment == APP_DIR
             || okf_core::RESERVED_FILENAMES
                 .iter()
-                .any(|reserved| collision_key(reserved) == segment)
+                .any(|reserved| collision_key_of(reserved) == segment)
     })
 }
 
@@ -345,7 +363,7 @@ pub(crate) fn respelled<'a>(files: impl IntoIterator<Item = &'a str>) -> Option<
     // Every spelling once, so two paths with one key are two spellings of it.
     let mut keys = BTreeMap::new();
     for path in paths {
-        if let Some(other) = keys.insert(collision_key(path), path) {
+        if let Some(other) = keys.insert(collision_key_of(path), path) {
             return Some(Respelled {
                 path: path.to_owned(),
                 other: other.to_owned(),
@@ -364,7 +382,7 @@ fn respelled_server_name(path: &str) -> Option<Respelled> {
     let mut tree = String::new();
     let mut server = String::new();
     for segment in path.split('/') {
-        let key = collision_key(segment);
+        let key = collision_key_of(segment);
         let written = server_writes(&server, &key);
         if !tree.is_empty() {
             tree.push('/');
@@ -417,37 +435,19 @@ fn is_item_id(text: &str) -> bool {
     uuid::Uuid::parse_str(text).is_ok_and(|id| id.to_string() == text)
 }
 
-/// The key two paths collide on (`WorkspacePath::collision_key`: NFC, then lower case), for a
-/// path of a tree whether or not it is a valid workspace path. A path that is not one (not in
-/// NFC, or with a segment Windows refuses) is keyed segment by segment: a segment that is a
-/// valid path once in NFC (`WorkspacePath::from_supplied`, contract's only NFC) gets its key,
-/// so `café` and `cafe` with a combining accent collide; one that is not valid even in NFC (a
-/// reserved character, a trailing dot or space, a device name) is lower-cased without NFC.
-pub(crate) fn collision_key(path: &str) -> String {
-    WorkspacePath::try_from(path.to_owned()).map_or_else(
-        |_| {
-            path.split('/')
-                .map(|segment| {
-                    WorkspacePath::from_supplied(segment)
-                        .map_or_else(|_| segment.to_lowercase(), |valid| valid.collision_key())
-                })
-                .collect::<Vec<_>>()
-                .join("/")
-        },
-        |valid| valid.collision_key(),
-    )
-}
-
-/// `path` in NFC, segment by segment as `collision_key` normalizes it: a segment that is not a
-/// valid path even in NFC is kept as it is.
-fn nfc(path: &str) -> String {
+/// `path` in NFC, segment by segment; `None` when a segment is not a valid path even in NFC (a
+/// reserved character, a trailing dot or space, a device name). Storage's only NFC is the
+/// contract's `WorkspacePath::from_supplied`, which validates, so the NFC of such a segment is
+/// not known here (the wording of `Respelled::what` says only what is known then).
+fn nfc(path: &str) -> Option<String> {
     path.split('/')
         .map(|segment| {
             WorkspacePath::from_supplied(segment)
-                .map_or_else(|_| segment.to_owned(), |valid| valid.as_str().to_owned())
+                .ok()
+                .map(|valid| valid.as_str().to_owned())
         })
-        .collect::<Vec<_>>()
-        .join("/")
+        .collect::<Option<Vec<_>>>()
+        .map(|segments| segments.join("/"))
 }
 
 /// `path` as a refusal shows it: with `escaped`, every character that is not ASCII written as

@@ -327,6 +327,7 @@ fn links_of(
             });
             links.push(Link {
                 from: file.header.item_id,
+                from_path: path.clone(),
                 to_path: link.target.clone(),
                 to,
                 label: link.text.clone(),
@@ -496,7 +497,7 @@ fn read_links(
 ) -> Result<Vec<Link>, ApiError> {
     let mut statement = connection
         .prepare(&format!(
-            "SELECT source_item, target_path, target_item, label, line FROM index_links
+            "SELECT source_item, source_path, target_path, target_item, label, line FROM index_links
              WHERE tenant_id = ?1 AND workspace_id = ?2 AND revision = ?3 AND {column} = ?4
              ORDER BY rowid"
         ))
@@ -506,18 +507,20 @@ fn read_links(
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
             ))
         })
         .map_err(|error| sql(&error))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| sql(&error))?;
     rows.into_iter()
-        .map(|(from, to_path, to, label, line)| {
+        .map(|(from, from_path, to_path, to, label, line)| {
             Ok(Link {
                 from: from_text!(from.as_str())?,
+                from_path: from_text!(from_path.as_str())?,
                 to_path,
                 to: to.map(|to| from_text!(to.as_str())).transpose()?,
                 label,

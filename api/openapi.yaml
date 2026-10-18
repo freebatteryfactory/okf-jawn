@@ -2195,7 +2195,9 @@ components:
           anyOf:
           - $ref: '#/components/schemas/OperationName'
           - type: 'null'
-          description: The refused operation of a `permission_denied` event.
+          description: |-
+            The refused operation of a `permission_denied` event; absent when a byte transport was
+            refused (`transport`).
         proposal_id:
           anyOf:
           - $ref: '#/components/schemas/ProposalId'
@@ -2206,6 +2208,13 @@ components:
           - $ref: '#/components/schemas/Revision'
           - type: 'null'
           description: Content revision when applicable.
+        transport:
+          anyOf:
+          - $ref: '#/components/schemas/TransportName'
+          - type: 'null'
+          description: |-
+            The refused byte transport of a `permission_denied` event (a download, or an upload's
+            bytes, which are not operations); `operation` is then absent.
         workspace_id:
           anyOf:
           - $ref: '#/components/schemas/WorkspaceId'
@@ -3148,7 +3157,12 @@ components:
         description: An appearance of immutable source bytes.
         type: string
       - const: view
-        description: A source-bound declarative visual artifact.
+        description: |-
+          A source-bound declarative visual artifact. Its file is an OKF concept: the `title`
+          property, then a body that is the View's description as Markdown followed by exactly one
+          fenced code block whose info string is `json okf-jawn-view`, holding `schema_version`, `mode`,
+          `grammar`, `bindings` (without `workspace_id`, `locations` or `materialized`, which the
+          server derives), `spec` and `charts`; the block ends the body.
         type: string
     ItemStatus:
       description: |-
@@ -3441,6 +3455,9 @@ components:
         from:
           $ref: '#/components/schemas/ItemId'
           description: Linking item.
+        from_path:
+          $ref: '#/components/schemas/WorkspacePath'
+          description: The linking item's path at the revision read, so a backlink is shown by its name.
         label:
           description: Link label.
           type: string
@@ -3459,6 +3476,7 @@ components:
           type: string
       required:
       - from
+      - from_path
       - to_path
       - label
       - line
@@ -5498,7 +5516,9 @@ components:
           $ref: '#/components/schemas/ItemId'
           description: Stable application item identity; paths remain the portable OKF identity.
         refresh_live:
-          description: Only live views may request current input resolution.
+          description: |-
+            Only live views may request current input resolution; `true` on a pinned View is
+            `invalid_input` on `/refresh_live`.
           type: boolean
         workspace_id:
           $ref: '#/components/schemas/WorkspaceId'
@@ -5604,7 +5624,8 @@ components:
       description: |-
         Fill a blank workspace of this installation from an uploaded workspace archive.
 
-        The restore keeps item ids, rewrites View bindings to this workspace, gives each draft
+        The restore keeps item ids (a View's file names no workspace, so a restored View binds to
+        this one), gives each draft
         whose editor is a validated subject with `write` here back to that editor, and keeps the
         others in the archive, unassigned and counted. An archive of this tenant whose workspace
         still exists, or has a purge record, is refused: purged content never comes back through
@@ -6384,6 +6405,23 @@ components:
       format: date-time
       pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-5][0-9]:[0-5][0-9]\.[0-9]{3}Z$
       type: string
+    TransportName:
+      description: |-
+        A byte transport by name, as a refused one is recorded (`Event::transport`); each is one entry
+        of `TRANSPORTS`, whose `id` is its `as_str`.
+      oneOf:
+      - const: upload_content
+        description: '`upload_content`.'
+        type: string
+      - const: download_object
+        description: '`download_object`.'
+        type: string
+      - const: download_artifact
+        description: '`download_artifact`.'
+        type: string
+      - const: download_tenant_artifact
+        description: '`download_tenant_artifact`.'
+        type: string
     TypeDefinition:
       additionalProperties: false
       description: A user-defined type schema and UI hints.
@@ -6690,9 +6728,10 @@ components:
       description: An editable visual artifact with prose and explicit source bindings.
       properties:
         bindings:
-          description: Cited input datasets and passages.
+          description: Cited input datasets and passages, at most `MAX_VIEW_BINDINGS`.
           items:
             $ref: '#/components/schemas/ViewBinding'
+          maxItems: 50
           type: array
         charts:
           additionalProperties: true
@@ -12808,7 +12847,7 @@ paths:
       - session
       x-agent-alias: ''
       x-agent-tool: false
-      x-allowed-while-archived: false
+      x-allowed-while-archived: true
       x-cli-alias: null
       x-human-session-only: false
       x-local-owner-only: true
