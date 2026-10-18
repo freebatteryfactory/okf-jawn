@@ -49,7 +49,9 @@ use crate::proposals::ProposalStore;
 use crate::readiness::ReadinessProbe;
 use crate::sandbox::SandboxCapabilityStore;
 use crate::search::SearchIndex;
-use crate::storage::{BlobStore, CandidateCheck, StorageScope, VersionStore, WorkspaceCatalog};
+use crate::storage::{
+    Backups, BlobStore, CandidateCheck, StorageScope, VersionStore, WorkspaceCatalog,
+};
 use crate::uploads::UploadStore;
 
 pub use reviews::CONFIRMATION_TTL;
@@ -319,6 +321,10 @@ pub struct Ports {
     pub sandbox: Arc<dyn SandboxCapabilityStore>,
     /// Configured dependency readiness.
     pub readiness: Arc<dyn ReadinessProbe>,
+    /// Workspace and installation archives; the `download_tenant_artifact` transport reads an
+    /// installation archive back through it (`Backups::open_installation_archive`), since the
+    /// blob store is workspace-scoped.
+    pub backups: Arc<dyn Backups>,
 }
 
 /// Deployment settings the operations need beyond the ports.

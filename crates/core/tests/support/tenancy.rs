@@ -239,9 +239,10 @@ impl Tenancy {
             events: log.clone(),
             credentials: credentials.clone(),
             drafts: world.drafts.clone(),
-            confirmations: unused,
+            confirmations: unused.clone(),
             sandbox: world.sandbox.clone(),
             readiness: world.readiness.clone(),
+            backups: unused,
         };
         let service = ApplicationService::new(ports, config)?;
         Ok(Self {
