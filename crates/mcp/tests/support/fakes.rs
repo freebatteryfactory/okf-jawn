@@ -4,7 +4,9 @@
 //! a configured outcome per object digest first, and records who called what with which
 //! request, and the whole principal of each call's context. `FakeAccess` grants each known subject a fixed permission set on every workspace
 //! but the ones it refuses, and on the tenant, so dispatch's own route and permission rules
-//! decide. `FakeLedger` always begins a new mutation. `FakeEvents` records every append.
+//! decide. `FakeLedger` always begins a new mutation. `FakeEvents` records every append. No
+//! workspace is archived here: `FakeApplication` answers every archive question "live", and
+//! the archive rule is core dispatch's, tested in core.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -12,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use okf_jawn_contract::access::{Permission, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::{Event, ListEventsResponse};
-use okf_jawn_contract::identity::{Digest, MutationId, WorkspaceId};
+use okf_jawn_contract::identity::{Digest, MutationId, Timestamp, WorkspaceId};
 use okf_jawn_core::access::AccessControl;
 use okf_jawn_core::context::{OperationContext, TenantGrant, WorkspaceGrant};
 use okf_jawn_core::dispatch::new_mutation_id;
@@ -32,6 +34,12 @@ macro_rules! fake_operations {
                 -> PortFuture<'a, $response> {
                 Box::pin(async move { self.answer(stringify!($id), context, &request) })
             })*
+
+            /// Every workspace is live: no test of this crate archives one.
+            fn archived_at<'a>(&'a self, _scope: &'a StorageScope)
+                -> PortFuture<'a, Option<Timestamp>> {
+                Box::pin(async { Ok(None) })
+            }
         }
     };
 }

@@ -3,7 +3,9 @@
 //! A session is opened in one place (`open`): a fresh secret from the operating system's random
 //! source becomes the cookie, its SHA-256 the stored session id (`CredentialStore::insert_session`),
 //! and a `signed_in` event naming the subject and route is appended to the tenant's log before the
-//! cookies are sent; a sign-in that cannot be recorded is undone and refused. Locally the session's
+//! cookies are sent, by core's one rule for it (`okf_jawn_core::events::record_sign_in`, which
+//! `ApplicationService::record_sign_in` applies too); a sign-in that cannot be recorded is undone
+//! and refused. Locally the session's
 //! principal is the persistent installation identity with route `LocalOwner`; hosted it is the
 //! AuthKit user in their organization with route `BrowserSession`. No other route ever gets a
 //! session. A hosted sign-in in progress lives in its browser's cookie, never on the server
@@ -24,10 +26,9 @@ use getrandom::fill;
 use okf_jawn_contract::access::{AccessRoute, Principal};
 use okf_jawn_contract::common::Empty;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::events::{EventActor, EventKind};
 use okf_jawn_contract::identity::{TenantId, Timestamp};
 use okf_jawn_core::credentials::{CredentialStore, SessionRecord, secret_hash};
-use okf_jawn_core::events::{EventLog, EventScope, NewEvent};
+use okf_jawn_core::events::{EventLog, record_sign_in};
 use time::OffsetDateTime;
 
 use crate::SessionId;
@@ -162,34 +163,6 @@ pub fn routes(sessions: Sessions) -> Router {
             .route(CALLBACK_PATH, get(complete_login)),
     };
     router.with_state(sessions)
-}
-
-/// Append `signed_in` for `principal` to its tenant's log.
-///
-/// The one place the server records a sign-in. It is replaced by core's
-/// `ApplicationService::record_sign_in` when that method lands (core M1.4, Stage 1b design
-/// section 7); until then it appends through `EventLog` directly.
-///
-/// # Errors
-/// Returns the log's error.
-pub async fn record_sign_in(events: &dyn EventLog, principal: &Principal) -> Result<(), ApiError> {
-    let scope = EventScope::Tenant(principal.tenant_id.clone());
-    let event = NewEvent {
-        kind: EventKind::SignedIn,
-        revision: None,
-        item_id: None,
-        job_id: None,
-        connector_id: None,
-        actor: Some(EventActor {
-            subject: principal.subject.clone(),
-            route: principal.route.clone(),
-            client_id: principal.client_id.clone(),
-        }),
-        operation: None,
-        proposal_id: None,
-        count: None,
-    };
-    events.append(&scope, None, event).await.map(|_| ())
 }
 
 /// Exchange the launch token for the local owner's session. Only a `GET` takes the token: a

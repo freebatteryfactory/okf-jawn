@@ -1,15 +1,12 @@
 //! The `purge_ledger` scenarios again (core M1.4b, ruling P6), through `ApplicationService`
 //! composed over the real data directory instead of a test application: core's dispatch, the
-//! service's own `purge_workspace`, `create_item` and `save_draft`, and every storage adapter.
+//! service's own `create_workspace`, `purge_workspace`, `create_item` and `save_draft`, and
+//! every storage adapter.
 //! The purge empties the completed ledger rows of the purged workspace, keeps its own, touches
 //! no other workspace's row; a purge asked for again after it completed answers it, and one
 //! asked for again after its job failed is resumed through the store's retry of a tenant job.
 //!
-//! Two stand-ins, said here rather than hidden:
-//! - `create_workspace` is not built on this branch (core M1.4a builds it in parallel), so
-//!   `Composed` answers it with the one catalog call its contract names
-//!   (`WorkspaceCatalog::create` under the request's mutation), as `purge_ledger.rs`'s harness
-//!   does. Every other operation goes to `ApplicationService`. Once M1.4a lands, that arm goes.
+//! One stand-in, said here rather than hidden:
 //! - The purge's tenant job is carried out as ingest's purge handler does (`carry_out`): claimed,
 //!   its purge marked running, the purger called with the job's mutation, the report recorded
 //!   and the job completed; or, when the purger fails, the purge recorded `Failed` with its
@@ -30,11 +27,10 @@ use std::time::Duration;
 
 use check::{TestResult, err_of, some};
 use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
-use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
-use okf_jawn_contract::identity::{JobId, MutationId, TenantId, WorkspaceId};
+use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::identity::{JobId, MutationId, TenantId, Timestamp, WorkspaceId};
 use okf_jawn_contract::import::JobState;
 use okf_jawn_contract::purge::{Purge, PurgeState};
-use okf_jawn_contract::workspace::{CreateWorkspaceRequest, Workspace};
 use okf_jawn_core::access::AccessControl;
 use okf_jawn_core::application::{ApplicationConfig, ApplicationService, Ports};
 use okf_jawn_core::context::{Attempt, OperationContext, TenantGrant, WorkspaceGrant};
@@ -45,9 +41,7 @@ use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
 use okf_jawn_core::drafts::DraftStore;
 use okf_jawn_core::jobs::{JobCompletion, JobQueue, JobScope, JobSpec, RecordStore};
 use okf_jawn_core::ports::{Application, PortFuture};
-use okf_jawn_core::storage::{
-    LocalSource, NewWorkspace, Provenance, Purger, StorageScope, WorkspaceCatalog,
-};
+use okf_jawn_core::storage::{LocalSource, Purger, StorageScope, WorkspaceCatalog};
 use okf_jawn_storage::Storage;
 use serde_json::{Value, json};
 
@@ -60,20 +54,16 @@ macro_rules! composed_operations {
                 -> PortFuture<'a, $response> {
                 Box::pin(async move {
                     self.ran(stringify!($id), context)?;
-                    handler!($id, self, context, request)
+                    self.service.$id(context, request).await
                 })
             })*
-        }
-    };
-}
 
-/// Where one operation goes: `create_workspace` to the stand-in, every other to the service.
-macro_rules! handler {
-    (create_workspace, $composed:ident, $context:ident, $request:ident) => {
-        $composed.create_workspace($context, $request).await
-    };
-    ($id:ident, $composed:ident, $context:ident, $request:ident) => {
-        $composed.service.$id($context, $request).await
+            /// The service's own answer, from its catalog: a wrapper delegates every port method.
+            fn archived_at<'a>(&'a self, scope: &'a StorageScope)
+                -> PortFuture<'a, Option<Timestamp>> {
+                self.service.archived_at(scope)
+            }
+        }
     };
 }
 
@@ -198,30 +188,6 @@ impl Composed {
             .filter(|run| run.operation == operation)
             .cloned()
             .collect())
-    }
-
-    /// The stand-in for `create_workspace` (core M1.4a): the one catalog call its contract
-    /// names, under the request's mutation.
-    async fn create_workspace(
-        &self,
-        context: &OperationContext,
-        request: CreateWorkspaceRequest,
-    ) -> Result<Workspace, ApiError> {
-        let mutation = context
-            .mutation
-            .ok_or_else(|| ApiError::new(ErrorCode::Internal, "a mutation runs under an id"))?;
-        self.storage
-            .catalog()
-            .create(
-                &context.principal.tenant_id,
-                mutation,
-                NewWorkspace {
-                    name: request.name,
-                    description: request.description,
-                    creator: Provenance::from_principal(&context.principal),
-                },
-            )
-            .await
     }
 }
 
@@ -823,9 +789,12 @@ async fn purge_ledger_service_a_purge_stopped_by_a_survivors_unreadable_archive_
     Ok(())
 }
 
-/// The draft's retry re-runs under its own mutation (the purge emptied its row) and the real
-/// handler refuses it: its base revision is one the purge invalidated, so it is the typed
-/// `NotFound` naming the purge, before any store is written. No draft is left.
+/// The draft's retry is refused by dispatch's archive question (core M1.4a), which reads the
+/// catalog after authorization and before the mutation ledger: the catalog no longer holds the
+/// purged workspace, so the answer is its `NotFound`, and neither the ledger nor the handler
+/// sees the retry. No draft is left. (Without that question the retry reached the handler, whose
+/// typed `NotFound` naming the purge core's
+/// `drafts::a_save_checks_its_base_against_the_purge_map_first` pins.)
 #[tokio::test]
 async fn purge_ledger_service_a_retried_mutation_of_the_purged_workspace_is_refused_and_writes_nothing()
 -> TestResult {
@@ -834,21 +803,17 @@ async fn purge_ledger_service_a_retried_mutation_of_the_purged_workspace_is_refu
     let (request, _) = purged.draft.clone();
     let refused = err_of(call(&purged.composed, "save_draft", request).await)?;
     assert_eq!(refused.code, ErrorCode::NotFound, "{}", refused.message);
-    assert_eq!(
-        refused.detail.as_deref(),
-        Some(&ErrorDetail::Invalidated {
-            purge_id: purged.purge.id,
-            replacement: None
-        })
+    assert!(
+        refused.detail.is_none(),
+        "the catalog's refusal, not a handler's: {:?}",
+        refused.detail
     );
     let runs = purged.composed.runs_of("save_draft")?;
-    let (original, retry) = (
-        some(runs.first(), "the draft")?,
-        some(runs.get(1), "the retry")?,
+    assert_eq!(
+        runs.len(),
+        1,
+        "only the original draft ran; the retry reached no handler"
     );
-    assert_eq!(runs.len(), 2);
-    assert_eq!(retry.mutation, original.mutation);
-    assert_eq!(retry.attempt, Attempt::Resumed);
     let scope = StorageScope {
         tenant_id: tenant()?,
         workspace_id: purged.target,

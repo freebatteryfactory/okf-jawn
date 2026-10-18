@@ -21,7 +21,7 @@ use okf_jawn_contract::import::Upload;
 use okf_jawn_core::context::OperationContext;
 use okf_jawn_core::credentials::{CredentialStore, SessionRecord};
 use okf_jawn_core::ports::{Application, PortFuture};
-use okf_jawn_core::storage::ByteReader;
+use okf_jawn_core::storage::{ByteReader, StorageScope};
 use okf_jawn_server::app::{ServiceParts, service};
 use okf_jawn_server::cookies::CrateCookies;
 use okf_jawn_server::events::{EventStreams, last_event_id};
@@ -54,6 +54,13 @@ macro_rules! scripted_operations {
                         .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))
                 })
             })*
+
+            /// Refused like every operation but `list_events`: no mutation is scripted, and a
+            /// read never asks it.
+            fn archived_at<'a>(&'a self, _scope: &'a StorageScope)
+                -> PortFuture<'a, Option<Timestamp>> {
+                Box::pin(async { Err(ApiError::new(ErrorCode::NotImplemented, "not scripted")) })
+            }
         }
     };
 }
@@ -391,6 +398,14 @@ fn page(first: usize, count: usize) -> Value {
         })
         .collect();
     json!({ "events": events })
+}
+
+/// `page` with `cursor` as its `next_cursor`: the page read past events it does not show.
+fn with_cursor(mut page: Value, cursor: &str) -> Value {
+    if let Some(fields) = page.as_object_mut() {
+        fields.insert("next_cursor".to_owned(), json!(cursor));
+    }
+    page
 }
 
 /// Read the stream until it ends or `events` events were seen, giving up after ten seconds; the
@@ -804,6 +819,28 @@ async fn a_backlog_of_three_pages_arrives_without_waiting_between_full_pages() -
     assert!(!ended);
     assert!(seen.contains("id: 201") || seen.contains("id:201"));
     assert_eq!(stream.scripted.asked()?.len(), 3);
+    Ok(())
+}
+
+/// A page that shows one event and carries a cursor past events it read and did not show (a
+/// non-administrator's security events): once its event is delivered, the next poll resumes at
+/// the cursor, not after the delivered event, and comes at once (the interval is an hour).
+#[tokio::test]
+async fn a_page_s_cursor_is_where_the_next_poll_resumes_once_its_events_are_delivered() -> TestResult
+{
+    let stream = Stream::new(NEVER, vec![with_cursor(page(1, 1), "100"), page(101, 1)])?;
+    let response = stream
+        .open(&[("authorization", &format!("Bearer {SECRET}"))])
+        .await?;
+    let (seen, ended) = read(response, 2).await?;
+    assert!(!ended);
+    assert!(
+        seen.contains("id: 101") || seen.contains("id:101"),
+        "{seen}"
+    );
+    let asked = stream.scripted.asked()?;
+    let second = some(asked.get(1), "the second poll")?;
+    assert_eq!(second.get("after"), Some(&json!("100")));
     Ok(())
 }
 

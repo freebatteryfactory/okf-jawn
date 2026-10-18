@@ -304,6 +304,12 @@ impl VersionStore for GitVersions {
         let commit = self.blocking(scope, move |repositories, scope| {
             repositories.locked(scope, || {
                 refuse_locked(&records, scope)?;
+                // A test holds a commit here: under the workspace's lock, before its head
+                // comparison (`crate::pause`).
+                #[cfg(test)]
+                tokio::runtime::Handle::current().block_on(crate::pause::point(
+                    &commit_locked_point(repositories, scope, changes.mutation_id),
+                ))?;
                 let repository = repositories.open_durable(scope)?;
                 let expected = held_head(&repository, &changes.expected_head)?;
                 let current = head(&repository)?;
@@ -733,6 +739,22 @@ fn history_recorded_point(
 ) -> String {
     format!(
         "history-recorded|{}|{}",
+        repositories.path(scope).display(),
+        mutation.0
+    )
+}
+
+/// The name of the test-only pause point (`crate::pause`) of a commit under `mutation`: holding
+/// the workspace's write lock, before its head comparison. It names the workspace's repository
+/// path, unique to each test's data directory.
+#[cfg(test)]
+pub(crate) fn commit_locked_point(
+    repositories: &Repositories,
+    scope: &StorageScope,
+    mutation: MutationId,
+) -> String {
+    format!(
+        "commit-locked|{}|{}",
         repositories.path(scope).display(),
         mutation.0
     )
