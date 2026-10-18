@@ -12,7 +12,7 @@ use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath};
 use okf_jawn_contract::item::{ItemDocument, ItemSummary, TypeDefinition};
 use okf_jawn_contract::source::SourceAppearance;
 use okf_jawn_core::portable::item_content_digest;
-use okf_jawn_core::storage::{FolderListing, Page, Provenance};
+use okf_jawn_core::storage::{FolderListing, Page, Provenance, RulesFile, RulesParseError};
 
 use super::edit::{appearance_file, correction_file, supplied_file};
 use super::history::last_change;
@@ -229,16 +229,33 @@ pub(crate) fn file(
         .transpose()
 }
 
+/// The naming rules file at `revision` (`VersionStore::rules`): its text, and its bytes read as
+/// `NamingRules`. The bytes are read, not the text, so a file that is not UTF-8 never reads as
+/// rules (the text shows U+FFFD where its bad bytes were). A file that does not read is answered
+/// with the reader's message and its 1-based line and column, never as an error.
 pub(crate) fn rules(
     repository: &Repository,
     revision: &Revision,
-) -> Result<Option<NamingRules>, ApiError> {
-    file(repository, revision, RULES_FILE)?
-        .map(|bytes| {
-            yaml_serde::from_slice(&bytes)
-                .map_err(|error| internal(format!("{RULES_FILE} does not parse: {error}")))
-        })
-        .transpose()
+) -> Result<Option<RulesFile>, ApiError> {
+    let Some(bytes) = file(repository, revision, RULES_FILE)? else {
+        return Ok(None);
+    };
+    let parsed = yaml_serde::from_slice::<NamingRules>(&bytes).map_err(|error| {
+        let location = error.location();
+        RulesParseError {
+            message: error.to_string(),
+            line: location
+                .as_ref()
+                .and_then(|at| u32::try_from(at.line()).ok()),
+            column: location
+                .as_ref()
+                .and_then(|at| u32::try_from(at.column()).ok()),
+        }
+    });
+    Ok(Some(RulesFile {
+        text: String::from_utf8_lossy(&bytes).into_owned(),
+        parsed,
+    }))
 }
 
 pub(crate) fn types(

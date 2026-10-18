@@ -376,6 +376,30 @@ pub struct Committed {
     pub warnings: Vec<Warning>,
 }
 
+/// The naming rules file as one revision stores it (`VersionStore::rules`).
+#[derive(Debug, Clone)]
+pub struct RulesFile {
+    /// The file's text. Bytes that are not UTF-8 are replaced with U+FFFD
+    /// (`String::from_utf8_lossy`); such a file never reads as rules (`parsed` is an error).
+    pub text: String,
+    /// The stored bytes read as `NamingRules` (YAML, unknown keys refused), or why they do not
+    /// read. Nothing beyond the reader's own checks is applied here: whether the rules can be
+    /// applied is the application's (`conventions::CompiledRules`).
+    pub parsed: Result<NamingRules, RulesParseError>,
+}
+
+/// Why a stored rules file does not read as `NamingRules`: the reader's message, and where in
+/// the file it stopped when it says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RulesParseError {
+    /// The reader's message.
+    pub message: String,
+    /// The 1-based line the reader stopped at; `None` when it names none.
+    pub line: Option<u32>,
+    /// The 1-based column on that line; `None` when it names none.
+    pub column: Option<u32>,
+}
+
 /// One page of a folder at one revision.
 #[derive(Debug, Clone)]
 pub struct FolderListing {
@@ -498,12 +522,17 @@ pub trait VersionStore: Send + Sync {
         revision: &'a Revision,
         path: &'a WorkspacePath,
     ) -> PortFuture<'a, Vec<u8>>;
-    /// Read the naming rules stored in `.okf/rules.yaml`; `None` when no rules were saved.
+    /// Read the naming rules file `.okf/rules.yaml` at `revision`: `None` when no rules were
+    /// saved there; otherwise the file's text and what reading its bytes as `NamingRules` gave
+    /// (`RulesFile`). A file that does not read as rules (a YAML error, an unknown key, bytes
+    /// that are not UTF-8) is answered with its text and the reader's error, never as an error
+    /// of this call: a person or an import wrote it, and `get_rules` gives it back to be
+    /// repaired. `NotFound` only when the revision itself is unknown.
     fn rules<'a>(
         &'a self,
         scope: &'a StorageScope,
         revision: &'a Revision,
-    ) -> PortFuture<'a, Option<NamingRules>>;
+    ) -> PortFuture<'a, Option<RulesFile>>;
     /// Read every user-defined type definition.
     fn types<'a>(
         &'a self,

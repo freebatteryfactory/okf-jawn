@@ -68,7 +68,6 @@ use std::time::Duration;
 
 use okf_jawn_contract::access::{AccessRoute, Connector, IssuedConnector, Principal};
 use okf_jawn_contract::common::{PageRange, TextRange, Warning};
-use okf_jawn_contract::conventions::NamingRules;
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::events::{Event, ListEventsResponse, Receipt};
 use okf_jawn_contract::extraction::{
@@ -121,7 +120,7 @@ use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
     BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges, Committed,
     DiffQuery, FolderListing, LocalSource, LogQuery, NewWorkspace, ObjectInfo, ObjectRead, Page,
-    Promotion, Provenance, StorageScope, TreeEdit, VersionStore, WorkspaceArchive,
+    Promotion, Provenance, RulesFile, StorageScope, TreeEdit, VersionStore, WorkspaceArchive,
     WorkspaceCatalog, WorkspaceUpdate, replay_warnings_unavailable,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadRecord, UploadStore};
@@ -203,6 +202,8 @@ struct VersionState {
     diff_queries: Vec<DiffQuery>,
     blame_queries: Vec<BlameQuery>,
     list_queries: Vec<(Revision, Option<WorkspacePath>, Page)>,
+    /// The naming rules file each revision holds; a revision with none has no rules saved.
+    rules: Vec<(Revision, RulesFile)>,
 }
 
 /// `BlobStore` over a map of digests to bytes.
@@ -1281,9 +1282,19 @@ impl VersionStore for FakeVersions {
     fn rules<'a>(
         &'a self,
         _scope: &'a StorageScope,
-        _revision: &'a Revision,
-    ) -> PortFuture<'a, Option<NamingRules>> {
-        unused()
+        revision: &'a Revision,
+    ) -> PortFuture<'a, Option<RulesFile>> {
+        // "`None` when no rules were saved there; otherwise the file's text and what reading its
+        // bytes as `NamingRules` gave ... `NotFound` only when the revision itself is unknown."
+        Box::pin(async move {
+            let state = lock_api(&self.state)?;
+            state.require_known(revision)?;
+            Ok(state
+                .rules
+                .iter()
+                .find(|(at, _)| at == revision)
+                .map(|(_, file)| file.clone()))
+        })
     }
     fn types<'a>(
         &'a self,

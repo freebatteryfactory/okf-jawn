@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 use git2::{Oid, Repository};
 use okf_jawn_contract::common::Warning;
-use okf_jawn_contract::conventions::NamingRules;
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::history::{BlameResponse, DiffResponse, LogResponse};
 use okf_jawn_contract::identity::{
@@ -28,8 +27,8 @@ use okf_jawn_contract::item::{ItemDocument, ItemSummary, TypeDefinition};
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
     BlameQuery, CandidateChanges, CandidateCheck, CommitChanges, Committed, DiffQuery,
-    FolderListing, LogQuery, ObjectInfo, Page, Promotion, Provenance, StorageScope, TreeEdit,
-    VersionStore,
+    FolderListing, LogQuery, ObjectInfo, Page, Promotion, Provenance, RulesFile, StorageScope,
+    TreeEdit, VersionStore,
 };
 
 use crate::blobs::{LocalBlobs, file_reader};
@@ -251,7 +250,7 @@ impl VersionStore for GitVersions {
         &'a self,
         scope: &'a StorageScope,
         revision: &'a Revision,
-    ) -> PortFuture<'a, Option<NamingRules>> {
+    ) -> PortFuture<'a, Option<RulesFile>> {
         let revision = revision.clone();
         Box::pin(self.blocking(scope, move |repositories, scope| {
             read::rules(&repositories.open(scope)?, &revision)

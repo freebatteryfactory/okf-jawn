@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use okf_jawn_contract::{
-    conventions::NamingRules,
     error::{ApiError, ErrorCode},
     events::Receipt,
     history::{BlameResponse, DiffResponse, LogResponse},
@@ -31,7 +30,7 @@ use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
     BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges, Committed,
     DiffQuery, FolderListing, LocalSource, LogQuery, ObjectInfo, ObjectRead, Page, Promotion,
-    StorageScope, VersionStore,
+    RulesFile, StorageScope, VersionStore,
 };
 use tokio::io::AsyncReadExt;
 
@@ -128,7 +127,7 @@ impl VersionStore for FakeVersions {
         &'a self,
         _scope: &'a StorageScope,
         _revision: &'a Revision,
-    ) -> PortFuture<'a, Option<NamingRules>> {
+    ) -> PortFuture<'a, Option<RulesFile>> {
         unused()
     }
     fn types<'a>(

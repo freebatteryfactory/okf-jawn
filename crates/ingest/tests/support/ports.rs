@@ -13,7 +13,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use okf_jawn_contract::common::{PageRange, Warning};
-use okf_jawn_contract::conventions::NamingRules;
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::extraction::{ConverterIdentity, FailureReason};
 use okf_jawn_contract::history::{BlameResponse, Commit, DiffResponse, LogResponse};
@@ -34,7 +33,7 @@ use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
     Backups, BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges,
     Committed, DiffQuery, FolderListing, LocalSource, LogQuery, ObjectInfo, ObjectRead, Page,
-    Promotion, Purger, SourceCard, StorageScope, TreeEdit, VersionStore, WrittenArchive,
+    Promotion, Purger, RulesFile, SourceCard, StorageScope, TreeEdit, VersionStore, WrittenArchive,
     replay_warnings_unavailable,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadRecord, UploadStore};
@@ -87,6 +86,8 @@ pub struct FakeVersions {
     pub at_base: Mutex<Vec<SourceCard>>,
     /// The warnings the check gave for each commit this store wrote, by its mutation.
     pub warnings: Mutex<Vec<(MutationId, Vec<Warning>)>>,
+    /// The naming rules file every revision holds; `None` is no rules saved.
+    pub rules: Mutex<Option<RulesFile>>,
 }
 
 /// An `UploadStore` holding uploads and recording which job consumed each.
@@ -273,6 +274,7 @@ impl FakeVersions {
             on_commit: Mutex::new(None),
             at_base: Mutex::new(Vec::new()),
             warnings: Mutex::new(Vec::new()),
+            rules: Mutex::new(None),
         }
     }
 
@@ -861,8 +863,15 @@ impl VersionStore for FakeVersions {
         &'a self,
         _scope: &'a StorageScope,
         _revision: &'a Revision,
-    ) -> PortFuture<'a, Option<NamingRules>> {
-        unused("rules")
+    ) -> PortFuture<'a, Option<RulesFile>> {
+        // The port doc: `None` when no rules were saved; the file's text and its reading
+        // otherwise. The fake holds one file for every revision.
+        let held = self
+            .rules
+            .lock()
+            .map_err(|_| poisoned())
+            .map(|rules| rules.clone());
+        Box::pin(async move { held })
     }
     fn types<'a>(
         &'a self,
