@@ -9340,6 +9340,74 @@ async fn rr10_a_pack_lacking_a_blob_its_head_needs_is_refused_before_any_write()
     .await
 }
 
+/// R11A (b1r4 re-review, its probe adopted): the fixture's candidate is a second reference. A
+/// pack that lacks the blob only the candidate's commit needs (`notes/idea.md`) is refused as
+/// invalid input before any write: the archive writer packs every reference, so the restore's
+/// walk must follow each, not only the first.
+#[tokio::test]
+async fn rr11_a_pack_lacking_a_blob_only_the_candidate_needs_is_refused() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let storage = &fixture.storage;
+    storage
+        .backups()
+        .write_backup_set(output.path(), None)
+        .await?;
+    let (pack, references) = {
+        let repository = repository_of(storage, &fixture.workspace)?;
+        let candidate = repository.find_commit(git2::Oid::from_str(fixture.candidate.as_str())?)?;
+        let idea = candidate.tree()?.get_path(Path::new("notes/idea.md"))?.id();
+        assert!(
+            rr9_head(&repository)?
+                .tree()?
+                .get_path(Path::new("notes/idea.md"))
+                .is_err(),
+            "only the candidate holds the idea"
+        );
+        rr9_pack_of(&repository, Some(idea))?
+    };
+    assert!(
+        references.len() >= 2,
+        "main and the candidate: {references:?}"
+    );
+    let (_, archive) = set_of(output.path(), &fixture.workspace);
+    let crafted = rebuilt(
+        &std::fs::read(&archive)?,
+        &|_| zip::CompressionMethod::Stored,
+        &|name| (name == "history.pack").then(|| pack.clone()),
+        &[],
+    )?;
+    let crafted = rr9_with_manifest(&crafted, &|manifest| {
+        if let Some(fields) = manifest.as_object_mut() {
+            fields.insert("references".to_owned(), json!(references));
+        }
+    })?;
+    let outcome = import_crafted(storage, crafted).await?;
+    assert_import_refused(storage, outcome, "the history does not hold").await
+}
+
+/// R11A's companion (b1r4 re-review, its probe adopted): what a restore takes, a backup writes
+/// again. The fixture's real archive (a card, a candidate, drafts, an export) imports into
+/// another installation, whose workspace archive and backup set are then written.
+#[tokio::test]
+async fn rr11_an_imported_real_archive_is_archived_again() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let bytes = archive_bytes(&fixture.storage, &fixture.workspace).await?;
+    let elsewhere = tempfile::tempdir()?;
+    let other = Storage::open(elsewhere.path())?;
+    let (target, _blank, result) = import_crafted(&other, bytes).await?;
+    result?;
+    other
+        .backups()
+        .write_workspace_archive(&target, uuid!(97)?)
+        .await?;
+    let set = tempfile::tempdir()?;
+    other.backups().write_backup_set(set.path(), None).await?;
+    Ok(())
+}
+
 /// B4-1, the reviewer's characterisation turned around: a workspace Admin of tenant `elsewhere`
 /// imports an archive whose pack lacks a blob (`omit`, after `damage`), and the import is
 /// refused. Then every later backup still runs: the target workspace's own archive, the
