@@ -473,6 +473,103 @@ async fn what_the_service_says_reaches_the_error_stream_only_as_visible_text() -
     Ok(())
 }
 
+/// C4: a request whose exchange ends abnormally is answered: the client gets a JSON-RPC error
+/// with its id, once, and the relay goes on. A request whose answer was passed on before its
+/// exchange ended so gets nothing more; a notification gets nothing, as when it fails; and
+/// `initialize`, which is exchanged alone, is answered the same way, after which no protocol
+/// version is in force. (The double ends an exchange abnormally with a failed `assert!`: the
+/// idiom has no `panic!`, and a double that returns an error is not this case.)
+#[tokio::test]
+async fn a_request_whose_exchange_ends_abnormally_is_answered_with_its_id() -> TestResult {
+    let transport = FakeTransport::new(|post, events| {
+        Box::pin(async move {
+            let message: Value = serde_json::from_slice(&post.body).unwrap_or(Value::Null);
+            let id = message.get("id").cloned().unwrap_or(Value::Null);
+            let method = message
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if method == "tools/stream" || method == "tools/late" {
+                let _ = events
+                    .send(response(&id, &json!({"early": true})).to_string())
+                    .await;
+            }
+            if method == "tools/stream" {
+                // The relay takes the answer up and queues it before the exchange ends.
+                for _ in 0..500 {
+                    tokio::task::yield_now().await;
+                }
+            }
+            assert!(
+                !method.starts_with("tools/")
+                    && !method.starts_with("notifications/x")
+                    && method != "initialize",
+                "this exchange ends abnormally on purpose"
+            );
+            match message.get("id") {
+                Some(id) => answered(&response(id, &json!({"method": method}))).reply,
+                None => accepted().reply,
+            }
+        })
+    });
+    let input = format!(
+        "{}{}{}{}{}{}",
+        request(&json!("p"), "tools/call", &json!({})),
+        request(&json!(2), "tools/stream", &json!({})),
+        request(&json!(5), "tools/late", &json!({})),
+        notification("notifications/x"),
+        request(&json!(3), "initialize", &json!({})),
+        request(&json!(4), "ping", &json!({}))
+    );
+    let ran =
+        tokio::time::timeout(PATIENCE, relay(Setup::new(&transport), input.as_bytes())).await??;
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    let answers = ran.lines()?;
+    assert_eq!(
+        answers.len(),
+        5,
+        "one line for each request: {}",
+        ran.stdout
+    );
+    let by_id = |id: &Value| answers.iter().find(|answer| answer.get("id") == Some(id));
+    // `tools/late` handed its answer over and broke before the relay had taken it up: the
+    // answer was never written, so the request gets the relay's error.
+    for id in [json!("p"), json!(5), json!(3)] {
+        let answer = some(by_id(&id), "an error for the request")?;
+        assert_eq!(answer.pointer("/error/code"), Some(&json!(-32603)), "{id}");
+        let words = some(
+            answer.pointer("/error/message").and_then(Value::as_str),
+            "a message",
+        )?;
+        assert!(words.contains("ended abnormally"), "{words}");
+    }
+    assert_eq!(
+        by_id(&json!(2)),
+        Some(&response(&json!(2), &json!({"early": true}))),
+        "answered once, before its exchange ended"
+    );
+    assert_eq!(
+        by_id(&json!(4)),
+        Some(&response(&json!(4), &json!({"method": "ping"})))
+    );
+    assert_eq!(
+        ran.stderr
+            .matches("a message's exchange ended abnormally")
+            .count(),
+        5,
+        "{}",
+        ran.stderr
+    );
+    let posts = transport.posts()?;
+    let ping = some(posts.last(), "the ping")?;
+    assert_eq!(
+        crate::support::doubles::header(ping, "MCP-Protocol-Version"),
+        None,
+        "no version is in force after an initialize that ended abnormally"
+    );
+    Ok(())
+}
+
 /// An accepted notification after a failure shows the relay carries on: one bad exchange
 /// does not end the session.
 #[tokio::test]

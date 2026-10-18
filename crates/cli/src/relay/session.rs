@@ -4,7 +4,8 @@
 //! - The output stream carries JSON-RPC messages and nothing else, one per line. One task
 //!   owns the stream and writes each line whole; diagnostics go to the error stream.
 //! - Every request the relay accepts gets a response or an error with its id: the service's
-//!   own, or one the relay writes when the service gave none. A failed notification is
+//!   own, or one the relay writes when the service gave none, `initialize` included, and when
+//!   its exchange ended abnormally (`guarded`). A failed notification is
 //!   logged to the error stream instead. The one exception is a request still in flight when
 //!   the relay stops, which is named on the error stream (see "how it ends").
 //! - Messages are forwarded concurrently, at most `Limits::in_flight` at a time. Each line
@@ -55,8 +56,9 @@
 //! - Each line that has a turn is held, as it was read while it waits to be looked at and as
 //!   the message made of it while that is in flight (at most 16 MiB; sixteen turns, 256 MiB),
 //!   and one line more that waits for a turn (16 MiB). A message in flight holds its id as
-//!   often as three times more (as written, as read, and in the name the relay calls the
-//!   message by), which matters only for an id of megabytes.
+//!   often as four times more (as written, as read, in the name the relay calls the message
+//!   by, and for the error it owes if its exchange ends abnormally), which matters only for an
+//!   id of megabytes.
 //! - One request line at a time is read into a tree of values while it is prepared. A line
 //!   of 16 MiB that is one string costs about 50 MiB for that moment; one that is an array of
 //!   8 million numbers was measured at 403 MiB.
@@ -117,9 +119,13 @@
 //!   more lines still unread, the relay does not learn that its input ended, and stays.
 //! - A response the service sends for another request's id is passed on as it is.
 
+use std::any::Any;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::panic::AssertUnwindSafe;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use okf_jawn_contract::transport::MAX_REQUEST_BODY_BYTES;
@@ -236,11 +242,20 @@ struct Saying<'run, E> {
     secret: &'run Credential,
 }
 
+/// A piece of work polled so that a panic inside it is caught where it happens and given as
+/// the work's end, in the words of the panic, as a task's harness catches one; the work is not
+/// polled again after it.
+struct Caught<W> {
+    work: Pin<Box<W>>,
+}
+
 /// What the answers relayed so far say about one exchange.
-#[derive(Debug, Default)]
-struct Seen {
-    /// A response or error with the request's id was written.
-    answered: bool,
+#[derive(Debug)]
+struct Seen<'flag> {
+    /// Set once a response or error with the request's id is queued for the output. It is
+    /// shared with whoever runs the exchange, so it is still known when the exchange ends
+    /// abnormally (`guarded`).
+    answered: &'flag AtomicBool,
     /// The protocol version of an `initialize` result, when it can be put in force.
     negotiated: Option<String>,
 }
@@ -271,6 +286,9 @@ struct Unfinished {
     ahead: usize,
 }
 
+/// What a request is told whose exchange ended abnormally.
+const ABNORMAL: &str = "The relay's exchange of this request with the okf-jawn service ended \
+    abnormally, so its answer is not known";
 /// The service refused the credential.
 const CREDENTIAL_REFUSED: &str = "The okf-jawn service refused the connector credential (HTTP \
     401). Ask the workspace owner for a current connector credential, then set OKF_JAWN_TOKEN \
@@ -512,6 +530,33 @@ impl<E: AsyncWrite + Unpin> Progress for Saying<'_, E> {
     }
 }
 
+impl<W: Future> Future for Caught<W> {
+    type Output = Result<W::Output, String>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let work = &mut self.get_mut().work;
+        // Nothing the work shares with the rest of the relay is left half changed by a panic:
+        // its channels, its room and the flag of its answer are each changed in one step.
+        match std::panic::catch_unwind(AssertUnwindSafe(|| work.as_mut().poll(context))) {
+            Ok(Poll::Pending) => Poll::Pending,
+            Ok(Poll::Ready(done)) => Poll::Ready(Ok(done)),
+            Err(payload) => Poll::Ready(Err(panic_words(payload.as_ref()))),
+        }
+    }
+}
+
+impl Seen<'_> {
+    /// Note that the request has had its answer.
+    fn answer(&self) {
+        self.answered.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the request has had its answer.
+    fn answered(&self) -> bool {
+        self.answered.load(Ordering::SeqCst)
+    }
+}
+
 impl Default for Limits {
     /// The contract's request-body limit for a line; four times that for an answer; sixteen
     /// messages in flight; for the shared part of the room, the length of the longest answer;
@@ -588,6 +633,15 @@ fn called(kind: &Kind, secret: &Credential) -> String {
     }
 }
 
+/// The words a panic was raised with, when it had some.
+fn panic_words(payload: &(dyn Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|words| (*words).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic without words".to_owned())
+}
+
 /// A message as the subject of a sentence of the error stream: `the notification "..."` or
 /// `the request ...`, named by [`called`] (cleaned of the credential, cut and made
 /// printable), or `a response to the service`.
@@ -608,7 +662,7 @@ async fn deliver(
     kind: &Kind,
     initialize: bool,
     desk: &Desk,
-    seen: &mut Seen,
+    seen: &mut Seen<'_>,
 ) -> Result<(), &'static str> {
     // The text itself is passed on: only the line breaks between its tokens are removed.
     let Some(noted) = data
@@ -635,7 +689,7 @@ async fn deliver(
         return Err(ANSWER_WITHHELD);
     }
     if answers {
-        seen.answered = true;
+        seen.answer();
         if initialize {
             if named.is_some() && negotiated.is_none() {
                 remark(desk, VERSION_UNUSABLE).await;
@@ -647,7 +701,12 @@ async fn deliver(
 }
 
 /// Send one message and relay its answers; then settle what the relay still owes the client.
-async fn exchange<T: Transport>(transport: &T, outgoing: Outgoing, desk: &Desk) -> Outcome {
+async fn exchange<T: Transport>(
+    transport: &T,
+    outgoing: Outgoing,
+    desk: &Desk,
+    answered: &AtomicBool,
+) -> Outcome {
     let Outgoing {
         post,
         kind,
@@ -655,7 +714,10 @@ async fn exchange<T: Transport>(transport: &T, outgoing: Outgoing, desk: &Desk) 
     } = outgoing;
     let (events, mut arriving) = mpsc::channel::<Held>(AHEAD);
     let streamed = async {
-        let mut seen = Seen::default();
+        let mut seen = Seen {
+            answered,
+            negotiated: None,
+        };
         while let Some(data) = arriving.recv().await {
             // What is not passed on is said on the error stream by `deliver` and `line`.
             let _ = deliver(data, &kind, initialize, desk, &mut seen).await;
@@ -674,12 +736,13 @@ async fn exchange<T: Transport>(transport: &T, outgoing: Outgoing, desk: &Desk) 
         }
     };
     match (&kind, failure) {
-        (Kind::Request { written, .. }, failure) if !seen.answered => {
+        (Kind::Request { written, .. }, failure) if !seen.answered() => {
             let why = failure.unwrap_or_else(|| {
                 "The okf-jawn service ended its answer without a response to this request"
                     .to_owned()
             });
             own(desk, error_line(Some(written), INTERNAL_ERROR, &why)).await;
+            seen.answer();
         }
         (Kind::Request { .. }, Some(why)) => {
             note(desk, &format!("after a request was answered: {why}")).await;
@@ -693,6 +756,40 @@ async fn exchange<T: Transport>(transport: &T, outgoing: Outgoing, desk: &Desk) 
     Outcome {
         negotiated: seen.negotiated,
         session,
+    }
+}
+
+/// Exchange one message so that an exchange that ends abnormally (a panic in the transport or
+/// in the relay's own handling of the answer) is caught where it happens, and the client is
+/// told.
+///
+/// A request then gets the relay's own error with its id, unless its answer was queued
+/// before the exchange ended; the error stream says what happened; and the message is over,
+/// with nothing learned for the messages after it. A notification or a response gets the
+/// error stream's line alone, as when it fails. The exchange runs in the caller's task, as it
+/// did before, so nothing about when a message is forwarded changes.
+async fn guarded(transport: &impl Transport, outgoing: Outgoing, desk: &Desk) -> Outcome {
+    let owed = match &outgoing.kind {
+        Kind::Request { written, .. } => Some(written.clone()),
+        Kind::Notification { .. } | Kind::Response => None,
+    };
+    let answered = AtomicBool::new(false);
+    let caught = Caught {
+        work: Box::pin(exchange(transport, outgoing, desk, &answered)),
+    };
+    match caught.await {
+        Ok(outcome) => outcome,
+        Err(why) => {
+            if let Some(written) = owed.filter(|_| !answered.load(Ordering::SeqCst)) {
+                own(desk, error_line(Some(&written), INTERNAL_ERROR, ABNORMAL)).await;
+            }
+            note(
+                desk,
+                &format!("a message's exchange ended abnormally: {why}"),
+            )
+            .await;
+            Outcome::default()
+        }
     }
 }
 
@@ -752,7 +849,7 @@ async fn forward<T: Transport, I: AsyncRead + Unpin>(
             let alone = async {
                 flight.drain(desk).await;
                 desk.room.vacancy().await;
-                exchange(transport.as_ref(), outgoing, desk).await
+                guarded(transport.as_ref(), outgoing, desk).await
             };
             let outcome = input.busy(name, alone).await;
             lifecycle.version = outcome.negotiated;
@@ -764,7 +861,7 @@ async fn forward<T: Transport, I: AsyncRead + Unpin>(
                 // While a text waits for room, this message is held here and not forwarded.
                 // The read loop goes on meanwhile, so that it sees the end of the input.
                 desk.room.vacancy().await;
-                exchange(transport.as_ref(), outgoing, &desk).await;
+                guarded(transport.as_ref(), outgoing, &desk).await;
             });
         }
         input.meanwhile(flight.reap(desk)).await;
@@ -1026,7 +1123,7 @@ async fn settle(
     kind: &Kind,
     initialize: bool,
     desk: &Desk,
-    seen: &mut Seen,
+    seen: &mut Seen<'_>,
 ) -> Option<String> {
     match (status, body) {
         (401, _) => Some(CREDENTIAL_REFUSED.to_owned()),
@@ -1061,7 +1158,7 @@ async fn refusal(
     mut text: Held,
     kind: &Kind,
     desk: &Desk,
-    seen: &mut Seen,
+    seen: &mut Seen<'_>,
 ) -> Option<String> {
     let plain = format!("The okf-jawn service answered HTTP {status}");
     let Some(noted) = text.one_line() else {
@@ -1099,7 +1196,9 @@ async fn refusal(
         if !line(desk, text).await {
             return Some(ANSWER_WITHHELD.to_owned());
         }
-        seen.answered |= answers;
+        if answers {
+            seen.answer();
+        }
         return None;
     }
     let code = spelled(text.as_str(), noted.code, MESSAGE_BYTES);
