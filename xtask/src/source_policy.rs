@@ -27,7 +27,10 @@
 //!   support modules (`#[path]` `check.rs`) are read on their own, and tests read archives
 //!   they wrote, never one a caller supplied;
 //! - nothing names `ZipStreamReader`, `read_zipfile_from_stream` or the `zip::read::stream`
-//!   module.
+//!   module;
+//! - production code declares no module by `#[path]`: the rule judges a file production or test
+//!   by where it lives, so a production module taken from a `tests` folder would be judged as a
+//!   test (none exists, and source code never includes test support).
 //!
 //! The rule reads syntax, not types: a method named `extract` on another type in a file that
 //! names `ZipArchive` is refused too (none exists; rename it), which keeps the rule simple and
@@ -74,6 +77,7 @@ const RENAMES: &str = "imports from the zip crate with a rename or a glob (the z
 const RE_EXPORTS: &str = "re-exports the zip crate or its reader (the zip rule)";
 const ALIASES: &str = "aliases ZipArchive with a type alias (the zip rule)";
 const EXPOSES: &str = "has ZipArchive in the signature of an item visible outside its module, or in a trait implementation (the zip rule)";
+const PATH_MODULE: &str = "declares a module by #[path] in production code, whose file the rule would judge by another place (the zip rule)";
 const IN_MACRO: &str =
     "names ZipArchive inside a macro, whose expansion the rule cannot read (the zip rule)";
 
@@ -152,6 +156,13 @@ impl<'ast> Visit<'ast> for ZipUse {
     fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
         if item.content.is_none() {
             self.reaches_out = true;
+        }
+        if item
+            .attrs
+            .iter()
+            .any(|attribute| attribute.path().is_ident("path"))
+        {
+            self.findings.insert(PATH_MODULE);
         }
         syn::visit::visit_item_mod(self, item);
     }
@@ -380,7 +391,7 @@ fn zip_violations(relative: &str, file: &syn::File) -> Vec<String> {
         found
             .findings
             .iter()
-            .filter(|finding| !(test_code && **finding == IN_MACRO))
+            .filter(|finding| !(test_code && (**finding == IN_MACRO || **finding == PATH_MODULE)))
             .map(|finding| (*finding).to_owned()),
     );
     violations
@@ -617,6 +628,21 @@ mod tests {
             Vec::<String>::new(),
             "a test reads it in an assertion"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn production_code_takes_no_module_by_path() -> TestResult {
+        let production = zip(
+            "crates/storage/src/backup/mod.rs",
+            "//! x\n#[path = \"../../tests/helper.rs\"]\nmod helper;\n",
+        )?;
+        assert!(says(&production, "#[path]"), "{production:?}");
+        let test = zip(
+            "crates/storage/tests/backup.rs",
+            "//! x\n#[path = \"support/check.rs\"]\nmod check;\n",
+        )?;
+        assert_eq!(test, Vec::<String>::new(), "a test target's support module");
         Ok(())
     }
 
