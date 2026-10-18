@@ -43,6 +43,8 @@ pub(crate) const FSYNC_SETTING: &str = "core.fsyncObjectFiles";
 const BLOB_MODE: i32 = 0o100_644;
 /// File mode of a tree.
 const TREE_MODE: i32 = 0o040_000;
+/// The length of a commit id these repositories write: SHA-1, in hex.
+const SHA1_HEX_LEN: usize = 40;
 
 impl Repositories {
     /// The repositories and staging directory of the locked `data` directory.
@@ -260,19 +262,37 @@ pub(crate) fn reference_target(
     }
 }
 
-/// The commit a `Revision` names; `NotFound` when the repository does not hold it.
+/// The commit a `Revision` names; `NotFound` when the repository does not hold it, or when the
+/// revision cannot name a commit here at all (`oid_of`).
 pub(crate) fn commit_of<'r>(
     repository: &'r Repository,
     revision: &Revision,
 ) -> Result<Commit<'r>, ApiError> {
-    let oid = Oid::from_str(revision.as_str()).map_err(|error| git(&error))?;
+    let oid = oid_of(revision)?;
     repository.find_commit(oid).map_err(|error| {
         if error.code() == git2::ErrorCode::NotFound {
-            ApiError::new(ErrorCode::NotFound, "No revision with that identity here")
+            no_such_revision()
         } else {
             git(&error)
         }
     })
+}
+
+/// The object id a `Revision` names. `Revision` holds 40 or 64 lower-case hex characters, and
+/// these repositories use SHA-1, so a revision of 64 (a SHA-256 commit id) can never name a
+/// commit here: it is `NotFound` (`no_such_revision`), the answer to a revision the repository
+/// does not hold, never `Unavailable`, which a caller would retry. The field is the caller's to
+/// name, as for every revision the store does not hold.
+pub(crate) fn oid_of(revision: &Revision) -> Result<Oid, ApiError> {
+    if revision.as_str().len() != SHA1_HEX_LEN {
+        return Err(no_such_revision());
+    }
+    Oid::from_str(revision.as_str()).map_err(|error| git(&error))
+}
+
+/// The answer to a revision that names no commit of the repository.
+pub(crate) fn no_such_revision() -> ApiError {
+    ApiError::new(ErrorCode::NotFound, "No revision with that identity here")
 }
 
 /// The `Revision` of a commit id.
