@@ -1236,6 +1236,24 @@ async fn the_relay_s_last_words_write_control_characters_as_escapes() -> TestRes
     Ok(())
 }
 
+/// C6: characters that change the direction of text and characters that are invisible reach
+/// the last words only as escapes, like control characters: an id that holds a right-to-left
+/// override, an isolate and its end, a right-to-left mark, a zero-width space, a word joiner,
+/// a byte order mark, a soft hyphen and a Hangul filler, each raw in its JSON string.
+#[tokio::test]
+async fn the_relay_s_last_words_write_invisible_and_direction_characters_as_escapes() -> TestResult
+{
+    let id = "a\u{202e}b\u{2066}c\u{2069}d\u{200f}e\u{200b}f\u{2060}g\u{feff}h\u{ad}i\u{3164}j";
+    let said = last_words(raw_id_request(id)).await?;
+    assert_eq!(
+        said,
+        unfinished(&[
+            "request \"a\\u{202e}b\\u{2066}c\\u{2069}d\\u{200f}e\\u{200b}f\\u{2060}g\\u{feff}h\\u{ad}i\\u{3164}j\""
+        ])
+    );
+    Ok(())
+}
+
 /// Sixteen long ids at once: the whole of the last words stays under 8 KiB, and the names that
 /// did not fit are counted.
 #[tokio::test]

@@ -16,8 +16,44 @@ use crate::support::doubles::{
 };
 use crate::support::{Outcome, Ran};
 
+/// The characters ruling C6 names, one or more of each kind: C0 controls (escape, bell,
+/// carriage return, tab), delete, C1 controls (CSI, next line), characters that change the
+/// direction of text (right-to-left override, left-to-right isolate, pop directional isolate,
+/// right-to-left mark, Arabic letter mark) and characters that are invisible (zero-width
+/// space, word joiner, byte order mark, soft hyphen, Hangul filler, line separator).
+const HIDDEN: [char; 18] = [
+    '\u{1b}', '\u{7}', '\r', '\t', '\u{7f}', '\u{9b}', '\u{85}', '\u{202e}', '\u{2066}',
+    '\u{2069}', '\u{200f}', '\u{61c}', '\u{200b}', '\u{2060}', '\u{feff}', '\u{ad}', '\u{3164}',
+    '\u{2028}',
+];
+
 /// How long a test waits for something that a correct relay does at once.
 const PATIENCE: Duration = Duration::from_secs(20);
+
+/// Every character of [`HIDDEN`], each as a JSON string spells it with a `\u` escape.
+fn hidden_spelled() -> String {
+    HIDDEN
+        .iter()
+        .map(|letter| format!("\\u{:04x}", u32::from(*letter)))
+        .collect()
+}
+
+/// Whether `said`, what the relay wrote to its error stream, holds no character of [`HIDDEN`]
+/// as it is; its own line feeds are the only line breaks in it, one after each diagnostic.
+fn hides_nothing(said: &str) -> TestResult {
+    for letter in HIDDEN {
+        assert!(
+            !said.contains(letter),
+            "U+{:04X} reached the error stream as it is: {said:?}",
+            u32::from(letter)
+        );
+    }
+    assert!(
+        said.lines().all(|line| line.starts_with("okf-jawn mcp: ")),
+        "{said:?}"
+    );
+    Ok(())
+}
 
 /// The only line on stdout, which must be an error for request `id`.
 fn only_error(ran: &Ran, id: &Value) -> Outcome<String> {
@@ -345,6 +381,93 @@ async fn a_failed_output_stream_stops_the_relay_while_stdin_is_still_open() -> T
     assert_eq!(code, 1);
     assert!(stderr.contains("the output stream failed"), "{stderr}");
     drop(client);
+    Ok(())
+}
+
+/// C6: the diagnostic for a notification that was not delivered quotes its method cut to 200
+/// characters, with a mark that counts the rest, and with every control character, every
+/// character that changes the direction of text and every invisible one written as an escape.
+/// The method is the client's: of a megabyte, and beginning with each such character.
+#[tokio::test]
+async fn a_notification_that_was_not_delivered_is_named_in_bounded_and_visible_words() -> TestResult
+{
+    let long = 1_048_576_usize;
+    let method = format!("{}{}", hidden_spelled(), "m".repeat(long));
+    let transport = FakeTransport::scripted(|_| broken("connection reset by peer"));
+    let input = format!("{{\"jsonrpc\":\"2.0\",\"method\":\"{method}\"}}\n");
+    let ran = relay(Setup::new(&transport), input.as_bytes()).await?;
+    assert_eq!((ran.code, ran.stdout.as_str()), (0, ""));
+    hides_nothing(&ran.stderr)?;
+    let rest = long.saturating_add(HIDDEN.len()).saturating_sub(200);
+    assert!(
+        ran.stderr.contains(&format!(
+            "{}\" [cut: {rest} more characters] was not delivered",
+            "m".repeat(200_usize.saturating_sub(HIDDEN.len()))
+        )),
+        "{}",
+        ran.stderr.chars().take(800).collect::<String>()
+    );
+    assert!(ran.stderr.len() < 2048, "{} bytes", ran.stderr.len());
+    Ok(())
+}
+
+/// C6: the same for a notification the relay does not send (its method cannot travel in the
+/// `Mcp-Method` header that protocol `2026-07-28` asks for).
+#[tokio::test]
+async fn a_notification_that_was_not_sent_is_named_in_bounded_and_visible_words() -> TestResult {
+    let modern = json!({"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}});
+    let transport = FakeTransport::echoing();
+    let method = format!("{}{}", hidden_spelled(), "n".repeat(300));
+    let input = format!(
+        "{}{{\"jsonrpc\":\"2.0\",\"method\":\"{method}\"}}\n",
+        request(&json!(1), "tools/list", &modern)
+    );
+    let ran = relay(Setup::new(&transport), input.as_bytes()).await?;
+    assert_eq!(ran.code, 0);
+    hides_nothing(&ran.stderr)?;
+    let rest = 300_usize.saturating_add(HIDDEN.len()).saturating_sub(200);
+    assert!(
+        ran.stderr.contains(&format!(
+            "{}\" [cut: {rest} more characters] was not sent",
+            "n".repeat(200_usize.saturating_sub(HIDDEN.len()))
+        )),
+        "{}",
+        ran.stderr
+    );
+    assert_eq!(transport.posts()?.len(), 1, "the notification was not sent");
+    Ok(())
+}
+
+/// C6: what the service says is escaped too when the relay repeats it in a diagnostic: a
+/// refusal of a notification whose message holds each such character, as JSON escapes that
+/// the relay reads into the characters themselves.
+#[tokio::test]
+async fn what_the_service_says_reaches_the_error_stream_only_as_visible_text() -> TestResult {
+    let message = format!("left {} right", hidden_spelled());
+    let body =
+        format!("{{\"jsonrpc\":\"2.0\",\"error\":{{\"code\":-32602,\"message\":\"{message}\"}}}}");
+    let transport = FakeTransport::scripted(move |_| status(400, Body::Json(body.clone())));
+    let ran = relay(
+        Setup::new(&transport),
+        notification("notifications/progress").as_bytes(),
+    )
+    .await?;
+    assert_eq!((ran.code, ran.stdout.as_str()), (0, ""));
+    hides_nothing(&ran.stderr)?;
+    assert_eq!(ran.stderr.lines().count(), 1, "{}", ran.stderr);
+    assert!(
+        ran.stderr.contains("HTTP 400: left \\u{1b}\\u{7}") && ran.stderr.contains(" right\n"),
+        "{}",
+        ran.stderr
+    );
+    for letter in HIDDEN {
+        assert!(
+            ran.stderr.contains(&letter.escape_unicode().to_string()),
+            "U+{:04X}: {}",
+            u32::from(letter),
+            ran.stderr
+        );
+    }
     Ok(())
 }
 

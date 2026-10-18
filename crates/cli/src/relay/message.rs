@@ -69,8 +69,9 @@ pub(super) struct Outgoing {
 pub(super) enum Refusal {
     /// Answer the client with this JSON-RPC error line.
     Answer(String),
-    /// Nothing can be answered (a notification); log this instead.
-    Log(String),
+    /// Nothing can be answered (a notification or a response): say on the error stream that
+    /// this message was not sent, and why. The session names it, in bounded and visible words.
+    Log(Kind, String),
 }
 
 /// JSON-RPC: the service or the relay failed while handling a request.
@@ -312,10 +313,7 @@ pub(super) fn prepare(line: &[u8], lifecycle: &mut Lifecycle) -> Result<Option<O
         Kind::Request { written, .. } => {
             Refusal::Answer(error_line(Some(written), INVALID_REQUEST, &why))
         }
-        Kind::Notification { method } => {
-            Refusal::Log(format!("the notification {method:?} was not sent: {why}"))
-        }
-        Kind::Response => Refusal::Log(format!("a response was not sent: {why}")),
+        Kind::Notification { .. } | Kind::Response => Refusal::Log(kind.clone(), why),
     })?;
     Ok(Some(Outgoing {
         post: Post {

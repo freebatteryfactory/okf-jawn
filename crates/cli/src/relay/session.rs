@@ -87,10 +87,15 @@
 //! fail is therefore no reason to stay. The last words go straight to the error stream and
 //! get two seconds, so an error stream that takes nothing does not keep the relay either.
 //! They are bounded and printable whatever the client wrote: an id or a method they quote is
-//! cut to 200 characters with a mark that says so, every control character in it (C0 and C1)
-//! is written as an escape, and the names together stay within 5 KiB, with a count of those
-//! left out, so the whole stays under 8 KiB. Redaction runs before the cut, so a credential
-//! at the cut is not left half shown, and again on the result.
+//! cut to 200 characters with a mark that says so, and the names together stay within 5 KiB,
+//! with a count of those left out, so the whole stays under 8 KiB. Redaction runs before the
+//! cut, so a credential at the cut is not left half shown, and again on the result.
+//!
+//! Every diagnostic, the last words among them, is printable whoever wrote what it repeats:
+//! every control character, every character that changes the direction of text and every
+//! invisible one is written as an escape (`printable`, in `say`, the one place a diagnostic is
+//! written). A message that was not sent or not delivered is named as the last words name it,
+//! its method cut to 200 characters; what the service says is repeated up to 8192 bytes.
 //! When the output stream fails, the relay stops at once and returns 1, whatever it was
 //! waiting for.
 //!
@@ -541,14 +546,25 @@ fn cut(rest: usize) -> String {
     }
 }
 
-/// `text` with every control character (C0, DEL and C1) written as a visible escape.
+/// `text` with every character a reader cannot see as it stands written as a visible escape
+/// (`\u{202e}`): the control characters (C0, DEL and C1), the characters that change the
+/// direction of text, the invisible ones (zero-width characters, the byte order mark, the soft
+/// hyphen, fillers, separators other than the space) and the marks that join the character
+/// before them. That is every character the standard library's debug escaping writes as an
+/// escape; the quote, the apostrophe and the backslash, which it escapes only to quote a
+/// string, stay as they are.
 fn printable(text: &str) -> String {
     let mut shown = String::with_capacity(text.len());
     for letter in text.chars() {
-        if letter.is_control() {
-            shown.extend(letter.escape_unicode());
+        let visible = if letter.is_ascii() {
+            letter == ' ' || letter.is_ascii_graphic()
         } else {
+            letter.escape_debug().len() == 1
+        };
+        if visible {
             shown.push(letter);
+        } else {
+            shown.extend(letter.escape_unicode());
         }
     }
     shown
@@ -569,6 +585,16 @@ fn called(kind: &Kind, secret: &Credential) -> String {
             format!("notification {first:?}{}", cut(rest))
         }
         Kind::Response => "a response to the service".to_owned(),
+    }
+}
+
+/// A message as the subject of a sentence of the error stream: `the notification "..."` or
+/// `the request ...`, named by [`called`] (cleaned of the credential, cut and made
+/// printable), or `a response to the service`.
+fn subject(kind: &Kind, secret: &Credential) -> String {
+    match kind {
+        Kind::Response => called(kind, secret),
+        Kind::Request { .. } | Kind::Notification { .. } => format!("the {}", called(kind, secret)),
     }
 }
 
@@ -658,19 +684,9 @@ async fn exchange<T: Transport>(transport: &T, outgoing: Outgoing, desk: &Desk) 
         (Kind::Request { .. }, Some(why)) => {
             note(desk, &format!("after a request was answered: {why}")).await;
         }
-        (Kind::Notification { method }, Some(why)) => {
-            note(
-                desk,
-                &format!("the notification {method:?} was not delivered: {why}"),
-            )
-            .await;
-        }
-        (Kind::Response, Some(why)) => {
-            note(
-                desk,
-                &format!("a response to the service was not delivered: {why}"),
-            )
-            .await;
+        (Kind::Notification { .. } | Kind::Response, Some(why)) => {
+            let named = subject(&kind, &desk.secret);
+            note(desk, &format!("{named} was not delivered: {why}")).await;
         }
         (_, None) => {}
     }
@@ -724,8 +740,9 @@ async fn forward<T: Transport, I: AsyncRead + Unpin>(
                 input.busy(REFUSED.to_owned(), own(desk, answer)).await;
                 continue;
             }
-            Err(Refusal::Log(why)) => {
-                input.busy(REFUSED.to_owned(), note(desk, &why)).await;
+            Err(Refusal::Log(kind, why)) => {
+                let said = format!("{} was not sent: {why}", subject(&kind, &desk.secret));
+                input.busy(REFUSED.to_owned(), note(desk, &said)).await;
                 continue;
             }
         };
@@ -991,9 +1008,12 @@ where
     1
 }
 
-/// Write one diagnostic line to the error stream, without the credential.
+/// Write one diagnostic line to the error stream, without the credential, and with every
+/// character a reader cannot see written as an escape ([`printable`]), whoever wrote it: the
+/// relay's own words, a client's id or method, what the service says. So a diagnostic is one
+/// line, and nothing in it moves the cursor, hides text or turns its direction.
 async fn say<E: AsyncWrite + Unpin>(stderr: &mut E, secret: &Credential, text: &str) {
-    let text = secret.redact(&format!("okf-jawn mcp: {text}\n"));
+    let text = secret.redact(&format!("okf-jawn mcp: {}\n", printable(text)));
     // Nothing can report a failure of the error stream itself.
     let _ = stderr.write_all(text.as_bytes()).await;
     let _ = stderr.flush().await;
