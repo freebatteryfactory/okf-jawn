@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use check::{TestResult, err_of, some};
 use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
-use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
+use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{JobId, MutationId, TenantId, Timestamp, WorkspaceId};
 use okf_jawn_contract::import::JobState;
 use okf_jawn_contract::purge::{Purge, PurgeState};
@@ -789,9 +789,12 @@ async fn purge_ledger_service_a_purge_stopped_by_a_survivors_unreadable_archive_
     Ok(())
 }
 
-/// The draft's retry re-runs under its own mutation (the purge emptied its row) and the real
-/// handler refuses it: its base revision is one the purge invalidated, so it is the typed
-/// `NotFound` naming the purge, before any store is written. No draft is left.
+/// The draft's retry is refused by dispatch's archive question (core M1.4a), which reads the
+/// catalog after authorization and before the mutation ledger: the catalog no longer holds the
+/// purged workspace, so the answer is its `NotFound`, and neither the ledger nor the handler
+/// sees the retry. No draft is left. (Without that question the retry reached the handler, whose
+/// typed `NotFound` naming the purge core's
+/// `drafts::a_save_checks_its_base_against_the_purge_map_first` pins.)
 #[tokio::test]
 async fn purge_ledger_service_a_retried_mutation_of_the_purged_workspace_is_refused_and_writes_nothing()
 -> TestResult {
@@ -800,21 +803,17 @@ async fn purge_ledger_service_a_retried_mutation_of_the_purged_workspace_is_refu
     let (request, _) = purged.draft.clone();
     let refused = err_of(call(&purged.composed, "save_draft", request).await)?;
     assert_eq!(refused.code, ErrorCode::NotFound, "{}", refused.message);
-    assert_eq!(
-        refused.detail.as_deref(),
-        Some(&ErrorDetail::Invalidated {
-            purge_id: purged.purge.id,
-            replacement: None
-        })
+    assert!(
+        refused.detail.is_none(),
+        "the catalog's refusal, not a handler's: {:?}",
+        refused.detail
     );
     let runs = purged.composed.runs_of("save_draft")?;
-    let (original, retry) = (
-        some(runs.first(), "the draft")?,
-        some(runs.get(1), "the retry")?,
+    assert_eq!(
+        runs.len(),
+        1,
+        "only the original draft ran; the retry reached no handler"
     );
-    assert_eq!(runs.len(), 2);
-    assert_eq!(retry.mutation, original.mutation);
-    assert_eq!(retry.attempt, Attempt::Resumed);
     let scope = StorageScope {
         tenant_id: tenant()?,
         workspace_id: purged.target,
