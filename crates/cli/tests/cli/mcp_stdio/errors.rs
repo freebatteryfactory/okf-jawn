@@ -2,6 +2,7 @@
 //! notification is logged, a refused credential is explained in plain words, and when stdin
 //! ends the requests in flight finish before the relay returns 0.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,15 +33,17 @@ const PATIENCE: Duration = Duration::from_secs(20);
 
 /// Every character of [`HIDDEN`], each as a JSON string spells it with a `\u` escape.
 fn hidden_spelled() -> String {
-    HIDDEN
-        .iter()
-        .map(|letter| format!("\\u{:04x}", u32::from(*letter)))
-        .collect()
+    HIDDEN.iter().fold(String::new(), |mut spelled, letter| {
+        // Writing to a `String` cannot fail.
+        let _ = write!(spelled, "\\u{:04x}", u32::from(*letter));
+        spelled
+    })
 }
 
-/// Whether `said`, what the relay wrote to its error stream, holds no character of [`HIDDEN`]
-/// as it is; its own line feeds are the only line breaks in it, one after each diagnostic.
-fn hides_nothing(said: &str) -> TestResult {
+/// Asserts that `said`, what the relay wrote to its error stream, holds no character of
+/// [`HIDDEN`] as it is; its own line feeds are the only line breaks in it, one after each
+/// diagnostic.
+fn hides_nothing(said: &str) {
     for letter in HIDDEN {
         assert!(
             !said.contains(letter),
@@ -52,7 +55,6 @@ fn hides_nothing(said: &str) -> TestResult {
         said.lines().all(|line| line.starts_with("okf-jawn mcp: ")),
         "{said:?}"
     );
-    Ok(())
 }
 
 /// The only line on stdout, which must be an error for request `id`.
@@ -397,7 +399,7 @@ async fn a_notification_that_was_not_delivered_is_named_in_bounded_and_visible_w
     let input = format!("{{\"jsonrpc\":\"2.0\",\"method\":\"{method}\"}}\n");
     let ran = relay(Setup::new(&transport), input.as_bytes()).await?;
     assert_eq!((ran.code, ran.stdout.as_str()), (0, ""));
-    hides_nothing(&ran.stderr)?;
+    hides_nothing(&ran.stderr);
     let rest = long.saturating_add(HIDDEN.len()).saturating_sub(200);
     assert!(
         ran.stderr.contains(&format!(
@@ -424,7 +426,7 @@ async fn a_notification_that_was_not_sent_is_named_in_bounded_and_visible_words(
     );
     let ran = relay(Setup::new(&transport), input.as_bytes()).await?;
     assert_eq!(ran.code, 0);
-    hides_nothing(&ran.stderr)?;
+    hides_nothing(&ran.stderr);
     let rest = 300_usize.saturating_add(HIDDEN.len()).saturating_sub(200);
     assert!(
         ran.stderr.contains(&format!(
@@ -453,7 +455,7 @@ async fn what_the_service_says_reaches_the_error_stream_only_as_visible_text() -
     )
     .await?;
     assert_eq!((ran.code, ran.stdout.as_str()), (0, ""));
-    hides_nothing(&ran.stderr)?;
+    hides_nothing(&ran.stderr);
     assert_eq!(ran.stderr.lines().count(), 1, "{}", ran.stderr);
     assert!(
         ran.stderr.contains("HTTP 400: left \\u{1b}\\u{7}") && ran.stderr.contains(" right\n"),
