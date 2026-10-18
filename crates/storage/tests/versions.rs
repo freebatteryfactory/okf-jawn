@@ -1110,15 +1110,25 @@ async fn a_refusal_never_names_the_server_staging_directory() -> TestResult {
 }
 
 /// Assert that `message` holds no part of the absolute path of the data directory `data`: not
-/// the path in either separator, not any of its components, not its drive letter.
+/// the path in either separator, and none of its components (its drive letter included) as a
+/// segment of the message.
 fn assert_names_no_machine_path(message: &str, data: &Path) {
     let root = data.to_string_lossy();
     let forward = root.replace('\\', "/");
-    for part in [root.as_ref(), forward.as_str()]
-        .into_iter()
-        .chain(forward.split('/').filter(|part| !part.is_empty()))
-    {
-        assert!(!message.contains(part), "{part:?} is in {message:?}");
+    for whole in [root.as_ref(), forward.as_str()] {
+        assert!(!message.contains(whole), "{whole:?} is in {message:?}");
+    }
+    // A component is looked for as a whole segment of the message, not as a substring: a short
+    // one (`T`, `4f` in a macOS temp root) can occur by chance inside a workspace id or in
+    // libgit2's words.
+    let segments: Vec<&str> = message
+        .split(['/', '\\', ' ', '\'', '"', '`', '(', ')', ',', ';'])
+        .collect();
+    for part in forward.split('/').filter(|part| !part.is_empty()) {
+        assert!(
+            !segments.contains(&part),
+            "{part:?} is a segment of {message:?}"
+        );
     }
 }
 

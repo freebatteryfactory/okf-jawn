@@ -9706,11 +9706,20 @@ async fn a_survivor_that_does_not_open_is_named_without_a_machine_path() -> Test
     assert!(error.message.contains("(Repository, NotFound)"), "{error}");
     let root = directory.path().to_string_lossy();
     let forward = root.replace('\\', "/");
-    for part in [root.as_ref(), forward.as_str()]
-        .into_iter()
-        .chain(forward.split('/').filter(|part| !part.is_empty()))
-    {
-        assert!(!error.message.contains(part), "{part:?} is in {error}");
+    for whole in [root.as_ref(), forward.as_str()] {
+        assert!(!error.message.contains(whole), "{whole:?} is in {error}");
+    }
+    // A component is looked for as a whole segment, not as a substring: a short one (`T`, `4f` in
+    // a macOS temp root) can occur by chance inside a workspace id or in libgit2's words.
+    let segments: Vec<&str> = error
+        .message
+        .split(['/', '\\', ' ', '\'', '"', '`', '(', ')', ',', ';'])
+        .collect();
+    for part in forward.split('/').filter(|part| !part.is_empty()) {
+        assert!(
+            !segments.contains(&part),
+            "{part:?} is a segment of {error}"
+        );
     }
     Ok(())
 }
