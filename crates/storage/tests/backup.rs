@@ -5447,24 +5447,40 @@ async fn backup_a_restore_refuses_damaged_records_before_any_write() -> TestResu
 
 /// B1-R: a constraint the live database still enforces at the copy is the archive's, so
 /// `InvalidInput`, never a collision: here the second archive of a set gives its workspace the
-/// creation mutation of the first, which the same restore already wrote.
+/// creation mutation of the first, which the same restore already wrote. N-3: the failed run
+/// leaves what `restore_replacement` says it leaves (the installation's rows, the first
+/// workspace in full, and of the second its history but none of its rows), and a run again
+/// with the good set completes.
 #[tokio::test]
 async fn backup_a_constraint_failed_at_the_copy_is_invalid_input() -> TestResult {
     let directory = tempfile::tempdir()?;
     let output = tempfile::tempdir()?;
-    let (first, second) = {
+    let (first, second, identity) = {
         let storage = Storage::open(directory.path())?;
+        let identity = storage.credentials().installation_identity().await?;
         let first = notes_workspace(&storage).await?;
-        let (second, _) = create(&storage, "local", 2, "Second").await?;
+        let (second, created) = create(&storage, "local", 2, "Second").await?;
+        // The second holds an object, so what its failed copy leaves of it can be seen.
+        let original = put(&storage, &second, b"n3 the second workspace's original").await?;
+        commit(
+            &storage,
+            &second,
+            3,
+            &created,
+            vec![card(uuid!(15)?, &original.digest)?],
+        )
+        .await?;
         storage
             .backups()
             .write_backup_set(output.path(), None)
             .await?;
-        (first, second)
+        (first, second, identity)
     };
     let (installation, first_archive) = set_of(output.path(), &first);
     let (_, second_archive) = set_of(output.path(), &second);
     let bytes = std::fs::read(&second_archive)?;
+    let good_second = output.path().join("good-second.zip");
+    std::fs::write(&good_second, &bytes)?;
     let records = rr4_forged_records(
         &bytes,
         &format!("UPDATE workspaces SET mutation_id = '{}'", uuid_text(1)),
@@ -5483,7 +5499,7 @@ async fn backup_a_constraint_failed_at_the_copy_is_invalid_input() -> TestResult
     let error = err_of(
         restored
             .backups()
-            .restore_replacement(&installation, &[first_archive, second_archive])
+            .restore_replacement(&installation, &[first_archive.clone(), second_archive])
             .await,
     )?;
     assert_eq!(error.code, ErrorCode::InvalidInput, "{error}");
@@ -5491,7 +5507,61 @@ async fn backup_a_constraint_failed_at_the_copy_is_invalid_input() -> TestResult
         error.message.contains("workspaces") && error.message.contains("constraint"),
         "{error}"
     );
+    // What the failed run left: the installation's rows; the first workspace in full, its rows
+    // with the record of the restore that wrote them; of the second, its objects as pending
+    // puts and its history, no row.
+    let live = directory.path().join("records.sqlite");
+    assert_eq!(
+        restored
+            .credentials()
+            .installation_identity()
+            .await?
+            .subject,
+        identity.subject
+    );
+    for (workspace, table, rows) in [
+        (&first, "workspaces", 1),
+        (&first, "replacement_restores", 1),
+        (&first, "drafts", 1),
+        (&second, "workspaces", 0),
+        (&second, "replacement_restores", 0),
+        (&second, "pending_puts", 1),
+    ] {
+        assert_eq!(rows_of(&live, workspace, table)?, rows, "{table}");
+    }
+    assert!(
+        restored
+            .data()
+            .repositories_path()
+            .join("local")
+            .join(format!("{}.git", second.workspace_id.0))
+            .is_dir(),
+        "the second workspace's history was written before its rows failed"
+    );
+    // A run again with the good set completes: the first is accepted as it is, the second is
+    // restored over the history the failed run left.
+    let reports = restored
+        .backups()
+        .restore_replacement(&installation, &[first_archive, good_second])
+        .await?;
+    assert_eq!(reports.len(), 2);
+    for workspace in [&first, &second] {
+        assert_eq!(rows_of(&live, workspace, "workspaces")?, 1);
+        assert_eq!(rows_of(&live, workspace, "replacement_restores")?, 1);
+        restored.catalog().open(workspace).await?;
+    }
     Ok(())
+}
+
+/// How many rows of `table` in the records database `live` name `workspace`.
+fn rows_of(live: &Path, workspace: &StorageScope, table: &str) -> Fallible<i64> {
+    count(
+        live,
+        &format!(
+            "SELECT count(*) FROM {table} WHERE workspace_id = '{}'",
+            workspace.workspace_id.0
+        ),
+    )
 }
 
 /// B1-R: a workspace archive whose records are at records schema 1 (a pre-migration set's)

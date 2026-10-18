@@ -31,7 +31,12 @@
 //!   (`replacement_restores`). It refuses, in this order: an archive of another tenant; a
 //!   workspace any recorded purge names, finished or not; and a workspace that exists, unless
 //!   that record names this same archive file and its head is still the archive's, which is the
-//!   same restore run again after a stop in a later workspace: it is accepted as it is.
+//!   same restore run again after a stop in a later workspace: it is accepted as it is. A
+//!   replacement whose rows fail at the copy (a constraint across the set's archives, an
+//!   encoding the check did not read) leaves the installation's rows, the workspaces restored
+//!   before it in full, and of its own workspace the objects (recorded as pending puts) and the
+//!   history, but no row; a run again with a good set completes over them
+//!   (`StorageBackups::restore_replacement`).
 //!
 //! Known gap: a View's bindings name its workspace, and the on-disk form of a View document
 //! is not decided yet (core-cli M1.6), so an import does not rewrite them.
