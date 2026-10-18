@@ -305,6 +305,90 @@ test.describe('history and review', () => {
     await shot(page, 'm3-11-verified');
   });
 
+  test('an item’s Timeline and Who, Propose a change, and Decline, from the keyboard', async ({
+    page,
+  }) => {
+    const proposed = {
+      id: PROPOSAL_ID,
+      workspace_id: WS,
+      base_revision: HEAD,
+      proposal_revision: CANDIDATE,
+      content_digest: '3'.repeat(64),
+      title: 'Publish the budget',
+      description: '',
+      changes: [{ kind: 'edit', item_id: NOTE, body: 'x', properties: {} }],
+      kind: 'content',
+      status: 'open',
+      created_by: 'ada',
+      created_via: 'browser_session',
+      created_at: '2026-01-01T09:30:00.000Z',
+      warnings: [],
+    };
+    await routeApi(page, {
+      '/api/workspaces/open-workspace': () => ok(everything),
+      '/api/history/log-items': () => ok({ commits: VERSIONS.slice(0, 3), next_cursor: null }),
+      '/api/history/diff-items': diffAnswer,
+      '/api/history/blame-item': (body) => {
+        const lines = body.lines as { start: number; end: number };
+        const answered = [];
+        for (let line = lines.start; line <= lines.end; line += 1) {
+          answered.push({
+            line,
+            text: `Line ${line}`,
+            commit: line < 4 ? VERSIONS.at(1) : VERSIONS.at(0),
+          });
+        }
+        return ok({
+          lines: answered,
+          source: {
+            workspace_id: WS,
+            item_id: NOTE,
+            path: 'notes/meeting.md',
+            revision: HEAD,
+            selection: { kind: 'lines', range: lines },
+            locations: [],
+          },
+        });
+      },
+      '/api/proposals/open-proposal': () => ok(proposed),
+      '/api/proposals/get-proposal': () => ok(proposed),
+      '/api/proposals/list-comments': () => ok({ items: [], next_cursor: null }),
+    });
+    await page.goto(`${server.origin()}/w/${WS}/i/${NOTE}`);
+    await expect(page.getByRole('heading', { level: 2, name: 'Meeting notes' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Show this item’s Timeline' })).toBeVisible();
+    await press(page, 'Show this item’s Timeline');
+    const timeline = page.getByRole('region', { name: 'Timeline of Meeting notes' });
+    await expect(timeline.getByText('Draft the budget')).toBeVisible();
+    expect(await focused(page)).toBe('button:Hide this item’s Timeline');
+    await press(page, 'Show who changed each line');
+    const who = page.getByRole('region', { name: 'Who changed each line' });
+    await expect(who.getByRole('table')).toBeVisible();
+    await expect(who).toContainText('the same version as the line above');
+    await expectVisibleFocus(page);
+    await expectNoAxeViolations(page, 'an item’s Timeline and Who');
+    await shot(page, 'm3-13-item-history');
+
+    await press(page, 'Propose a change…');
+    await expect(page.getByRole('textbox', { name: 'Title' })).toBeFocused();
+    await page.keyboard.type('Publish the budget');
+    await expectNoAxeViolations(page, 'proposing a change');
+    await shot(page, 'm3-14-propose');
+    await press(page, 'Propose');
+    const made = page.getByText(/^Proposed: “Publish the budget”/);
+    await expect(made).toBeFocused();
+    await made.getByRole('link', { name: 'Open the proposal' }).focus();
+    await page.keyboard.press('Enter');
+    const detail = page.getByRole('region', { name: 'Publish the budget' });
+    await expect(detail.getByRole('region', { name: 'What it changes' })).toBeVisible();
+    await press(page, 'Decline…', detail);
+    await expect(detail.getByRole('textbox', { name: 'Why it is declined' })).toBeFocused();
+    await expectNoAxeViolations(page, 'declining a proposal');
+    await shot(page, 'm3-15-decline');
+    await page.keyboard.press('Escape');
+    expect(await focused(page)).toBe('button:Decline…');
+  });
+
   test('the graph, drawn, and its list, from the keyboard', async ({ page }) => {
     await routeApi(page, {
       '/api/search/get-graph': () =>
