@@ -727,6 +727,100 @@ async fn imports_an_import_through_the_service_is_accepted_and_its_job_created()
     Ok(())
 }
 
+/// R1 and the item-ancestor scope extension apply to the complete real tree, even where the
+/// ordinary folder listing hides leading-dot folders. Refusals must precede durable acceptance;
+/// the exact existing folder spelling remains usable. Expected paths and outcomes are literals.
+#[tokio::test]
+async fn imports_a_hidden_destination_uses_the_complete_tree_before_job_creation() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let world = World::new(directory.path())?;
+    let (scope, initial) = world.workspace().await?;
+    let (_, base) = note(
+        &world,
+        &scope,
+        &initial,
+        2,
+        ".hidden/blocked.md",
+        "Held text.\n",
+        json!({}),
+    )
+    .await?;
+    let versions = world.storage.versions();
+    let root = versions
+        .list(
+            &scope,
+            &base,
+            None,
+            Page {
+                cursor: None,
+                limit: 500,
+            },
+        )
+        .await?;
+    assert!(
+        !root
+            .folders
+            .iter()
+            .any(|folder| folder.as_str() == ".hidden")
+    );
+    let tree = versions.tree(&scope, &base).await?;
+    assert!(
+        tree.items
+            .iter()
+            .any(|held| held.summary.path.as_str() == ".hidden/blocked.md")
+    );
+    let upload = complete(&world, &scope, 3, "report.pdf").await?;
+    let jobs = JobScope::Workspace(scope.clone());
+    for (number, destination, occupied) in [
+        (4, ".hidden/blocked.md/new", ".hidden/blocked.md"),
+        (5, ".HIDDEN/new", ".hidden"),
+    ] {
+        let refused = err_of(
+            world
+                .call(
+                    "start_import",
+                    start_import(&scope, &base, &[upload], destination, number),
+                )
+                .await,
+        )?;
+        assert_eq!(refused.code, ErrorCode::InvalidInput, "{}", refused.message);
+        assert_eq!(refused.field.as_deref(), Some("/destination"));
+        assert!(refused.message.contains(occupied), "{}", refused.message);
+        assert_eq!(
+            job_count(&world, &jobs).await?,
+            0,
+            "no durable job for a refusal"
+        );
+        assert!(world.deliveries()?.is_empty(), "no wake-up for a refusal");
+    }
+    let accepted: Job = serde_json::from_value(
+        world
+            .call(
+                "start_import",
+                start_import(&scope, &base, &[upload], ".hidden/new", 6),
+            )
+            .await?,
+    )?;
+    assert_eq!(
+        (accepted.kind, accepted.state),
+        (JobKind::Import, JobState::Queued)
+    );
+    assert_eq!(job_count(&world, &jobs).await?, 1);
+    assert_eq!(world.deliveries()?, vec![(jobs, accepted.id)]);
+    let claimed = some(
+        world.storage.records().claim_job(accepted.id).await?,
+        "the import claim",
+    )?;
+    let JobSpec::Import { destination, .. } = claimed.spec else {
+        return Err("an import job".into());
+    };
+    assert_eq!(
+        destination,
+        Some(WorkspacePath::try_from(".hidden/new".to_owned())?)
+    );
+    Ok(())
+}
+
 /// SPEC section 5's replay guarantee across the real ledger/records/upload stores: the
 /// wake-up was delivered, its acknowledgment failed, and that job consumed its upload before
 /// any pending-card commit. A retry returns the same durable job, not a conflict or an orphan.

@@ -35,7 +35,8 @@ use okf_jawn_core::context::{Attempt, OperationContext};
 use okf_jawn_core::jobs::{JobScope, JobSpec, RevisionMapping};
 use okf_jawn_core::ports::Application;
 use okf_jawn_core::storage::{
-    CommitChanges, ObjectInfo, Provenance, TreeEdit, VersionStore, derive_commit_mutation_id,
+    CommitChanges, FolderListing, ObjectInfo, Provenance, TreeEdit, VersionStore,
+    derive_commit_mutation_id,
 };
 use okf_jawn_core::uploads::UploadRecord;
 use serde_json::json;
@@ -397,6 +398,54 @@ async fn imports_a_destination_or_ancestor_that_is_an_item_is_refused_before_job
         start(&imports, number, import(vec![upload], written)?).await?;
     }
     assert_eq!(imports.tenancy.jobs.created()?.len(), 2);
+    Ok(())
+}
+
+/// M1.5b's destination ruling applies inside hidden folders too. Real storage's root `list`
+/// omits a leading-dot folder; `tree` still contains its items (VersionStore::tree's contract).
+/// Literal expected refusals come from R1's collision rule and the item-ancestor scope extension.
+#[tokio::test]
+async fn imports_a_hidden_destination_uses_the_complete_tree_before_job_creation() -> TestResult {
+    let imports = imports()?;
+    let versions = &imports.tenancy.world.versions;
+    let base = revision('a')?;
+    versions.put_document(
+        &base,
+        note(40, &base, ".hidden/blocked.md", "Held text.", json!({}))?,
+    )?;
+    // Model storage/git/read.rs: list hides the child folder, without removing it from tree.
+    versions.put_listing(
+        &base,
+        None,
+        FolderListing {
+            items: Vec::new(),
+            folders: Vec::new(),
+            next_cursor: None,
+        },
+    )?;
+    let tree = versions.tree(&scope()?, &base).await?;
+    assert_eq!(
+        tree.items
+            .iter()
+            .map(|held| held.summary.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![".hidden/blocked.md"],
+    );
+    let upload = held(&imports.tenancy, 1, true, None)?;
+    for (number, destination, occupied) in [
+        (150, ".hidden/blocked.md/new", ".hidden/blocked.md"),
+        (151, ".HIDDEN/new", ".hidden"),
+    ] {
+        let refused = err_of(start(&imports, number, import(vec![upload], destination)?).await)?;
+        assert_refused(&refused, ErrorCode::InvalidInput, "/destination");
+        assert!(refused.message.contains(occupied), "{}", refused.message);
+        assert_nothing_queued(&imports.tenancy)?;
+    }
+    start(&imports, 152, import(vec![upload], ".hidden/new")?).await?;
+    let JobSpec::Import { destination, .. } = only_spec(&imports.tenancy)? else {
+        return Err("an import job".into());
+    };
+    assert_eq!(destination, Some(path(".hidden/new")?));
     Ok(())
 }
 
