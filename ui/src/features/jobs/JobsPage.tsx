@@ -88,7 +88,7 @@ export function JobsPage({ workspaceId }: JobsPageProps) {
   const headingRef = useRef<HTMLHeadingElement | null>(null);
   const listRef = useRef<HTMLUListElement | null>(null);
   const moreRef = useRef<HTMLButtonElement | null>(null);
-  const { rights } = useWorkspaceChanges();
+  const { head, rights } = useWorkspaceChanges();
   const feed = useJobsFeed(workspaceId);
   const jobs = useInfiniteQuery(jobsOptions(workspaceId, feed.live));
   const signedOut = sessionEnded(jobs.error) || sessionEnded(feed.error);
@@ -139,7 +139,7 @@ export function JobsPage({ workspaceId }: JobsPageProps) {
       <h2 id={heading} ref={headingRef} tabIndex={-1} className="page-heading">
         Jobs
       </h2>
-      <ExportWorkspace workspaceId={workspaceId} rights={rights} />
+      <ExportWorkspace workspaceId={workspaceId} head={head} rights={rights} />
       <p className="meta">{describeFeed(feed, signedOut)}</p>
       <p className="page-actions">
         {/* aria-disabled rather than disabled: the button keeps focus while the list is asked. */}

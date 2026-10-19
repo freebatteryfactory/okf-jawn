@@ -25,6 +25,7 @@ import type { Rights } from '../../src/features/explorer/rights';
 import { ExportViewButton } from '../../src/features/exports/ExportView';
 import { fail, type Json, mockApi, ok, type Reply } from './support/api';
 import { EXPORT_VIEW, EXPORT_WORKSPACE } from './support/exports';
+import { LOG, OLDER, VERSIONS } from './support/history';
 import { accepted, JOBS, jobOf } from './support/imports';
 import {
   explorerHandlers,
@@ -489,5 +490,88 @@ describe('"Export visual" is about the revision its tab reads now', () => {
     const keys = api.callsTo(EXPORT_VIEW).map((body) => body.idempotency_key);
     expect(keys[2]).toBe(keys[0]);
     expect(keys[1]).not.toBe(keys[0]);
+  });
+});
+
+describe('"Export this workspace" at the version the person chooses (B3)', () => {
+  /** The Jobs page of a workspace the person may change, its versions listed newest first. */
+  async function openJobsWithHistory() {
+    const service = exportService();
+    const api = mockApi(
+      explorerHandlers({
+        [OPEN]: () => ok(writableWorkspace),
+        ...service.handlers,
+        [LOG]: () => ok({ commits: VERSIONS, next_cursor: null }),
+      }),
+    );
+    renderAt(`/w/${WS}/jobs`);
+    await screen.findByRole('heading', { name: 'Jobs' });
+    return { api, service };
+  }
+  const choice = (name: string) => within(section()).getByRole<HTMLInputElement>('radio', { name });
+  const versionList = () => within(section()).queryByRole('combobox', { name: 'Version' });
+
+  it('exports the workspace as it is now unless a version is chosen, and says so', async () => {
+    const { api } = await openJobsWithHistory();
+    expect(choice('As it is now').checked).toBe(true);
+    expect(choice('A version from its history').checked).toBe(false);
+    expect(section().textContent).toContain(
+      'its latest version when the service takes the request',
+    );
+    expect(versionList()).toBeNull();
+    fireEvent.click(exportButton());
+    await within(section()).findByText(/^The export was accepted/);
+    expect(api.callsTo(EXPORT_WORKSPACE).map((body) => body.at)).toEqual([{ kind: 'latest' }]);
+    // Nothing of the history is asked while no version is chosen.
+    expect(api.callsTo(LOG)).toEqual([]);
+  });
+
+  it('exports a version chosen from its history at that revision, and asks again for it under its key', async () => {
+    const { api, service } = await openJobsWithHistory();
+    fireEvent.click(choice('A version from its history'));
+    const list = await within(section()).findByRole<HTMLSelectElement>('combobox', {
+      name: 'Version',
+    });
+    // The versions of the head the page shows, newest first; the newest is chosen at first.
+    expect(api.callsTo(LOG)[0]).toMatchObject({ at: { kind: 'revision', revision: HEAD } });
+    expect(Array.from(list.options, (option) => option.value)).toEqual(
+      VERSIONS.map((version) => version.revision),
+    );
+    expect(list.value).toBe(HEAD);
+    fireEvent.change(list, { target: { value: OLDER } });
+    expect(section().textContent).toContain(`as of revision ${OLDER.slice(0, 10)}`);
+    service.script.push(() => fail(503, 'unavailable', 'the gateway lost the answer'));
+    fireEvent.click(exportButton());
+    await within(section()).findByText(/temporarily unavailable/);
+    fireEvent.click(within(section()).getByRole('button', { name: 'Try again' }));
+    await within(section()).findByText(/^The export was accepted/);
+    const sent = api.callsTo(EXPORT_WORKSPACE);
+    expect(sent.map((body) => body.at)).toEqual([
+      { kind: 'revision', revision: OLDER },
+      { kind: 'revision', revision: OLDER },
+    ]);
+    expect(sent[1]?.idempotency_key).toBe(sent[0]?.idempotency_key);
+    expect(service.jobs()).toHaveLength(1);
+    expect(api.violations).toEqual([]);
+  });
+
+  it('starts a new export for another version, under a new key', async () => {
+    const { api } = await openJobsWithHistory();
+    fireEvent.click(choice('A version from its history'));
+    const list = await within(section()).findByRole<HTMLSelectElement>('combobox', {
+      name: 'Version',
+    });
+    fireEvent.change(list, { target: { value: OLDER } });
+    fireEvent.click(exportButton());
+    await within(section()).findByText(/job aaaaaaaa/);
+    fireEvent.click(choice('As it is now'));
+    fireEvent.click(exportButton());
+    await within(section()).findByText(/job bbbbbbbb/);
+    const sent = api.callsTo(EXPORT_WORKSPACE);
+    expect(sent.map((body) => body.at)).toEqual([
+      { kind: 'revision', revision: OLDER },
+      { kind: 'latest' },
+    ]);
+    expect(sent[1]?.idempotency_key).not.toBe(sent[0]?.idempotency_key);
   });
 });
