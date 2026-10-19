@@ -113,6 +113,8 @@ const OUT: &str = "OKF_JAWN_FIXTURE_OUT";
 const SCHEMA_2: &str = "records-schema-2";
 /// The directory of the fixtures the last build at records schema 3 wrote.
 const SCHEMA_3: &str = "records-schema-3";
+/// The archives generated from the retained writer before records schema 5.
+const SCHEMA_4: &str = "records-schema-4";
 /// The tenant whose blank workspace the import test fills.
 const IMPORT_TENANT: &str = "import-tenant";
 /// The tenant of everything in the fixtures.
@@ -1242,6 +1244,38 @@ async fn the_schema_2_workspace_archive_restores_by_import_into_a_blank_workspac
 #[tokio::test]
 async fn the_schema_3_workspace_archive_restores_by_import_into_a_blank_workspace() -> TestResult {
     restores_by_import(SCHEMA_3).await
+}
+
+/// SPEC section 12: the fixed pre-V5 archive retains records schema 4 and its job seal.
+/// Expected values come from the released `RECORDS_V4` declaration, not the current writer.
+#[test]
+fn the_schema_4_workspace_archive_holds_records_at_schema_4() -> TestResult {
+    let archived = archived(SCHEMA_4)?;
+    assert_eq!(archived_schema(&archived.workspace)?, (4, 1));
+    let scratch = tempfile::tempdir()?;
+    let records = scratch.path().join("records.sqlite");
+    std::fs::write(&records, entry(&archived.workspace, "records.sqlite")?)?;
+    assert_eq!(
+        count(
+            &records,
+            "SELECT count(*) FROM pragma_table_info('jobs') WHERE name = 'sealed'"
+        )?,
+        1,
+        "schema 4 keeps the released job-seal column"
+    );
+    Ok(())
+}
+
+/// SPEC section 12: restore all independently archived schema-4 content and records.
+#[tokio::test]
+async fn the_schema_4_archives_restore_by_replacement_into_an_empty_directory() -> TestResult {
+    restores_by_replacement(SCHEMA_4, 4).await
+}
+
+/// SPEC section 12: import fixed schema-4 bytes into another tenant's blank workspace.
+#[tokio::test]
+async fn the_schema_4_workspace_archive_restores_by_import_into_a_blank_workspace() -> TestResult {
+    restores_by_import(SCHEMA_4).await
 }
 
 /// The archives of `schema`, written at records `user_version` `version`, restore by
