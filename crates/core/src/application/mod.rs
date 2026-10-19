@@ -14,8 +14,10 @@
 //! `uploads` (upload slots) and `job_control` (reading jobs, retrying and cancelling them),
 //! over the shared steps in `shared` (revision resolution, commits, receipts). Besides the
 //! operations, the service answers dispatch's archive question (`Application::archived_at`)
-//! from its catalog and records a sign-in for the server's session routes
-//! (`ApplicationService::record_sign_in`).
+//! from its catalog, records a sign-in for the server's session routes
+//! (`ApplicationService::record_sign_in`), and implements the byte transports the server binds
+//! (`transfers::Transfers`, in `transfers`), which authorize themselves since they are not
+//! operations.
 //!
 //! Operations whose part of the construction plan has not landed answer `NotImplemented`,
 //! naming the operation; nothing here claims an operation works that is not built, and no
@@ -566,5 +568,6 @@ mod reviews;
 mod shared;
 mod sources;
 mod status;
+mod transfers;
 mod uploads;
 mod workspaces;

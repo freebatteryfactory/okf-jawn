@@ -22,8 +22,10 @@
 //! - `FakeUploads` opens slots unique on the mutation, lists them newest first a page at a time
 //!   after a position cursor, and completes one against the bytes a test says it received
 //!   (`receive`), with storage's length and hash refusals. It holds no files and no blob store:
-//!   a completed slot's object is the received bytes' digest and length, and `put_content`,
-//!   `consume` and `consume_batch` are not modelled.
+//!   a completed slot's object is the received bytes' digest and length. `put_content` appends
+//!   a body within the slot's room (the smaller of the limit and the announced size, less what
+//!   it holds) with storage's refusals, and keeps each call's limit; `consume` and
+//!   `consume_batch` are not modelled.
 //! - `FakeCredentials` issues connectors unique on the mutation with a counter for a secret
 //!   (storage draws 32 random bytes), and keeps their order for listing, newest first.
 //! - `FakeLog` keeps every append, except an identical notification already appended under the
@@ -62,6 +64,7 @@ use okf_jawn_core::storage::{
     WorkspaceCatalog, WorkspaceUpdate, derive_workspace_id,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadRecord, UploadStore};
+use tokio::io::AsyncReadExt as _;
 use uuid::Uuid;
 
 use crate::fixture::{Built, FakeRecords, Unused, World, config, instant, revision};
@@ -165,6 +168,8 @@ struct UploadState {
     queries: Vec<(StorageScope, UploadQuery)>,
     /// How many times `create` was called.
     creates: usize,
+    /// The `limit` of every `put_content`, in order.
+    limits: Vec<u64>,
 }
 
 /// One slot as `FakeUploads` holds it.
@@ -667,6 +672,14 @@ impl FakeUploads {
     /// Returns when the lock is poisoned.
     pub fn queries(&self) -> Built<Vec<(StorageScope, UploadQuery)>> {
         Ok(lock(&self.state)?.queries.clone())
+    }
+
+    /// The `limit` of every `put_content` so far, in order.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn limits(&self) -> Built<Vec<u64>> {
+        Ok(lock(&self.state)?.limits.clone())
     }
 }
 
@@ -1336,14 +1349,59 @@ impl UploadStore for FakeUploads {
             })
         })
     }
+    /// "Append authenticated bytes to a slot. Fails with `TooLarge` when the slot would exceed
+    /// `limit` or its announced size." As storage: `NotFound` for a slot the workspace does not
+    /// hold, `Conflict` for a complete one, and a refusal appends nothing. It takes at most one
+    /// byte past what the slot has room for, so a longer body is cut, not read to its end. Each
+    /// call's `limit` is kept (`limits`).
     fn put_content<'a>(
         &'a self,
-        _scope: &'a StorageScope,
-        _upload: UploadId,
-        _body: ByteReader,
-        _limit: u64,
+        scope: &'a StorageScope,
+        upload: UploadId,
+        body: ByteReader,
+        limit: u64,
     ) -> PortFuture<'a, UploadRecord> {
-        unused()
+        Box::pin(async move {
+            let room = {
+                let mut state = lock_api(&self.state)?;
+                state.limits.push(limit);
+                let slot = state
+                    .slots
+                    .iter()
+                    .find(|slot| slot.scope == *scope && slot.record.id == upload)
+                    .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such upload"))?;
+                if slot.record.object.is_some() {
+                    return Err(ApiError::new(
+                        ErrorCode::Conflict,
+                        "this upload is already complete",
+                    ));
+                }
+                limit
+                    .min(slot.record.expected_size)
+                    .saturating_sub(slot.record.received_bytes)
+            };
+            let mut taken = Vec::new();
+            body.take(room.saturating_add(1))
+                .read_to_end(&mut taken)
+                .await
+                .map_err(|error| ApiError::new(ErrorCode::Unavailable, error.to_string()))?;
+            let length = u64::try_from(taken.len()).map_err(internal)?;
+            if length > room {
+                return Err(ApiError::new(
+                    ErrorCode::TooLarge,
+                    "the upload would exceed its announced size or the limit; nothing was appended",
+                ));
+            }
+            let mut state = lock_api(&self.state)?;
+            let slot = state
+                .slots
+                .iter_mut()
+                .find(|slot| slot.scope == *scope && slot.record.id == upload)
+                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such upload"))?;
+            slot.bytes.extend_from_slice(&taken);
+            slot.record.received_bytes = slot.record.received_bytes.saturating_add(length);
+            Ok(slot.record.clone())
+        })
     }
     /// "Verify the received bytes against the announced length and `sha256`, and retain them.
     /// Fails with `Conflict` and `ErrorDetail::UploadMismatch` on a length or hash mismatch, and
