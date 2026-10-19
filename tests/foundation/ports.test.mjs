@@ -23,6 +23,7 @@ const portFiles = new Map([
   ['sandbox.rs', { principal: false }],
   ['search.rs', { principal: false }],
   ['storage.rs', { principal: false }],
+  ['transfers.rs', { principal: false }],
   ['uploads.rs', { principal: false }],
 ]);
 /** `ports.rs` declares `Application` by macro; its methods take the wire request by design. */

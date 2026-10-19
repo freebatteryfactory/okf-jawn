@@ -5,9 +5,8 @@
 //! `ByteReader` into the response body (`tokio_util::io::ReaderStream`), and parse the path and an
 //! optional single `Range`. Every decision (which object an item revision may open, which artifact
 //! kind needs which permission on which route, an upload's byte limit) belongs to the
-//! application behind [`Transfers`]. Core has no such port yet (report request S3), so these
-//! routes are bound against this trait and tested with doubles; no production adapter exists in
-//! the server.
+//! application behind core's [`Transfers`], which `ApplicationService` implements; these routes
+//! are tested here with doubles of it, and no adapter of the server's stands between them.
 //!
 //! A download is never a page of the application origin (SPEC section 11: "Uploaded HTML is
 //! hostile data until constrained by actual isolation"). The response headers are written here,
@@ -31,82 +30,13 @@ use axum::{Extension, Json, Router};
 use futures_util::TryStreamExt as _;
 use okf_jawn_contract::access::Principal;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::identity::{ArtifactId, Digest, ItemId, Revision, UploadId, WorkspaceId};
-use okf_jawn_contract::import::Upload;
-use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::ByteReader;
+use okf_jawn_core::transfers::{ByteRange, Download, TransferCaller, Transfers};
 use serde::de::DeserializeOwned;
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::SessionId;
 use crate::errors::{Readable, error_response};
-
-/// The application side of the byte transports; each call authorizes as `caller`.
-pub trait Transfers: Send + Sync {
-    /// Append the request body to an upload slot (`upload_content`).
-    fn upload_content<'a>(
-        &'a self,
-        caller: &'a TransferCaller,
-        workspace: WorkspaceId,
-        upload: UploadId,
-        body: ByteReader,
-    ) -> PortFuture<'a, Upload>;
-    /// An object authorized through an exact item revision (`download_object`).
-    fn download_object<'a>(
-        &'a self,
-        caller: &'a TransferCaller,
-        workspace: WorkspaceId,
-        item: ItemId,
-        revision: Revision,
-        digest: Digest,
-        range: Option<ByteRange>,
-    ) -> PortFuture<'a, Download>;
-    /// A workspace artifact (`download_artifact`).
-    fn download_artifact<'a>(
-        &'a self,
-        caller: &'a TransferCaller,
-        workspace: WorkspaceId,
-        artifact: ArtifactId,
-    ) -> PortFuture<'a, Download>;
-    /// An installation archive (`download_tenant_artifact`).
-    fn download_tenant_artifact<'a>(
-        &'a self,
-        caller: &'a TransferCaller,
-        artifact: ArtifactId,
-    ) -> PortFuture<'a, Download>;
-}
-
-/// Who a transfer acts for, as the identity middleware established it.
-#[derive(Debug, Clone)]
-pub struct TransferCaller {
-    /// The authenticated principal.
-    pub principal: Principal,
-    /// The browser session, when the request came with the session cookie.
-    pub session_id: Option<String>,
-}
-
-/// One requested byte interval: `bytes=start-` or `bytes=start-end` (inclusive).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ByteRange {
-    /// First byte.
-    pub start: u64,
-    /// Last byte, inclusive; `None` to the end.
-    pub end: Option<u64>,
-}
-
-/// Bytes to send and what they are.
-pub struct Download {
-    /// Media type.
-    pub media_type: String,
-    /// Whole object size.
-    pub total_size: u64,
-    /// Offset of the first byte sent.
-    pub offset: u64,
-    /// Bytes sent.
-    pub length: u64,
-    /// The bytes.
-    pub body: ByteReader,
-}
 
 /// The upload route (`api/transports.json` `upload_content`).
 pub const UPLOAD_PATH: &str = "/api/workspaces/{workspace_id}/uploads/{upload_id}/content";

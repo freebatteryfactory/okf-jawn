@@ -1,4 +1,5 @@
-//! Reads of one resolved revision: folder listings, items, files, rules, types, corrections.
+//! Reads of one resolved revision: folder listings, the whole tree, items, files, rules, types,
+//! corrections.
 //!
 //! `show` finds an item by the identity in its application header, never by a path the caller
 //! names, so a moved item is found at its new path. `item_at_path` answers what is at one path
@@ -14,6 +15,7 @@ use okf_jawn_contract::source::SourceAppearance;
 use okf_jawn_core::portable::{content_digest, item_content_digest};
 use okf_jawn_core::storage::{
     CommittedFile, CommittedFiles, CommittedItem, FilePage, FolderListing, Page, Provenance,
+    RulesFile, RulesParseError, TreeItem, WorkspaceTree,
 };
 
 use super::edit::{appearance_file, correction_file, supplied_file};
@@ -32,8 +34,16 @@ pub(crate) fn items(
     repository: &Repository,
     tree: &Tree<'_>,
 ) -> Result<Vec<(WorkspacePath, ItemFile)>, ApiError> {
+    items_of(repository, files(repository, tree)?)
+}
+
+/// The items among `files` (a tree's files, as `repo::files` lists them), in their order.
+fn items_of(
+    repository: &Repository,
+    files: Vec<(String, Oid)>,
+) -> Result<Vec<(WorkspacePath, ItemFile)>, ApiError> {
     let mut found = Vec::new();
-    for (path, blob) in files(repository, tree)? {
+    for (path, blob) in files {
         if let Some(file) = item_file(repository, &path, blob)? {
             let path = WorkspacePath::try_from(path.clone())
                 .map_err(|error| internal(format!("{path} is not a workspace path: {error}")))?;
@@ -308,6 +318,47 @@ pub(crate) fn list(
     })
 }
 
+/// Every item of `revision` and every folder of its tree, in one walk (`VersionStore::tree`):
+/// each item file is parsed once and summarized as `list` summarizes it (`summary_of`), with a
+/// source card's original name from its header; the folders are every folder above a file, so
+/// the dot-folders `list` leaves out, `.okf` included, are here.
+pub(crate) fn tree(
+    repository: &Repository,
+    revision: &Revision,
+) -> Result<WorkspaceTree, ApiError> {
+    let tree = commit_of(repository, revision)?
+        .tree()
+        .map_err(|error| git(&error))?;
+    let files = files(repository, &tree)?;
+    let mut folders = std::collections::BTreeSet::new();
+    for (path, _) in &files {
+        folders.extend(
+            path.match_indices('/')
+                .filter_map(|(at, _)| path.get(..at))
+                .map(str::to_owned),
+        );
+    }
+    let mut items = Vec::new();
+    for (path, file) in items_of(repository, files)? {
+        items.push(TreeItem {
+            summary: summary_of(repository, &tree, &path, &file, revision)?,
+            original_name: file
+                .header
+                .source
+                .as_ref()
+                .map(|source| source.original_name.clone()),
+        });
+    }
+    let folders = folders
+        .into_iter()
+        .map(|folder| {
+            WorkspacePath::try_from(folder.clone())
+                .map_err(|error| internal(format!("{folder}: {error}")))
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(WorkspaceTree { items, folders })
+}
+
 pub(crate) fn show(
     repository: &Repository,
     revision: &Revision,
@@ -355,16 +406,33 @@ pub(crate) fn file(
         .transpose()
 }
 
+/// The naming rules file at `revision` (`VersionStore::rules`): its text, and its bytes read as
+/// `NamingRules`. The bytes are read, not the text, so a file that is not UTF-8 never reads as
+/// rules (the text shows U+FFFD where its bad bytes were). A file that does not read is answered
+/// with the reader's message and its 1-based line and column, never as an error.
 pub(crate) fn rules(
     repository: &Repository,
     revision: &Revision,
-) -> Result<Option<NamingRules>, ApiError> {
-    file(repository, revision, RULES_FILE)?
-        .map(|bytes| {
-            yaml_serde::from_slice(&bytes)
-                .map_err(|error| internal(format!("{RULES_FILE} does not parse: {error}")))
-        })
-        .transpose()
+) -> Result<Option<RulesFile>, ApiError> {
+    let Some(bytes) = file(repository, revision, RULES_FILE)? else {
+        return Ok(None);
+    };
+    let parsed = yaml_serde::from_slice::<NamingRules>(&bytes).map_err(|error| {
+        let location = error.location();
+        RulesParseError {
+            message: error.to_string(),
+            line: location
+                .as_ref()
+                .and_then(|at| u32::try_from(at.line()).ok()),
+            column: location
+                .as_ref()
+                .and_then(|at| u32::try_from(at.column()).ok()),
+        }
+    });
+    Ok(Some(RulesFile {
+        text: String::from_utf8_lossy(&bytes).into_owned(),
+        parsed,
+    }))
 }
 
 pub(crate) fn types(

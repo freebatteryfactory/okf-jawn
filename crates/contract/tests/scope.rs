@@ -121,7 +121,8 @@ const OTHER_WORKSPACE: &str = "33333333-3333-4333-8333-333333333333";
 /// The issued connector's ledger row keeps only its id (`ReplayPolicy::AlreadyIssued`), and a
 /// purge unlists the workspace from the connector record itself.
 const NAMES_WORKSPACES_IN_A_LIST: &[&str] = &["create_connector", "revoke_connector"];
-/// The mutations an archived workspace allows, by decision (ruling 25), in table order.
+/// The mutations an archived workspace allows, by decision (ruling 25; `create_connector` by the
+/// owner's decision of 2026-10-17), in table order.
 const ALLOWED_MUTATIONS_WHILE_ARCHIVED: &[&str] = &[
     "archive_workspace",
     "unarchive_workspace",
@@ -132,10 +133,11 @@ const ALLOWED_MUTATIONS_WHILE_ARCHIVED: &[&str] = &[
     "cancel_job",
     "rebuild_index",
     "export_view",
+    "create_connector",
 ];
 
 /// The mutations an archived workspace refuses, in table order. The tenant-level ones
-/// (`create_workspace`, `backup_installation`, `create_connector`, `revoke_connector`) never
+/// (`create_workspace`, `backup_installation`, `revoke_connector`) never
 /// name an archived workspace as their table target; they are listed so that every mutation
 /// has a decision.
 const REFUSED_MUTATIONS_WHILE_ARCHIVED: &[&str] = &[
@@ -170,7 +172,6 @@ const REFUSED_MUTATIONS_WHILE_ARCHIVED: &[&str] = &[
     "correct_digest",
     "set_rules",
     "apply_names",
-    "create_connector",
     "revoke_connector",
 ];
 

@@ -13,7 +13,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use okf_jawn_contract::common::{PageRange, Warning};
-use okf_jawn_contract::conventions::NamingRules;
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::extraction::{ConverterIdentity, FailureReason};
 use okf_jawn_contract::history::{BlameResponse, Commit, DiffResponse, LogResponse};
@@ -34,8 +33,8 @@ use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
     Backups, BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges,
     Committed, CommittedFile, CommittedFiles, DiffQuery, FilePage, FolderListing, LocalSource,
-    LogQuery, ObjectInfo, ObjectRead, Page, Promotion, Purger, SourceCard, StorageScope, TreeEdit,
-    VersionStore, WrittenArchive, replay_warnings_unavailable,
+    LogQuery, ObjectInfo, ObjectRead, Page, Promotion, Purger, RulesFile, SourceCard, StorageScope,
+    TreeEdit, TreeItem, VersionStore, WorkspaceTree, WrittenArchive, replay_warnings_unavailable,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadRecord, UploadStore};
 
@@ -108,6 +107,8 @@ pub struct FakeVersions {
     pub file_scopes: Mutex<Vec<StorageScope>>,
     /// Runs after a page was read, before the handler observes progress (a controlled cancel).
     pub after_file_page: Mutex<Option<FilePageHook>>,
+    /// The naming rules file every revision holds (`put_rules`); `None` is no rules saved.
+    pub rules: Mutex<Option<RulesFile>>,
 }
 
 /// A version tree is scoped independently from its revision identity.
@@ -317,6 +318,7 @@ impl FakeVersions {
             histories: Mutex::new(Vec::new()),
             file_scopes: Mutex::new(Vec::new()),
             after_file_page: Mutex::new(None),
+            rules: Mutex::new(None),
         }
     }
 
@@ -448,6 +450,15 @@ impl FakeVersions {
             files: answered,
             next_after,
         })
+    }
+
+    /// Hold `file` as the naming rules file at every revision.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn put_rules(&self, file: RulesFile) -> Result<(), ApiError> {
+        *self.rules.lock().map_err(|_| poisoned())? = Some(file);
+        Ok(())
     }
 
     /// Forget the warnings kept for every commit so far, as a store that wrote those commits
@@ -1055,12 +1066,31 @@ impl VersionStore for FakeVersions {
     ) -> PortFuture<'a, Vec<u8>> {
         unused("read_file")
     }
+    fn tree<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        revision: &'a Revision,
+    ) -> PortFuture<'a, WorkspaceTree> {
+        // The port doc: every item and folder of the revision, in path order; `NotFound` only
+        // for a revision the line does not hold (`items_at`).
+        let tree = self
+            .items_at(revision)
+            .and_then(|items| tree_of(&items, revision));
+        Box::pin(async move { tree })
+    }
     fn rules<'a>(
         &'a self,
         _scope: &'a StorageScope,
         _revision: &'a Revision,
-    ) -> PortFuture<'a, Option<NamingRules>> {
-        unused("rules")
+    ) -> PortFuture<'a, Option<RulesFile>> {
+        // The port doc: `None` when no rules were saved; the file's text and its reading
+        // otherwise. The fake holds one file for every revision.
+        let held = self
+            .rules
+            .lock()
+            .map_err(|_| poisoned())
+            .map(|rules| rules.clone());
+        Box::pin(async move { held })
     }
     fn types<'a>(
         &'a self,
@@ -1839,6 +1869,7 @@ fn apply_to_items(items: &mut Vec<SourceCard>, edit: &TreeEdit) {
         TreeEdit::MoveItem {
             item_id,
             destination,
+            ..
         } => {
             for item in items.iter_mut().filter(|item| item.item_id == *item_id) {
                 item.path = destination.clone();
@@ -1850,6 +1881,38 @@ fn apply_to_items(items: &mut Vec<SourceCard>, edit: &TreeEdit) {
 }
 
 /// The document `show` returns for a card at a revision.
+/// The tree of `items` at `revision`: each card summarized as `show` summarizes it, with its first
+/// observed name as its original's, in path order, and every folder above them.
+fn tree_of(items: &[SourceCard], revision: &Revision) -> Result<WorkspaceTree, ApiError> {
+    let mut held = Vec::new();
+    let mut folders = std::collections::BTreeSet::new();
+    for card in items {
+        let path = card.path.as_str();
+        folders.extend(
+            path.match_indices('/')
+                .filter_map(|(at, _)| path.get(..at))
+                .map(str::to_owned),
+        );
+        held.push(TreeItem {
+            summary: document_of(card, revision)?.summary,
+            original_name: card
+                .appearance
+                .names
+                .first()
+                .map(|name| name.filename.clone()),
+        });
+    }
+    held.sort_by(|left, right| left.summary.path.as_str().cmp(right.summary.path.as_str()));
+    Ok(WorkspaceTree {
+        items: held,
+        folders: folders
+            .into_iter()
+            .map(WorkspacePath::try_from)
+            .collect::<Result<_, _>>()
+            .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?,
+    })
+}
+
 fn document_of(card: &SourceCard, revision: &Revision) -> Result<ItemDocument, ApiError> {
     let content = serde_json::to_vec(&(&card.body, &card.properties))
         .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;

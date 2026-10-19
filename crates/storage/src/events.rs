@@ -51,6 +51,7 @@ impl EventLog for SqliteEvents {
                 connector_id: event.connector_id,
                 actor: event.actor,
                 operation: event.operation,
+                transport: event.transport,
                 proposal_id: event.proposal_id,
                 count: event.count,
             };

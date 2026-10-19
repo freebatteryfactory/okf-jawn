@@ -75,7 +75,7 @@ use okf_jawn_core::storage::{
 };
 use okf_jawn_core::uploads::UploadStore;
 
-pub use crate::import::CARD_NOT_WRITTEN;
+pub use crate::import::{CARD_NOT_WRITTEN, NAMING_RULES_ABSENT};
 use crate::import::{ImportRequest, import, redigest};
 
 /// The ports the handler calls: storage's, the converter and the injected check.
@@ -968,6 +968,7 @@ async fn announce_cancelled(
                 connector_id: None,
                 actor: None,
                 operation: None,
+                transport: None,
                 proposal_id: None,
                 count: None,
             },
@@ -991,6 +992,7 @@ pub(crate) fn job_event(
         connector_id: None,
         actor: None,
         operation: None,
+        transport: None,
         proposal_id: None,
         count: None,
     }

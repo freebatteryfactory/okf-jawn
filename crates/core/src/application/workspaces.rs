@@ -508,7 +508,7 @@ async fn metadata_result(
 ///
 /// # Errors
 /// Returns any port error.
-async fn start_job(
+pub(super) async fn start_job(
     service: &ApplicationService,
     context: &OperationContext,
     scope: JobScope,

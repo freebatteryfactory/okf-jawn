@@ -2947,6 +2947,7 @@ async fn purge_does_not_refuse_an_event_of_the_workspace_it_names() -> TestResul
                 connector_id: None,
                 actor: None,
                 operation: None,
+                transport: None,
                 proposal_id: None,
                 count: None,
             },

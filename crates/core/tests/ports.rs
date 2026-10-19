@@ -706,6 +706,7 @@ async fn event_calls(
         connector_id: None,
         actor: None,
         operation: None,
+        transport: None,
         proposal_id: None,
         count: None,
     };
@@ -970,7 +971,8 @@ fn a_proposed_change_becomes_the_matching_tree_edit() -> TestResult {
     );
     assert!(matches!(
         moved,
-        TreeEdit::MoveItem { item_id, destination } if item_id == existing && destination == path
+        TreeEdit::MoveItem { item_id, destination, keep_alias: false }
+            if item_id == existing && destination == path
     ));
     let edited = TreeEdit::from_change(
         Change::Edit {
