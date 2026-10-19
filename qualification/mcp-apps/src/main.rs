@@ -1091,17 +1091,21 @@ mod tests {
         assert_eq!(dataset.sha256, digest);
         assert_eq!(dataset.bytes.as_ref(), bytes.as_slice());
 
-        // The view document and the resolved bindings name the same retained digest.
+        // Authored bindings contain no materialization; only the resolved bindings retain it.
         let view_bindings = fixtures
             .present
             .pointer("/view/bindings")
             .and_then(Value::as_array)
             .ok_or("present fixture has no view.bindings")?;
+        assert!(
+            view_bindings
+                .iter()
+                .all(|binding| binding.get("materialized").is_none())
+        );
         let retained: Vec<&Value> = resolved_bindings(&fixtures.present)
-            .chain(view_bindings)
             .filter_map(|binding| binding.get("materialized"))
             .collect();
-        assert_eq!(retained, [&json!(digest), &json!(digest)]);
+        assert_eq!(retained, [&json!(digest)]);
         assert_eq!(
             metrics_binding(&fixtures.present)?.get("materialized"),
             Some(&json!(digest))
