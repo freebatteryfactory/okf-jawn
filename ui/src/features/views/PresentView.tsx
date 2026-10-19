@@ -1,24 +1,26 @@
-/** Resolve a saved presentation through host tools and preserve exact source bindings. */
+/** Resolve a presentation through the host's `ViewData` and preserve exact source bindings. */
 import { useEffect, useState } from 'react';
-import { compile, type TopLevelSpec } from 'vega-lite';
-import { z } from 'zod';
+import type { TopLevelSpec } from 'vega-lite';
+import type { z } from 'zod';
 import {
   zDataset,
   type zDatasetValue,
-  zGetObjectResponse,
   type zPresentResponse,
-  zReadItemResponse,
+  type zReadItemResponse,
   type zViewBinding,
 } from '../../api/generated/zod.gen';
 import type { ResolvedPresentation } from './Bindings';
 import { BindingsContext } from './Bindings';
-import { Chart } from './Chart';
+import { Chart, parseVegaLiteSpec } from './Chart';
+import { readDataset, readSource, type ViewData } from './data';
 import { Layout } from './Layout';
+import { Resolution, warnedBinding } from './Resolution';
+import { type DerivedDataset, planChart } from './transforms';
 
 export interface PresentViewProps {
   response: z.infer<typeof zPresentResponse>;
-  /** Host tool call; the Apps bridge applies omitUndefined once at the wire boundary. */
-  callTool: (name: string, input: Record<string, unknown>) => Promise<unknown>;
+  /** The host's reads of the sources and datasets the View cites. */
+  data: ViewData;
 }
 type Row = Readonly<Record<string, string | number | boolean | null>>;
 
@@ -138,94 +140,6 @@ export function parseDataset(
     );
   return datasetRecords(parsed.data);
 }
-const toolResult = z.object({
-  isError: z.boolean().optional(),
-  content: z.array(z.looseObject({ type: z.string(), text: z.string().optional() })).optional(),
-  structuredContent: z.unknown().optional(),
-});
-const refusalLimit = 512;
-
-/** The tool's own refusal text, bounded; cut on a code point boundary, ending with an ellipsis. */
-function refusalMessage(output: z.infer<typeof toolResult>, fallback: string): string {
-  const text = (output.content ?? [])
-    .flatMap((part) => (part.type === 'text' && part.text ? [part.text] : []))
-    .join('\n')
-    .trim();
-  if (text.length === 0) return fallback;
-  if (text.length <= refusalLimit) return text;
-  let end = refusalLimit - 1;
-  const last = text.charCodeAt(end - 1);
-  if (last >= 0xd800 && last <= 0xdbff) end -= 1; // do not leave half a surrogate pair
-  return `${text.slice(0, end)}…`;
-}
-
-/**
- * One host tool call whose refusal is surfaced as the tool's own bounded message. `isError` is
- * checked before `structuredContent` is parsed, because a refusal carries no structured content.
- */
-async function callChecked(
-  callTool: PresentViewProps['callTool'],
-  name: string,
-  input: Record<string, unknown>,
-  fallback: string,
-) {
-  const output = toolResult.parse(await callTool(name, input));
-  if (output.isError === true) throw new Error(refusalMessage(output, fallback));
-  return output;
-}
-
-/** Runtime-validate a Vega-Lite grammar value (SPEC §10); never cast untrusted specs. */
-export function parseVegaLiteSpec(value: unknown): TopLevelSpec {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('Vega-Lite specification must be a JSON object');
-  }
-  const candidate = value as TopLevelSpec;
-  compile(candidate);
-  return candidate;
-}
-
-async function dataset(
-  binding: z.infer<typeof zPresentResponse>['resolved_bindings'][number],
-  callTool: PresentViewProps['callTool'],
-) {
-  if (!binding.materialized) return undefined;
-  const chunks: Uint8Array[] = [];
-  let offset = 0n;
-  let more = true;
-  while (more) {
-    const output = await callChecked(
-      callTool,
-      'read_object',
-      {
-        source: binding.source,
-        object: binding.materialized,
-        offset: offset.toString(),
-        length: 1048576,
-      },
-      'The host refused to read the dataset.',
-    );
-    const part = zGetObjectResponse.parse(output.structuredContent);
-    if (part.sha256 !== binding.materialized || BigInt(part.offset) !== offset)
-      throw new Error('Dataset identity or range changed');
-    const bytes = Uint8Array.from(atob(part.data_base64), (character) => character.charCodeAt(0));
-    offset += BigInt(bytes.byteLength);
-    if (offset > 4194304n) throw new Error('Dataset exceeds the inline display budget');
-    if (bytes.length === 0 && part.has_more) throw new Error('Dataset read made no progress');
-    chunks.push(bytes);
-    more = part.has_more;
-  }
-  const merged = new Uint8Array(Number(offset));
-  let cursor = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, cursor);
-    cursor += chunk.byteLength;
-  }
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', merged));
-  const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
-  if (hex !== binding.materialized) throw new Error('Dataset digest verification failed');
-  return new TextDecoder('utf-8', { fatal: true }).decode(merged);
-}
-
 const failureLabel = {
   invalid_spec: 'Invalid specification',
   unknown_binding: 'Unknown binding',
@@ -240,15 +154,36 @@ const failureLabel = {
  * diagnostic is the source of truth for its own failure; a chart it calls ready is still judged
  * here, because renderer specs need runtime validation as well as the wire schema.
  */
+/** Each binding's declared transforms, by its name. */
+function bindingTransforms(
+  bindings: z.infer<typeof zPresentResponse>['resolved_bindings'],
+): ReadonlyMap<string, readonly unknown[]> {
+  return new Map(bindings.map((binding) => [binding.name, binding.transforms]));
+}
+
 function chartsFromView(
   view: z.infer<typeof zPresentResponse>['view'],
   statuses: z.infer<typeof zPresentResponse>['charts'],
-): { charts: Map<string, TopLevelSpec>; errors: Map<string, string> } {
+  transforms: ReadonlyMap<string, readonly unknown[]>,
+): {
+  charts: Map<string, TopLevelSpec>;
+  errors: Map<string, string>;
+  reads: Map<string, readonly string[]>;
+  derived: Map<string, readonly DerivedDataset[]>;
+} {
   const charts = new Map<string, TopLevelSpec>();
   const errors = new Map<string, string>();
+  const reads = new Map<string, readonly string[]>();
+  const derived = new Map<string, readonly DerivedDataset[]>();
   for (const [name, value] of Object.entries(view.charts ?? {})) {
+    const plan = planChart(value, transforms);
+    if (!plan.ok) {
+      errors.set(name, `Chart "${name}" cannot be drawn: ${plan.message}`);
+      continue;
+    }
     try {
-      charts.set(name, parseVegaLiteSpec(value));
+      charts.set(name, parseVegaLiteSpec(plan.spec));
+      if (plan.derived.length > 0) derived.set(name, plan.derived);
     } catch (cause) {
       errors.set(
         name,
@@ -259,24 +194,43 @@ function chartsFromView(
     }
   }
   for (const { chart, status } of statuses) {
-    if (status.status !== 'failed') continue;
     const name = chart.kind === 'named' ? chart.name : '';
-    errors.set(name, `${failureLabel[status.reason]}: ${status.message}`);
+    if (status.status === 'ready') reads.set(name, status.bindings);
+    else errors.set(name, `${failureLabel[status.reason]}: ${status.message}`);
   }
-  return { charts, errors };
+  return { charts, errors, reads, derived };
 }
 
 function reason(cause: unknown, fallback: string): string {
   return cause instanceof Error ? cause.message : fallback;
 }
 
-export function PresentView({ response, callTool }: PresentViewProps) {
-  const [bindings, setBindings] = useState<ResolvedPresentation | null>(null);
-  const [failure, setFailure] = useState<string | null>(null);
+/**
+ * What one resolution produced, for the response and the reads it was made with. It is shown only
+ * while both are still the ones given: while the next response, or the same one through other
+ * reads, is resolving, nothing read for the previous one is drawn under the new title and as-of
+ * time, and a previous failure does not stand for the next response.
+ */
+type Resolved = { response: PresentViewProps['response']; data: ViewData } & (
+  | { bindings: ResolvedPresentation }
+  | { failure: string }
+);
+
+export function PresentView({ response, data }: PresentViewProps) {
+  const [resolved, setResolved] = useState<Resolved | null>(null);
   useEffect(() => {
     let active = true;
     const load = async () => {
-      const { charts, errors: chartErrors } = chartsFromView(response.view, response.charts);
+      const {
+        charts,
+        errors: chartErrors,
+        reads: chartBindings,
+        derived: derivedDatasets,
+      } = chartsFromView(
+        response.view,
+        response.charts,
+        bindingTransforms(response.resolved_bindings),
+      );
       const sources = new Map<string, z.infer<typeof zReadItemResponse>>();
       const definitions = new Map<string, z.infer<typeof zViewBinding>>();
       const tables = new Map<string, ReadonlyArray<Row>>();
@@ -287,71 +241,77 @@ export function PresentView({ response, callTool }: PresentViewProps) {
       for (const binding of response.resolved_bindings) {
         definitions.set(binding.name, binding);
         try {
-          const output = await callChecked(
-            callTool,
-            'show',
-            {
-              workspace_id: binding.source.workspace_id,
-              item_id: binding.source.item_id,
-              at: { kind: 'revision', revision: binding.source.revision },
-              view: 'text',
-              selection: binding.source.selection,
-              max_bytes: 65536,
-              max_images: 0,
-            },
-            'The host refused to read the source.',
-          );
-          const source = zReadItemResponse.parse(output.structuredContent);
-          if (source.source.revision !== binding.source.revision)
-            throw new Error('Returned source revision differs from the binding');
-          sources.set(binding.name, source);
+          sources.set(binding.name, await readSource(data, binding));
         } catch (cause) {
           sourceErrors.set(binding.name, reason(cause, 'The source could not be read'));
         }
         try {
-          const text = await dataset(binding, callTool);
+          const text = await readDataset(data, binding);
           if (text !== undefined) tables.set(binding.name, parseDataset(text, binding.source));
         } catch (cause) {
           datasetErrors.set(binding.name, reason(cause, 'The dataset could not be read'));
         }
       }
+      // The server's own reason a dataset is missing, by the binding its warning locates.
+      const datasetWarnings = new Map<string, string>();
+      for (const warning of response.warnings) {
+        const binding = warnedBinding(response.view, warning.location);
+        if (warning.code === 'dataset_unavailable' && binding !== undefined)
+          datasetWarnings.set(binding, warning.message);
+      }
       if (active)
-        setBindings({
-          sources,
-          bindings: definitions,
-          tables,
-          charts,
-          datasetErrors,
-          sourceErrors,
-          chartErrors,
+        setResolved({
+          response,
+          data,
+          bindings: {
+            sources,
+            bindings: definitions,
+            tables,
+            charts,
+            datasetErrors,
+            datasetWarnings,
+            sourceErrors,
+            chartErrors,
+            chartBindings,
+            derivedDatasets,
+          },
         });
     };
     // Each binding and chart is caught on its own; this is for what nobody foresaw, so that the
     // View never waits on "Resolving…" forever.
     load().catch((cause) => {
-      if (active) setFailure(reason(cause, 'The presentation could not be resolved.'));
+      if (active)
+        setResolved({
+          response,
+          data,
+          failure: reason(cause, 'The presentation could not be resolved.'),
+        });
     });
     return () => {
       active = false;
     };
-  }, [response, callTool]);
-  if (failure !== null) return <p role="alert">{failure}</p>;
-  if (failure !== null) return <p role="alert">{failure}</p>;
-  if (!bindings) return <p role="status">Resolving the presentation's exact source references…</p>;
+  }, [response, data]);
+  const current =
+    resolved !== null && resolved.response === response && resolved.data === data ? resolved : null;
+  if (current === null)
+    return <p role="status">Resolving the presentation's exact source references…</p>;
+  if ('failure' in current) return <p role="alert">{current.failure}</p>;
+  const { bindings } = current;
   const view = response.view;
-  if (view.grammar === 'json_render') {
-    return (
-      <BindingsContext.Provider value={bindings}>
-        <Layout spec={view.spec} />
-      </BindingsContext.Provider>
-    );
-  }
+  // Either grammar: the View's own title and description, its drawing, then what it was read from.
   return (
-    <section>
-      <h2>{view.title}</h2>
-      <p>{view.description}</p>
-      <VegaLiteChart view={view} resolved={bindings} response={response} />
-    </section>
+    <BindingsContext.Provider value={bindings}>
+      <section>
+        <h2>{view.title}</h2>
+        <p>{view.description}</p>
+        {view.grammar === 'json_render' ? (
+          <Layout spec={view.spec} />
+        ) : (
+          <VegaLiteChart view={view} resolved={bindings} response={response} />
+        )}
+        <Resolution response={response} />
+      </section>
+    </BindingsContext.Provider>
   );
 }
 
@@ -367,9 +327,11 @@ function VegaLiteChart({
 }) {
   const failed = resolved.chartErrors?.get('');
   if (failed !== undefined) return <p role="alert">{failed}</p>;
+  const plan = planChart(view.spec, bindingTransforms(response.resolved_bindings));
+  if (!plan.ok) return <p role="alert">{`The chart cannot be drawn: ${plan.message}`}</p>;
   let chartSpec: TopLevelSpec;
   try {
-    chartSpec = parseVegaLiteSpec(view.spec);
+    chartSpec = parseVegaLiteSpec(plan.spec);
   } catch (cause) {
     return <p role="alert">{reason(cause, 'Vega-Lite specification failed runtime validation')}</p>;
   }
@@ -377,31 +339,35 @@ function VegaLiteChart({
     'data' in chartSpec && chartSpec.data && 'name' in chartSpec.data
       ? chartSpec.data.name
       : undefined;
-  const first = wanted
-    ? response.resolved_bindings.find((binding) => binding.name === wanted)
-    : response.resolved_bindings.at(0);
-  if (!first)
-    return (
-      <p role="alert">
-        {wanted
-          ? `Unknown binding "${wanted}": the chart names a binding this View does not resolve.`
-          : 'A chart requires a retained materialized dataset. No model-provided data was substituted.'}
-      </p>
-    );
-  const rows = resolved.tables.get(first.name);
-  if (!rows)
-    return (
-      <p role="alert">
-        {resolved.datasetErrors?.get(first.name) ??
-          'A chart requires a retained materialized dataset. No model-provided data was substituted.'}
-      </p>
-    );
+  // What the server says the chart reads; else the dataset its spec names, else the first binding.
+  const fallback = wanted ?? response.resolved_bindings.at(0)?.name;
+  const reads = resolved.chartBindings?.get('') ?? (fallback === undefined ? [] : [fallback]);
+  const unmaterialized =
+    'A chart requires a retained materialized dataset. No model-provided data was substituted.';
+  if (reads.length === 0) return <p role="alert">{unmaterialized}</p>;
+  const datasets = [];
+  const cited = [];
+  for (const name of reads) {
+    const binding = resolved.bindings.get(name);
+    if (!binding)
+      return (
+        <p role="alert">
+          {`Unknown binding "${name}": the chart names a binding this View does not resolve.`}
+        </p>
+      );
+    const rows = resolved.tables.get(name);
+    if (!rows) return <p role="alert">{resolved.datasetErrors?.get(name) ?? unmaterialized}</p>;
+    datasets.push({ name, rows });
+    cited.push(binding);
+  }
   return (
     <>
-      <Chart spec={chartSpec} rows={rows} bindingName={first.name} />
-      <p>
-        {first.source.path} @ <code>{first.source.revision}</code>
-      </p>
+      <Chart spec={chartSpec} datasets={datasets} derived={plan.derived} />
+      {cited.map((binding) => (
+        <p key={binding.name}>
+          {binding.source.path} @ <code>{binding.source.revision}</code>
+        </p>
+      ))}
     </>
   );
 }

@@ -1750,3 +1750,65 @@ async fn a_view_whose_chart_fails_its_own_check_is_still_exported() -> TestResul
     assert_eq!(tenancy.jobs.created()?.len(), 1);
     Ok(())
 }
+
+/// The owner's cycle rule is enforced by the real production saved-View validation,
+/// before a create can commit. A View-level fault is surfaced at body with its exact
+/// internal lookup pointer, rather than saved as a later chart warning.
+#[tokio::test]
+async fn create_item_refuses_binding_transform_cycles_before_committing() -> TestResult {
+    let self_cycle = block_with(
+        "/bindings/0/transforms",
+        json!([
+            { "lookup": "Quarter", "from": { "data": { "name": "revenue" }, "key": "Quarter" } }
+        ]),
+    )?;
+    let mut multi_cycle = block_with(
+        "/bindings/0/transforms",
+        json!([
+            { "lookup": "Quarter", "from": { "data": { "name": "venue" }, "key": "Quarter" } }
+        ]),
+    )?;
+    *some(
+        multi_cycle.pointer_mut("/bindings/1/transforms"),
+        "venue transforms",
+    )? = json!([
+        { "lookup": "Quarter", "from": { "data": { "name": "revenue" }, "key": "Quarter" } }
+    ]);
+    for (block, pointer) in [
+        (self_cycle, "/bindings/0/transforms/0/from/data/name"),
+        (multi_cycle, "/bindings/1/transforms/0/from/data/name"),
+    ] {
+        let world = standard_world()?;
+        // As the neighboring valid-create control, provide the returned revision/item.
+        // Old validation can then succeed completely: RED is the missing cycle refusal.
+        let body = view_body("Revenue.", &block)?;
+        let mut committed = view_item(&revision('e')?, &body)?;
+        committed.summary.id = derive_item_id(mutation(1), 0);
+        committed.summary.path = path("views/new.md")?;
+        world.versions.queue_revision(revision('e')?)?;
+        world.versions.put_document(&revision('e')?, committed)?;
+        let refused = err_of(
+            world
+                .service
+                .create_item(
+                    &alice(OperationName::CreateItem, Some(mutation(1)))?,
+                    create_view(&body)?,
+                )
+                .await,
+        )?;
+        assert_eq!(
+            refused.code,
+            ErrorCode::InvalidInput,
+            "{pointer}: {}",
+            refused.message
+        );
+        assert_eq!(refused.field.as_deref(), Some("/body"));
+        assert!(
+            refused.message.starts_with(pointer),
+            "{pointer}: {}",
+            refused.message
+        );
+        assert!(world.versions.commits()?.is_empty(), "{pointer}");
+    }
+    Ok(())
+}
