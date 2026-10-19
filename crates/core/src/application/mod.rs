@@ -14,7 +14,8 @@
 //! `events` (receipts and the two event logs), `connectors` (local connector credentials),
 //! `views` (persistent Views: reading, presenting, resolving and exporting them, and the check
 //! every saved-View write runs first),
-//! `uploads` (upload slots) and `job_control` (reading jobs, retrying and cancelling them),
+//! `uploads` (upload slots), `job_control` (reading jobs, retrying and cancelling them), and
+//! `attention` (advisory workspace observations and index rebuild jobs),
 //! over the shared steps in `shared` (revision resolution, commits, receipts). Besides the
 //! operations, the service answers dispatch's archive question (`Application::archived_at`)
 //! from its catalog, records a sign-in for the server's session routes
@@ -287,6 +288,12 @@ macro_rules! route {
     };
     (cancel_job) => {
         job_control::cancel_job
+    };
+    (get_attention) => {
+        attention::get_attention
+    };
+    (rebuild_index) => {
+        attention::rebuild_index
     };
     ($pending:ident) => {
         pending
@@ -589,6 +596,7 @@ fn is_origin(text: &str) -> bool {
     host_ok && port_ok
 }
 
+mod attention;
 mod connectors;
 mod conventions;
 mod drafts;

@@ -43,15 +43,15 @@
 //!   pages not converted when they are one range. Action `redigest_item`.
 //! - `ExtractionWarnings`: a completed source whose conversion recorded warnings. Action
 //!   `read_item`.
+//! - `InstructionLike`: the current local English rule set scans the shown body, including
+//!   digest, corrected and supplied text. One row holds at most 32 original passages with the
+//!   same citation locations as `read_item`, plus the count omitted. Action `read_item`.
 //! - `UploadsWaiting`: one row for the workspace when any upload is complete and not imported
 //!   (`UploadStore::list` in `waiting`, every page), with their count and total retained bytes.
 //!   Action `list_uploads`.
 //!
-//! Remaining producers, said rather than hidden: `InstructionLike` has an owner-approved
-//! deterministic v1 detector, whose implementation, typed findings and consumers are a
-//! separate follow-up. This slice does not implement it. `NewerSource`, `Invalidated` and
-//! `UnparseableHeader` also remain separate producer-backed work; this handler does not emit
-//! those kinds.
+//! Remaining producers, said rather than hidden: `NewerSource`, `Invalidated` and
+//! `UnparseableHeader` remain separate producer-backed work; this handler does not emit them.
 //!
 //! Order and pages: the rows are ordered by kind in the order `AttentionKind` declares them,
 //! then by the item's path, then by its identity (a row about no item has an empty path and
@@ -74,7 +74,7 @@
 //! and records no receipt.
 //!
 //! `rebuild_index` queues `JobSpec::RebuildIndex` as every job-starting operation does
-//! (`shared::start_job`): ingest runs it over `SearchIndex::rebuild`, which never touches jobs,
+//! (`workspaces::start_job`): ingest runs it over `SearchIndex::rebuild`, which never touches jobs,
 //! reviews or receipts. Dispatch lets it run while the workspace is archived (contract ruling
 //! 25), and its table permission is `admin`.
 
@@ -83,7 +83,8 @@ use std::collections::BTreeMap;
 use okf_core::{Actor, ActorKind, ConceptId, LinkKind};
 use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::attention::{
-    AttentionItem, AttentionKind, GetAttentionRequest, GetAttentionResponse, RebuildIndexRequest,
+    AttentionItem, AttentionKind, GetAttentionRequest, GetAttentionResponse, InstructionEvidence,
+    InstructionFinding, RebuildIndexRequest,
 };
 use okf_jawn_contract::common::{PageRange, TextRange};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
@@ -103,9 +104,12 @@ use serde::{Deserialize, Serialize};
 use super::ApplicationService;
 use super::navigation::indexed;
 use super::reviews::reviews_at;
-use super::shared::{invalid, next_page, resolve_page, start_job, workspace_scope};
+use super::shared::{invalid, next_page, resolve_page, workspace_scope};
+use super::sources::{citation, record_of};
+use super::workspaces::start_job;
 use crate::conformance::names_markdown;
 use crate::context::OperationContext;
+use crate::instruction_like::{Detector, RULE_SET_VERSION};
 use crate::jobs::{JobScope, JobSpec};
 use crate::portable::item_content_digest;
 use crate::proposals::ProposalFilter;
@@ -229,10 +233,12 @@ async fn scan(
 ) -> Result<Vec<Row>, ApiError> {
     let documents = documents_at(service, scope, revision).await?;
     let agents = agent_content(service, scope).await?;
+    let detector = Detector::new()?;
     let mut day = None;
     let mut rows = Vec::new();
     let mut by_object: BTreeMap<Digest, Vec<&ItemDocument>> = BTreeMap::new();
     for document in &documents {
+        rows.extend(instruction_like(service, scope, revision, document, &detector).await?);
         if let Some(message) = broken_links(service, scope, revision, document).await? {
             rows.push(message);
         }
@@ -282,6 +288,55 @@ async fn scan(
     }
     rows.extend(uploads_waiting(service, scope).await?);
     Ok(rows)
+}
+
+/// Current advisory evidence over the unchanged shown body, located by the ordinary read path.
+/// Only a matched source requires its conversion record; an empty scan emits no observation.
+async fn instruction_like(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    revision: &Revision,
+    document: &ItemDocument,
+    detector: &Detector,
+) -> Result<Option<Row>, ApiError> {
+    let scan = detector.scan(&document.body)?;
+    if scan.findings.is_empty() {
+        return Ok(None);
+    }
+    let record = record_of(service, scope, document.source.as_ref()).await?;
+    let findings = scan
+        .findings
+        .into_iter()
+        .map(|finding| InstructionFinding {
+            rule_id: finding.rule,
+            rule_set_version: RULE_SET_VERSION.to_owned(),
+            passage: finding.passage,
+            source: citation(
+                scope,
+                revision,
+                document,
+                record.as_ref(),
+                Selection::Lines {
+                    range: finding.lines,
+                },
+            ),
+        })
+        .collect();
+    let mut observation = row(
+        AttentionKind::InstructionLike,
+        document,
+        None,
+        "This text may contain instructions aimed at an AI assistant. English-only rules; \
+         findings are advisory and false positives are possible."
+            .to_owned(),
+        OperationName::ReadItem,
+    );
+    observation.item.instruction_like = Some(InstructionEvidence {
+        language: "en".to_owned(),
+        findings,
+        omitted_findings: scan.omitted_findings,
+    });
+    Ok(Some(observation))
 }
 
 /// Every item of the tree at `revision` that is not archived, read whole.
@@ -846,6 +901,7 @@ async fn uploads_waiting(
             selection: None,
             message,
             action: OperationName::ListUploads,
+            instruction_like: None,
         },
     }))
 }
@@ -872,6 +928,7 @@ fn row(
             selection,
             message,
             action,
+            instruction_like: None,
         },
     }
 }

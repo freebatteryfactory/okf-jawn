@@ -266,7 +266,7 @@ fn folder_of(folder: Option<String>) -> Result<Option<WorkspacePath>, ApiError> 
 /// Answer `query` from the index; when the index has not built `revision` yet and it lies in
 /// the retained window, build it under the workspace's gate and ask once more, as the module
 /// header says.
-async fn indexed<T, Answer>(
+pub(super) async fn indexed<T, Answer>(
     service: &ApplicationService,
     scope: &StorageScope,
     revision: &Revision,
