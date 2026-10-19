@@ -12,11 +12,15 @@
 //! `status` (health, readiness and the session), `purges` (recording, resuming and reading
 //! a workspace purge), `workspaces` (the catalog, archive, export, backup and restore),
 //! `events` (receipts and the two event logs), `connectors` (local connector credentials),
+//! `views` (persistent Views: reading, presenting, resolving and exporting them, and the check
+//! every saved-View write runs first),
 //! `uploads` (upload slots) and `job_control` (reading jobs, retrying and cancelling them),
 //! over the shared steps in `shared` (revision resolution, commits, receipts). Besides the
 //! operations, the service answers dispatch's archive question (`Application::archived_at`)
-//! from its catalog and records a sign-in for the server's session routes
-//! (`ApplicationService::record_sign_in`).
+//! from its catalog, records a sign-in for the server's session routes
+//! (`ApplicationService::record_sign_in`), and implements the byte transports the server binds
+//! (`transfers::Transfers`, in `transfers`), which authorize themselves since they are not
+//! operations.
 //!
 //! Operations whose part of the construction plan has not landed answer `NotImplemented`,
 //! naming the operation; nothing here claims an operation works that is not built, and no
@@ -51,7 +55,9 @@ use crate::proposals::ProposalStore;
 use crate::readiness::ReadinessProbe;
 use crate::sandbox::SandboxCapabilityStore;
 use crate::search::SearchIndex;
-use crate::storage::{BlobStore, CandidateCheck, StorageScope, VersionStore, WorkspaceCatalog};
+use crate::storage::{
+    Backups, BlobStore, CandidateCheck, StorageScope, VersionStore, WorkspaceCatalog,
+};
 use crate::uploads::UploadStore;
 
 pub use reviews::CONFIRMATION_TTL;
@@ -107,6 +113,21 @@ macro_rules! route {
     };
     (get_object) => {
         sources::get_object
+    };
+    (get_view) => {
+        views::get_view
+    };
+    (get_catalog) => {
+        views::get_catalog
+    };
+    (present_view) => {
+        views::present_view
+    };
+    (resolve_view) => {
+        views::resolve_view
+    };
+    (export_view) => {
+        views::export_view
     };
     (log_items) => {
         history::log_items
@@ -333,6 +354,10 @@ pub struct Ports {
     pub sandbox: Arc<dyn SandboxCapabilityStore>,
     /// Configured dependency readiness.
     pub readiness: Arc<dyn ReadinessProbe>,
+    /// Workspace and installation archives; the `download_tenant_artifact` transport reads an
+    /// installation archive back through it (`Backups::open_installation_archive`), since the
+    /// blob store is workspace-scoped.
+    pub backups: Arc<dyn Backups>,
 }
 
 /// Deployment settings the operations need beyond the ports.
@@ -579,5 +604,7 @@ mod reviews;
 mod shared;
 mod sources;
 mod status;
+mod transfers;
 mod uploads;
+mod views;
 mod workspaces;

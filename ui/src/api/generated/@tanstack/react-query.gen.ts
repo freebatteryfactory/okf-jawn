@@ -1877,7 +1877,7 @@ export const downloadObjectOptions = (options: Options<DownloadObjectData>) => q
 /**
  * upload_content
  *
- * Stream authenticated original bytes into a preallocated upload, enforcing byte limits and digest verification.
+ * Stream authenticated original bytes into a preallocated upload, enforcing byte limits. complete_upload verifies the expected length and digest.
  */
 export const uploadContentMutation = (options?: Partial<Options<UploadContentData>>): UseMutationOptions<UploadContentResponse, DefaultError, Options<UploadContentData>> => {
     const mutationOptions: UseMutationOptions<UploadContentResponse, DefaultError, Options<UploadContentData>> = {
