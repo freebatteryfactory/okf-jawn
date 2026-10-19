@@ -1,5 +1,5 @@
 {
-  "git_sha": "6cc587e62230b2383d5b711441aeda5a3f230375",
+  "git_sha": "887056a26d3ee0e20cda63cb38391b88a5e75ec8",
   "inputs": [
     ".bun-version",
     ".cargo/config.toml",
@@ -23,7 +23,7 @@
     "ui/tsconfig.json",
     "ui/vite.config.ts"
   ],
-  "produced_at": "2026-10-19T18:37:15.212Z",
+  "produced_at": "2026-10-19T18:49:36.339Z",
   "component": "mcp-apps-protocol-qualification",
   "gate": "mcp-apps-protocol-qualification",
   "result": "PASS",
@@ -212,7 +212,7 @@
   ],
   "not_judged": [],
   "harness_error_detail": [],
-  "finished_at": "2026-10-19T18:39:38.242Z",
+  "finished_at": "2026-10-19T18:51:15.533Z",
   "scope": {
     "summary": "This run renders the real MCP App bundle in a real MCP Apps host, against a fixture MCP server. It qualifies the App side and the protocol libraries; it does not test the product server.",
     "real": [
@@ -250,16 +250,16 @@
     "protocol/read_object_digest": "The bytes assembled from those blocks hash to the binding's materialized digest, and total_size is their count.",
     "protocol/read_object_unknown_digest_refused": "read_object answers a digest nobody retains with isError and no structuredContent.",
     "protocol/read_object_unknown_argument_refused": "read_object answers a request with an argument the product request type does not have with isError and no structuredContent, as the product's deny_unknown_fields does.",
-    "render_source/text": "In the App frame of the reference host, render_source shows the source view's own text for the committed fixture and none of another view's, and no waiting, disconnected or unparsed-result message.",
+    "render_source/text": "In the App frame of the reference host, render_source shows the source view's own text for the committed fixture and none of another view's, and no waiting, disconnected or unparsed-result message. Where revisions are abbreviated, visible code titles retain the exact full fixture identities.",
     "render_source/no_alert": "The App frame holds no element with role=\"alert\". Only the App frame is read: an alert in the host page or in the sandbox proxy frame is not seen by this rule.",
     "render_source/accessibility": "axe analysed the App frame and found no serious or critical violation in it.",
-    "render_changes/text": "In the App frame of the reference host, render_changes shows the changes view's own text for the committed fixture and none of another view's, and no waiting, disconnected or unparsed-result message.",
+    "render_changes/text": "In the App frame of the reference host, render_changes shows the changes view's own text for the committed fixture and none of another view's, and no waiting, disconnected or unparsed-result message. Where revisions are abbreviated, visible code titles retain the exact full fixture identities.",
     "render_changes/no_alert": "The App frame holds no element with role=\"alert\". Only the App frame is read: an alert in the host page or in the sandbox proxy frame is not seen by this rule.",
     "render_changes/accessibility": "axe analysed the App frame and found no serious or critical violation in it.",
-    "render_timeline/text": "In the App frame of the reference host, render_timeline shows the timeline view's own text for the committed fixture and none of another view's, and no waiting, disconnected or unparsed-result message.",
+    "render_timeline/text": "In the App frame of the reference host, render_timeline shows the timeline view's own text for the committed fixture and none of another view's, and no waiting, disconnected or unparsed-result message. Where revisions are abbreviated, visible code titles retain the exact full fixture identities.",
     "render_timeline/no_alert": "The App frame holds no element with role=\"alert\". Only the App frame is read: an alert in the host page or in the sandbox proxy frame is not seen by this rule.",
     "render_timeline/accessibility": "axe analysed the App frame and found no serious or critical violation in it.",
-    "render_present/text": "In the App frame of the reference host, render_present shows the present view's own text for the committed fixture and none of another view's, and no waiting, disconnected or unparsed-result message.",
+    "render_present/text": "In the App frame of the reference host, render_present shows the present view's own text for the committed fixture and none of another view's, and no waiting, disconnected or unparsed-result message. Where revisions are abbreviated, visible code titles retain the exact full fixture identities.",
     "render_present/no_alert": "The App frame holds no element with role=\"alert\". Only the App frame is read: an alert in the host page or in the sandbox proxy frame is not seen by this rule.",
     "render_present/accessibility": "axe analysed the App frame and found no serious or critical violation in it.",
     "render_present/chart_marks": "The chart svg holds exactly as many mark elements (children of g.role-mark) as the dataset has rows. Equality is right for this fixture because its chart is one unit bar with a plain nominal field against a plain quantitative field: Vega-Lite compiles that to one rect per row, and nothing aggregates, bins, stacks, filters or layers. The expectation is derived from the fixture; another specification is refused, not guessed.",
@@ -279,17 +279,17 @@
     },
     "http": {
       "status": "listening",
-      "endpoint": "http://127.0.0.1:18768/mcp",
-      "requested": "http://127.0.0.1:18768/mcp"
+      "endpoint": "http://127.0.0.1:18765/mcp",
+      "requested": "http://127.0.0.1:18765/mcp"
     }
   },
   "harness_binary": {
     "path": "<abs>/release/okf-qualify-mcp-apps.exe",
     "bytes": 5330432,
-    "sha256": "04781e884949fa074ea0d77ac46bb6d7856fd07ef2c0d3ee67dae3358b9852bc",
+    "sha256": "43f1065d4191242e6dff34c0cbff78178acb16b19f6a167d4c1af31ce7a180d5",
     "args": [
       "--http",
-      "127.0.0.1:18768"
+      "127.0.0.1:18765"
     ]
   },
   "harness_process": {
@@ -311,7 +311,7 @@
     ]
   },
   "bundle_sizes": {
-    "app": 1608669
+    "app": 1616519
   },
   "app_bundle": {
     "node_env": "development",
@@ -336,7 +336,7 @@
     "resource_count": 1,
     "resources": [
       {
-        "byteLength": 1608669,
+        "byteLength": 1616519,
         "metaUi": {
           "csp": {
             "connectDomains": [],
@@ -348,7 +348,7 @@
         "name": "app",
         "path": "ui/dist-apps/app.html",
         "readable": true,
-        "sha256": "ee3277e1062b802f37087d2ef46859f637c561034f4f6140b0e5244269601b4f",
+        "sha256": "349fcf9cd28094cc01dd9430f15af371a01b8705f0f060a36b5bad3cf9a49552",
         "uri": "ui://okf-jawn/app.html"
       }
     ],
@@ -451,7 +451,7 @@
       {
         "uri": "ui://okf-jawn/app.html",
         "mime_type": "text/html;profile=mcp-app",
-        "text_sha256": "ee3277e1062b802f37087d2ef46859f637c561034f4f6140b0e5244269601b4f",
+        "text_sha256": "349fcf9cd28094cc01dd9430f15af371a01b8705f0f060a36b5bad3cf9a49552",
         "csp": {
           "connectDomains": [],
           "resourceDomains": []
@@ -545,14 +545,14 @@
       "repository": "https://github.com/modelcontextprotocol/ext-apps",
       "requested_tag": "v2.0.3",
       "commit": "82221c0c8ce7661efa6771c9d461511b1650495f",
-      "commit_resolved_at": "2026-10-19T15:48:43.192Z",
+      "commit_resolved_at": "2026-10-19T00:58:11.291Z",
       "files_verified": 14,
       "files_expected": 14,
       "package": {
         "name": "@modelcontextprotocol/ext-apps-basic-host",
         "version": "2.0.3"
       },
-      "lockfile_sha256": "c3c6af27f70c56a7e1a29119fdfdf5447ddb37332fcb5e1bf89ed0e64fa5ede6"
+      "lockfile_sha256": "27f97aef6f62fc3cdeed9f0ea02b6a7a2fb20367ee3b1554b09adf3e6c07de4e"
     },
     "browser": {
       "name": "chromium",
@@ -567,6 +567,7 @@
         "screenshot": ".artifacts/qualification/mcp-apps/basic-host-render_source.png",
         "app_frame_depth": 2,
         "feature_text": "fixtures/qualification-source.md\n0123456789abcdef0123456789abcdef01234567\nQualification source\n\nContract-valid ReadItemResponse fixture for the MCP Apps harness.",
+        "revisions": [],
         "alerts": [],
         "expected_alerts": [],
         "axe": {
@@ -612,7 +613,11 @@
         "url": "http://127.0.0.1:8080/?server=okf-qualify-mcp-apps&tool=render_changes&call=true&theme=hide",
         "screenshot": ".artifacts/qualification/mcp-apps/basic-host-render_changes.png",
         "app_frame_depth": 2,
-        "feature_text": "Changes\n\n0123456789abcdef0123456789abcdef01234567 → 89abcdef0123456789abcdef0123456789abcdef\n\nfixtures/qualification-source.md\n@@ -1,3 +1,4 @@\n # Qualification source\n+\n+Harness fixture line.\n",
+        "feature_text": "Changes\n\nFrom revision 0123456789 to revision 89abcdef01.\n\nChanged: fixtures/qualification-source.md\n\nFrom line 1 of the file\n\n  # Qualification source\n\nAdded:\n+ \n\nAdded:\n+ Harness fixture line.\n",
+        "revisions": [
+          "0123456789abcdef0123456789abcdef01234567",
+          "89abcdef0123456789abcdef0123456789abcdef"
+        ],
         "alerts": [],
         "expected_alerts": [],
         "axe": {
@@ -658,7 +663,10 @@
         "url": "http://127.0.0.1:8080/?server=okf-qualify-mcp-apps&tool=render_timeline&call=true&theme=hide",
         "screenshot": ".artifacts/qualification/mcp-apps/basic-host-render_timeline.png",
         "app_frame_depth": 2,
-        "feature_text": "Timeline\nQualification timeline fixture\n\nokf-qualify-mcp-apps · 2026-10-05T12:00:00.000Z\n\n89abcdef0123456789abcdef0123456789abcdef",
+        "feature_text": "Timeline\nQualification timeline fixture\n\nOct 5, 2026, 8:00 AM, author recorded as okf-qualify-mcp-apps, revision 89abcdef01",
+        "revisions": [
+          "89abcdef0123456789abcdef0123456789abcdef"
+        ],
         "alerts": [],
         "expected_alerts": [],
         "axe": {
@@ -705,6 +713,7 @@
         "screenshot": ".artifacts/qualification/mcp-apps/basic-host-render_present.png",
         "app_frame_depth": 2,
         "feature_text": "Six-component catalog\nfixtures/qualification-source.md\n0123456789abcdef0123456789abcdef01234567\nQualification source\n\nContract-valid ReadItemResponse fixture for the MCP Apps harness.\n\nmetrics\ncategory\tvalue\nIngested\t412\nConverted\t397\nIndexed\t389\nReviewed\t127\nPublished\t61\nMetrics chart\nConverted\nIndexed\nIngested\nPublished\nReviewed\ncategory\n0\n50\n100\n150\n200\n250\n300\n350\n400\n450\nvalue\nSource data\nfix",
+        "revisions": [],
         "alerts": [],
         "expected_alerts": [],
         "present_dataset": {
@@ -853,7 +862,7 @@
     "opened_at": null,
     "closed_at": null,
     "public_url": null,
-    "local_port": 18768,
+    "local_port": 18765,
     "note": "OKF_MCP_APPS_NGROK is not 1"
   },
   "host_render": {
