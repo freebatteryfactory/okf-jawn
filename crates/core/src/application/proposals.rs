@@ -612,8 +612,9 @@ async fn check_proposed_view(
 /// E6), before its acceptance uses the confirmation.
 ///
 /// # Errors
-/// Returns `Conflict` with no field, naming the change's field and the fault, when one no longer
-/// passes; any port error reading the base.
+/// Returns `Conflict` with no field, naming the change's field and the fault, for invalid View
+/// content or a missing/invalidated citation. Operational errors retain their code, field and
+/// detail: a storage failure does not establish that the proposal no longer validates.
 async fn recheck_proposed_views(
     service: &ApplicationService,
     scope: &StorageScope,
@@ -635,11 +636,15 @@ async fn recheck_proposed_views(
         check_proposed_view(service, scope, change, index, edited.as_ref())
             .await
             .map_err(|error| {
-                conflict(&format!(
-                    "the proposal's View no longer validates ({}): {}",
-                    error.field.as_deref().unwrap_or("/changes"),
-                    error.message
-                ))
+                if matches!(error.code, ErrorCode::InvalidInput | ErrorCode::NotFound) {
+                    conflict(&format!(
+                        "the proposal's View no longer validates ({}): {}",
+                        error.field.as_deref().unwrap_or("/changes"),
+                        error.message
+                    ))
+                } else {
+                    error
+                }
             })?;
     }
     Ok(())
