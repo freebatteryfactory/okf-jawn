@@ -13,7 +13,7 @@
 //!   (`shared::check_named`) and then held by the store, which answers `NotFound` for a revision
 //!   it does not hold. A head that moved since does not refuse the import (contract ruling 26):
 //!   card names are chosen at the base, and a card path taken since fails the job.
-//! - the destination against the base: walking its folders from the root, a folder of the base
+//! - the destination against the complete base tree, including hidden folders: a folder
 //!   with the same collision key as the destination's folder at that level but another spelling
 //!   is refused as `invalid_input` on `/destination`, naming the spelling the base holds, so the
 //!   cards never land in a second spelling of an existing folder. A level the base does not hold
@@ -68,6 +68,8 @@
 //! attempt runs the same checks at the same base and is answered the first attempt's commit and
 //! receipt (the commit replays on the mutation).
 
+use std::collections::BTreeMap;
+
 use okf_jawn_contract::common::{MutationResult, PageRange};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::{ConversionOutcome, ConversionSettings};
@@ -89,9 +91,6 @@ use super::workspaces::start_job;
 use crate::context::{Attempt, OperationContext};
 use crate::jobs::{JobScope, JobSpec};
 use crate::storage::{Page, StorageScope, TreeEdit};
-
-/// How many entries of a folder are read at a time while the destination is walked.
-const FOLDER_PAGE: u16 = 500;
 
 /// The request field a destination is refused on.
 const DESTINATION: &str = "/destination";
@@ -275,7 +274,7 @@ fn destination_of(destination: &str) -> Result<Option<WorkspacePath>, ApiError> 
 }
 
 /// Refuse a base the store does not hold, and a destination that names a folder of the base
-/// spelled otherwise, at any level, walking from the root until a level the base does not hold.
+/// spelled otherwise, at any level, using the complete tree rather than the visible listing.
 ///
 /// # Errors
 /// Returns `InvalidInput` on `/destination` naming the base's spelling, the store's `NotFound`
@@ -303,16 +302,38 @@ async fn check_destination(
             .await?;
         return Ok(());
     };
-    let mut parent: Option<WorkspacePath> = None;
+    // Ordinary listings deliberately omit dot-prefixed folders. Build collision-key indexes
+    // once from the complete tree, so a hidden item or folder is equally occupied.
+    let tree = service.ports().versions.tree(scope, base).await?;
+    let items: BTreeMap<_, _> = tree
+        .items
+        .iter()
+        .map(|item| (item.summary.path.collision_key(), &item.summary.path))
+        .collect();
+    let folders: BTreeMap<_, _> = tree
+        .folders
+        .iter()
+        .map(|folder| (folder.collision_key(), folder))
+        .collect();
     let mut wanted = String::new();
     for segment in destination.as_str().split('/') {
         if !wanted.is_empty() {
             wanted.push('/');
         }
         wanted.push_str(segment);
-        match folder_by_key(service, scope, base, parent.as_ref(), &wanted).await? {
+        let key = collision_key_of(&wanted);
+        if let Some(item) = items.get(&key) {
+            return Err(invalid(
+                format!(
+                    "the destination names the item {} as a folder",
+                    item.as_str()
+                ),
+                DESTINATION,
+            ));
+        }
+        match folders.get(&key) {
             None => return Ok(()),
-            Some(held) if held.as_str() == wanted => parent = Some(held),
+            Some(held) if held.as_str() == wanted => {}
             Some(held) => {
                 return Err(invalid(
                     format!(
@@ -326,62 +347,6 @@ async fn check_destination(
         }
     }
     Ok(())
-}
-
-/// The child folder of `parent` at `base` whose collision key is `wanted`'s, read from every
-/// page of the listing; `None` when the base holds none. An item with that key cannot become
-/// a destination folder or an ancestor of one.
-///
-/// # Errors
-/// Returns `InvalidInput` on `/destination` for an item occupying the wanted path, or any
-/// listing error: a missing folder is empty, so `NotFound` here is an unknown revision.
-async fn folder_by_key(
-    service: &ApplicationService,
-    scope: &StorageScope,
-    base: &Revision,
-    parent: Option<&WorkspacePath>,
-    wanted: &str,
-) -> Result<Option<WorkspacePath>, ApiError> {
-    let key = collision_key_of(wanted);
-    let versions = &service.ports().versions;
-    let mut cursor = None;
-    loop {
-        let listing = versions
-            .list(
-                scope,
-                base,
-                parent,
-                Page {
-                    cursor: cursor.take(),
-                    limit: FOLDER_PAGE,
-                },
-            )
-            .await?;
-        if let Some(item) = listing
-            .items
-            .iter()
-            .find(|item| item.path.collision_key() == key)
-        {
-            return Err(invalid(
-                format!(
-                    "the destination names the item {} as a folder",
-                    item.path.as_str()
-                ),
-                DESTINATION,
-            ));
-        }
-        if let Some(found) = listing
-            .folders
-            .into_iter()
-            .find(|folder| folder.collision_key() == key)
-        {
-            return Ok(Some(found));
-        }
-        match listing.next_cursor {
-            Some(next) => cursor = Some(next),
-            None => return Ok(None),
-        }
-    }
 }
 
 /// Refuse, at the first upload in the request's order that fails, an upload the workspace does

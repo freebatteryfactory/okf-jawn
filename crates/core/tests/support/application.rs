@@ -993,7 +993,9 @@ impl VersionState {
 
     fn require_known(&self, revision: &Revision) -> Result<(), ApiError> {
         let known = self.head.as_ref() == Some(revision)
-            || self.commits.iter().any(|(_, at)| at == revision)
+            || self.commits.iter().any(|(changes, at)| {
+                at == revision || &changes.expected_head == revision
+            })
             // Moving the head does not erase the revision it moved from, including an empty tree.
             || self.landed.iter().any(|(at, parent)| at == revision || parent == revision)
             || self.documents.iter().any(|(at, _)| at == revision)
