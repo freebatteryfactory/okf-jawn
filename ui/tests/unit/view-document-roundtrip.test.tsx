@@ -7,7 +7,15 @@
  * real render of that data produces: a row's cells, a chart mark per row, the source's words.
  */
 
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+  RouterProvider,
+} from '@tanstack/react-router';
 import { render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import type { ReactNode } from 'react';
 import type { TopLevelSpec } from 'vega-lite';
 import { describe, expect, it } from 'vitest';
 import metricsDatasetFixture from '../../../tests/fixtures/views/present-metrics.dataset.json';
@@ -520,6 +528,16 @@ describe('a dataset read from another source than its binding cites is stale', (
   });
 });
 
+/** A failure notice's way home is a router link, so a refusal that offers one renders in a router. */
+async function routed(element: ReactNode) {
+  const router = createRouter({
+    routeTree: createRootRoute({ component: () => element }),
+    history: createMemoryHistory({ initialEntries: ['/somewhere'] }),
+  });
+  render(<RouterProvider router={router} />);
+  await screen.findByRole('alert');
+}
+
 describe('a saved View reopens with the server as the source of truth', () => {
   const saved = zPresentResponse.parse(presentResponseFixture);
   const noTools = serverToolData(async () => ({
@@ -631,21 +649,71 @@ describe('a saved View reopens with the server as the source of truth', () => {
     );
   });
 
-  it("shows the server's refusal as the reopen's alert, with its own message", async () => {
+  it("shows the server's refusal in the standing failure notice, with its own message", async () => {
     const { client } = server(404, {
       code: 'not_found',
       message: 'no saved View at that item',
     });
-    render(<SavedView {...ids} data={noTools} client={client} />);
-    expect((await screen.findByRole('alert')).textContent).toBe('no saved View at that item');
+    await routed(<SavedView {...ids} data={noTools} client={client} />);
+    const alert = await screen.findByRole('alert');
+    expect(within(alert).getByText('Reopening this View: This could not be found.')).toBeTruthy();
+    expect(alert.textContent).toContain('The service said: no saved View at that item');
+    // A View that is not there offers the way back to its workspace, not a retry.
+    expect(within(alert).getByRole('link', { name: 'Go to this workspace' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
   });
 
   it('refuses a body the generated schema does not read, rather than drawing it', async () => {
     const { client } = server(200, { view: 'not a view' });
     render(<SavedView {...ids} data={noTools} client={client} />);
-    expect((await screen.findByRole('alert')).textContent).toBe(
-      'The server returned a View this client cannot read.',
-    );
+    const alert = await screen.findByRole('alert');
+    expect(
+      within(alert).getByText(
+        'Reopening this View: The server returned a View this client cannot read.',
+      ),
+    ).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Six-component catalog' })).toBeNull();
+  });
+
+  it('offers a retry that keeps the notice until the View answers, then moves focus to it', async () => {
+    const asked: unknown[] = [];
+    const answers = [
+      { status: 500, body: { code: 'internal', message: 'the store was busy' } },
+      { status: 200, body: { ...saved, resolved_bindings: [] } },
+    ];
+    const client = createClient({
+      baseUrl: 'http://okf.test',
+      fetch: Object.assign(
+        async (input: URL | RequestInfo, init?: RequestInit) => {
+          asked.push(await new Request(input, init).json());
+          const { status, body } = answers[Math.min(asked.length, answers.length) - 1] ?? {
+            status: 500,
+            body: {},
+          };
+          return new Response(JSON.stringify(body), {
+            status,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        },
+        { preconnect: () => {} },
+      ),
+    });
+    render(<SavedView {...ids} data={noTools} client={client} />);
+    const alert = await screen.findByRole('alert');
+    expect(
+      within(alert).getByText('Reopening this View: Something went wrong in the service.'),
+    ).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    const title = await screen.findByRole('heading', { name: 'Six-component catalog view' });
+    expect(asked).toHaveLength(2);
+    expect(asked.at(1)).toEqual(asked.at(0));
+    // The notice is gone (the View's own alerts for its unread sources are another matter).
+    expect(screen.queryByText(/^Reopening this View:/)).toBeNull();
+    // Keyboard focus was on the retry button; it is now on the View that took the notice's place.
+    const focused = document.activeElement;
+    expect(focused).not.toBe(document.body);
+    expect(focused?.contains(title)).toBe(true);
   });
 });
 
@@ -714,25 +782,43 @@ describe('a saved View follows the ids it was asked for', () => {
     expect(screen.getByRole('heading', { name: 'Board of the second' })).toBeTruthy();
   });
 
-  it('shows a fixed sentence when the refusal has no message', async () => {
-    for (const body of [{ code: 'not_found' }, { code: 'not_found', message: '  ' }]) {
-      const client = createClient({
-        baseUrl: 'http://okf.test',
-        fetch: Object.assign(
-          async () =>
-            new Response(JSON.stringify(body), {
-              status: 404,
-              headers: { 'Content-Type': 'application/json' },
-            }),
-          { preconnect: () => {} },
-        ),
-      });
-      const view = render(<SavedView {...first} data={noTools} client={client} />);
-      expect((await screen.findByRole('alert')).textContent).toBe(
-        'The server refused to open the View.',
-      );
-      view.unmount();
-    }
+  /** A client whose every answer is a 404 with this body. */
+  const refusingWith = (body: unknown) =>
+    createClient({
+      baseUrl: 'http://okf.test',
+      fetch: Object.assign(
+        async () =>
+          new Response(JSON.stringify(body), {
+            status: 404,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        { preconnect: () => {} },
+      ),
+    });
+
+  it('shows a fixed sentence when the refusal is not an error the service describes', async () => {
+    const view = render(
+      <SavedView {...first} data={noTools} client={refusingWith({ code: 'not_found' })} />,
+    );
+    const alert = await screen.findByRole('alert');
+    expect(
+      within(alert).getByText('Reopening this View: The server refused to open the View.'),
+    ).toBeTruthy();
+    expect(alert.textContent).not.toContain('The service said');
+    view.unmount();
+  });
+
+  it("shows the code's own words, and no empty quotation, when the service's message is blank", async () => {
+    await routed(
+      <SavedView
+        {...first}
+        data={noTools}
+        client={refusingWith({ code: 'not_found', message: '  ' })}
+      />,
+    );
+    const alert = await screen.findByRole('alert');
+    expect(within(alert).getByText('Reopening this View: This could not be found.')).toBeTruthy();
+    expect(alert.textContent).not.toContain('The service said');
   });
 });
 
