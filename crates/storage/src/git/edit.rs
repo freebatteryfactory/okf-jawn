@@ -1261,9 +1261,9 @@ fn park(
 
 /// Every concept a reference of `bundle` resolves to, found as `okf_core::move_concept` finds
 /// the references it rewrites: each Markdown link of a body (`rewrite_markdown_links`, then
-/// `Link::resolve` from the document's own concept) and each `sources[].resource` of a
-/// frontmatter. A reference to a concept that does not exist counts: a move to that concept
-/// would rewrite it.
+/// `Link::resolve` from the document's own concept), and frontmatter's `computation`,
+/// `executor.resource`, `attester.resource` and `sources[].resource` (`follow_frontmatter`).
+/// A reference to a concept that does not exist counts: a move to that concept would rewrite it.
 fn linked(bundle: &Bundle) -> BTreeSet<ConceptId> {
     let mut found = BTreeSet::new();
     for concept in bundle.concepts() {
@@ -1271,20 +1271,34 @@ fn linked(bundle: &Bundle) -> BTreeSet<ConceptId> {
             found.extend(link.resolve(&concept.id));
             LinkRewriteAction::Keep
         });
-        let Some(okf_core::Value::Sequence(sources)) = concept.document.frontmatter.get("sources")
-        else {
-            continue;
-        };
-        for source in sources {
-            if let okf_core::Value::Mapping(entry) = source
-                && let Some(okf_core::Value::String(resource)) = entry.get("resource")
-            {
+        let mut remember = |value: &Yaml| {
+            if let Yaml::String(resource) = value {
                 let link = Link {
                     text: String::new(),
                     kind: Link::classify(resource),
                     target: resource.clone(),
                 };
                 found.extend(link.resolve(&concept.id));
+            }
+        };
+        let frontmatter = &concept.document.frontmatter;
+        if let Some(value) = frontmatter.get("computation") {
+            remember(value);
+        }
+        for key in ["executor", "attester"] {
+            if let Some(Yaml::Mapping(entry)) = frontmatter.get(key)
+                && let Some(value) = entry.get("resource")
+            {
+                remember(value);
+            }
+        }
+        if let Some(Yaml::Sequence(sources)) = frontmatter.get("sources") {
+            for source in sources {
+                if let Yaml::Mapping(entry) = source
+                    && let Some(value) = entry.get("resource")
+                {
+                    remember(value);
+                }
             }
         }
     }
