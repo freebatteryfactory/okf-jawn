@@ -23,8 +23,10 @@
 //!   any moved head, so the edit is committed on the base first. When the store answers that
 //!   the head moved (`ErrorDetail::StaleBase`), the store's comparison of the base with that
 //!   head (`VersionStore::diff`) is read; when no file at or under the folder, nor at or under
-//!   the destination of a move, changed between them (at either end of a change, by collision
-//!   key), the same edit is committed on that head. Otherwise the answer is `Conflict` with
+//!   the destination of a move, nor a companion of a contained item changed between them (at
+//!   either end of a change, paths by collision key), the same edit is committed on that head.
+//!   Companion ownership is the same rule item-filtered history uses. Otherwise the answer is
+//!   `Conflict` with
 //!   `StaleBase` naming that head, on `/base_revision`, and so is a comparison the store cannot
 //!   make because it no longer holds the base. A change elsewhere in the workspace never blocks
 //!   a folder operation. The comparison is read as listing every changed file, which the
@@ -44,9 +46,11 @@
 //! A delete removes the folder from the tree only; history and retained objects stay, so a
 //! Rewind of an item brings it back. Neither is offered to proposals (contract ruling 9).
 
+use std::collections::BTreeSet;
+
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::history::FileChange;
-use okf_jawn_contract::identity::{Revision, WorkspacePath, collision_key_of};
+use okf_jawn_contract::identity::{ItemId, Revision, WorkspacePath, collision_key_of};
 use okf_jawn_contract::item::{DeleteFolderRequest, FolderResult, MoveFolderRequest};
 
 use super::ApplicationService;
@@ -56,13 +60,17 @@ use super::shared::{
 };
 use crate::context::OperationContext;
 use crate::conventions::reserved;
-use crate::storage::{Committed, DiffQuery, StorageScope, TreeEdit};
+use crate::storage::{
+    Committed, DiffQuery, StorageScope, TreeEdit, TreeItem, item_companion_owner,
+};
 
 /// The edit, the message and the touched files of one folder write, committed on a base.
 struct FolderWrite<'a> {
     /// The folder the write changes, and for a move its destination: a change at or under any
     /// of these since the base conflicts.
     under: Vec<&'a WorkspacePath>,
+    /// The contained items whose versioned companions change with them, even outside `under`.
+    items: BTreeSet<ItemId>,
     /// Commit message, without the trailer.
     message: String,
     /// The one edit.
@@ -111,12 +119,14 @@ pub(super) async fn move_folder(
     let scope = workspace_scope(context)?;
     check_named(service, &scope, &base_revision).await?;
     let held = items_under(service, &scope, &base_revision, &folder).await?;
-    let mut touched = held.clone();
-    for path in &held {
-        touched.push(moved_to(path, &folder, &destination)?);
+    let mut touched: Vec<WorkspacePath> =
+        held.iter().map(|item| item.summary.path.clone()).collect();
+    for item in &held {
+        touched.push(moved_to(&item.summary.path, &folder, &destination)?);
     }
     let write = FolderWrite {
         under: vec![&folder, &destination],
+        items: held.iter().map(|item| item.summary.id).collect(),
         message: format!(
             "Move folder {} to {}",
             folder.as_str(),
@@ -157,11 +167,12 @@ pub(super) async fn delete_folder(
     let items = held.len();
     let write = FolderWrite {
         under: vec![&folder],
+        items: held.iter().map(|item| item.summary.id).collect(),
         message: format!("Delete folder {}", folder.as_str()),
         edit: TreeEdit::DeleteFolder {
             folder: folder.clone(),
         },
-        touched: held,
+        touched: held.into_iter().map(|item| item.summary.path).collect(),
     };
     let committed = folder_commit(service, context, &base_revision, &write).await?;
     finish(service, context, &scope, committed, items).await
@@ -199,7 +210,9 @@ async fn folder_commit(
                 return Err(refused);
             };
             let head = head.clone();
-            if let Some(why) = changed_between(service, &scope, base, &head, &write.under).await? {
+            if let Some(why) =
+                changed_between(service, &scope, base, &head, &write.under, &write.items).await?
+            {
                 return Err(ApiError::new(ErrorCode::Conflict, why)
                     .with_detail(ErrorDetail::StaleBase { head })
                     .with_field("/base_revision"));
@@ -233,6 +246,7 @@ async fn changed_between(
     base: &Revision,
     head: &Revision,
     folders: &[&WorkspacePath],
+    items: &BTreeSet<ItemId>,
 ) -> Result<Option<String>, ApiError> {
     let compared = service
         .ports()
@@ -260,12 +274,17 @@ async fn changed_between(
     Ok(diff
         .changes
         .iter()
-        .find_map(|change| changed_at(change, folders))
+        .find_map(|change| changed_at(change, folders, items))
         .map(|path| format!("{path} changed since the base revision")))
 }
 
-/// The end of `change` (its old or its new path) at or under one of `folders`, if any.
-fn changed_at(change: &FileChange, folders: &[&WorkspacePath]) -> Option<String> {
+/// The end of `change` (its old or new path) under `folders` or owned as a companion by one of
+/// their contained `items`, if any.
+fn changed_at(
+    change: &FileChange,
+    folders: &[&WorkspacePath],
+    items: &BTreeSet<ItemId>,
+) -> Option<String> {
     [change.old_path.as_deref(), change.new_path.as_deref()]
         .into_iter()
         .flatten()
@@ -273,6 +292,7 @@ fn changed_at(change: &FileChange, folders: &[&WorkspacePath]) -> Option<String>
             folders
                 .iter()
                 .any(|folder| path_is(path, folder) || under(path, folder))
+                || item_companion_owner(path).is_some_and(|item| items.contains(&item))
         })
         .map(str::to_owned)
 }
@@ -290,7 +310,7 @@ fn under(path: &str, folder: &WorkspacePath) -> bool {
         .is_some_and(|rest| rest.starts_with('/'))
 }
 
-/// The path of every item under `folder` at `revision`, in path order, archived items and items
+/// Every item under `folder` at `revision`, in path order, archived items and items
 /// below a folder whose name starts with `.` included. `folder` is matched as it is spelled,
 /// as the store matches it (a folder the tree spells another way is the store's to refuse).
 ///
@@ -301,7 +321,7 @@ async fn items_under(
     scope: &StorageScope,
     revision: &Revision,
     folder: &WorkspacePath,
-) -> Result<Vec<WorkspacePath>, ApiError> {
+) -> Result<Vec<TreeItem>, ApiError> {
     let prefix = format!("{}/", folder.as_str());
     Ok(service
         .ports()
@@ -310,8 +330,7 @@ async fn items_under(
         .await?
         .items
         .into_iter()
-        .map(|item| item.summary.path)
-        .filter(|path| path.as_str().starts_with(&prefix))
+        .filter(|item| item.summary.path.as_str().starts_with(&prefix))
         .collect())
 }
 

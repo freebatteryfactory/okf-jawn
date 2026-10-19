@@ -113,7 +113,9 @@ use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath, colli
 use okf_jawn_contract::item::{ItemStatus, TypeDefinition};
 use okf_jawn_core::items::{ApplicationHeader, refuse_header_change, refuse_header_in_type};
 use okf_jawn_core::portable::ALIASES_KEY;
-use okf_jawn_core::storage::{SourceCard, TreeEdit, folder_files_deleted, folder_other_files};
+use okf_jawn_core::storage::{
+    SourceCard, TreeEdit, folder_files_deleted, folder_other_files, item_companion_owner,
+};
 
 use super::item::{
     CORRECTIONS_DIR, Holder, INDEX_FILE, ItemFile, LOG_FILE, RULES_FILE, SOURCES_DIR, SUPPLIED_DIR,
@@ -1565,11 +1567,7 @@ pub(crate) fn correction_file(item: ItemId, digest: &Digest) -> String {
 /// back with it (`restore_items`): its source appearance, its accepted supplied text, or a file
 /// anywhere in its corrections folder.
 pub(crate) fn is_companion(path: &str, item: ItemId) -> bool {
-    path == appearance_file(item)
-        || path == supplied_file(item)
-        || path
-            .strip_prefix(&corrections_folder(item))
-            .is_some_and(|rest| rest.starts_with('/'))
+    item_companion_owner(path) == Some(item)
 }
 
 /// The tree path of the folder holding every correction of one item.

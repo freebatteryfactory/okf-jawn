@@ -40,8 +40,8 @@ use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
 use okf_jawn_core::jobs::{JobQueue, JobScope};
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
-    CandidateCheck, CommitChanges, Committed, FOLDER_OTHER_FILES, LocalSource, NewWorkspace,
-    Provenance, SourceCard, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
+    CandidateCheck, CommitChanges, Committed, DiffQuery, FOLDER_OTHER_FILES, LocalSource,
+    NewWorkspace, Provenance, SourceCard, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
 };
 use okf_jawn_storage::Storage;
 use serde_json::{Value, json};
@@ -1483,6 +1483,77 @@ async fn delete_folder_through_the_service_and_rewind_brings_the_items_back() ->
     )?;
     assert_eq!(missing.code, ErrorCode::NotFound, "{}", missing.message);
     assert_eq!(missing.field.as_deref(), Some("/folder"));
+    Ok(())
+}
+
+/// F4: changing only a source occurrence's versioned metadata changes its item. Both folder
+/// operations must reject the stale base, preserving that newer commit. The raw tree writer
+/// and an explicit diff check prove that no visible folder file changed in this setup.
+#[tokio::test]
+async fn folder_operations_conflict_on_a_contained_sources_metadata_only_change() -> TestResult {
+    for operation in ["move_folder", "delete_folder"] {
+        let service = Service::new().await?;
+        let space = &service.workspace;
+        let base = space
+            .commit(2, &space.initial, vec![card(10, "notes/source.md")?])
+            .await?
+            .revision;
+        let companion = format!(".okf/sources/{}.json", uuid_text(10));
+        let before = some(space.file(&base, &companion)?, "the source metadata")?;
+        let mut metadata: Value = serde_json::from_slice(&before)?;
+        some(
+            metadata.get_mut("metadata").and_then(Value::as_object_mut),
+            "the source's metadata map",
+        )?
+        .insert(
+            "operator_note".to_owned(),
+            json!("Newer occurrence metadata."),
+        );
+        let changed = serde_json::to_vec(&metadata)?;
+        let head = space.raw(3, &[(companion.as_str(), changed.as_slice())])?;
+        let diff = space
+            .storage
+            .versions()
+            .diff(
+                &space.scope,
+                DiffQuery {
+                    from: base.clone(),
+                    to: head.clone(),
+                    item_id: None,
+                },
+            )
+            .await?;
+        assert_eq!(diff.changes.len(), 1);
+        assert_eq!(
+            diff.changes
+                .first()
+                .and_then(|change| change.new_path.as_deref()),
+            Some(companion.as_str())
+        );
+        assert_eq!(
+            space.file(&base, "notes/source.md")?,
+            space.file(&head, "notes/source.md")?,
+            "the source card itself is unchanged"
+        );
+        let mut request = json!({
+            "workspace_id": space.scope.workspace_id,
+            "base_revision": base,
+            "folder": "notes",
+            "idempotency_key": uuid_text(50),
+        });
+        if operation == "move_folder" {
+            some(request.as_object_mut(), "the request")?
+                .insert("destination".to_owned(), json!("archive"));
+        }
+        let error = err_of(service.call(operation, request).await)?;
+        assert_eq!(error.code, ErrorCode::Conflict, "{operation}: {error:?}");
+        assert_eq!(error.field.as_deref(), Some("/base_revision"));
+        assert_eq!(
+            error.detail.as_deref(),
+            Some(&ErrorDetail::StaleBase { head: head.clone() })
+        );
+        assert_eq!(space.head().await?, head, "{operation} writes nothing");
+    }
     Ok(())
 }
 

@@ -24,7 +24,8 @@ use uuid::Uuid;
 
 use crate::check::{TestResult, err_of, some};
 use crate::fixture::{
-    ALICE, Built, World, alice, file_text, mutation, note, path, revision, scope,
+    ALICE, Built, World, alice, converted, digest, file_text, mutation, note, path, revision,
+    scope, source_card,
 };
 
 fn key() -> IdempotencyKey {
@@ -621,5 +622,64 @@ async fn delete_folder_retried_after_its_commit_answers_the_first_attempt() -> T
     assert_eq!(retried.items, 2);
     assert_eq!(world.versions.commits()?.len(), 1);
     assert_eq!(world.versions.diff_queries()?.len(), 1);
+    Ok(())
+}
+
+/// F4 and the request's "a folder changed since base conflicts": an item's versioned source,
+/// supplied text and corrections are part of that item even outside its visible folder. A
+/// companion of an item elsewhere must not block either folder operation.
+#[tokio::test]
+async fn folder_operations_check_companion_changes_of_contained_items_only() -> TestResult {
+    for delete in [false, true] {
+        for inside in [false, true] {
+            let item = if inside { 25 } else { 26 };
+            let id = Uuid::from_u128(item);
+            for companion in [
+                format!(".okf/sources/{id}.json"),
+                format!(".okf/supplied/{id}.json"),
+                format!(".okf/corrections/{id}/{}.json", digest('b')?.as_str()),
+            ] {
+                let world = moved_head(vec![change(
+                    FileChangeKind::Modified,
+                    Some(&companion),
+                    Some(&companion),
+                )])?;
+                for (source, location) in [(25, "notes/source.md"), (26, "elsewhere/source.md")] {
+                    world.versions.put_document(
+                        &revision('a')?,
+                        source_card(
+                            source,
+                            &revision('a')?,
+                            location,
+                            "Unchanged converter text.",
+                            converted(&digest('b')?),
+                        )?,
+                    )?;
+                }
+                let outcome = if delete {
+                    deleted(&world, 1, delete_request("notes")?).await
+                } else {
+                    moved(&world, 1, move_request("notes", "archive")?).await
+                };
+                if inside {
+                    let error = err_of(outcome)?;
+                    assert_stale(&world, &error, &revision('c')?, &companion)?;
+                } else {
+                    assert_eq!(outcome?.revision, revision('d')?, "{companion}");
+                    assert_eq!(world.versions.commits()?.len(), 1, "{companion}");
+                }
+                let queries = world.versions.diff_queries()?;
+                let [query] = queries.as_slice() else {
+                    return Err(format!("not one comparison for {companion}: {queries:?}").into());
+                };
+                assert_eq!(query.from, revision('a')?);
+                assert_eq!(query.to, revision('c')?);
+                assert_eq!(
+                    query.item_id, None,
+                    "one workspace comparison, not one per item"
+                );
+            }
+        }
+    }
     Ok(())
 }
