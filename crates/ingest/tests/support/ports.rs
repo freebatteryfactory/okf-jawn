@@ -33,8 +33,8 @@ use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
     Backups, BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges,
-    Committed, CommittedFiles, DiffQuery, FilePage, FolderListing, LocalSource, LogQuery,
-    ObjectInfo, ObjectRead, Page, Promotion, Purger, SourceCard, StorageScope, TreeEdit,
+    Committed, CommittedFile, CommittedFiles, DiffQuery, FilePage, FolderListing, LocalSource,
+    LogQuery, ObjectInfo, ObjectRead, Page, Promotion, Purger, SourceCard, StorageScope, TreeEdit,
     VersionStore, WrittenArchive, replay_warnings_unavailable,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadRecord, UploadStore};
@@ -60,8 +60,12 @@ use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadRecord, U
 /// another writer racing the handler would.
 ///
 /// `list` lists the items and child folders directly in a folder at a revision, in one page;
-/// the handler reads no file of a committed tree (it rebuilt a replayed commit's warnings that
-/// way before the store kept them), so `read_file` answers `NotImplemented`.
+/// the handler reads no single file of a committed tree (it rebuilt a replayed commit's warnings
+/// that way before the store kept them), so `read_file` answers `NotImplemented`. A portable
+/// export reads whole trees through `committed_files`, which answers the files a test set for a
+/// revision (`set_tree`) a page at a time, sorted and paged as the port documents; and
+/// `write_history`, which answers the object a test set (`set_history`) and records each call.
+/// Neither tree is derived from the commits: an export test states its tree.
 ///
 /// `show` and `item_at_path` read an item at a revision by replaying, over the items present at the base
 /// (`at_base`), the edits of every commit up to that revision: `WriteSourceCard` writes the
@@ -87,6 +91,36 @@ pub struct FakeVersions {
     pub at_base: Mutex<Vec<SourceCard>>,
     /// The warnings the check gave for each commit this store wrote, by its mutation.
     pub warnings: Mutex<Vec<(MutationId, Vec<Warning>)>>,
+    /// Every file of the trees `committed_files` reads, by revision, as a test set them
+    /// (`set_tree`); a revision with none set is not on the line.
+    pub trees: Mutex<BTreeMap<ExportTreeKey, Vec<CommittedFile>>>,
+    /// Retained candidate revisions: present in storage, but outside the accepted line.
+    pub candidates: Mutex<Vec<ExportTreeKey>>,
+    /// Every page `committed_files` was asked for, in order.
+    pub file_pages: Mutex<Vec<FilePage>>,
+    /// The object `write_history` answers, as a test set it (`set_history`).
+    pub history: Mutex<Option<ObjectInfo>>,
+    /// First history object returned for a mutation, retained across retries.
+    pub history_writes: Mutex<BTreeMap<MutationId, ObjectInfo>>,
+    /// Every `write_history` call: the revision and the mutation.
+    pub histories: Mutex<Vec<(Revision, MutationId)>>,
+    /// Scoped revisions requested by export enumeration; tests assert the caller's scope.
+    pub file_scopes: Mutex<Vec<StorageScope>>,
+    /// Runs after a page was read, before the handler observes progress (a controlled cancel).
+    pub after_file_page: Mutex<Option<FilePageHook>>,
+}
+
+/// A version tree is scoped independently from its revision identity.
+pub type ExportTreeKey = (String, WorkspaceId, String);
+/// Controlled callback after a page is answered; it may cancel the running export.
+pub type FilePageHook = Box<dyn Fn(usize) -> Result<(), ApiError> + Send + Sync>;
+
+fn export_tree_key(scope: &StorageScope, revision: &Revision) -> ExportTreeKey {
+    (
+        scope.tenant_id.as_str().to_owned(),
+        scope.workspace_id,
+        revision.as_str().to_owned(),
+    )
 }
 
 /// An `UploadStore` holding uploads and recording which job consumed each.
@@ -126,6 +160,8 @@ pub struct FakeBlobs {
     pub directory: tempfile::TempDir,
     /// Awaited once, by the next `materialize` of this digest, before it answers.
     pub materialize_hold: Mutex<Option<(Digest, Hold)>>,
+    /// Successful puts, excluding direct fixture insertion.
+    pub puts: Mutex<Vec<ObjectInfo>>,
 }
 
 /// A `Converter` that converts every window of a paginated original, except the windows that
@@ -273,7 +309,145 @@ impl FakeVersions {
             on_commit: Mutex::new(None),
             at_base: Mutex::new(Vec::new()),
             warnings: Mutex::new(Vec::new()),
+            trees: Mutex::new(BTreeMap::new()),
+            candidates: Mutex::new(Vec::new()),
+            file_pages: Mutex::new(Vec::new()),
+            history: Mutex::new(None),
+            history_writes: Mutex::new(BTreeMap::new()),
+            histories: Mutex::new(Vec::new()),
+            file_scopes: Mutex::new(Vec::new()),
+            after_file_page: Mutex::new(None),
         }
+    }
+
+    /// Every file of the tree of `revision`, which `committed_files` answers (in any order: the
+    /// fake sorts them by path, as the port answers them).
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn set_tree(
+        &self,
+        scope: &StorageScope,
+        revision: &Revision,
+        files: Vec<CommittedFile>,
+    ) -> Result<(), ApiError> {
+        self.trees
+            .lock()
+            .map_err(|_| poisoned())?
+            .insert(export_tree_key(scope, revision), files);
+        Ok(())
+    }
+
+    /// Retain a candidate's bytes without putting it on the accepted line.
+    ///
+    /// # Errors
+    /// Returns when a fixture lock is poisoned.
+    pub fn set_candidate_tree(
+        &self,
+        scope: &StorageScope,
+        revision: &Revision,
+        files: Vec<CommittedFile>,
+    ) -> Result<(), ApiError> {
+        self.set_tree(scope, revision, files)?;
+        self.candidates
+            .lock()
+            .map_err(|_| poisoned())?
+            .push(export_tree_key(scope, revision));
+        Ok(())
+    }
+
+    /// The object `write_history` answers from now on.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn set_history(&self, object: ObjectInfo) -> Result<(), ApiError> {
+        *self.history.lock().map_err(|_| poisoned())? = Some(object);
+        Ok(())
+    }
+
+    /// Every `write_history` call so far: the revision and the mutation.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn histories(&self) -> Result<Vec<(Revision, MutationId)>, ApiError> {
+        self.histories
+            .lock()
+            .map(|calls| calls.clone())
+            .map_err(|_| poisoned())
+    }
+
+    /// Every page `committed_files` was asked for so far.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn file_pages(&self) -> Result<Vec<FilePage>, ApiError> {
+        self.file_pages
+            .lock()
+            .map(|pages| pages.clone())
+            .map_err(|_| poisoned())
+    }
+
+    /// One page of the tree of `revision`, as the port documents it: files in byte order of
+    /// path after `page.after`, at most `page.limit` (clamped to 1..=500), ending with the first
+    /// file that takes the page's bytes past `page.max_bytes`; `NotFound` for a revision not on
+    /// the line (here: one with no tree set).
+    fn page_of(
+        &self,
+        scope: &StorageScope,
+        revision: &Revision,
+        page: &FilePage,
+    ) -> Result<CommittedFiles, ApiError> {
+        self.file_pages
+            .lock()
+            .map_err(|_| poisoned())?
+            .push(page.clone());
+        let key = export_tree_key(scope, revision);
+        if self
+            .candidates
+            .lock()
+            .map_err(|_| poisoned())?
+            .contains(&key)
+        {
+            return Err(ApiError::new(
+                ErrorCode::NotFound,
+                "candidate is not on the accepted line",
+            ));
+        }
+        let mut files = self
+            .trees
+            .lock()
+            .map_err(|_| poisoned())?
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such revision on the line"))?;
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        let limit = usize::from(page.limit.clamp(1, 500));
+        let mut remaining = files
+            .into_iter()
+            .filter(|file| {
+                page.after
+                    .as_deref()
+                    .is_none_or(|after| file.path.as_str() > after)
+            })
+            .peekable();
+        let mut answered = Vec::new();
+        let mut held: u64 = 0;
+        for file in remaining.by_ref() {
+            held = held.saturating_add(u64::try_from(file.bytes.len()).unwrap_or(u64::MAX));
+            answered.push(file);
+            if answered.len() >= limit || held > page.max_bytes {
+                break;
+            }
+        }
+        let next_after = if remaining.peek().is_some() {
+            answered.last().map(|file| file.path.clone())
+        } else {
+            None
+        };
+        Ok(CommittedFiles {
+            files: answered,
+            next_after,
+        })
     }
 
     /// Forget the warnings kept for every commit so far, as a store that wrote those commits
@@ -766,6 +940,7 @@ impl FakeBlobs {
             objects: Mutex::new(BTreeMap::new()),
             directory: tempfile::tempdir()?,
             materialize_hold: Mutex::new(None),
+            puts: Mutex::new(Vec::new()),
         })
     }
 
@@ -796,6 +971,29 @@ impl FakeBlobs {
             .get(digest.as_str())
             .cloned()
             .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such object"))
+    }
+
+    /// Successfully retained puts; fixture insertion never counts as an export write.
+    ///
+    /// # Errors
+    /// Returns when the fixture lock is poisoned.
+    pub fn puts(&self) -> Result<Vec<ObjectInfo>, ApiError> {
+        self.puts
+            .lock()
+            .map(|puts| puts.clone())
+            .map_err(|_| poisoned())
+    }
+
+    /// Remove a fixture object to model a missing reference, without changing a card.
+    ///
+    /// # Errors
+    /// Returns when the fixture lock is poisoned.
+    pub fn forget(&self, digest: &Digest) -> Result<(), ApiError> {
+        self.objects
+            .lock()
+            .map_err(|_| poisoned())?
+            .remove(digest.as_str());
+        Ok(())
     }
 }
 
@@ -944,21 +1142,83 @@ impl VersionStore for FakeVersions {
     ) -> PortFuture<'a, BlameResponse> {
         unused("blame")
     }
+    // The port doc: "It holds the commits reachable from `revision` on the accepted line and
+    // nothing else ... Idempotent on `mutation_id`: a repeated id writes nothing and returns the
+    // object the first call wrote." A revision with no tree set is not on the line: `NotFound`.
     fn write_history<'a>(
         &'a self,
-        _scope: &'a StorageScope,
-        _revision: &'a Revision,
-        _mutation_id: MutationId,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+        mutation_id: MutationId,
     ) -> PortFuture<'a, ObjectInfo> {
-        unused("write_history")
+        let written = (|| {
+            self.histories
+                .lock()
+                .map_err(|_| poisoned())?
+                .push((revision.clone(), mutation_id));
+            if !self
+                .trees
+                .lock()
+                .map_err(|_| poisoned())?
+                .contains_key(&export_tree_key(scope, revision))
+            {
+                return Err(ApiError::new(
+                    ErrorCode::NotFound,
+                    "No revision with that identity on the accepted line here",
+                ));
+            }
+            if self
+                .candidates
+                .lock()
+                .map_err(|_| poisoned())?
+                .contains(&export_tree_key(scope, revision))
+            {
+                return Err(ApiError::new(
+                    ErrorCode::NotFound,
+                    "candidate history is not on the accepted line",
+                ));
+            }
+            let mut writes = self.history_writes.lock().map_err(|_| poisoned())?;
+            if let Some(prior) = writes.get(&mutation_id) {
+                return Ok(prior.clone());
+            }
+            let object = self
+                .history
+                .lock()
+                .map_err(|_| poisoned())?
+                .clone()
+                .ok_or_else(|| ApiError::new(ErrorCode::NotImplemented, "no history was set"))?;
+            writes.insert(mutation_id, object.clone());
+            Ok(object)
+        })();
+        Box::pin(async move { written })
     }
+    // The port doc: "Every file of `revision`'s tree, a page at a time, in byte order of path
+    // ... `NotFound` for a revision this repository does not hold or that is not on the
+    // accepted line" (`page_of`).
     fn committed_files<'a>(
         &'a self,
-        _scope: &'a StorageScope,
-        _revision: &'a Revision,
-        _page: FilePage,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+        page: FilePage,
     ) -> PortFuture<'a, CommittedFiles> {
-        unused("committed_files")
+        Box::pin(async move {
+            self.file_scopes
+                .lock()
+                .map_err(|_| poisoned())?
+                .push(scope.clone());
+            let answered = self.page_of(scope, revision, &page)?;
+            let calls = self.file_pages.lock().map_err(|_| poisoned())?.len();
+            if let Some(hook) = self
+                .after_file_page
+                .lock()
+                .map_err(|_| poisoned())?
+                .as_ref()
+            {
+                hook(calls)?;
+            }
+            Ok(answered)
+        })
     }
 }
 
@@ -1266,17 +1526,43 @@ impl BlobStore for FakeBlobs {
             if expected.is_some_and(|expected| expected != object.digest) {
                 return Err(ApiError::new(ErrorCode::Conflict, "digest mismatch"));
             }
+            self.puts
+                .lock()
+                .map_err(|_| poisoned())?
+                .push(object.clone());
             Ok(object)
         })
     }
     fn open<'a>(
         &'a self,
         _scope: &'a StorageScope,
-        _digest: &'a Digest,
-        _offset: u64,
-        _length: u64,
+        digest: &'a Digest,
+        offset: u64,
+        length: u64,
     ) -> PortFuture<'a, ObjectRead> {
-        unused("open")
+        Box::pin(async move {
+            let bytes = self.bytes(digest)?;
+            let object = ObjectInfo {
+                digest: digest.clone(),
+                size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            };
+            let start = usize::try_from(offset)
+                .unwrap_or(usize::MAX)
+                .min(bytes.len());
+            let end = usize::try_from(offset.saturating_add(length))
+                .unwrap_or(usize::MAX)
+                .min(bytes.len());
+            let selected = bytes
+                .get(start..end)
+                .ok_or_else(|| ApiError::new(ErrorCode::Internal, "invalid fake object range"))?
+                .to_vec();
+            Ok(ObjectRead {
+                object,
+                offset,
+                length: u64::try_from(selected.len()).unwrap_or(u64::MAX),
+                body: Box::pin(std::io::Cursor::new(selected)),
+            })
+        })
     }
     fn materialize<'a>(
         &'a self,
