@@ -1,4 +1,4 @@
-//! Owner-approved InstructionLike v1 evidence survives the public Attention wire boundary.
+//! Owner-approved `InstructionLike` v1 evidence survives the public Attention wire boundary.
 
 use okf_jawn_contract::attention::AttentionItem;
 use serde_json::{Value, json};

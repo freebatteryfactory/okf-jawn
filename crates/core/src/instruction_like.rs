@@ -11,37 +11,6 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 use regex::Regex;
 use unicode_normalization::UnicodeNormalization;
 
-/// Changes whenever the rule behavior changes; this is carried on every emitted finding.
-pub const RULE_SET_VERSION: &str = "instruction-like-en-v1";
-/// Findings retained per item; omitted matches are counted separately.
-pub const MAX_FINDINGS: usize = 32;
-
-/// Fixed English forms, with no backreferences, lookaround or unbounded wildcard searches.
-const RULES: &str = r"(?mx)
-    (?P<role>
-        ^[\t\x20]*(?:system|developer)[\t\x20]*:
-        |\bdeveloper\s+message\b
-        |\bas\s+your\s+administrator\b
-        |(?:<\|(?:im_start|start_header_id)\|>|\[im_start\])\s*(?:system|developer)\b
-        |(?:\[|<)(?:system|developer)(?:\]|>)
-    )
-    |(?P<override>\b(?:ignore|disregard|override|forget)\s+
-        (?:(?:all|the|any|your)\s+){0,2}
-        (?:(?:previous|prior|earlier|above)\s+)?(?:instructions?|rules?|prompts?)\b)
-    |(?P<secret>\b(?:reveal|show|print|output|share|disclose|leak|expose)\s+
-        (?:(?:me|us|your|the|all|any|hidden|internal|secret|original)\s+){0,5}
-        (?:system\s+prompts?|developer\s+prompts?|hidden\s+instructions?|instructions?
-            |secrets?|credentials?|passwords?|tokens?|api\s+keys?)\b)
-    |(?P<action>\b(?:
-        (?:call|invoke|use)\s+(?:(?:a|an|the)\s+)?tool\b
-        |(?:run|execute)\s+(?:(?:a|an|the|this|following)\s+){0,2}(?:command|script|code)\b
-        |(?:fetch|visit|open|post|upload|send)\s+(?:(?:to|from|data|at)\s+){0,2}https?://
-        |(?:send|write)\s+(?:(?:a|an|the|this)\s+)?e-?mail\b
-        |e-?mail\s+(?:this|the|your)\s+(?:document|data|file|contents?)\b
-    ))
-    |(?P<hidden>[\u{00ad}\u{034f}\u{061c}\u{180e}\u{200b}-\u{200f}\u{202a}-\u{202e}\u{2060}-\u{2064}\u{2066}-\u{206f}\u{feff}])
-";
-
 /// Compiled once for one workspace scan, then shared across its documents.
 pub struct Detector {
     rules: Regex,
@@ -74,6 +43,37 @@ struct Line {
     original_end: usize,
 }
 
+/// Changes whenever the rule behavior changes; this is carried on every emitted finding.
+pub const RULE_SET_VERSION: &str = "instruction-like-en-v1";
+/// Findings retained per item; omitted matches are counted separately.
+pub const MAX_FINDINGS: usize = 32;
+
+/// Fixed English forms, with no backreferences, lookaround or unbounded wildcard searches.
+const RULES: &str = r"(?mx)
+    (?P<role>
+        ^[\t\x20]*(?:system|developer)[\t\x20]*:
+        |\bdeveloper\s+message\b
+        |\bas\s+your\s+administrator\b
+        |(?:<\|(?:im_start|start_header_id)\|>|\[im_start\])\s*(?:system|developer)\b
+        |(?:\[|<)(?:system|developer)(?:\]|>)
+    )
+    |(?P<override>\b(?:ignore|disregard|override|forget)\s+
+        (?:(?:all|the|any|your)\s+){0,2}
+        (?:(?:previous|prior|earlier|above)\s+)?(?:instructions?|rules?|prompts?)\b)
+    |(?P<secret>\b(?:reveal|show|print|output|share|disclose|leak|expose)\s+
+        (?:(?:me|us|your|the|all|any|hidden|internal|secret|original)\s+){0,5}
+        (?:system\s+prompts?|developer\s+prompts?|hidden\s+instructions?|instructions?
+            |secrets?|credentials?|passwords?|tokens?|api\s+keys?)\b)
+    |(?P<action>\b(?:
+        (?:call|invoke|use)\s+(?:(?:a|an|the)\s+)?tool\b
+        |(?:run|execute)\s+(?:(?:a|an|the|this|following)\s+){0,2}(?:command|script|code)\b
+        |(?:fetch|visit|open|post|upload|send)\s+(?:(?:to|from|data|at)\s+){0,2}https?://
+        |(?:send|write)\s+(?:(?:a|an|the|this)\s+)?e-?mail\b
+        |e-?mail\s+(?:this|the|your)\s+(?:document|data|file|contents?)\b
+    ))
+    |(?P<hidden>[\u{00ad}\u{034f}\u{061c}\u{180e}\u{200b}-\u{200f}\u{202a}-\u{202e}\u{2060}-\u{2064}\u{2066}-\u{206f}\u{feff}])
+";
+
 impl Detector {
     /// Compile the fixed rule set without a panic or external dependency.
     ///
@@ -92,13 +92,13 @@ impl Detector {
     /// # Errors
     /// Returns an internal error if the original-line mapping cannot represent a match.
     pub fn scan(&self, text: &str) -> Result<Scan, ApiError> {
-        let (normalized, lines) = normalize(text);
+        let (normalized, lines) = normalize(text)?;
         let mut output = Scan {
             findings: Vec::new(),
             omitted_findings: 0,
         };
-        let mut first = 0;
-        let mut last = 0;
+        let mut first: usize = 0;
+        let mut last: usize = 0;
         for matched in self.rules.captures_iter(&normalized) {
             let (rule, span) = [
                 ("role", InstructionRule::RoleImpersonation),
@@ -120,21 +120,24 @@ impl Detector {
                 continue;
             }
             if output.findings.len() == MAX_FINDINGS {
-                output.omitted_findings += 1;
+                output.omitted_findings = output
+                    .omitted_findings
+                    .checked_add(1)
+                    .ok_or_else(mapping_error)?;
                 continue;
             }
             while lines
-                .get(first + 1)
+                .get(first.checked_add(1).ok_or_else(mapping_error)?)
                 .is_some_and(|line| line.normalized_start <= span.start())
             {
-                first += 1;
+                first = first.checked_add(1).ok_or_else(mapping_error)?;
             }
             last = last.max(first);
             while lines
-                .get(last + 1)
+                .get(last.checked_add(1).ok_or_else(mapping_error)?)
                 .is_some_and(|line| line.normalized_start < span.end())
             {
-                last += 1;
+                last = last.checked_add(1).ok_or_else(mapping_error)?;
             }
             let begin = lines.get(first).ok_or_else(mapping_error)?;
             let end = lines.get(last).ok_or_else(mapping_error)?;
@@ -145,8 +148,10 @@ impl Detector {
                 rule,
                 passage: passage.to_owned(),
                 lines: TextRange {
-                    start: u32::try_from(first + 1).map_err(|_| mapping_error())?,
-                    end: u32::try_from(last + 1).map_err(|_| mapping_error())?,
+                    start: u32::try_from(first.checked_add(1).ok_or_else(mapping_error)?)
+                        .map_err(|_| mapping_error())?,
+                    end: u32::try_from(last.checked_add(1).ok_or_else(mapping_error)?)
+                        .map_err(|_| mapping_error())?,
                 },
             });
         }
@@ -155,25 +160,29 @@ impl Detector {
 }
 
 /// Keep line boundaries even when compatibility forms expand to several characters.
-fn normalize(text: &str) -> (String, Vec<Line>) {
+fn normalize(text: &str) -> Result<(String, Vec<Line>), ApiError> {
     let mut normalized = String::with_capacity(text.len());
     let mut lines = Vec::new();
-    let mut original_start = 0;
+    let mut original_start: usize = 0;
     for raw in text.split_inclusive('\n') {
         let body = raw.strip_suffix('\n').unwrap_or(raw);
         let body = body.strip_suffix('\r').unwrap_or(body);
         lines.push(Line {
             normalized_start: normalized.len(),
             original_start,
-            original_end: original_start + body.len(),
+            original_end: original_start
+                .checked_add(body.len())
+                .ok_or_else(mapping_error)?,
         });
         normalized.extend(body.nfkc().flat_map(char::to_lowercase));
         if raw.ends_with('\n') {
             normalized.push('\n');
         }
-        original_start += raw.len();
+        original_start = original_start
+            .checked_add(raw.len())
+            .ok_or_else(mapping_error)?;
     }
-    (normalized, lines)
+    Ok((normalized, lines))
 }
 
 /// Ordinary warnings such as "never share passwords" are negative controls, not requests.

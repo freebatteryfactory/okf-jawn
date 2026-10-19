@@ -84,13 +84,22 @@ fn scan_world() -> Built<Scan> {
         &head,
         None,
         LogResponse {
-            commits: vec![Commit {
-                revision: head.clone(),
-                parents: Vec::new(),
-                message: "m".to_owned(),
-                author: "alice".to_owned(),
-                committed_at: instant()?,
-            }],
+            commits: vec![
+                Commit {
+                    revision: head.clone(),
+                    parents: vec![revision('0')?],
+                    message: "m".to_owned(),
+                    author: "alice".to_owned(),
+                    committed_at: instant()?,
+                },
+                Commit {
+                    revision: revision('0')?,
+                    parents: Vec::new(),
+                    message: "Base before accepted promotion a".to_owned(),
+                    author: "alice".to_owned(),
+                    committed_at: instant()?,
+                },
+            ],
             next_cursor: None,
         },
     )?;
@@ -246,10 +255,22 @@ fn accepted(
     candidate: char,
     changes: serde_json::Value,
 ) -> Built<()> {
+    accepted_from(scan, number, route, '0', candidate, changes)
+}
+
+/// An immutable accepted row whose real promotion is the accepted successor of `base`.
+fn accepted_from(
+    scan: &Scan,
+    number: u128,
+    route: &str,
+    base: char,
+    candidate: char,
+    changes: serde_json::Value,
+) -> Built<()> {
     let held = serde_json::from_value(json!({
         "id": ProposalId(Uuid::from_u128(number)),
         "workspace_id": scope()?.workspace_id,
-        "base_revision": revision('a')?,
+        "base_revision": revision(base)?,
         "proposal_revision": revision(candidate)?,
         "content_digest": digest('d')?,
         "title": "t",
@@ -552,6 +573,167 @@ async fn attention_unreviewed_content_an_agents_accepted_proposal_wrote() -> Tes
             .iter()
             .all(|row| row.message.contains("agent-800")),
         "{rows:?}"
+    );
+    Ok(())
+}
+
+/// SPEC sections 3 and 8, and R4: a later accepted agent proposal cannot claim a historical
+/// person's identical body. Its exact base still predates acceptance; its successor includes it.
+#[tokio::test]
+async fn attention_agent_proposal_never_claims_matching_historical_human_text() -> TestResult {
+    let scan = scan_world()?;
+    let versions = &scan.world.versions;
+    let mut original = described(86, "p/historical.md", json!({}))?;
+    "Human original X.".clone_into(&mut original.body);
+    put(&scan, &original)?;
+    for (at, body) in [
+        ('b', "Human replacement Y."),
+        ('c', "Human original X."),
+        ('e', "Human original X."),
+        ('f', "Human original X."),
+    ] {
+        let mut document = original.clone();
+        document.summary.revision = revision(at)?;
+        body.clone_into(&mut document.body);
+        versions.put_document(&revision(at)?, document)?;
+        scan.world.search.mark_indexed(&revision(at)?)?;
+    }
+    versions.set_head(revision('b')?)?;
+    versions.set_head(revision('c')?)?;
+    versions.page_log(1)?;
+    for (tip, chain) in [
+        ('b', vec!['b', 'a', '0']),
+        ('c', vec!['c', 'b', 'a', '0']),
+        ('f', vec!['f', 'b', 'a', '0']),
+    ] {
+        let mut commits = Vec::new();
+        for (index, at) in chain.iter().enumerate() {
+            commits.push(Commit {
+                revision: revision(*at)?,
+                parents: chain
+                    .get(index.saturating_add(1))
+                    .map(|parent| revision(*parent))
+                    .transpose()?
+                    .into_iter()
+                    .collect(),
+                message: "Literal historical fixture".to_owned(),
+                author: "alice".to_owned(),
+                committed_at: instant()?,
+            });
+        }
+        versions.put_log(
+            &revision(tip)?,
+            None,
+            LogResponse {
+                commits,
+                next_cursor: None,
+            },
+        )?;
+    }
+    scan.proposals.put(
+        &scope()?,
+        mutation(860),
+        serde_json::from_value(json!({
+            "id": ProposalId(Uuid::from_u128(860)), "workspace_id": scope()?.workspace_id,
+            "base_revision": revision('b')?, "proposal_revision": revision('e')?,
+            "content_digest": digest('d')?, "title": "Restore X", "description": "Agent proposal",
+            "changes": [{ "kind": "edit", "item_id": original.summary.id,
+                "body": "Human original X.", "properties": {} }],
+            "kind": "content", "status": "accepted", "created_by": "later-agent",
+            "created_via": "mcp_delegation", "created_at": "2026-10-09T12:00:00.000Z"
+        }))?,
+    )?;
+    for (at, expected) in [
+        ('a', Vec::new()),
+        ('b', Vec::new()),
+        ('f', Vec::new()),
+        ('c', vec![Some(item(86))]),
+    ] {
+        let response = attention_at(
+            &scan,
+            At::Revision {
+                revision: revision(at)?,
+            },
+            200,
+            None,
+        )
+        .await?;
+        assert_eq!(response.revision, revision(at)?);
+        assert_eq!(
+            named(&response.items, &AttentionKind::Unreviewed),
+            expected,
+            "revision {at}"
+        );
+    }
+    Ok(())
+}
+
+/// R4 applies accepted content after promotion, never at its exact base, even when the
+/// proposed edit repeats the person's bytes. The explicit negative is independent of digests.
+#[tokio::test]
+async fn attention_agent_proposal_excludes_matching_content_at_its_exact_base() -> TestResult {
+    let scan = scan_world()?;
+    let original = described(87, "p/base.md", json!({}))?;
+    put(&scan, &original)?;
+    for at in ['b', 'e'] {
+        let mut document = original.clone();
+        document.summary.revision = revision(at)?;
+        scan.world.versions.put_document(&revision(at)?, document)?;
+    }
+    scan.world.versions.set_head(revision('b')?)?;
+    scan.world.versions.put_log(
+        &revision('b')?,
+        None,
+        LogResponse {
+            commits: vec![
+                Commit {
+                    revision: revision('b')?,
+                    parents: vec![revision('a')?],
+                    message: "Accepted promotion".to_owned(),
+                    author: "alice".to_owned(),
+                    committed_at: instant()?,
+                },
+                Commit {
+                    revision: revision('a')?,
+                    parents: vec![revision('0')?],
+                    message: "Human base".to_owned(),
+                    author: "alice".to_owned(),
+                    committed_at: instant()?,
+                },
+                Commit {
+                    revision: revision('0')?,
+                    parents: Vec::new(),
+                    message: "Root".to_owned(),
+                    author: "alice".to_owned(),
+                    committed_at: instant()?,
+                },
+            ],
+            next_cursor: None,
+        },
+    )?;
+    accepted_from(
+        &scan,
+        870,
+        "mcp_delegation",
+        'a',
+        'e',
+        json!([{ "kind": "edit", "item_id": item(87),
+        "body": "text", "properties": {} }]),
+    )?;
+    let response = attention_at(
+        &scan,
+        At::Revision {
+            revision: revision('a')?,
+        },
+        200,
+        None,
+    )
+    .await?;
+    assert_eq!(response.revision, revision('a')?);
+    assert_eq!(
+        named(&response.items, &AttentionKind::Unreviewed),
+        Vec::new(),
+        "proposal base precedes acceptance"
     );
     Ok(())
 }
