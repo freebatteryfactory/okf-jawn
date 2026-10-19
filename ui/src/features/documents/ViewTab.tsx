@@ -89,6 +89,8 @@ function CitedSources({ workspaceId, itemId, revision }: ViewTabProps) {
               <li key={key}>
                 {name}:{' '}
                 <Link
+                  // Underlined, as links in the page are; Tailwind, so no shared stylesheet changes.
+                  className="underline"
                   to="/w/$workspaceId/i/$itemId"
                   params={{ workspaceId, itemId: source.item_id }}
                   search={{
