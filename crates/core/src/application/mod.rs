@@ -8,6 +8,7 @@
 //! sandbox capabilities), `sources` (citations and object reads), `history` (Timeline, Changes,
 //! Who, Snapshot and Rewind), `navigation` (search, links and the graph), `proposals`
 //! (proposals, their acceptance and discussion), `reviews` (confirmations and reviews),
+//! `conventions` (the naming rules: reading and saving them, a rename preview and its apply),
 //! `status` (health, readiness and the session), `purges` (recording, resuming and reading
 //! a workspace purge), `workspaces` (the catalog, archive, export, backup and restore),
 //! `events` (receipts and the two event logs), `connectors` (local connector credentials),
@@ -222,6 +223,18 @@ macro_rules! route {
     };
     (list_reviews) => {
         reviews::list_reviews
+    };
+    (get_rules) => {
+        conventions::get_rules
+    };
+    (set_rules) => {
+        conventions::set_rules
+    };
+    (preview_names) => {
+        conventions::preview_names
+    };
+    (apply_names) => {
+        conventions::apply_names
     };
     (create_upload) => {
         uploads::create_upload
@@ -547,6 +560,7 @@ fn is_origin(text: &str) -> bool {
 }
 
 mod connectors;
+mod conventions;
 mod drafts;
 mod events;
 mod history;
