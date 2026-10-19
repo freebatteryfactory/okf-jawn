@@ -118,7 +118,15 @@ function ClaimRow({ claim }: { claim: ImportedClaim }) {
   );
 }
 
-export function ItemReviews({ workspaceId, itemId, revision }: ItemReviewsProps) {
+export function ItemReviews(props: ItemReviewsProps) {
+  // A durable Verify can finish after navigation. Keep its dialog, announcement, retry keys
+  // and mutation observer with the exact displayed identity, so it cannot update another item.
+  return (
+    <ItemReviewState key={`${props.workspaceId} ${props.itemId} ${props.revision}`} {...props} />
+  );
+}
+
+function ItemReviewState({ workspaceId, itemId, revision }: ItemReviewsProps) {
   const client = useQueryClient();
   const { rights } = useWorkspaceChanges();
   useReviewFeed(workspaceId);
