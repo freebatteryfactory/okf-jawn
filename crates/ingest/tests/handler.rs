@@ -34,7 +34,7 @@ mod job_handler {
     use okf_jawn_contract::import::JobState;
     use okf_jawn_contract::purge::{Purge, PurgeReport, PurgeState};
     use okf_jawn_contract::workspace::{ArtifactKind, BackupReport};
-    use okf_jawn_core::conventions::{COLLISION_KEPT, COLLISION_SUFFIXED};
+    use okf_jawn_core::conventions::{COLLISION_KEPT, COLLISION_SUFFIXED, PATH_NOT_VALID};
     use okf_jawn_core::conversion::{ConversionRecord, ConverterLimits, PixelSize, RetainedAsset};
     use okf_jawn_core::events::EventScope;
     use okf_jawn_core::jobs::{JobHandler, JobScope, JobSpec, NewJob, RecordStore};
@@ -3032,6 +3032,60 @@ mod job_handler {
             assert_eq!(paths, [named]);
             assert_eq!(warnings, [(warned.to_owned(), Some(named.to_owned()))]);
         }
+        Ok(())
+    }
+
+    /// SPEC section 6: an unusable ruled folder falls back before consumption, so an item
+    /// called archive.md never becomes a directory. These literal paths are the import's
+    /// ordinary unruled card names, not answers computed by the naming engine under test.
+    #[tokio::test]
+    async fn conventions_import_an_item_ancestor_falls_back_before_the_upload_is_consumed()
+    -> TestResult {
+        for collision in [
+            CollisionPolicy::Suffix,
+            CollisionPolicy::KeepExisting,
+            CollisionPolicy::Reject,
+        ] {
+            let world = world_with(Some(3), Vec::new())?;
+            card_at_base(&world, 90, "archive.md", "archive.pdf")?;
+            let mut rules = naming_rules(collision);
+            let rule = some(rules.rules.first_mut(), "the naming rule")?;
+            rule.destination = Some("ARCHIVE.md/nested".to_owned());
+            save_rules(&world, Ok(rules))?;
+            let (paths, warnings) = import_named(&world, 205, &["report.pdf"]).await?;
+            assert_eq!(paths, ["inbox/report-pdf.md"]);
+            assert_eq!(
+                warnings,
+                [(
+                    PATH_NOT_VALID.to_owned(),
+                    Some("inbox/report-pdf.md".to_owned())
+                )]
+            );
+            assert_eq!(world.uploads.consumed()?.len(), 1);
+            assert!(
+                cards(&world)?
+                    .iter()
+                    .all(|card| { card.path.as_str() == "inbox/report-pdf.md" })
+            );
+        }
+        Ok(())
+    }
+
+    /// A folder may itself end in .md. SPEC section 3 requires its stored spelling; the item
+    /// ancestor refusal must distinguish this real folder from an item of the same name.
+    #[tokio::test]
+    async fn conventions_import_an_existing_folder_is_allowed_with_its_stored_spelling()
+    -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        card_at_base(&world, 90, "Archive.md/kept.md", "kept.pdf")?;
+        let mut rules = naming_rules(CollisionPolicy::Suffix);
+        let rule = some(rules.rules.first_mut(), "the naming rule")?;
+        rule.destination = Some("archive.MD".to_owned());
+        save_rules(&world, Ok(rules))?;
+        let (paths, warnings) = import_named(&world, 206, &["report.pdf"]).await?;
+        assert_eq!(paths, ["Archive.md/report-pdf.md"]);
+        assert_eq!(warnings, Vec::new());
+        assert_eq!(world.uploads.consumed()?.len(), 1);
         Ok(())
     }
 

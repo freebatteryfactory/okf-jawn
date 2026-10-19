@@ -106,7 +106,7 @@ use okf_jawn_contract::identity::{Digest, ItemId, Revision, UploadId, WorkspaceP
 use okf_jawn_contract::import::JobState;
 use okf_jawn_contract::item::ItemDocument;
 use okf_jawn_contract::source::{SourceAppearance, SourceName};
-use okf_jawn_core::conventions::{CompiledRules, Subject, name_new_item};
+use okf_jawn_core::conventions::{CompiledRules, Subject, TakenPaths, name_new_item};
 use okf_jawn_core::conversion::{
     Conversion, ConversionInput, ConversionRecord, ConvertedDocument, PageCount, RetainedAsset,
 };
@@ -536,13 +536,15 @@ async fn unruled_paths(
 /// The card paths of `names` under the naming rules saved at the import's base, and the
 /// warnings naming them gave (the module header, step 2). Each card's path without rules is
 /// its subject (`destination/source_card_name`), of type `SOURCE_CARD_TYPE`, with its file
-/// name as the original's; the keys taken are every item's and folder's of the whole tree at
-/// the base and every card's named before it.
+/// name as the original's; the taken paths keep items distinct from folders and retain folder
+/// spelling, over the whole tree at the base and every card named before it. An item cannot
+/// become a destination folder: such a rule falls back before any upload is consumed.
 ///
 /// # Errors
 /// Returns `InvalidInput` on `/apply_naming_rules` for rules that do not read or that this
 /// build cannot apply (their first problem), `InvalidInput` on `/upload_ids/<index>` for a file
-/// name that gives no workspace path, or any port error.
+/// name that gives no workspace path, on `/destination` when the unruled path itself cannot
+/// use a folder (before any upload is consumed), or any port error.
 async fn ruled_paths(
     ports: &HandlerPorts,
     scope: &StorageScope,
@@ -576,12 +578,7 @@ async fn ruled_paths(
         None => unusable(error.message),
     })?;
     let tree = ports.versions.tree(scope, base).await?;
-    let mut taken: BTreeSet<String> = tree
-        .items
-        .iter()
-        .map(|item| item.summary.path.collision_key())
-        .chain(tree.folders.iter().map(WorkspacePath::collision_key))
-        .collect();
+    let mut taken = TakenPaths::new(&tree.items, &tree.folders);
     let mut paths = Vec::new();
     let mut warnings = Vec::new();
     for (index, name) in names.iter().enumerate() {

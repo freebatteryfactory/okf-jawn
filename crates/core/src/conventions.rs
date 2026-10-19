@@ -140,6 +140,14 @@ pub struct NewName {
     pub warnings: Vec<Warning>,
 }
 
+/// The paths an import must keep distinct: items cannot be ancestors, while folders retain
+/// their stored spellings and may receive more cards. Includes the import's earlier cards.
+#[derive(Debug, Default)]
+pub struct TakenPaths {
+    items: BTreeSet<String>,
+    folders: BTreeMap<String, String>,
+}
+
 /// One compiled rule.
 #[derive(Debug)]
 struct CompiledRule {
@@ -562,6 +570,52 @@ impl Assigned {
     }
 }
 
+impl TakenPaths {
+    /// Start with the complete tree at the import's base revision, keeping item and folder
+    /// paths separate. Ancestors of each item are folders too.
+    #[must_use]
+    pub fn new(items: &[TreeItem], folders: &[WorkspacePath]) -> Self {
+        let mut taken = Self {
+            items: BTreeSet::new(),
+            folders: folder_spellings(folders),
+        };
+        for item in items {
+            taken.take(&item.summary.path);
+        }
+        taken
+    }
+
+    /// Whether an item or folder holds this collision key.
+    #[must_use]
+    pub fn contains(&self, key: &str) -> bool {
+        self.items.contains(key) || self.folders.contains_key(key)
+    }
+
+    /// The first ancestor occupied by an item; numbering the leaf cannot make it a folder.
+    fn item_ancestor<'p>(&self, path: &'p WorkspacePath) -> Option<&'p str> {
+        ancestors(path.as_str()).find(|ancestor| self.items.contains(&collision_key_of(ancestor)))
+    }
+
+    /// Reserve a free item path and its folders, keeping any spelling already chosen.
+    fn claim(&mut self, path: &WorkspacePath) -> bool {
+        if self.contains(&path.collision_key()) || self.item_ancestor(path).is_some() {
+            return false;
+        }
+        self.take(path);
+        true
+    }
+
+    /// Record an item and its ancestor folders after its path has been checked.
+    fn take(&mut self, path: &WorkspacePath) {
+        self.items.insert(path.collision_key());
+        for folder in ancestors(path.as_str()) {
+            self.folders
+                .entry(collision_key_of(folder))
+                .or_insert_with(|| folder.to_owned());
+        }
+    }
+}
+
 impl Patterns {
     fn build() -> Result<Self, regex::Error> {
         Ok(Self {
@@ -871,24 +925,26 @@ fn settle(
 }
 
 /// Name one new item, an import's card: `subject.path` is its path without rules, and `taken`
-/// holds the collision keys of every item and folder at the import's base and of every item the
-/// same import named before; the key chosen is added to it.
+/// holds every item and folder at the import's base and every item the same import named before;
+/// the chosen item and its ancestor folders are added to it, preserving stored folder spelling.
 ///
 /// The ruled path is taken when its key is free. Taken, a `suffix` rule numbers it
 /// (`numbered`), so the rule's changes stay. Otherwise (no rule matches, the rule leaves the
 /// path or gives a refused name, `keep_existing` or `reject`), the path without rules is taken,
 /// numbered as the import numbers a card without rules (`numbered_source_card_name` for a
 /// source card, `numbered` otherwise); a ruled name that lost its collision says so in the
-/// warnings. So naming never fails an import for a collision.
+/// warnings. A ruled name below an existing item falls back too: numbering its leaf could never
+/// make that ancestor a folder. So a naming rule's collision never fails an import.
 ///
 /// # Errors
-/// Returns `Internal` when no numbered name is a workspace path.
+/// Returns `InvalidInput` on `/destination` when the unruled path itself cannot use its stored
+/// folder spelling or lies below an item; `Internal` when no numbered name is a workspace path.
 pub fn name_new_item(
     rules: &CompiledRules,
     subject: &Subject<'_>,
-    taken: &mut BTreeSet<String>,
+    taken: &mut TakenPaths,
 ) -> Result<NewName, ApiError> {
-    let (by_rule, mut warnings) = match propose(rules, subject) {
+    let (by_rule, mut warnings) = match propose_in_folders(rules, subject, &taken.folders) {
         Proposal::Unmatched => (None, Vec::new()),
         Proposal::Unchanged { warnings } | Proposal::Refused { warnings } => (None, warnings),
         Proposal::Renamed {
@@ -900,7 +956,16 @@ pub fn name_new_item(
     };
     let chosen = match by_rule {
         Some((path, policy)) => {
-            if taken.insert(path.collision_key()) {
+            if let Some(parent) = taken.item_ancestor(&path) {
+                warnings.push(warning(
+                    path.as_str(),
+                    PATH_NOT_VALID,
+                    &format!(
+                        "{parent} is an item, not a folder, so the name is chosen without the rules"
+                    ),
+                ));
+                None
+            } else if taken.claim(&path) {
                 Some(path)
             } else if policy == CollisionPolicy::Suffix {
                 let numbered = first_numbered(taken, |number| numbered(&path, number).ok());
@@ -943,15 +1008,19 @@ pub fn name_new_item(
 
 /// The path without rules for `subject` (`name_new_item`): its own path when free, else the
 /// first free numbered one, as an import names a card without rules.
-fn unruled(subject: &Subject<'_>, taken: &mut BTreeSet<String>) -> Result<WorkspacePath, ApiError> {
-    if taken.insert(subject.path.collision_key()) {
-        return Ok(subject.path.clone());
+fn unruled(subject: &Subject<'_>, taken: &mut TakenPaths) -> Result<WorkspacePath, ApiError> {
+    let path = in_stored_folders(subject.path, &taken.folders)
+        .map_err(|error| invalid(error.0, "/destination"))?;
+    if let Some(parent) = taken.item_ancestor(&path) {
+        return Err(invalid(
+            format!("{parent} is an item, not a destination folder"),
+            "/destination",
+        ));
     }
-    let folder = subject
-        .path
-        .as_str()
-        .rsplit_once('/')
-        .map(|(folder, _)| folder);
+    if taken.claim(&path) {
+        return Ok(path);
+    }
+    let folder = path.as_str().rsplit_once('/').map(|(folder, _)| folder);
     first_numbered(taken, |number| match subject.original_name {
         Some(original) => {
             let name = numbered_source_card_name(original, number);
@@ -961,7 +1030,7 @@ fn unruled(subject: &Subject<'_>, taken: &mut BTreeSet<String>) -> Result<Worksp
             };
             WorkspacePath::from_supplied(&full).ok()
         }
-        None => numbered(subject.path, number).ok(),
+        None => numbered(&path, number).ok(),
     })
     .ok_or_else(|| {
         ApiError::new(
@@ -978,13 +1047,14 @@ fn unruled(subject: &Subject<'_>, taken: &mut BTreeSet<String>) -> Result<Worksp
 /// once a number gives no path. At most one more number than there are taken keys is tried, since
 /// each taken key blocks one number at most.
 fn first_numbered(
-    taken: &mut BTreeSet<String>,
+    taken: &mut TakenPaths,
     numbered: impl Fn(u32) -> Option<WorkspacePath>,
 ) -> Option<WorkspacePath> {
-    let last = u32::try_from(taken.len()).map_or(u32::MAX, |count| count.saturating_add(2));
+    let occupied = taken.items.len().saturating_add(taken.folders.len());
+    let last = u32::try_from(occupied).map_or(u32::MAX, |count| count.saturating_add(2));
     for number in 2..=last {
         let path = numbered(number)?;
-        if taken.insert(path.collision_key()) {
+        if taken.claim(&path) {
             return Some(path);
         }
     }
