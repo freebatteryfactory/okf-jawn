@@ -1,7 +1,7 @@
 /** The host owns the model loop; this resource displays tool results only. */
 
 import { useApp } from '@modelcontextprotocol/ext-apps/react';
-import { StrictMode, useCallback, useState } from 'react';
+import { StrictMode, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { z } from 'zod';
 import {
@@ -15,9 +15,10 @@ import { SourceExcerpt } from '../features/documents/SourceExcerpt';
 import { Sources } from '../features/documents/Sources';
 import { Changes } from '../features/history/Changes';
 import { Timeline } from '../features/history/Timeline';
+import type { ViewData } from '../features/views/data';
 import { PresentView } from '../features/views/PresentView';
-import { omitUndefined } from '../lib/wire';
 import '../styles.css';
+import { serverToolData } from './view-data';
 
 const resultSchema = z.union([
   zReadItemResponse,
@@ -28,13 +29,7 @@ const resultSchema = z.union([
 ]);
 
 /** Pick Source / Changes / Timeline / Present from structuredContent; unknown → text fallback. */
-export function AppResult({
-  result,
-  callTool,
-}: {
-  result: unknown;
-  callTool: (name: string, input: Record<string, unknown>) => Promise<unknown>;
-}) {
+export function AppResult({ result, data }: { result: unknown; data: ViewData }) {
   const parsed = resultSchema.safeParse(result);
   if (!parsed.success) {
     const text =
@@ -51,8 +46,7 @@ export function AppResult({
       </p>
     );
   }
-  if ('resolved_bindings' in parsed.data)
-    return <PresentView response={parsed.data} callTool={callTool} />;
+  if ('resolved_bindings' in parsed.data) return <PresentView response={parsed.data} data={data} />;
   if ('sources' in parsed.data) return <Sources result={parsed.data} />;
   if ('markdown' in parsed.data) return <SourceExcerpt result={parsed.data} />;
   if ('commits' in parsed.data) return <Timeline result={parsed.data} />;
@@ -71,18 +65,19 @@ function App() {
       };
     },
   });
-  const callTool = useCallback(
-    async (name: string, input: Record<string, unknown>) => {
-      if (!app) throw new Error('Host connection unavailable');
-      // Single wire-boundary omit: PresentView must pass fields through unchanged.
-      return app.callServerTool({ name, arguments: omitUndefined(input) });
-    },
+  // A View's reads go to the host's server tools; view-data.ts is the one wire boundary.
+  const data = useMemo(
+    () =>
+      serverToolData(async (call) => {
+        if (!app) throw new Error('Host connection unavailable');
+        return app.callServerTool(call);
+      }),
     [app],
   );
   if (error) return <p role="alert">Host connection failed: {String(error)}</p>;
   if (result === null)
     return <p role="status">Waiting for a tool result from the connected host.</p>;
-  return <AppResult result={result} callTool={callTool} />;
+  return <AppResult result={result} data={data} />;
 }
 
 const element = document.getElementById('root');
