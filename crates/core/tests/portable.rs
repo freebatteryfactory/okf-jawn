@@ -162,6 +162,116 @@ fn properties(value: Value) -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
     Ok(serde_json::from_value(value)?)
 }
 
+/// A committed note for M2a's export writer (design VW1-VW3), with an extension and body to keep.
+const STORED_EXPORT_NOTE: &str = concat!(
+    "---\n",
+    "type: Note\n",
+    "title: Plan\n",
+    "generated:\n",
+    "  by: agent:writer\n",
+    "  at: '2026-10-01T08:00:00Z'\n",
+    "stale_after: '2027-01-01'\n",
+    "x_team: 7\n",
+    "okf_jawn:\n",
+    "  item_id: 00000000-0000-0000-0000-00000000000a\n",
+    "  kind: note\n",
+    "---\n",
+    "\n",
+    "# Plan\n",
+    "\n",
+    "Ship it.\n",
+);
+
+/// The actual content fingerprint of the fixed note, using the existing item test helper.
+fn export_note_fingerprint() -> Result<Digest, Box<dyn Error>> {
+    let stored = okf_core::Document::parse(STORED_EXPORT_NOTE)?;
+    Ok(document(
+        &stored.body,
+        json!({
+            "type": "Note",
+            "title": "Plan",
+            "generated": { "by": "agent:writer", "at": "2026-10-01T08:00:00Z" },
+            "stale_after": "2027-01-01",
+            "x_team": 7
+        }),
+    )?
+    .content_digest)
+}
+
+#[test]
+fn export_item_file_adds_only_the_current_whole_review() -> TestResult {
+    // The caller supplies the item's fingerprint. The review names that same content;
+    // the expected verification below is the literal VW1 answer, not the value writer's output.
+    let content = export_note_fingerprint()?;
+    let reviews = [review(
+        "alice",
+        "2026-10-08T09:00:00.000Z",
+        content.clone(),
+        Selection::All,
+        ReviewCoverage::Current,
+    )?];
+    let exported = some(
+        okf_jawn_core::portable::export_item_file(
+            STORED_EXPORT_NOTE.as_bytes(),
+            &reviews,
+            &content,
+        )?,
+        "the file with its current review written",
+    )?;
+    let after = okf_core::Document::parse(std::str::from_utf8(&exported)?)?;
+    let before = okf_core::Document::parse(STORED_EXPORT_NOTE)?;
+    assert_eq!(
+        after.frontmatter.get(VERIFIED_KEY),
+        Some(&yaml(&json!([
+            { "by": "human:alice", "at": "2026-10-08T09:00:00.000Z" }
+        ])))
+    );
+    assert_eq!(
+        after.frontmatter.keys().collect::<Vec<_>>(),
+        vec![
+            "type",
+            "title",
+            "generated",
+            "verified",
+            "stale_after",
+            "x_team",
+            APP_HEADER_KEY,
+        ]
+    );
+    assert_eq!(after.body, before.body);
+    for key in before.frontmatter.keys() {
+        assert_eq!(after.frontmatter.get(key), before.frontmatter.get(key), "{key}");
+    }
+    Ok(())
+}
+
+#[test]
+fn export_item_file_without_whole_current_review_keeps_stored_bytes() -> TestResult {
+    let content = export_note_fingerprint()?;
+    let line_review = review(
+        "alice",
+        "2026-10-08T09:00:00.000Z",
+        content.clone(),
+        Selection::Lines {
+            range: TextRange { start: 1, end: 1 },
+        },
+        ReviewCoverage::Current,
+    )?;
+    for reviews in [Vec::new(), vec![line_review]] {
+        // VW2-VW3: None instructs the caller to export the exact original bytes; an empty
+        // verification or a reserialized copy would change a file that has no whole-item review.
+        assert_eq!(
+            okf_jawn_core::portable::export_item_file(
+                STORED_EXPORT_NOTE.as_bytes(),
+                &reviews,
+                &content,
+            )?,
+            None
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn export_writes_only_current_whole_item_reviews_as_okf_verified() -> TestResult {
     let item = document("# Plan\n\nShip it.\n", json!({ "type": "Note" }))?;
