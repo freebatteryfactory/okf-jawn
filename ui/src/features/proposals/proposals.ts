@@ -14,6 +14,9 @@
  * when it still shows that head, as every change of the person's own does. Declining needs no
  * confirmation: its reason is recorded as a comment by the service. Every write carries its key,
  * kept while the request says the same thing.
+ *
+ * The changes that may store a View (`viewCandidates`) are the ones the service checks as Views:
+ * the proposal page draws each as proposed (`documents/ProposedView.tsx`).
  */
 import { infiniteQueryOptions, type QueryClient } from '@tanstack/react-query';
 import {
@@ -44,6 +47,7 @@ import { adoptHeadFrom, checkHeadsAgain, type HeadChange } from '../explorer/hea
 import type { Confirmed } from '../reviews/confirm';
 import { proposalsChanged } from '../reviews/feed';
 import type { Attempt } from '../tree/changes';
+import type { ViewFile } from '../views/view-file';
 
 /** Proposals asked for per page. */
 export const PROPOSALS_PAGE = 50;
@@ -146,6 +150,43 @@ export function changeWords(change: Change): string {
         ? 'Supply the whole text of a source'
         : `Supply the text of a source for pages ${(change.pages ?? []).map((range) => (range.start === range.end ? `${range.start}` : `${range.start} to ${range.end}`)).join(', ')}`;
   }
+}
+
+/**
+ * A change that may store a View, as the service checks one when the proposal is opened and again
+ * when it is accepted (`check_proposed_view`): a create of a View, or an edit, which stores one
+ * when the item is a View at the proposal's base (so its kind is read there). Its file is the
+ * change's own properties and body: the exact proposed content.
+ */
+export type ViewCandidate = { key: string; file: ViewFile } & (
+  | { kind: 'created'; path: string }
+  | { kind: 'edited'; itemId: string }
+);
+
+/** The changes of a proposal that may store a View, in the order of its changes. */
+export function viewCandidates(proposal: Proposal): ViewCandidate[] {
+  return proposal.changes.flatMap((change, index): ViewCandidate[] => {
+    const key = `${proposal.proposal_revision}/${index}`;
+    if (change.kind === 'create' && change.item_kind === 'view')
+      return [
+        {
+          key,
+          kind: 'created',
+          path: change.path,
+          file: { properties: change.properties, body: change.body },
+        },
+      ];
+    if (change.kind === 'edit')
+      return [
+        {
+          key,
+          kind: 'edited',
+          itemId: change.item_id,
+          file: { properties: change.properties, body: change.body },
+        },
+      ];
+    return [];
+  });
 }
 
 /** The items a proposal's changes name; a tab of one that cited the old head follows. */
