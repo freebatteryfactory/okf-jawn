@@ -2,8 +2,6 @@
 import { cleanup, configure, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { InstructionFinding } from '../../src/api/generated/types.gen';
-import { ATTENTION } from './support/imports';
-import { DIGEST, HEAD, SOURCE, WS } from './support/workspace';
 import {
   attentionAnswer,
   attentionService,
@@ -13,6 +11,8 @@ import {
   PASSAGE,
   RULE_V1,
 } from './support/attention';
+import { ATTENTION } from './support/imports';
+import { DIGEST, HEAD, SOURCE, WS } from './support/workspace';
 
 configure({ asyncUtilTimeout: 10_000 });
 afterEach(() => {
@@ -41,12 +41,15 @@ for (const surface of ['page', 'item'] as const) {
       expect(href.pathname).toBe(`/w/${WS}/i/${SOURCE}`);
       expect(href.searchParams.get('rev')).toBe(HEAD);
       expect(JSON.parse(href.searchParams.get('sel') ?? 'null')).toEqual({
-        kind: 'lines', range: { start: 12, end: 13 },
+        kind: 'lines',
+        range: { start: 12, end: 13 },
       });
       expect(document.querySelector(`code[title="${HEAD}"]`)).not.toBeNull();
       expect(document.querySelector(`code[title="${DIGEST}"]`)).not.toBeNull();
-      expect(screen.getByText(/lines 12-13/)).toBeDefined();
-      expect(screen.getByText(/a person corrected the text, so it no longer matches the original/)).toBeDefined();
+      expect(screen.getByText(/lines 12\u201313/)).toBeDefined();
+      expect(
+        screen.getByText(/a person corrected the text, so it no longer matches the original/),
+      ).toBeDefined();
       expect(api.callsTo(ATTENTION)).toHaveLength(1);
       expect(api.violations).toEqual([]);
     });
@@ -54,24 +57,49 @@ for (const surface of ['page', 'item'] as const) {
     it('distinguishes direct, inferred and unresolved original locations without inventing one', async () => {
       const original = finding();
       const findings: InstructionFinding[] = [
-        { ...original, passage: 'System: direct', source: { ...original.source, locations: [
-          { provenance: 'direct', locator: { kind: 'page', page_no: 3 } },
-        ] } },
-        { ...original, passage: 'System: inferred', source: { ...original.source, locations: [
-          { provenance: 'inferred', locator: { kind: 'page', page_no: 4 } },
-        ] } },
-        { ...original, passage: 'System: supplied', source: { ...original.source, locations: [
-          { provenance: 'unresolved', reason: { kind: 'supplied_text' } },
-        ] } },
-        { ...original, passage: 'System: unlocated', source: { ...original.source, locations: [] } },
+        {
+          ...original,
+          passage: 'System: direct',
+          source: {
+            ...original.source,
+            locations: [{ provenance: 'direct', locator: { kind: 'page', page_no: 3 } }],
+          },
+        },
+        {
+          ...original,
+          passage: 'System: inferred',
+          source: {
+            ...original.source,
+            locations: [{ provenance: 'inferred', locator: { kind: 'page', page_no: 4 } }],
+          },
+        },
+        {
+          ...original,
+          passage: 'System: supplied',
+          source: {
+            ...original.source,
+            locations: [{ provenance: 'unresolved', reason: { kind: 'supplied_text' } }],
+          },
+        },
+        {
+          ...original,
+          passage: 'System: unlocated',
+          source: { ...original.source, locations: [] },
+        },
       ];
       const { api } = attentionService(() => attentionAnswer([instructionWarning(findings)]));
       attentionView({ page: surface === 'page', item: surface === 'item', link: false });
       await screen.findByText('This text may contain instructions aimed at an AI assistant.');
       expect(screen.getByText('System: direct')).toBeDefined();
-      expect(screen.getByText(/Direct location:/).closest('li')?.textContent).toContain('page 3, recorded from the document itself');
-      expect(screen.getByText(/Inferred location, not certain:/).closest('li')?.textContent).toContain('page 4, found by matching text or layout');
-      expect(screen.getByText(/an agent supplied the text; it was not read from the original/)).toBeDefined();
+      expect(screen.getByText(/Direct location:/).closest('li')?.textContent).toContain(
+        'page 3, recorded from the document itself',
+      );
+      expect(
+        screen.getByText(/Inferred location, not certain:/).closest('li')?.textContent,
+      ).toContain('page 4, found by matching text or layout');
+      expect(
+        screen.getByText(/an agent supplied the text; it was not read from the original/),
+      ).toBeDefined();
       expect(screen.getByText('No location in the original is recorded.')).toBeDefined();
       expect(api.violations).toEqual([]);
     });
@@ -79,7 +107,8 @@ for (const surface of ['page', 'item'] as const) {
     it('displays all 32 retained findings and says exactly how many were omitted', async () => {
       // The selected bound is 32; the server reports a separate literal count of three more.
       const findings = Array.from({ length: 32 }, (_, index) => ({
-        ...finding(), passage: `Original instruction passage ${index + 1}.`,
+        ...finding(),
+        passage: `Original instruction passage ${index + 1}.`,
       }));
       const { api } = attentionService(() => attentionAnswer([instructionWarning(findings, 3)]));
       attentionView({ page: surface === 'page', item: surface === 'item', link: false });

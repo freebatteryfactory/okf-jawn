@@ -1,6 +1,11 @@
 /** Focused Attention fixtures: literal owner-rule evidence, with the existing API and SSE doubles. */
 import { QueryClientProvider } from '@tanstack/react-query';
-import { createMemoryHistory, createRootRoute, createRouter, RouterProvider } from '@tanstack/react-router';
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+  RouterProvider,
+} from '@tanstack/react-router';
 import { render } from '@testing-library/react';
 import type { AttentionItem, InstructionFinding } from '../../../src/api/generated/types.gen';
 import { createQueryClient } from '../../../src/app/query-client';
