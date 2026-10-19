@@ -20,8 +20,10 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { expect, type Locator, type Page, test } from '@playwright/test';
 import {
+  type Answers,
   expectNoAxeViolations,
   expectVisibleFocus,
+  HEAD,
   ok,
   routeApi,
   shot,
@@ -84,9 +86,10 @@ interface Service {
  * The service: no jobs until an export is accepted; the export answered queued, and listed
  * queued once, then succeeded with its archive.
  */
-async function play(page: Page): Promise<Service> {
+async function play(page: Page, extra: Answers = {}): Promise<Service> {
   const service: Service = { exports: [], listedSince: 0 };
   await routeApi(page, {
+    ...extra,
     '/api/workspaces/open-workspace': () => ok(writableWorkspace),
     '/api/workspaces/export-workspace': (body) => {
       service.exports.push(body);
@@ -225,5 +228,75 @@ test.describe('export a workspace and download it', () => {
     await expectSaved(page, () => page.keyboard.press('Enter'));
     expect(service.exports).toHaveLength(1);
     expect(server.downloads(ARTIFACT_PATH)).toBe(1);
+  });
+});
+
+/** A version of the workspace's history before the head the page shows. */
+const EARLIER = 'c'.repeat(40);
+const versions = {
+  '/api/history/log-items': () =>
+    ok({
+      commits: [
+        {
+          revision: HEAD,
+          parents: [EARLIER],
+          message: 'Publish the notes',
+          author: 'ada',
+          committed_at: '2026-01-01T12:00:00.000Z',
+        },
+        {
+          revision: EARLIER,
+          parents: [],
+          message: 'Start the notes',
+          author: 'ada',
+          committed_at: '2026-01-01T09:00:00.000Z',
+        },
+      ],
+      next_cursor: null,
+    }),
+};
+
+test.describe('export a version of the workspace’s history', () => {
+  const server = useDownloadServer({ [ARTIFACT_PATH]: { body: ARCHIVE, filename: FILENAME } });
+
+  test('chosen from the keyboard alone: the export asks that revision', async ({
+    page,
+    browserName,
+  }) => {
+    const service = await play(page, versions);
+    await page.goto(`${server.origin()}/w/${WS}/jobs`);
+    const now = group(page).getByRole('radio', { name: 'As it is now' });
+    await expect(now).toBeChecked();
+    await tabTo(page, now);
+    await expectVisibleFocus(page);
+    // Arrow keys move the choice within the group, as for every radio group.
+    await page.keyboard.press('ArrowDown');
+    await expect(
+      group(page).getByRole('radio', { name: 'A version from its history' }),
+    ).toBeChecked();
+    const list = group(page).getByRole('combobox', { name: 'Version' });
+    await expect(list).toHaveValue(HEAD);
+    await tabTo(page, list);
+    await expectVisibleFocus(page);
+    if (browserName === 'webkit') {
+      // WebKit opens a native menu for a list from the keyboard, which the page cannot drive; the
+      // choice is made as that menu would make it.
+      await list.selectOption(EARLIER);
+    } else {
+      await page.keyboard.press('ArrowDown');
+    }
+    await expect(list).toHaveValue(EARLIER);
+    await expect(group(page)).toContainText(`as of revision ${EARLIER.slice(0, 10)}`);
+    await expectNoAxeViolations(page, 'a version of the history chosen');
+    await shot(page, 'm4b-export-05-version-chosen');
+
+    const button = group(page).getByRole('button', { name: 'Export the workspace' });
+    await tabTo(page, button);
+    await page.keyboard.press('Enter');
+    await expect(group(page).getByRole('status')).toContainText('The export was accepted');
+    expect(service.exports.map((body) => body.at)).toEqual([
+      { kind: 'revision', revision: EARLIER },
+    ]);
+    await expect(button).toBeFocused();
   });
 });
