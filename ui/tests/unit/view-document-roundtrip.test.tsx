@@ -1055,6 +1055,26 @@ describe('a View file reads as its title, its description and its one block', ()
     });
   });
 
+  it("refuses JSON nested deeper than core reads as not JSON, at core's own limit, never throwing", () => {
+    // Core reads the block with serde_json, which refuses the 128th array or object nested in one
+    // another, the block's own object the first: core's `view_from` reads 127 and refuses 128 with
+    // "the View block is not JSON: recursion limit exceeded" and no field.
+    const nested = (depth: number) => {
+      // `spec` is the second level; the arrays in it are the rest.
+      const arrays = depth - 1;
+      const text = block({ ...stored(), spec: 'NESTED' }).replace(
+        '"NESTED"',
+        `${'['.repeat(arrays)}${']'.repeat(arrays)}`,
+      );
+      return body('', text);
+    };
+    expect(read(nested(127)).ok).toBe(true);
+    const refused = refusal(nested(128));
+    expect(refused).toMatchObject({ problem: 'not_json', pointer: null });
+    expect(refused.message).toMatch(/not JSON.*127/);
+    expect(refusal(nested(100_000))).toMatchObject({ problem: 'not_json', pointer: null });
+  });
+
   it('refuses a derived field by name, and an unknown field, at its pointer', () => {
     const named: Array<
       [

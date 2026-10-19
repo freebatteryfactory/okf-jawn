@@ -1134,6 +1134,7 @@ describe('a chart draws every binding its ready status names', () => {
   const cited = {
     metrics: cite('11111111-2222-4333-8444-555555555555', 'fixtures/metrics.json'),
     targets: cite('22222222-2222-4333-8444-555555555555', 'fixtures/targets.json'),
+    venues: cite('33333333-2222-4333-8444-555555555555', 'fixtures/venues.json'),
   };
   const rows = {
     metrics: [
@@ -1144,6 +1145,10 @@ describe('a chart draws every binding its ready status names', () => {
       ['a', 3],
       ['b', 4],
       ['c', 5],
+    ],
+    venues: [
+      ['a', 1],
+      ['b', 2],
     ],
   };
   /** The converter's Dataset of one binding, as its bytes. */
@@ -1178,19 +1183,24 @@ describe('a chart draws every binding its ready status names', () => {
   };
 
   /**
-   * A board of one chart whose server status reads both bindings: a json_render Chart citing
-   * `metrics`, or a vega_lite View whose spec is the layered chart.
+   * A board of one chart whose server status reads both bindings (or the ones named): a
+   * json_render Chart citing `metrics`, or a vega_lite View whose spec is the layered chart.
    */
   async function board(
     grammar: 'json_render' | 'vega_lite' = 'json_render',
     {
       chart = layered,
       transforms = {},
-    }: { chart?: unknown; transforms?: Record<string, unknown[]> } = {},
+      names = ['metrics', 'targets'],
+    }: {
+      chart?: unknown;
+      transforms?: Record<string, unknown[]>;
+      names?: ReadonlyArray<keyof typeof cited>;
+    } = {},
   ) {
     const served = new Map<string, Uint8Array>();
     const digests: Record<string, string> = {};
-    for (const name of ['metrics', 'targets'] as const) {
+    for (const name of names) {
       const bytes = bytesOf(name);
       digests[name] = await digestOf(bytes);
       served.set(digests[name], bytes);
@@ -1219,7 +1229,7 @@ describe('a chart draws every binding its ready status names', () => {
               },
             }),
       },
-      resolved_bindings: (['metrics', 'targets'] as const).map((name) => ({
+      resolved_bindings: names.map((name) => ({
         name,
         source: cited[name],
         units: {},
@@ -1229,7 +1239,7 @@ describe('a chart draws every binding its ready status names', () => {
       charts: [
         {
           chart: grammar === 'vega_lite' ? { kind: 'spec' } : { kind: 'named', name: 'both' },
-          status: { status: 'ready', bindings: ['metrics', 'targets'] },
+          status: { status: 'ready', bindings: [...names] },
         },
       ],
       as_of: '2026-10-08T14:03:07.250Z',
@@ -1242,7 +1252,9 @@ describe('a chart draws every binding its ready status names', () => {
         media: [],
         outline: [],
         receipt_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
-        source: request.item_id === cited.targets.item_id ? cited.targets : cited.metrics,
+        source:
+          Object.values(cited).find((source) => source.item_id === request.item_id) ??
+          cited.metrics,
         truncated: false,
         view: 'text',
         warnings: [],
@@ -1320,6 +1332,82 @@ describe('a chart draws every binding its ready status names', () => {
     });
     await expect.poll(drawn(container), { timeout: 15_000 }).toEqual([1]);
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  /** The text each text mark of the drawn chart shows, in order, once there is any. */
+  const texts = (container: HTMLElement) => () =>
+    Array.from(
+      container.querySelectorAll('svg g[class~="role-mark"] text'),
+      (text) => text.textContent,
+    );
+  /** One text mark per `metrics` row, showing the field its transforms looked up. */
+  const showing = (field: string) => ({
+    $schema: 'https://vega.github.io/schema/vega-lite/v6.json',
+    data: { name: 'metrics' },
+    mark: 'text',
+    encoding: {
+      y: { field: 'category', type: 'nominal' },
+      text: { field, type: 'quantitative' },
+    },
+  });
+  const lookUp = (binding: string, field: string) => ({
+    lookup: 'category',
+    from: { data: { name: binding }, key: 'category', fields: [field] },
+  });
+
+  it("looks up a binding after that binding's own transforms", { timeout: 30_000 }, async () => {
+    // `targets` is (a, 3), (b, 4), (c, 5); its own calculate makes `scaled` 300, 400, 500. A
+    // lookup of the raw dataset would find no `scaled` at all.
+    const container = await board('vega_lite', {
+      chart: showing('scaled'),
+      transforms: {
+        metrics: [lookUp('targets', 'scaled')],
+        targets: [{ calculate: 'datum.value * 100', as: 'scaled' }],
+      },
+    });
+    await expect.poll(texts(container), { timeout: 15_000 }).toEqual(['300', '400']);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('runs looked-up transforms in dependency order, through a chain of lookups', {
+    timeout: 30_000,
+  }, async () => {
+    // `venues` (a, 1), (b, 2) makes `factor` 10, 20; `targets` looks that up and makes
+    // `scaled` 3 * 10 = 30 and 4 * 20 = 80; `metrics` looks `scaled` up. Had `targets`'
+    // transforms run on the raw `venues`, `factor` would be missing and `scaled` not a number.
+    const container = await board('json_render', {
+      chart: showing('scaled'),
+      names: ['metrics', 'targets', 'venues'],
+      transforms: {
+        metrics: [lookUp('targets', 'scaled')],
+        targets: [
+          lookUp('venues', 'factor'),
+          { calculate: 'datum.value * datum.factor', as: 'scaled' },
+        ],
+        venues: [{ calculate: 'datum.value * 10', as: 'factor' }],
+      },
+    });
+    await expect.poll(texts(container), { timeout: 15_000 }).toEqual(['30', '80']);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it("refuses, in that chart's alert, bindings whose transforms look each other up", {
+    timeout: 30_000,
+  }, async () => {
+    await board('json_render', {
+      chart: showing('scaled'),
+      transforms: {
+        metrics: [lookUp('targets', 'scaled')],
+        targets: [lookUp('metrics', 'value'), { calculate: 'datum.value * 100', as: 'scaled' }],
+      },
+    });
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toMatch(/metrics → targets → metrics/);
+    expect(alert.textContent).toMatch(/look each other up/);
+    // The chart's own alert, in its section, not the View's.
+    const chart = screen.getByRole('heading', { name: 'Both bindings' }).closest('section');
+    if (chart === null) throw new Error('the chart has no section');
+    expect(within(chart).getByRole('alert')).toBe(alert);
   });
 
   it('draws a vega_lite View layered over two bindings with both, and tables both', {

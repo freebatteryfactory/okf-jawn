@@ -22,6 +22,10 @@
  * - a field is read with the generated schema, which is looser than core's types in places: a
  *   path segment `..` passes `zWorkspacePath`, and core refuses it;
  * - the wording of a refusal is this parser's own; its kind and pointer are core's.
+ *
+ * Every file is answered, never thrown on: JSON nested deeper than core reads (`MAX_DEPTH`) is
+ * refused as not JSON, as core refuses it, and the walk for a repeated key stops there, so this
+ * parser's own recursion is never deeper.
  */
 import type { z } from 'zod';
 import { zSourceReference, zViewBinding, zViewDocument } from '../../api/generated/zod.gen';
@@ -59,6 +63,11 @@ const CLOSE = '```';
 const DOCUMENT_FIELDS = ['schema_version', 'mode', 'grammar', 'bindings', 'spec', 'charts'];
 const BINDING_FIELDS = ['name', 'source', 'units', 'transforms'];
 const SOURCE_FIELDS = ['item_id', 'path', 'revision', 'digest', 'selection'];
+/**
+ * The deepest nesting of arrays and objects core reads, the block's own object the first. Core
+ * reads the block with `serde_json`, whose recursion limit refuses the 128th as "not JSON".
+ */
+const MAX_DEPTH = 127;
 
 /** A refusal, thrown inside the parser and answered as its result. */
 class Refused extends Error {
@@ -178,23 +187,34 @@ function parseUnique(text: string): JsonObject {
       `the View block is not JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
     );
   }
-  const repeated = repeatedKey(text);
-  if (repeated !== undefined)
+  const fault = structureFault(text);
+  if (fault?.kind === 'deep')
+    throw new Refused(
+      'not_json',
+      '',
+      `the View block is not JSON: it nests arrays and objects more than ${MAX_DEPTH} deep, deeper than core reads`,
+    );
+  if (fault?.kind === 'repeated')
     throw new Refused(
       'repeated_key',
-      repeated.at,
-      `the key \`${repeated.key}\` is repeated in one object`,
+      fault.at,
+      `the key \`${fault.key}\` is repeated in one object`,
     );
   if (!isObject(value)) throw new Refused('schema', '', 'the View block holds one JSON object');
   return value;
 }
 
+/** What the walk of a block's structure meets first: a repeated key, or nesting core refuses. */
+type StructureFault = { kind: 'repeated'; at: string; key: string } | { kind: 'deep' };
+
 /**
- * The first object of a JSON text that holds a key twice: its pointer and the key. The text is
- * already known to be JSON, so only the structure is walked: strings (a key is decoded by
+ * The first fault of a JSON text's structure, in the text's order as core meets it: an object that
+ * holds a key twice (its pointer and the key), or an array or object nested deeper than
+ * `MAX_DEPTH`, which the walk does not enter, so it never recurses deeper than core reads. The
+ * text is already known to be JSON, so only the structure is walked: strings (a key is decoded by
  * JSON.parse), brackets, braces, colons and commas.
  */
-function repeatedKey(text: string): { at: string; key: string } | undefined {
+function structureFault(text: string): StructureFault | undefined {
   let at = 0;
   const space = () => {
     while (at < text.length && ' \t\n\r'.includes(text.charAt(at))) at += 1;
@@ -206,9 +226,11 @@ function repeatedKey(text: string): { at: string; key: string } | undefined {
     at += 1;
     return text.slice(start, at);
   };
-  const value = (pointer: string): { at: string; key: string } | undefined => {
+  // `depth` is the nesting level an array or object met here would be at.
+  const value = (pointer: string, depth: number): StructureFault | undefined => {
     space();
     const first = text.charAt(at);
+    if ((first === '{' || first === '[') && depth > MAX_DEPTH) return { kind: 'deep' };
     if (first === '{') {
       at += 1;
       const keys = new Set<string>();
@@ -221,11 +243,11 @@ function repeatedKey(text: string): { at: string; key: string } | undefined {
         space();
         const key: unknown = JSON.parse(string());
         if (typeof key !== 'string') return undefined;
-        if (keys.has(key)) return { at: pointer, key };
+        if (keys.has(key)) return { kind: 'repeated', at: pointer, key };
         keys.add(key);
         space();
         at += 1; // the colon
-        const inner = value(`${pointer}/${token(key)}`);
+        const inner = value(`${pointer}/${token(key)}`, depth + 1);
         if (inner !== undefined) return inner;
         space();
         const next = text.charAt(at);
@@ -241,7 +263,7 @@ function repeatedKey(text: string): { at: string; key: string } | undefined {
         return undefined;
       }
       for (let index = 0; ; index += 1) {
-        const inner = value(`${pointer}/${index}`);
+        const inner = value(`${pointer}/${index}`, depth + 1);
         if (inner !== undefined) return inner;
         space();
         const next = text.charAt(at);
@@ -256,7 +278,7 @@ function repeatedKey(text: string): { at: string; key: string } | undefined {
     while (at < text.length && !' \t\n\r,]}'.includes(text.charAt(at))) at += 1;
     return undefined;
   };
-  return value('');
+  return value('', 1);
 }
 
 /** One binding of the block, read into the wire's `ViewBinding` in `workspaceId`. */
