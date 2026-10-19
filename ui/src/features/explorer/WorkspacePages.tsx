@@ -1,8 +1,10 @@
 /**
  * The workspace's own pages, beside its documents: bringing files in (`/import`), its jobs
  * (`/jobs`), its Attention warnings (`/attention`), its Timeline (`/timeline`: its versions,
- * their Changes and Rewind), its proposals (`/proposals`, and one proposal at `/proposals/<id>`)
- * and its graph (`/graph`). Each has a URL, which the router owns.
+ * their Changes and Rewind), its proposals (`/proposals`, and one proposal at `/proposals/<id>`),
+ * its graph (`/graph`), a comparison of two versions (`/compare`, which the page tool
+ * `open_comparison` opens and the bar does not list), and the settings of this browser (`/settings`), which are not the
+ * workspace's but are reached from its bar. Each has a URL, which the router owns.
  *
  * A page is shown in place of the documents, between the same navigation and source columns. The
  * open tabs are kept in the Explorer store and are there again under "Documents", which goes back
@@ -20,11 +22,13 @@ import type { Revision } from '../../api/generated/types.gen';
 import { AttentionLink } from '../attention/AttentionLink';
 import { AttentionPage } from '../attention/AttentionPage';
 import { GraphPage } from '../graph/GraphPage';
+import { type Comparison, ComparisonPage, comparisonOf } from '../history/ComparisonPage';
 import { TimelineView } from '../history/TimelineView';
 import { ImportPage } from '../imports/ImportPage';
 import { JobsPage } from '../jobs/JobsPage';
 import { ProposalPage } from '../proposals/ProposalPage';
 import { ProposalsPage } from '../proposals/ProposalsPage';
+import { SettingsPage } from '../settings/SettingsPage';
 import { DocumentPanes, type DocumentPanesProps } from './DocumentPanes';
 import { type Pane, tabLocation } from './store';
 
@@ -35,7 +39,20 @@ export type WorkspacePage =
   | 'timeline'
   | 'proposals'
   | 'graph'
-  | { proposal: string };
+  | 'settings'
+  | { proposal: string }
+  | { comparison: Comparison | null };
+
+/** One value of the search the URL names now: a string, or undefined when it has none. */
+function useSearched(key: string): string | undefined {
+  return useMatches({
+    select: (matches) => {
+      const search: Record<string, unknown> = matches.at(-1)?.search ?? {};
+      const value = search[key];
+      return typeof value === 'string' ? value : undefined;
+    },
+  });
+}
 
 /**
  * The page the URL names; null when it names the documents.
@@ -52,12 +69,17 @@ export function useWorkspacePage(): WorkspacePage | null {
       return params.proposalId;
     },
   });
+  const from = useSearched('from');
+  const to = useSearched('to');
+  const item = useSearched('item');
+  if (route === '/w/$workspaceId/compare') return { comparison: comparisonOf({ from, to, item }) };
   if (route === '/w/$workspaceId/import') return 'import';
   if (route === '/w/$workspaceId/jobs') return 'jobs';
   if (route === '/w/$workspaceId/attention') return 'attention';
   if (route === '/w/$workspaceId/timeline') return 'timeline';
   if (route === '/w/$workspaceId/proposals') return 'proposals';
   if (route === '/w/$workspaceId/graph') return 'graph';
+  if (route === '/w/$workspaceId/settings') return 'settings';
   if (route === '/w/$workspaceId/proposals/$proposalId' && proposalId !== undefined) {
     return { proposal: proposalId };
   }
@@ -80,8 +102,12 @@ export function DocumentsOrPage({
       {page === 'attention' && <AttentionPage workspaceId={workspaceId} head={head} />}
       {page === 'proposals' && <ProposalsPage workspaceId={workspaceId} />}
       {page === 'graph' && <GraphPage workspaceId={workspaceId} head={head} />}
-      {typeof page === 'object' && (
+      {page === 'settings' && <SettingsPage />}
+      {typeof page === 'object' && 'proposal' in page && (
         <ProposalPage key={page.proposal} workspaceId={workspaceId} proposalId={page.proposal} />
+      )}
+      {typeof page === 'object' && 'comparison' in page && (
+        <ComparisonPage workspaceId={workspaceId} comparison={page.comparison} />
       )}
       {page === 'timeline' && (
         <TimelineView
@@ -159,6 +185,9 @@ export function WorkspaceNav({ workspaceId, head, query, documents, onFollow }: 
       </Link>
       <Link to="/w/$workspaceId/graph" params={params} search={kept} onClick={onFollow}>
         Graph
+      </Link>
+      <Link to="/w/$workspaceId/settings" params={params} search={kept} onClick={onFollow}>
+        Settings
       </Link>
     </nav>
   );
