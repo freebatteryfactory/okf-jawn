@@ -244,21 +244,20 @@ export function PresentView({ response, data }: PresentViewProps) {
   if (failure !== null) return <p role="alert">{failure}</p>;
   if (!bindings) return <p role="status">Resolving the presentation's exact source references…</p>;
   const view = response.view;
-  if (view.grammar === 'json_render') {
-    return (
-      <BindingsContext.Provider value={bindings}>
-        <Layout spec={view.spec} />
-        <Resolution response={response} />
-      </BindingsContext.Provider>
-    );
-  }
+  // Either grammar: the View's own title and description, its drawing, then what it was read from.
   return (
-    <section>
-      <h2>{view.title}</h2>
-      <p>{view.description}</p>
-      <VegaLiteChart view={view} resolved={bindings} response={response} />
-      <Resolution response={response} />
-    </section>
+    <BindingsContext.Provider value={bindings}>
+      <section>
+        <h2>{view.title}</h2>
+        <p>{view.description}</p>
+        {view.grammar === 'json_render' ? (
+          <Layout spec={view.spec} />
+        ) : (
+          <VegaLiteChart view={view} resolved={bindings} response={response} />
+        )}
+        <Resolution response={response} />
+      </section>
+    </BindingsContext.Provider>
   );
 }
 

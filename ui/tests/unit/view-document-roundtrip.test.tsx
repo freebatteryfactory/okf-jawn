@@ -673,7 +673,7 @@ describe('a saved View follows the ids it was asked for', () => {
             root: 'root',
             elements: { root: { type: 'Stack', props: { title }, children: [] } },
           };
-          const view = { ...saved.view, title, spec };
+          const view = { ...saved.view, title: `View: ${title}`, spec };
           return new Response(JSON.stringify({ ...saved, view, resolved_bindings: [] }), {
             status: 200,
             headers: { 'Content-Type': 'application/json' },
@@ -1036,5 +1036,19 @@ describe('a View file reads as its title, its description and its one block', ()
     const notJson = refusal(body('', '{ "schema_version": 1,'));
     expect(notJson.problem).toBe('not_json');
     expect(notJson.message).toMatch(/not JSON/);
+  });
+});
+
+describe('a json_render View shows its own title and description, as a vega_lite View does', () => {
+  it('names the View above its composition', async () => {
+    const presented = zPresentResponse.parse(presentResponseFixture);
+    const refusing = serverToolData(async () => ({ isError: true, content: [] }));
+    render(<PresentView response={presented} data={refusing} />);
+    expect(
+      await screen.findByRole('heading', { name: 'Six-component catalog view', level: 2 }),
+    ).toBeTruthy();
+    expect(screen.getByText(presented.view.description)).toBeTruthy();
+    // The composition's own Stack title is still there, under the View's.
+    expect(screen.getByRole('heading', { name: 'Six-component catalog' })).toBeTruthy();
   });
 });

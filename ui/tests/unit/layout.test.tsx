@@ -783,7 +783,7 @@ describe('PresentView chart specification validation', () => {
     const { response, digest } = await responseWith(charts);
     const view = {
       ...response.view,
-      title: 'Quarterly board',
+      title: 'Quarterly board View',
       spec: {
         root: 'root',
         elements: {
