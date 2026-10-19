@@ -8,7 +8,8 @@
  * reader. The sources it cites are the server's reading of the saved View at that revision
  * (`get_view`, its bindings), so a link names the item, revision and selection the View binds,
  * whatever the source is called or holds now. Every read here is allowed in an archived workspace
- * (`ALLOWED_WHILE_ARCHIVED`), so nothing here asks what the person may change.
+ * (`ALLOWED_WHILE_ARCHIVED`), and so is "Export visual" (`ExportViewButton`, M4b B3), which
+ * exports the View at the same revision; it alone asks what the person may change (`write`).
  *
  * Limit: the links stand under the View, not in its own list of "Sources read" (`Resolution.tsx`,
  * the views lane's), which names each binding without a way to open it.
@@ -21,6 +22,8 @@ import type { Revision } from '../../api/generated/types.gen';
 import { keyed } from '../../lib/keys';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
+import { ExportViewButton } from '../exports/ExportView';
+import { useWorkspaceChanges } from '../tree/context';
 import { SavedView } from '../views/SavedView';
 import { describeSelection, short } from './describe';
 import { workspaceViewData } from './view-data';
@@ -33,10 +36,15 @@ export interface ViewTabProps {
 }
 
 export function ViewTab({ workspaceId, itemId, revision }: ViewTabProps) {
+  const { rights } = useWorkspaceChanges();
   return (
     <section aria-label="The View" className="view-tab">
-      {/* The View's own actions go here, above it: "Export visual" (`export_view`, M4b B3) is
-          built as its own package and needs only this tab's workspace, item and revision. */}
+      <ExportViewButton
+        workspaceId={workspaceId}
+        itemId={itemId}
+        revision={revision}
+        rights={rights}
+      />
       <SavedView
         workspaceId={workspaceId}
         itemId={itemId}

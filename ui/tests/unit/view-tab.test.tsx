@@ -10,6 +10,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GetObjectRequest, ReadItemRequest } from '../../src/api/generated/types.gen';
 import { explorerViewData } from '../../src/features/documents/view-data';
 import { fail, type Handler, mockApi, ok } from './support/api';
+import { EXPORT_JOB, EXPORT_VIEW } from './support/exports';
+import { accepted, jobOf } from './support/imports';
 import {
   CITED_AT,
   DATASET_SHA,
@@ -26,7 +28,16 @@ import {
   viewHandlers,
   viewOf,
 } from './support/views-explorer';
-import { explorerHandlers, HEAD, NOW, OLD, renderAt, WS, workspace } from './support/workspace';
+import {
+  explorerHandlers,
+  HEAD,
+  NOW,
+  OLD,
+  renderAt,
+  WS,
+  workspace,
+  writableWorkspace,
+} from './support/workspace';
 
 configure({ asyncUtilTimeout: 10_000 });
 
@@ -229,5 +240,38 @@ describe('the Explorer’s reads of a View', () => {
     await expect(explorerViewData().readItem(read)).rejects.toThrow(
       'The workspace service could not be reached.',
     );
+  });
+});
+
+describe('"Export visual" in a View\'s tab (M4b B3)', { timeout: 30_000 }, () => {
+  it('exports the View at the revision the tab reads, never the latest', async () => {
+    const api = setup({
+      '/api/workspaces/open-workspace': () => ok(writableWorkspace),
+      [EXPORT_VIEW]: () => accepted(jobOf('queued', { id: EXPORT_JOB, kind: 'export_view' })),
+    });
+    renderAt(`/w/${WS}/i/${VIEW}`);
+    await viewTable();
+    const view = screen.getByRole('region', { name: 'The View' });
+    fireEvent.click(within(view).getByRole('button', { name: 'Export visual' }));
+    await waitFor(() => expect(api.callsTo(EXPORT_VIEW)).toHaveLength(1));
+    expect(api.callsTo(EXPORT_VIEW)[0]).toEqual({
+      workspace_id: WS,
+      item_id: VIEW,
+      at: { kind: 'revision', revision: HEAD },
+      idempotency_key: expect.any(String),
+    });
+    expect(api.violations).toEqual([]);
+  });
+
+  it('is not offered to a person who may only read, and says why', async () => {
+    const api = setup();
+    renderAt(`/w/${WS}/i/${VIEW}`);
+    await viewTable();
+    const view = screen.getByRole('region', { name: 'The View' });
+    expect(within(view).queryByRole('button', { name: 'Export visual' })).toBeNull();
+    expect(view.textContent).toContain(
+      'Exporting this View needs permission to change this workspace, which you do not have.',
+    );
+    expect(api.callsTo(EXPORT_VIEW)).toEqual([]);
   });
 });
