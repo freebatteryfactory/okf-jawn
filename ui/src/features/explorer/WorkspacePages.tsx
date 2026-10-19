@@ -1,8 +1,9 @@
 /**
  * The workspace's own pages, beside its documents: bringing files in (`/import`), its jobs
  * (`/jobs`), its Attention warnings (`/attention`), its Timeline (`/timeline`: its versions,
- * their Changes and Rewind), its proposals (`/proposals`, and one proposal at `/proposals/<id>`)
- * and its graph (`/graph`). Each has a URL, which the router owns.
+ * their Changes and Rewind), its proposals (`/proposals`, and one proposal at `/proposals/<id>`),
+ * its graph (`/graph`), and the settings of this browser (`/settings`), which are not the
+ * workspace's but are reached from its bar. Each has a URL, which the router owns.
  *
  * A page is shown in place of the documents, between the same navigation and source columns. The
  * open tabs are kept in the Explorer store and are there again under "Documents", which goes back
@@ -25,6 +26,7 @@ import { ImportPage } from '../imports/ImportPage';
 import { JobsPage } from '../jobs/JobsPage';
 import { ProposalPage } from '../proposals/ProposalPage';
 import { ProposalsPage } from '../proposals/ProposalsPage';
+import { SettingsPage } from '../settings/SettingsPage';
 import { DocumentPanes, type DocumentPanesProps } from './DocumentPanes';
 import { type Pane, tabLocation } from './store';
 
@@ -35,6 +37,7 @@ export type WorkspacePage =
   | 'timeline'
   | 'proposals'
   | 'graph'
+  | 'settings'
   | { proposal: string };
 
 /**
@@ -58,6 +61,7 @@ export function useWorkspacePage(): WorkspacePage | null {
   if (route === '/w/$workspaceId/timeline') return 'timeline';
   if (route === '/w/$workspaceId/proposals') return 'proposals';
   if (route === '/w/$workspaceId/graph') return 'graph';
+  if (route === '/w/$workspaceId/settings') return 'settings';
   if (route === '/w/$workspaceId/proposals/$proposalId' && proposalId !== undefined) {
     return { proposal: proposalId };
   }
@@ -80,6 +84,7 @@ export function DocumentsOrPage({
       {page === 'attention' && <AttentionPage workspaceId={workspaceId} head={head} />}
       {page === 'proposals' && <ProposalsPage workspaceId={workspaceId} />}
       {page === 'graph' && <GraphPage workspaceId={workspaceId} head={head} />}
+      {page === 'settings' && <SettingsPage />}
       {typeof page === 'object' && (
         <ProposalPage key={page.proposal} workspaceId={workspaceId} proposalId={page.proposal} />
       )}
@@ -159,6 +164,9 @@ export function WorkspaceNav({ workspaceId, head, query, documents, onFollow }: 
       </Link>
       <Link to="/w/$workspaceId/graph" params={params} search={kept} onClick={onFollow}>
         Graph
+      </Link>
+      <Link to="/w/$workspaceId/settings" params={params} search={kept} onClick={onFollow}>
+        Settings
       </Link>
     </nav>
   );
