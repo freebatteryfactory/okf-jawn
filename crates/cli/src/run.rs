@@ -96,10 +96,14 @@ where
             Err(error) => fail(&mut stderr, None, &error, None).await,
         };
     }
-    let credential = match Credential::from_environment(environment, TOKEN_VARIABLE) {
-        Ok(credential) => credential,
-        Err(error) => return fail(&mut stderr, None, &error, None).await,
-    };
+    let credential =
+        match Credential::from_environment(environment, TOKEN_VARIABLE).and_then(|read| {
+            read.map(|token| token.operation(TOKEN_VARIABLE))
+                .transpose()
+        }) {
+            Ok(credential) => credential,
+            Err(error) => return fail(&mut stderr, None, &error, None).await,
+        };
     match operate(name, selected, credential.as_ref(), &mut stdin, &mut stdout).await {
         Ok(()) => 0,
         Err(failure) => {

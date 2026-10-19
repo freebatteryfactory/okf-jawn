@@ -7,8 +7,11 @@
 //! relay's connector credential is also refused unless it is spelled in the alphabet the
 //! service issues a connector secret in, lowercase letters, digits and the underscore
 //! ([`Credential::connector`]): so it never holds `[` or `]`, and the mark that replaces it in
-//! what the relay writes cannot complete it. An operation's bearer token keeps the wider rule,
-//! because a hosted service's token (a WorkOS access token) is spelled in another alphabet.
+//! what the relay writes cannot complete it. An operation's bearer token is refused unless it
+//! is an RFC 6750 `b64token` ([`Credential::operation`]): letters, digits and `-` `.` `_` `~`
+//! `+` `/`, then any number of `=`. That alphabet holds a hosted service's WorkOS Connect
+//! access token (base64url and dots) and every connector secret, and no `[` or `]`, so the
+//! mark cannot complete a token in a refusal the CLI prints either.
 //! It is never an argument. The type has no `Display` and its `Debug` prints no secret.
 //!
 //! Two functions keep the secret out of what the CLI writes:
@@ -185,6 +188,24 @@ impl Credential {
             .map_err(|_| refused(format!("The first line of {file} is not text")))?;
         Self::parse(line, "--token-file")?
             .ok_or_else(|| refused(format!("The first line of {file} is empty")))
+    }
+
+    /// This credential as an operation's bearer token: refused unless it is an RFC 6750
+    /// `b64token` (`is_b64token`). `source` names where it came from, for the refusal.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` when it is not; the token itself is never repeated.
+    pub fn operation(self, source: &str) -> Result<Self, ApiError> {
+        if is_b64token(&self.0) {
+            return Ok(self);
+        }
+        Err(ApiError::new(
+            ErrorCode::InvalidInput,
+            format!(
+                "The bearer token in {source} is not usable: a bearer token holds only letters, \
+                 digits and - . _ ~ + /, and may end in =. Copy the whole token as it was issued"
+            ),
+        ))
     }
 
     /// Take a credential from raw text: surrounding whitespace is dropped, and blank is none.
@@ -376,6 +397,18 @@ fn escape(rest: Option<&[u8]>) -> (u8, usize) {
 /// `[credential]`, begins and ends with a bracket, so it can never complete one.
 fn in_connector_alphabet(byte: u8) -> bool {
     byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+}
+
+/// Whether `text` is a `b64token` of RFC 6750 section 2.1, the syntax of a bearer token:
+/// `1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" ) *"="`. A WorkOS Connect access
+/// token (base64url and dots) and a connector secret are; `[` and `]`, from which the mark
+/// `[credential]` could complete a token, are not.
+fn is_b64token(text: &str) -> bool {
+    let body = text.trim_end_matches('=');
+    !body.is_empty()
+        && body.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'+' | b'/')
+        })
 }
 
 /// For each prefix of `secret`, the length of its longest proper prefix that is also its
