@@ -65,7 +65,9 @@ export function SettingsPage() {
         you open in this browser, and to no other browser.
       </p>
       <section aria-labelledby={webmcpHeading} className="workspace-page">
-        <h3 id={webmcpHeading} className="panel-heading">Page tools for an assistant (WebMCP)</h3>
+        <h3 id={webmcpHeading} className="panel-heading">
+          Page tools for an assistant (WebMCP)
+        </h3>
         <p>
           <label>
             <input
