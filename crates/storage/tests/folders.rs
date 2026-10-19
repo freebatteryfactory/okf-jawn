@@ -942,6 +942,61 @@ async fn move_folder_parks_past_a_taken_private_folder_and_a_linked_one() -> Tes
     Ok(())
 }
 
+/// F2's private sibling must not capture an existing reference: `park_folder` documents that
+/// no reference may resolve below its chosen name. SPEC 3 preserves frontmatter extensions.
+/// The dangling computation stays literally as written; only actual Notes files move.
+#[tokio::test]
+async fn move_folder_does_not_capture_a_dangling_computation_in_its_private_folder() -> TestResult {
+    let space = Workspace::new().await?;
+    space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "Notes/a.md", "A with ![p](p.png).")?,
+                note_with(
+                    11,
+                    "top.md",
+                    "Top [a](Notes/a.md) and ![p](Notes/p.png).",
+                    BTreeMap::from([(
+                        "computation".to_owned(),
+                        json!("okf-jawn-recase-folder/p.png"),
+                    )]),
+                )?,
+            ],
+        )
+        .await?;
+    let base = space.raw(3, &[("Notes/p.png", PICTURE)])?;
+    assert!(space.file(&base, "okf-jawn-recase-folder/p.png")?.is_none());
+    let renamed = space
+        .commit(4, &base, vec![moved_folder("Notes", "notes")?])
+        .await?
+        .revision;
+    assert_eq!(space.path_of(&renamed, 10).await?, "notes/a.md");
+    assert_eq!(space.body(&renamed, 10).await?, "A with ![p](p.png).");
+    assert_eq!(
+        space.body(&renamed, 11).await?,
+        "Top [a](notes/a.md) and ![p](notes/p.png)."
+    );
+    assert_eq!(
+        space.file(&renamed, "notes/p.png")?.as_deref(),
+        Some(PICTURE)
+    );
+    let properties = space
+        .storage
+        .versions()
+        .show(&space.scope, &renamed, uuid!(11)?)
+        .await?
+        .properties;
+    assert_eq!(
+        properties.get("computation"),
+        Some(&json!("okf-jawn-recase-folder/p.png")),
+        "an unrelated dangling computation must not become the moved picture"
+    );
+    assert_eq!(space.parents(&renamed)?, vec![base]);
+    Ok(())
+}
+
 /// F5, F7 at the store: what the edit refuses on its own, each before anything is written.
 #[tokio::test]
 async fn move_folder_refuses_what_the_tree_does_not_allow_and_writes_nothing() -> TestResult {
