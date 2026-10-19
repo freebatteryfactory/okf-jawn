@@ -4,7 +4,32 @@
   "description": "ViewDocument wrapping the approved six-component json-render Spec for Phase 0 round-trip.",
   "mode": "pinned",
   "grammar": "json_render",
-  "bindings": [],
+  "bindings": [
+    {
+      "name": "venue",
+      "source": {
+        "item_id": "11111111-2222-4333-8444-555555555555",
+        "path": "fixtures/qualification-source.md",
+        "revision": "0123456789abcdef0123456789abcdef01234567",
+        "selection": { "kind": "all" },
+        "workspace_id": "aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff"
+      },
+      "transforms": [],
+      "units": {}
+    },
+    {
+      "name": "metrics",
+      "source": {
+        "item_id": "22222222-3333-4444-8555-666666666666",
+        "path": "fixtures/qualification-metrics.json",
+        "revision": "0123456789abcdef0123456789abcdef01234567",
+        "selection": { "kind": "all" },
+        "workspace_id": "aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff"
+      },
+      "transforms": [],
+      "units": {}
+    }
+  ],
   "spec": {
     "root": "root",
     "elements": {

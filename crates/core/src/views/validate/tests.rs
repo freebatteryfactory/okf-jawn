@@ -683,3 +683,95 @@ fn needed_bindings_are_what_drawable_charts_and_tables_read() -> TestResult {
     );
     Ok(())
 }
+
+/// Owner-requested graph rule: a binding cannot depend on itself, even when no chart
+/// reads it. Pointer literals identify the lookup, not the binding or chart as a whole.
+#[test]
+fn binding_transform_self_cycles_are_refused_at_the_lookup() -> TestResult {
+    let self_lookup = with(
+        g0(),
+        "/bindings/0/transforms",
+        json!([{ "lookup": "category", "from": { "data": { "name": "metrics" }, "key": "category" } }]),
+    )?;
+    refused_at(self_lookup, "/bindings/0/transforms/0/from/data/name")?;
+    // Only the excerpt/SourceList shows venue; the chart reads report alone.
+    let uncharted = with(
+        f0(),
+        "/bindings/1/transforms",
+        json!([
+            { "filter": "datum.Stage != null" },
+            { "lookup": "Stage", "from": { "data": { "name": "venue" }, "key": "Stage" } }
+        ]),
+    )?;
+    refused_at(uncharted, "/bindings/1/transforms/1/from/data/name")?;
+    Ok(())
+}
+
+/// Input binding order visits report then venue; venue's lookup closes the two-node
+/// cycle. Both declarations and each individual Vega-Lite transform are otherwise valid.
+#[test]
+fn binding_transform_multi_binding_cycles_are_refused_at_the_closing_lookup() -> TestResult {
+    let report = with(
+        f0(),
+        "/bindings/0/transforms",
+        json!([{ "lookup": "Stage", "from": { "data": { "name": "venue" }, "key": "Stage" } }]),
+    )?;
+    let cycle = with(
+        report,
+        "/bindings/1/transforms",
+        json!([{ "lookup": "Stage", "from": { "data": { "name": "report" }, "key": "Stage" } }]),
+    )?;
+    refused_at(cycle, "/bindings/1/transforms/0/from/data/name")?;
+    Ok(())
+}
+
+/// A diamond is a DAG, not a cycle: metrics reads left/right and both read shared.
+/// The literal chart dependency closure remains sorted and contains each binding once.
+#[test]
+fn binding_transform_dag_and_shared_dependencies_remain_valid() -> TestResult {
+    let cited = source(
+        "22222222-3333-4444-8555-666666666666",
+        "reports/pipeline-pdf.md",
+        &json!({ "kind": "all" }),
+    );
+    let bindings = ["metrics", "left", "right", "shared"]
+        .iter()
+        .map(|name| binding(name, &cited))
+        .collect();
+    let mut dag = with(g0(), "/bindings", Value::Array(bindings))?;
+    dag = with(
+        dag,
+        "/bindings/0/transforms",
+        json!([
+            { "lookup": "category", "from": { "data": { "name": "left" }, "key": "category" } },
+            { "lookup": "category", "from": { "data": { "name": "right" }, "key": "category" } }
+        ]),
+    )?;
+    for pointer in ["/bindings/1/transforms", "/bindings/2/transforms"] {
+        dag = with(
+            dag,
+            pointer,
+            json!([
+                { "lookup": "category", "from": { "data": { "name": "shared" }, "key": "category" } }
+            ]),
+        )?;
+    }
+    let checked = check(dag)??;
+    checked.require_drawable()?;
+    assert_eq!(
+        checked.charts,
+        vec![ChartCheck::Drawable {
+            bindings: vec![
+                "left".to_owned(),
+                "metrics".to_owned(),
+                "right".to_owned(),
+                "shared".to_owned()
+            ]
+        }]
+    );
+    assert_eq!(
+        checked.needed().into_iter().collect::<Vec<_>>(),
+        ["left", "metrics", "right", "shared"]
+    );
+    Ok(())
+}
