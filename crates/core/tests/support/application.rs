@@ -2477,6 +2477,7 @@ pub fn config() -> ApplicationConfig {
         sandbox_origin: SANDBOX_ORIGIN.to_owned(),
         sandbox_ttl: Duration::from_secs(300),
         max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
+        conversion_defaults: ConversionSettings::default(),
     }
 }
 

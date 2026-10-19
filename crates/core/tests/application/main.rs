@@ -11,6 +11,7 @@
 //! handler), `job_control` dispatches to the service over the same fakes, with the fixture
 //! ledger (`support`).
 
+mod attention;
 #[path = "../support/candidates.rs"]
 mod candidates;
 #[path = "../support/confirmations.rs"]
@@ -22,6 +23,7 @@ mod events;
 #[path = "../support/application.rs"]
 mod fixture;
 mod history;
+mod imports;
 mod items;
 mod job_control;
 mod navigation;

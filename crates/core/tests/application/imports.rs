@@ -758,13 +758,13 @@ async fn imports_a_redigest_of_the_unconverted_pages_needs_some_and_the_records_
     let refused = err_of(convert_again(&imports, 220, other).await)?;
     assert_refused(&refused, ErrorCode::InvalidInput, "/settings");
     // A completed conversion has no page that was not converted.
-    let complete = imports()?;
+    let complete = imports_with(config())?;
     put_card(&complete, ConversionOutcome::Completed)?;
     let refused = err_of(convert_again(&complete, 221, redigest(true)?).await)?;
     assert_refused(&refused, ErrorCode::InvalidInput, "/unconverted_only");
     convert_again(&complete, 222, redigest(false)?).await?;
     // A failed card names no record.
-    let failed = imports()?;
+    let failed = imports_with(config())?;
     let base = revision('a')?;
     let extraction = Extraction {
         outcome: ConversionOutcome::Unsupported,

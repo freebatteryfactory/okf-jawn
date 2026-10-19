@@ -116,12 +116,7 @@ fn described(number: u128, location: &str, properties: serde_json::Value) -> Bui
 
 /// A described source card numbered `number` at `a` with `extraction`, whose original is the
 /// object `object` names.
-fn card(
-    number: u128,
-    location: &str,
-    extraction: Extraction,
-    object: char,
-) -> Built<ItemDocument> {
+fn card(number: u128, location: &str, extraction: Extraction, object: char) -> Built<ItemDocument> {
     let mut document = source_card(number, &revision('a')?, location, "text", extraction)?;
     DESCRIBED.clone_into(&mut document.summary.description);
     if let Some(source) = document.source.as_mut() {
@@ -330,12 +325,22 @@ async fn attention_a_link_that_leads_nowhere_is_one_row_an_item_with_each_line()
     ] {
         assert!(first.message.contains(named_line), "{}", first.message);
     }
-    for not_broken in ["example.com", "mailto", "#section", "other/", "clean.md", "chart.png"] {
+    for not_broken in [
+        "example.com",
+        "mailto",
+        "#section",
+        "other/",
+        "clean.md",
+        "chart.png",
+    ] {
         assert!(!first.message.contains(not_broken), "{}", first.message);
     }
     assert_eq!(first.selection, None, "three places");
     assert_eq!(first.action, OperationName::GetLinks);
-    assert_eq!(first.item.as_ref().map(|summary| summary.id), Some(plan.summary.id));
+    assert_eq!(
+        first.item.as_ref().map(|summary| summary.id),
+        Some(plan.summary.id)
+    );
     let second = some(broken.get(1), "the single row")?;
     assert_eq!(
         second.selection,
@@ -361,7 +366,10 @@ async fn attention_stale_is_judged_on_the_day_of_the_revisions_commit() -> TestR
         (65, "a/words.md", json!("soon")),
         (66, "a/offset.md", json!("2026-10-09T01:00:00+02:00")),
     ] {
-        put(&scan, &described(number, location, json!({ "stale_after": value }))?)?;
+        put(
+            &scan,
+            &described(number, location, json!({ "stale_after": value }))?,
+        )?;
     }
     put(&scan, &described(67, "a/never.md", json!({}))?)?;
     let rows = every_row(&scan).await?;
@@ -371,7 +379,11 @@ async fn attention_stale_is_judged_on_the_day_of_the_revisions_commit() -> TestR
     );
     let stale = of_kind(&rows, &AttentionKind::Stale);
     let row = some(stale.first(), "the first stale row")?;
-    assert!(row.message.contains("2026-10-08T00:00:00Z"), "{}", row.message);
+    assert!(
+        row.message.contains("2026-10-08T00:00:00Z"),
+        "{}",
+        row.message
+    );
     assert!(row.message.contains("2026-10-09"), "{}", row.message);
     assert_eq!(row.action, OperationName::GetItem);
     Ok(())
@@ -386,7 +398,11 @@ async fn attention_stale_reads_the_history_only_when_an_item_needs_it() -> TestR
     assert_eq!(scan.world.versions.log_queries()?.len(), 0);
     put(
         &scan,
-        &described(69, "a/dated.md", json!({ "stale_after": "2026-10-08T00:00:00Z" }))?,
+        &described(
+            69,
+            "a/dated.md",
+            json!({ "stale_after": "2026-10-08T00:00:00Z" }),
+        )?,
     )?;
     every_row(&scan).await?;
     assert_eq!(scan.world.versions.log_queries()?.len(), 1, "once a scan");
@@ -399,12 +415,22 @@ async fn attention_stale_reads_the_history_only_when_an_item_needs_it() -> TestR
 async fn attention_unreviewed_content_an_agent_generated() -> TestResult {
     let scan = scan_world()?;
     let generated = |by: &str| json!({ "generated": { "by": by, "at": "2026-10-01T00:00:00Z" } });
-    let by_agent = described(70, "g/agent.md", generated("reference_agent/gemini-2.5-pro"))?;
+    let by_agent = described(
+        70,
+        "g/agent.md",
+        generated("reference_agent/gemini-2.5-pro"),
+    )?;
     let by_person = described(71, "g/person.md", generated("human:walter"))?;
     let by_process = described(72, "g/process.md", generated("process:nightly"))?;
     let reviewed = described(73, "g/reviewed.md", generated("reference_agent/v1"))?;
     let reviewed_before = described(74, "g/reviewed-before.md", generated("reference_agent/v1"))?;
-    for document in [&by_agent, &by_person, &by_process, &reviewed, &reviewed_before] {
+    for document in [
+        &by_agent,
+        &by_person,
+        &by_process,
+        &reviewed,
+        &reviewed_before,
+    ] {
         put(&scan, document)?;
     }
     review(&scan, 700, &reviewed, item_content_digest(&reviewed)?)?;
@@ -414,8 +440,15 @@ async fn attention_unreviewed_content_an_agent_generated() -> TestResult {
         named(&rows, &AttentionKind::Unreviewed),
         vec![Some(by_agent.summary.id), Some(reviewed_before.summary.id)]
     );
-    let row = some(of_kind(&rows, &AttentionKind::Unreviewed).first().cloned(), "a row")?;
-    assert!(row.message.contains("reference_agent/gemini-2.5-pro"), "{}", row.message);
+    let row = some(
+        of_kind(&rows, &AttentionKind::Unreviewed).first().cloned(),
+        "a row",
+    )?;
+    assert!(
+        row.message.contains("reference_agent/gemini-2.5-pro"),
+        "{}",
+        row.message
+    );
     assert_eq!(row.action, OperationName::CreateReview);
     Ok(())
 }
@@ -530,7 +563,9 @@ async fn attention_every_page_of_the_accepted_proposals_is_read() -> TestResult 
     let scan = scan_world()?;
     let document = described(85, "p/oldest.md", json!({}))?;
     put(&scan, &document)?;
-    scan.world.versions.put_document(&revision('e')?, document.clone())?;
+    scan.world
+        .versions
+        .put_document(&revision('e')?, document.clone())?;
     let edit = json!([{ "kind": "edit", "item_id": document.summary.id, "body": "text",
                         "properties": {} }]);
     accepted(&scan, 820, "mcp_delegation", 'e', edit.clone())?;
@@ -549,7 +584,9 @@ async fn attention_a_candidate_that_cannot_be_read_fails_the_request() -> TestRe
     let scan = scan_world()?;
     let document = described(84, "p/one.md", json!({}))?;
     put(&scan, &document)?;
-    scan.world.versions.put_document(&revision('e')?, document.clone())?;
+    scan.world
+        .versions
+        .put_document(&revision('e')?, document.clone())?;
     accepted(
         &scan,
         810,
@@ -626,8 +663,8 @@ fn partial(not_converted: Vec<PageRange>) -> ConversionOutcome {
 /// as the selection when they are one range. `ExtractionWarnings` for a completed source with
 /// warnings only.
 #[tokio::test]
-async fn attention_unprocessed_and_extraction_warnings_follow_the_converters_verdict()
--> TestResult {
+async fn attention_unprocessed_and_extraction_warnings_follow_the_converters_verdict() -> TestResult
+{
     let scan = scan_world()?;
     let warned = vec![ExtractionWarning::UnlocatedItems { items: 2 }];
     let mut supplied_failed = extraction(
@@ -639,12 +676,19 @@ async fn attention_unprocessed_and_extraction_warnings_follow_the_converters_ver
     )?;
     supplied_failed.text_origin = TextOrigin::SuppliedByAgent;
     let cases = [
-        (110, "u/a-one-range-pdf.md", extraction(partial(vec![PageRange { start: 3, end: 4 }]), Vec::new())?),
+        (
+            110,
+            "u/a-one-range-pdf.md",
+            extraction(partial(vec![PageRange { start: 3, end: 4 }]), Vec::new())?,
+        ),
         (
             111,
             "u/b-two-ranges-pdf.md",
             extraction(
-                partial(vec![PageRange { start: 3, end: 4 }, PageRange { start: 7, end: 7 }]),
+                partial(vec![
+                    PageRange { start: 3, end: 4 },
+                    PageRange { start: 7, end: 7 },
+                ]),
                 Vec::new(),
             )?,
         ),
@@ -661,11 +705,31 @@ async fn attention_unprocessed_and_extraction_warnings_follow_the_converters_ver
                 Vec::new(),
             )?,
         ),
-        (113, "u/d-unsupported-pdf.md", extraction(ConversionOutcome::Unsupported, Vec::new())?),
-        (114, "u/e-pending-pdf.md", extraction(ConversionOutcome::Pending, Vec::new())?),
-        (115, "u/f-warned-pdf.md", extraction(ConversionOutcome::Completed, warned.clone())?),
-        (116, "u/g-clean-pdf.md", extraction(ConversionOutcome::Completed, Vec::new())?),
-        (117, "u/h-partial-warned-pdf.md", extraction(partial(vec![PageRange { start: 1, end: 1 }]), warned)?),
+        (
+            113,
+            "u/d-unsupported-pdf.md",
+            extraction(ConversionOutcome::Unsupported, Vec::new())?,
+        ),
+        (
+            114,
+            "u/e-pending-pdf.md",
+            extraction(ConversionOutcome::Pending, Vec::new())?,
+        ),
+        (
+            115,
+            "u/f-warned-pdf.md",
+            extraction(ConversionOutcome::Completed, warned.clone())?,
+        ),
+        (
+            116,
+            "u/g-clean-pdf.md",
+            extraction(ConversionOutcome::Completed, Vec::new())?,
+        ),
+        (
+            117,
+            "u/h-partial-warned-pdf.md",
+            extraction(partial(vec![PageRange { start: 1, end: 1 }]), warned)?,
+        ),
         (
             118,
             "u/i-partial-whole-pdf.md",
@@ -704,7 +768,11 @@ async fn attention_unprocessed_and_extraction_warnings_follow_the_converters_ver
     assert_eq!(one_range.action, OperationName::RedigestItem);
     let two_ranges = some(unprocessed.get(1), "the two-range row")?;
     assert_eq!(two_ranges.selection, None);
-    assert!(two_ranges.message.contains("3-4, 7"), "{}", two_ranges.message);
+    assert!(
+        two_ranges.message.contains("3-4, 7"),
+        "{}",
+        two_ranges.message
+    );
     let warning = only(&rows, &AttentionKind::ExtractionWarnings)?;
     assert_eq!(warning.item_id, Some(item(115)));
     assert_eq!(warning.action, OperationName::ReadItem);
@@ -714,7 +782,10 @@ async fn attention_unprocessed_and_extraction_warnings_follow_the_converters_ver
 #[tokio::test]
 async fn attention_uploads_waiting_is_one_row_with_their_count_and_size() -> TestResult {
     let scan = scan_world()?;
-    assert_eq!(of_kind(&every_row(&scan).await?, &AttentionKind::UploadsWaiting).len(), 0);
+    assert_eq!(
+        of_kind(&every_row(&scan).await?, &AttentionKind::UploadsWaiting).len(),
+        0
+    );
     upload(&scan, 1, true, false)?;
     upload(&scan, 2, true, false)?;
     upload(&scan, 3, true, false)?;
@@ -738,7 +809,11 @@ async fn attention_uploads_waiting_counts_every_page() -> TestResult {
         upload(&scan, number, true, false)?;
     }
     let row = only(&every_row(&scan).await?, &AttentionKind::UploadsWaiting)?;
-    assert!(row.message.contains("201 uploaded files"), "{}", row.message);
+    assert!(
+        row.message.contains("201 uploaded files"),
+        "{}",
+        row.message
+    );
     assert!(row.message.contains("2010 bytes"), "{}", row.message);
     Ok(())
 }
@@ -759,14 +834,25 @@ async fn attention_scans_every_folder_and_page_and_leaves_archived_items_out() -
         (123, "x/y/z/deeper.md"),
         (124, "w/side.md"),
     ] {
-        put(&scan, &note(number, &revision('a')?, location, "text", json!({}))?)?;
+        put(
+            &scan,
+            &note(number, &revision('a')?, location, "text", json!({}))?,
+        )?;
     }
     let rows = every_row(&scan).await?;
     assert_eq!(
         named(&rows, &AttentionKind::MissingDescription),
-        vec![Some(item(121)), Some(item(124)), Some(item(122)), Some(item(123))]
+        vec![
+            Some(item(121)),
+            Some(item(124)),
+            Some(item(122)),
+            Some(item(123))
+        ]
     );
-    assert!(rows.iter().all(|row| row.item_id != Some(item(120))), "{rows:?}");
+    assert!(
+        rows.iter().all(|row| row.item_id != Some(item(120))),
+        "{rows:?}"
+    );
     Ok(())
 }
 
@@ -779,10 +865,9 @@ async fn attention_builds_the_index_of_a_revision_it_lacks() -> TestResult {
     ports.proposals = Arc::new(FakeProposals::default());
     ports.records = Arc::new(ReviewRecords::new(Arc::clone(&world.records)));
     let service = ApplicationService::new(ports, config())?;
-    world.versions.put_document(
-        &revision('a')?,
-        described(130, "n/one.md", json!({}))?,
-    )?;
+    world
+        .versions
+        .put_document(&revision('a')?, described(130, "n/one.md", json!({}))?)?;
     let response = service
         .get_attention(
             &alice(OperationName::GetAttention, None)?,
@@ -866,7 +951,13 @@ async fn attention_a_cursor_it_did_not_issue_is_refused() -> TestResult {
     for number in [150, 151, 152] {
         put(
             &scan,
-            &note(number, &revision('a')?, &format!("n{number}.md"), "t", json!({}))?,
+            &note(
+                number,
+                &revision('a')?,
+                &format!("n{number}.md"),
+                "t",
+                json!({}),
+            )?,
         )?;
     }
     let first = attention_at(&scan, At::Latest, 1, None).await?;
