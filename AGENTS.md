@@ -37,6 +37,8 @@ Then, on the selected toolchain, `bootstrap`, `gen-check`, `foundation`. These r
 
 Implement the complete assigned responsibility using real selected libraries and generated interfaces. Builders may run targeted checks and add unit/regression tests. They must not alter protected acceptance, shared contracts, dependencies, or another lane's authored inputs without the integration owner's change.
 
+Owner decision (2026-10-19): use local red/green regressions and affected tests during construction. Before a merge, the full CI run at the final branch revision must pass, including all features, strict Clippy, generation, UI checks and the required Windows/macOS checks. That collected CI evidence replaces a duplicate full local workspace test and Clippy pass; local full runs are reserved for diagnosis and platform-specific concerns. Retain local-only qualification, browser/native checks, receipt freshness and independent acceptance. A focused pass never stands in for the full CI run, and an earlier revision's green run never clears later edits. Use Blacksmith runners; preserve every required check and test when splitting jobs, and shard only when measured timings justify the extra builds.
+
 ### Generator-input rule
 
 A lane may change its own authored generator inputs, run `bun scripts/dev.mjs gen`, and commit the generated outputs with the lane change. `gen-check` must pass on the lane branch. The integration owner regenerates at merge and owns final agreement of `api/`, `generated/cli/`, `generated/converter/`, and `ui/src/api/generated/`.

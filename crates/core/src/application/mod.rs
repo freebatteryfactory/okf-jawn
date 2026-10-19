@@ -12,7 +12,8 @@
 //! `conventions` (the naming rules: reading and saving them, a rename preview and its apply),
 //! `status` (health, readiness and the session), `purges` (recording, resuming and reading
 //! a workspace purge), `workspaces` (the catalog, archive, export, backup and restore),
-//! `events` (receipts and the two event logs) and `connectors` (local connector credentials),
+//! `events` (receipts and the two event logs), `connectors` (local connector credentials),
+//! `uploads` (upload slots) and `job_control` (reading jobs, retrying and cancelling them),
 //! over the shared steps in `shared` (revision resolution, commits, receipts). Besides the
 //! operations, the service answers dispatch's archive question (`Application::archived_at`)
 //! from its catalog and records a sign-in for the server's session routes
@@ -238,6 +239,36 @@ macro_rules! route {
     };
     (apply_names) => {
         conventions::apply_names
+    };
+    (create_upload) => {
+        uploads::create_upload
+    };
+    (complete_upload) => {
+        uploads::complete_upload
+    };
+    (get_upload) => {
+        uploads::get_upload
+    };
+    (list_uploads) => {
+        uploads::list_uploads
+    };
+    (get_job) => {
+        job_control::get_job
+    };
+    (list_jobs) => {
+        job_control::list_jobs
+    };
+    (get_tenant_job) => {
+        job_control::get_tenant_job
+    };
+    (list_tenant_jobs) => {
+        job_control::list_tenant_jobs
+    };
+    (retry_job) => {
+        job_control::retry_job
+    };
+    (cancel_job) => {
+        job_control::cancel_job
     };
     ($pending:ident) => {
         pending
@@ -539,6 +570,7 @@ mod events;
 mod folders;
 mod history;
 mod items;
+mod job_control;
 mod navigation;
 mod proposals;
 mod purges;
@@ -547,4 +579,5 @@ mod reviews;
 mod shared;
 mod sources;
 mod status;
+mod uploads;
 mod workspaces;

@@ -18,7 +18,7 @@ use okf_jawn_core::conventions::{
     COLLISION_KEPT, COLLISION_REJECTED, COLLISION_SUFFIXED, CompiledRules, DATE_AMBIGUOUS,
     DATE_NOT_READ, DESTINATION_NEEDS_DATE, ITEM_NOT_MOVABLE, NAME_LEFT_EMPTY, PATH_NOT_VALID,
     PATH_RESERVED, PlanBody, Proposal, RULES_INVALID, RULES_SCHEMA_VERSION_UNKNOWN,
-    RULES_TOO_LARGE, Subject, name_new_item, numbered, plan, propose,
+    RULES_TOO_LARGE, Subject, TakenPaths, name_new_item, numbered, plan, propose,
 };
 use okf_jawn_core::mutations::request_digest;
 use okf_jawn_core::storage::TreeItem;
@@ -1652,6 +1652,46 @@ fn conventions_collision_a_folder_holds_its_name() -> TestResult {
     Ok(())
 }
 
+/// SPEC section 3 compares folders by collision key; section 6's accepted preview must
+/// retain the folder spelling storage accepts, including empty and nested folders.
+#[test]
+fn conventions_destination_reuses_the_stored_folder_spelling() -> TestResult {
+    let items = [item(1, "inbox/Report.md")?, item(2, "notes/existing.md")?];
+    let selected = BTreeSet::from([id(1)]);
+    for (destination, folder, expected) in [
+        ("Notes", "notes", "notes/report.md"),
+        ("ARCHIVE", "Archive", "Archive/report.md"),
+        ("Notes/New", "notes", "notes/New/report.md"),
+        ("Notes/PAST/New", "notes/Past", "notes/Past/New/report.md"),
+    ] {
+        let body = plan(
+            &compiled(vec![routed("inbox", destination)])?,
+            &items,
+            &[path("notes")?, path(folder)?],
+            &selected,
+        )?;
+        assert_eq!(
+            moves(&body),
+            [(id(1), expected.to_owned())],
+            "{destination}"
+        );
+        assert!(body.warnings.is_empty(), "{destination}");
+        assert_eq!(body.refused, 0, "{destination}");
+        counts_add_up(&body)?;
+    }
+    Ok(())
+}
+
+/// A rule's respelling of a folder alone is not an item rename (SPEC sections 3 and 6).
+#[test]
+fn conventions_destination_a_stored_folder_respelling_alone_is_unchanged() -> TestResult {
+    let items = [item(1, "notes/report.md")?];
+    let body = plan_all(vec![routed("notes", "Notes")], &items)?;
+    assert!(body.entries.is_empty());
+    assert_eq!((body.unchanged, body.refused), (1, 0));
+    counts_add_up(&body)
+}
+
 #[test]
 fn conventions_collision_a_kept_mover_holds_its_name_in_a_second_round() -> TestResult {
     // B would free `b/x.md` for A, but B's own name is taken by C under keep_existing, so B
@@ -1911,10 +1951,82 @@ fn card_subject<'a>(at: &'a WorkspacePath, original: &'a str) -> Subject<'a> {
     }
 }
 
+/// The literal occupied item paths, with their ancestor folders, at an import's base.
+fn taken_paths(paths: &[&str]) -> Fallible<TakenPaths> {
+    let items = (1_u128..)
+        .zip(paths)
+        .map(|(number, at)| item(number, at))
+        .collect::<Fallible<Vec<_>>>()?;
+    Ok(TakenPaths::new(&items, &folders_of(&items)?))
+}
+
+/// SPEC section 6's collision fallback: numbering a leaf cannot fix a destination beneath
+/// an item. Every policy must retain the unruled card path instead of treating the item as a folder.
+#[test]
+fn conventions_import_a_ruled_item_ancestor_uses_the_unruled_name() -> TestResult {
+    let at = path("inbox/report-pdf.md")?;
+    for collision in [
+        CollisionPolicy::Suffix,
+        CollisionPolicy::KeepExisting,
+        CollisionPolicy::Reject,
+    ] {
+        let mut taken = taken_paths(&["archive.md"])?;
+        let rules = compiled(vec![with(|rule| {
+            rule.destination = Some("ARCHIVE.md/nested".to_owned());
+            rule.collision = collision;
+        })])?;
+        let name = name_new_item(&rules, &card_subject(&at, "report.pdf"), &mut taken)?;
+        assert_eq!(name.path.as_str(), "inbox/report-pdf.md");
+        assert_eq!(codes(&name.warnings), [PATH_NOT_VALID]);
+        assert!(taken.contains("inbox/report-pdf.md"));
+        assert!(!taken.contains("archive.md/nested/report-pdf.md"));
+    }
+    Ok(())
+}
+
+/// A preceding card in the same import is also an item, not a destination folder.
+#[test]
+fn conventions_import_a_previous_card_cannot_be_an_ancestor_of_the_next() -> TestResult {
+    let mut taken = TakenPaths::default();
+    let first = path("archive-pdf.md")?;
+    let first_name = name_new_item(
+        &compiled(vec![r0()])?,
+        &card_subject(&first, "archive.pdf"),
+        &mut taken,
+    )?;
+    assert_eq!(first_name.path.as_str(), "archive-pdf.md");
+    let second = path("inbox/report-pdf.md")?;
+    let name = name_new_item(
+        &compiled(vec![destined("ARCHIVE-PDF.md")])?,
+        &card_subject(&second, "report.pdf"),
+        &mut taken,
+    )?;
+    assert_eq!(name.path.as_str(), "inbox/report-pdf.md");
+    assert_eq!(codes(&name.warnings), [PATH_NOT_VALID]);
+    Ok(())
+}
+
+/// When the requested unruled folder itself is an item, fail before reserving any card path.
+#[test]
+fn conventions_import_an_unruled_item_ancestor_is_refused_before_a_name_is_reserved() -> TestResult
+{
+    let mut taken = taken_paths(&["archive.md"])?;
+    let at = path("archive.md/report-pdf.md")?;
+    let error = err_of(name_new_item(
+        &compiled(Vec::new())?,
+        &card_subject(&at, "report.pdf"),
+        &mut taken,
+    ))?;
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.field.as_deref(), Some("/destination"));
+    assert!(!taken.contains("archive.md/report-pdf.md"));
+    Ok(())
+}
+
 #[test]
 fn conventions_import_im2_a_card_is_named_by_the_rules() -> TestResult {
     let at = path("inbox/Q3 Report-PDF.md")?;
-    let mut taken = BTreeSet::new();
+    let mut taken = TakenPaths::default();
     let name = name_new_item(
         &compiled(vec![r0()])?,
         &card_subject(&at, "Q3 Report.PDF"),
@@ -1928,7 +2040,7 @@ fn conventions_import_im2_a_card_is_named_by_the_rules() -> TestResult {
 #[test]
 fn conventions_import_im3_the_jobs_own_cards_are_taken() -> TestResult {
     let rules = compiled(vec![r0()])?;
-    let mut taken = BTreeSet::new();
+    let mut taken = TakenPaths::default();
     let first = path("inbox/a-pdf.md")?;
     let second = path("inbox/A-pdf.md")?;
     let one = name_new_item(&rules, &card_subject(&first, "a.pdf"), &mut taken)?;
@@ -1950,7 +2062,7 @@ fn conventions_import_im3_the_jobs_own_cards_are_taken() -> TestResult {
 #[test]
 fn conventions_import_im4_keep_existing_falls_back_to_the_name_without_rules() -> TestResult {
     let at = path("inbox/Q3 Report-pdf.md")?;
-    let mut taken = BTreeSet::from(["inbox/q3-report-pdf.md".to_owned()]);
+    let mut taken = taken_paths(&["inbox/q3-report-pdf.md"])?;
     let rules = compiled(vec![with(|rule| {
         rule.collision = CollisionPolicy::KeepExisting;
     })])?;
@@ -1963,10 +2075,7 @@ fn conventions_import_im4_keep_existing_falls_back_to_the_name_without_rules() -
 #[test]
 fn conventions_import_im4_reject_falls_back_and_then_numbers_without_rules() -> TestResult {
     let at = path("inbox/Q3 Report-pdf.md")?;
-    let mut taken = BTreeSet::from([
-        "inbox/q3-report-pdf.md".to_owned(),
-        "inbox/q3 report-pdf.md".to_owned(),
-    ]);
+    let mut taken = taken_paths(&["inbox/q3-report-pdf.md", "inbox/q3 report-pdf.md"])?;
     let rules = compiled(vec![with(|rule| rule.collision = CollisionPolicy::Reject)])?;
     let name = name_new_item(&rules, &card_subject(&at, "Q3 Report.pdf"), &mut taken)?;
     assert_eq!(name.path.as_str(), "inbox/Q3 Report-pdf-2.md");
@@ -1977,7 +2086,7 @@ fn conventions_import_im4_reject_falls_back_and_then_numbers_without_rules() -> 
 #[test]
 fn conventions_import_im7_suffix_numbers_the_ruled_name() -> TestResult {
     let at = path("inbox/Q3 Report-pdf.md")?;
-    let mut taken = BTreeSet::from(["inbox/q3-report-pdf.md".to_owned()]);
+    let mut taken = taken_paths(&["inbox/q3-report-pdf.md"])?;
     let name = name_new_item(
         &compiled(vec![r0()])?,
         &card_subject(&at, "Q3 Report.pdf"),
@@ -1990,7 +2099,7 @@ fn conventions_import_im7_suffix_numbers_the_ruled_name() -> TestResult {
 #[test]
 fn conventions_import_im5_a_card_the_import_named_is_unchanged_in_a_preview() -> TestResult {
     let rules = compiled(vec![r0()])?;
-    let mut taken = BTreeSet::new();
+    let mut taken = TakenPaths::default();
     let first = path("inbox/a-pdf.md")?;
     let second = path("inbox/A-pdf.md")?;
     let one = name_new_item(&rules, &card_subject(&first, "a.pdf"), &mut taken)?;
@@ -2007,7 +2116,7 @@ fn conventions_import_im5_a_card_the_import_named_is_unchanged_in_a_preview() ->
 #[test]
 fn conventions_import_an_unmatched_card_keeps_the_numbering_without_rules() -> TestResult {
     let at = path("inbox/report-pdf.md")?;
-    let mut taken = BTreeSet::from(["inbox/report-pdf.md".to_owned()]);
+    let mut taken = taken_paths(&["inbox/report-pdf.md"])?;
     let rules = compiled(vec![with(|rule| "elsewhere/**".clone_into(&mut rule.glob))])?;
     let name = name_new_item(&rules, &card_subject(&at, "report.pdf"), &mut taken)?;
     assert_eq!(name.path.as_str(), "inbox/report-pdf-2.md");

@@ -706,6 +706,7 @@ async fn event_calls(
         connector_id: None,
         actor: None,
         operation: None,
+        transport: None,
         proposal_id: None,
         count: None,
     };

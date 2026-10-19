@@ -103,7 +103,7 @@ use okf_core::{
 use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::TextOrigin;
-use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath};
+use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath, collision_key_of};
 use okf_jawn_contract::item::{ItemStatus, TypeDefinition};
 use okf_jawn_core::items::{ApplicationHeader, refuse_header_change, refuse_header_in_type};
 use okf_jawn_core::portable::ALIASES_KEY;
@@ -111,8 +111,7 @@ use okf_jawn_core::storage::{SourceCard, TreeEdit, folder_other_files};
 
 use super::item::{
     CORRECTIONS_DIR, Holder, INDEX_FILE, ItemFile, LOG_FILE, RULES_FILE, SOURCES_DIR, SUPPLIED_DIR,
-    TYPES_FILE, bare_header, check_item_path, collision_key, is_item_path, is_reserved, new_item,
-    respelled,
+    TYPES_FILE, bare_header, check_item_path, is_item_path, is_reserved, new_item, respelled,
 };
 use super::repo::{commit_of, internal, materialize, materialize_at};
 use crate::data::io_error;
@@ -293,7 +292,7 @@ impl Staged {
     /// `path`. Every other file, folder and item counts.
     fn occupied(&self, path: &WorkspacePath, own: Option<&str>) -> Result<bool, ApiError> {
         let key = path.collision_key();
-        let own = own.filter(|own| collision_key(own) == key);
+        let own = own.filter(|own| collision_key_of(own) == key);
         if own.is_none() && self.root.join(path.as_str()).exists() {
             return Ok(true);
         }
@@ -306,13 +305,13 @@ impl Staged {
             if own == Some(existing.as_str()) {
                 return false;
             }
-            let existing = collision_key(existing);
+            let existing = collision_key_of(existing);
             // Anything below `path` is under a folder at its key, which is an entry itself.
             existing == key || (!folder && folders.contains(&existing.as_str()))
         }) || self
             .items
             .values()
-            .any(|existing| own != Some(existing.as_str()) && collision_key(existing) == key))
+            .any(|existing| own != Some(existing.as_str()) && collision_key_of(existing) == key))
     }
 }
 
@@ -1095,7 +1094,7 @@ fn move_item(
     if keep_alias {
         record_alias(staged, item, &source)?;
     }
-    if collision_key(&source) != destination.collision_key() {
+    if collision_key_of(&source) != destination.collision_key() {
         return relink(staged, &source, destination.as_str(), Some("/destination"));
     }
     // A rename that changes only letter case goes by a private path (the module header). The
@@ -1527,6 +1526,17 @@ pub(crate) fn correction_file(item: ItemId, digest: &Digest) -> String {
     format!("{}/{}.json", corrections_folder(item), digest.as_str())
 }
 
+/// Whether the tree path `path` is one of the item's companion files, which `RestoreItem` sets
+/// back with it (`restore_items`): its source appearance, its accepted supplied text, or a file
+/// anywhere in its corrections folder.
+pub(crate) fn is_companion(path: &str, item: ItemId) -> bool {
+    path == appearance_file(item)
+        || path == supplied_file(item)
+        || path
+            .strip_prefix(&corrections_folder(item))
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
 /// The tree path of the folder holding every correction of one item.
 fn corrections_folder(item: ItemId) -> String {
     format!("{CORRECTIONS_DIR}/{}", item.0)
@@ -1611,7 +1621,7 @@ fn spelled_in(directory: &Path, segment: &str, folders: bool) -> Result<Option<S
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(io_error("read", directory, &error)),
     };
-    let key = collision_key(segment);
+    let key = collision_key_of(segment);
     let mut other = None;
     for entry in entries {
         let entry = entry.map_err(|error| io_error("read", directory, &error))?;
@@ -1628,7 +1638,7 @@ fn spelled_in(directory: &Path, segment: &str, folders: bool) -> Result<Option<S
         if name == segment {
             return Ok(Some(name));
         }
-        if collision_key(&name) == key {
+        if collision_key_of(&name) == key {
             other = Some(name);
         }
     }

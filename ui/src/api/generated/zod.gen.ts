@@ -538,17 +538,6 @@ export const zLimits = z.object({
 });
 
 /**
- * A source-level relationship between items.
- */
-export const zLink = z.object({
-    from: zItemId,
-    label: z.string(),
-    line: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
-    to: zItemId.nullish(),
-    to_path: z.string()
-});
-
-/**
  * Which side of the link graph to inspect.
  */
 export const zLinkDirection = z.union([
@@ -1059,15 +1048,6 @@ export const zDraftConflictItem = z.object({
 });
 
 /**
- * Links and their resolution at one revision.
- */
-export const zGetLinksResponse = z.object({
-    links: z.array(zLink),
-    next_cursor: z.string().nullish(),
-    revision: zRevision
-});
-
-/**
  * Revoke one connector credential immediately.
  */
 export const zRevokeConnectorRequest = z.object({
@@ -1353,6 +1333,17 @@ export const zSourceAppearance = z.object({
     size: z.string(),
     supersedes: zItemId.nullish()
 });
+
+/**
+ * A byte transport by name, as a refused one is recorded (`Event::transport`); each is one entry
+ * of `TRANSPORTS`, whose `id` is its `as_str`.
+ */
+export const zTransportName = z.union([
+    z.literal('upload_content'),
+    z.literal('download_object'),
+    z.literal('download_artifact'),
+    z.literal('download_tenant_artifact')
+]);
 
 /**
  * A user-defined type schema and UI hints.
@@ -1782,6 +1773,7 @@ export const zEvent = z.object({
     operation: zOperationName.nullish(),
     proposal_id: zProposalId.nullish(),
     revision: zRevision.nullish(),
+    transport: zTransportName.nullish(),
     workspace_id: zWorkspaceId.nullish()
 });
 
@@ -2183,7 +2175,8 @@ export const zRestoreRequest = z.object({
 /**
  * Fill a blank workspace of this installation from an uploaded workspace archive.
  *
- * The restore keeps item ids, rewrites View bindings to this workspace, gives each draft
+ * The restore keeps item ids (a View's file names no workspace, so a restored View binds to
+ * this one), gives each draft
  * whose editor is a validated subject with `write` here back to that editor, and keeps the
  * others in the archive, unassigned and counted. An archive of this tenant whose workspace
  * still exists, or has a purge record, is refused: purged content never comes back through
@@ -2506,16 +2499,6 @@ export const zGetAttentionResponse = z.object({
 });
 
 /**
- * Graph nodes and edges from the same authorized revision.
- */
-export const zGetGraphResponse = z.object({
-    edges: z.array(zLink),
-    nodes: z.array(zItemSummary),
-    revision: zRevision,
-    truncated: z.boolean()
-});
-
-/**
  * Editable Markdown and preserved frontmatter extension properties.
  */
 export const zItemDocument = z.object({
@@ -2538,6 +2521,37 @@ export const zCreatedItem = z.object({
     item: zItemDocument,
     receipt_id: zReceiptId.nullish(),
     warnings: z.array(zWarning)
+});
+
+/**
+ * A source-level relationship between items.
+ */
+export const zLink = z.object({
+    from: zItemId,
+    from_path: zWorkspacePath,
+    label: z.string(),
+    line: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+    to: zItemId.nullish(),
+    to_path: z.string()
+});
+
+/**
+ * Graph nodes and edges from the same authorized revision.
+ */
+export const zGetGraphResponse = z.object({
+    edges: z.array(zLink),
+    nodes: z.array(zItemSummary),
+    revision: zRevision,
+    truncated: z.boolean()
+});
+
+/**
+ * Links and their resolution at one revision.
+ */
+export const zGetLinksResponse = z.object({
+    links: z.array(zLink),
+    next_cursor: z.string().nullish(),
+    revision: zRevision
 });
 
 /**
@@ -2899,7 +2913,7 @@ export const zViewBinding = z.object({
  * An editable visual artifact with prose and explicit source bindings.
  */
 export const zViewDocument = z.object({
-    bindings: z.array(zViewBinding),
+    bindings: z.array(zViewBinding).max(50),
     charts: z.record(z.string(), z.unknown()).optional(),
     description: z.string(),
     grammar: zRenderGrammar,

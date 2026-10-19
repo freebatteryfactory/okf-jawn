@@ -139,8 +139,7 @@ async fn an_operation_of_a_later_part_answers_not_implemented() -> TestResult {
 
 /// The rows contract batch 2 added and no part has built yet answer `NotImplemented`, naming
 /// themselves, through the production service: core's `route!` sends an operation it does not
-/// name to `pending`. (The sixth row, `list_comments`, is built with the proposals, and
-/// `move_folder` with the folders work item: `tests/application/folders.rs`.)
+/// name to `pending`. The proposals, upload slots and move-folder behavior have their own tests.
 #[tokio::test]
 async fn the_rows_of_contract_batch_2_answer_not_implemented() -> TestResult {
     let world = World::new()?;
@@ -148,28 +147,7 @@ async fn the_rows_of_contract_batch_2_answer_not_implemented() -> TestResult {
     let upload = json!("77777777-7777-4777-8777-777777777777");
     let key = json!("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
     let base = json!("a".repeat(40));
-    let page = json!({"limit": 20});
     let refused = [
-        err_of(
-            world
-                .service
-                .get_upload(
-                    &alice(OperationName::GetUpload, None)?,
-                    serde_json::from_value(
-                        json!({"workspace_id": workspace, "upload_id": upload}),
-                    )?,
-                )
-                .await,
-        )?,
-        err_of(
-            world
-                .service
-                .list_uploads(
-                    &alice(OperationName::ListUploads, None)?,
-                    serde_json::from_value(json!({"workspace_id": workspace, "page": page}))?,
-                )
-                .await,
-        )?,
         err_of(
             world
                 .service
@@ -194,12 +172,7 @@ async fn the_rows_of_contract_batch_2_answer_not_implemented() -> TestResult {
                 .await,
         )?,
     ];
-    let names = [
-        "get_upload",
-        "list_uploads",
-        "discard_upload",
-        "delete_folder",
-    ];
+    let names = ["discard_upload", "delete_folder"];
     for (error, name) in refused.iter().zip(names) {
         assert_eq!(error.code, ErrorCode::NotImplemented, "{name}");
         assert!(error.message.contains(name), "{name}: {}", error.message);

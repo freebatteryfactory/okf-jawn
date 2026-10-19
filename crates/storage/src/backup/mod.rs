@@ -117,6 +117,19 @@ impl StorageBackups {
     /// workspace, say), it accepts and leaves as it is a workspace this same archive file
     /// already restored in full, unless a purge of it is now recorded.
     ///
+    /// The check reads every archive before anything is written, but a few faults show only at
+    /// the copy of a workspace's rows: a constraint the live database enforces across archives
+    /// (two archives of one set whose workspaces carry one creation mutation), or an encoding
+    /// the check did not read. A run that fails there leaves exactly what it wrote before the
+    /// failing copy: the installation archive's rows; every workspace restored before the
+    /// failing one, in full (its rows, history and objects, and the record of this restore);
+    /// and of the failing workspace its objects, each still recorded as a pending
+    /// put of it, and its history (the repository and every reference), but none of its rows.
+    /// No later workspace is touched. A run again with a good set completes: the installation
+    /// rows are written again over themselves, each workspace already restored in full is
+    /// accepted as it is, and the failing one's repository, which no record names, is replaced
+    /// by its restore.
+    ///
     /// # Errors
     /// Returns `InvalidInput` for an archive this build cannot read, refuses, or of another
     /// tenant, and `Conflict` for a workspace any recorded purge names (finished or not) or that

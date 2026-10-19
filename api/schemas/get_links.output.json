@@ -13,6 +13,10 @@
           "$ref": "#/$defs/ItemId",
           "description": "Linking item."
         },
+        "from_path": {
+          "$ref": "#/$defs/WorkspacePath",
+          "description": "The linking item's path at the revision read, so a backlink is shown by its name."
+        },
         "label": {
           "description": "Link label.",
           "type": "string"
@@ -41,6 +45,7 @@
       },
       "required": [
         "from",
+        "from_path",
         "to_path",
         "label",
         "line"
@@ -50,6 +55,13 @@
     "Revision": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
       "type": "string"
+    },
+    "WorkspacePath": {
+      "description": "A relative path inside one workspace, in Unicode NFC, with `/` between segments. At most 4096 bytes in UTF-8: a character takes one to four.",
+      "minLength": 1,
+      "pattern": "^[^/\\\\:<>\"|?*\\x00-\\x1f]+(/[^/\\\\:<>\"|?*\\x00-\\x1f]+)*$",
+      "type": "string",
+      "x-max-utf8-bytes": 4096
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

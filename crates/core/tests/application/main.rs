@@ -1,12 +1,15 @@
 //! `ApplicationService` handlers over fakes of their ports: what each operation of the item,
 //! folder, read, source, history, search, health, session, proposal, review, purge, naming-rules
-//! (conventions), workspace, event and connector modules asks of the ports, and what it
-//! answers.
+//! (conventions), workspace, event, connector, upload and job-control modules asks of the
+//! ports, and what it answers.
 //!
 //! Handlers are called the way dispatch calls them, with the `OperationContext` dispatch
 //! builds; dispatch's own rules (validation, authorization, the human-route refusal of
 //! draft-bearing operations, the mutation ledger) are tested in `tests/dispatch.rs`, and its
-//! archive and local-owner rules in `tests/archived.rs`.
+//! archive and local-owner rules in `tests/archived.rs`. Where a rule belongs to the two
+//! together (a handler's `Forbidden` that dispatch records, the archive rule in front of a
+//! handler), `job_control` dispatches to the service over the same fakes, with the fixture
+//! ledger (`support`).
 
 #[path = "../support/candidates.rs"]
 mod candidates;
@@ -21,6 +24,7 @@ mod fixture;
 mod folders;
 mod history;
 mod items;
+mod job_control;
 mod navigation;
 #[path = "../support/proposals.rs"]
 mod proposal_store;
@@ -35,8 +39,11 @@ mod reviews;
 mod service;
 mod sources;
 mod status;
+#[path = "../support/mod.rs"]
+mod support;
 #[path = "../support/tenancy.rs"]
 mod tenancy;
+mod uploads;
 mod workspaces;
 
 #[path = "../../../../tests/support/check.rs"]

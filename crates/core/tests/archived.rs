@@ -67,7 +67,7 @@ const DIGEST: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 
 /// The mutations an archived workspace allows that name it in their targets or body, each sent
 /// to the archived workspace.
-const ALLOWED_MUTATIONS: [&str; 9] = [
+const ALLOWED_MUTATIONS: [&str; 10] = [
     "archive_workspace",
     "unarchive_workspace",
     "purge_workspace",
@@ -77,6 +77,7 @@ const ALLOWED_MUTATIONS: [&str; 9] = [
     "cancel_job",
     "rebuild_index",
     "export_view",
+    "create_connector",
 ];
 
 /// Mutations of a workspace an archived workspace refuses whose table permission is not
@@ -91,10 +92,9 @@ const REFUSED_NOT_WRITE: [&str; 6] = [
 ];
 
 /// The refused mutations authorized at the tenant: their table target names no workspace.
-const AT_THE_TENANT: [&str; 4] = [
+const AT_THE_TENANT: [&str; 3] = [
     "create_workspace",
     "backup_installation",
-    "create_connector",
     "revoke_connector",
 ];
 
@@ -426,28 +426,20 @@ async fn a_comment_naming_an_archived_workspace_on_either_side_is_refused() -> T
     Ok(())
 }
 
-/// A connector would be granted every workspace it lists: listing an archived one refuses it.
+/// Owner decision 2026-10-17: issuing a connector changes no content, and an archived workspace
+/// stays readable, so a connector may list one; dispatch asks no archive question for it.
 #[tokio::test]
-async fn a_connector_listing_an_archived_workspace_is_refused() -> TestResult {
+async fn a_connector_listing_an_archived_workspace_is_issued() -> TestResult {
     let (app, ports) = world()?;
     let owner = principal("alice", AccessRoute::LocalOwner)?;
     let request = json!({
         "label": "agent", "workspace_ids": [LIVE, ARCHIVED], "allow_propose": false,
         "idempotency_key": KEY
     });
-    let refused = err_of(call(&app, &ports, &owner, "create_connector", request).await)?;
-    assert_archived(&refused, "create_connector")?;
-    assert_eq!(
-        refused.field, None,
-        "only a Forbidden refusal names an entry"
-    );
-    assert_eq!(app.handlers.call_count("create_connector")?, 0);
-    let asked: Vec<_> = app
-        .asked()?
-        .into_iter()
-        .map(|scope| scope.workspace_id)
-        .collect();
-    assert_eq!(asked, vec![workspace(LIVE)?, workspace(ARCHIVED)?]);
+    // The scripted handler answers no response, so the call fails after the handler ran.
+    let _ran = call(&app, &ports, &owner, "create_connector", request).await;
+    assert_eq!(app.handlers.call_count("create_connector")?, 1);
+    assert!(app.asked()?.is_empty(), "no archive question asked");
     Ok(())
 }
 

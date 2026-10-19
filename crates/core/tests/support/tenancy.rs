@@ -13,10 +13,17 @@
 //!   lookup made fresh is told from a kept one; it counts every `authorize` by permission, and
 //!   fails one `authorize` or one `grant_creator` on request.
 //! - `FakeJobs` is the fixture's `FakeRecords` (revision maps, receipts) with jobs: unique on
-//!   the mutation, and receipts read back within their workspace. It refuses no job for a purge
-//!   or an archive (storage's).
+//!   the mutation, read and listed within their scope (a tenant's or one workspace's, as storage
+//!   filters them), cancelled and retried once per mutation with storage's refusals, and receipts
+//!   read back within their workspace. It refuses no job, and no retry, for a purge or an archive
+//!   (storage's), and it never claims or runs a job: a test puts one in the state it needs
+//!   (`put_job`).
 //! - `FakeQueue` keeps every wake-up and fails one on request.
-//! - `FakeUploads` answers slots a test put; it reads nothing else.
+//! - `FakeUploads` opens slots unique on the mutation, lists them newest first a page at a time
+//!   after a position cursor, and completes one against the bytes a test says it received
+//!   (`receive`), with storage's length and hash refusals. It holds no files and no blob store:
+//!   a completed slot's object is the received bytes' digest and length, and `put_content`,
+//!   `consume` and `consume_batch` are not modelled.
 //! - `FakeCredentials` issues connectors unique on the mutation with a counter for a secret
 //!   (storage draws 32 random bytes), and keeps their order for listing, newest first.
 //! - `FakeLog` keeps every append, except an identical notification already appended under the
@@ -34,12 +41,12 @@ use okf_jawn_contract::identity::{
     ArtifactId, ConnectorId, Digest, ItemId, JobId, MutationId, PurgeId, ReceiptId, Revision,
     TenantId, Timestamp, UploadId, WorkspaceId,
 };
-use okf_jawn_contract::import::{Job, JobState, ListJobsResponse};
+use okf_jawn_contract::import::{Job, JobState, ListJobsResponse, UploadListState};
 use okf_jawn_contract::purge::{Purge, PurgeTarget};
 use okf_jawn_contract::review::Review;
 use okf_jawn_contract::workspace::Workspace;
 use okf_jawn_core::access::AccessControl;
-use okf_jawn_core::application::{ApplicationService, Ports};
+use okf_jawn_core::application::{ApplicationConfig, ApplicationService, Ports};
 use okf_jawn_core::context::{TenantGrant, WorkspaceGrant};
 use okf_jawn_core::credentials::{
     ConnectorIssue, CredentialStore, InstallationIdentity, NewConnector, SessionRecord,
@@ -51,8 +58,8 @@ use okf_jawn_core::jobs::{
 };
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
-    ByteReader, NewWorkspace, Page, Provenance, StorageScope, WorkspaceArchive, WorkspaceCatalog,
-    WorkspaceUpdate, derive_workspace_id,
+    ByteReader, NewWorkspace, ObjectInfo, Page, Provenance, StorageScope, WorkspaceArchive,
+    WorkspaceCatalog, WorkspaceUpdate, derive_workspace_id,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadRecord, UploadStore};
 use uuid::Uuid;
@@ -117,10 +124,24 @@ struct GrantState {
 /// `RecordStore`: the fixture's records with jobs and receipts that can be read back.
 pub struct FakeJobs {
     records: Arc<FakeRecords>,
-    jobs: Mutex<Vec<(MutationId, JobScope, NewJob, Job)>>,
+    /// Every job, in the order it was created or first put.
+    jobs: Mutex<Vec<HeldJob>>,
+    /// The mutation of every cancellation or retry that took effect.
+    controls: Mutex<Vec<MutationId>>,
     receipts: Mutex<Vec<(StorageScope, Receipt)>>,
     ignore_receipt_scope: AtomicBool,
     mapping_lookups: Mutex<Vec<(StorageScope, Revision)>>,
+}
+
+/// One job as `FakeJobs` holds it.
+#[derive(Clone)]
+struct HeldJob {
+    /// What `create_job` was given; `None` for a job a test put.
+    created: Option<NewJob>,
+    scope: JobScope,
+    job: Job,
+    /// Whether the job sealed itself (`RecordStore::seal`).
+    sealed: bool,
 }
 
 /// `JobQueue` that keeps every wake-up.
@@ -130,10 +151,30 @@ pub struct FakeQueue {
     fail_next: AtomicBool,
 }
 
-/// `UploadStore` answering the slots a test put.
+/// `UploadStore` over slots opened under a mutation or put by a test.
 #[derive(Default)]
 pub struct FakeUploads {
-    slots: Mutex<Vec<(StorageScope, UploadRecord)>>,
+    state: Mutex<UploadState>,
+}
+
+#[derive(Default)]
+struct UploadState {
+    /// Every slot, in the order it was opened or first put.
+    slots: Vec<Slot>,
+    /// Every listing asked for, with its workspace.
+    queries: Vec<(StorageScope, UploadQuery)>,
+    /// How many times `create` was called.
+    creates: usize,
+}
+
+/// One slot as `FakeUploads` holds it.
+struct Slot {
+    scope: StorageScope,
+    /// The mutation that opened it; `None` for a slot a test put.
+    mutation: Option<MutationId>,
+    record: UploadRecord,
+    /// The bytes it received (`FakeUploads::receive`).
+    bytes: Vec<u8>,
 }
 
 /// `CredentialStore` for connectors.
@@ -166,6 +207,14 @@ impl Tenancy {
     /// # Errors
     /// Returns when the fixture world cannot be built.
     pub fn new() -> Built<Self> {
+        Self::with_config(config())
+    }
+
+    /// The service over fresh fakes with the deployment settings `config`.
+    ///
+    /// # Errors
+    /// Returns when the fixture world cannot be built or `config` is refused.
+    pub fn with_config(config: ApplicationConfig) -> Built<Self> {
         let world = World::new()?;
         let catalog = Arc::new(FakeCatalog::default());
         let access = Arc::new(FakeGrants::default());
@@ -194,7 +243,7 @@ impl Tenancy {
             sandbox: world.sandbox.clone(),
             readiness: world.readiness.clone(),
         };
-        let service = ApplicationService::new(ports, config())?;
+        let service = ApplicationService::new(ports, config)?;
         Ok(Self {
             service,
             world,
@@ -382,6 +431,7 @@ impl FakeJobs {
         Self {
             records,
             jobs: Mutex::new(Vec::new()),
+            controls: Mutex::new(Vec::new()),
             receipts: Mutex::new(Vec::new()),
             ignore_receipt_scope: AtomicBool::new(false),
             mapping_lookups: Mutex::new(Vec::new()),
@@ -410,15 +460,111 @@ impl FakeJobs {
         Ok(lock(&self.mapping_lookups)?.clone())
     }
 
-    /// Every job created, with its scope and specification, oldest first.
+    /// Every job created, with its scope, specification and record as it stands now, oldest
+    /// first.
     ///
     /// # Errors
     /// Returns when the lock is poisoned.
     pub fn created(&self) -> Built<Vec<(JobScope, NewJob, Job)>> {
         Ok(lock(&self.jobs)?
             .iter()
-            .map(|(_, scope, job, wire)| (scope.clone(), job.clone(), wire.clone()))
+            .filter_map(|held| {
+                held.created
+                    .as_ref()
+                    .map(|created| (held.scope.clone(), created.clone(), held.job.clone()))
+            })
             .collect())
+    }
+
+    /// Hold `job` in `scope`, sealed or not, in place of the job of that identity, as a job
+    /// that was claimed, sealed, completed or failed reads afterwards.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn put_job(&self, scope: &JobScope, job: Job, sealed: bool) -> Built<()> {
+        let mut jobs = lock(&self.jobs)?;
+        if let Some(held) = jobs.iter_mut().find(|held| held.job.id == job.id) {
+            held.scope = scope.clone();
+            held.job = job;
+            held.sealed = sealed;
+        } else {
+            jobs.push(HeldJob {
+                created: None,
+                scope: scope.clone(),
+                job,
+                sealed,
+            });
+        }
+        Ok(())
+    }
+
+    /// The job of identity `id` as it stands, in whatever scope.
+    ///
+    /// # Errors
+    /// Returns when no such job is held or the lock is poisoned.
+    pub fn job(&self, id: JobId) -> Built<Job> {
+        Ok(lock(&self.jobs)?
+            .iter()
+            .find(|held| held.job.id == id)
+            .map(|held| held.job.clone())
+            .ok_or("the fake holds no such job")?)
+    }
+
+    /// The transition a cancellation (`retry` false) or a retry of `job` under `mutation` makes,
+    /// as storage's `control` makes it: once per mutation, and a refusal records nothing.
+    fn control(
+        &self,
+        scope: &JobScope,
+        mutation: MutationId,
+        job: JobId,
+        retry: bool,
+    ) -> Result<Job, ApiError> {
+        let mut jobs = lock_api(&self.jobs)?;
+        let held = jobs
+            .iter_mut()
+            .find(|held| held.job.id == job && held.scope == *scope)
+            .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such job"))?;
+        let mut controls = lock_api(&self.controls)?;
+        if controls.contains(&mutation) {
+            return Ok(held.job.clone());
+        }
+        let stands = &mut held.job;
+        match (retry, &stands.state) {
+            (false, JobState::Queued | JobState::Running) if held.sealed => {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "this job has passed its point of no return; it runs to its end",
+                ));
+            }
+            (false, JobState::Queued | JobState::Running) => {
+                stands.state = JobState::Cancelled;
+                stands.finished_at = Some(instant().map_err(internal)?);
+            }
+            (true, JobState::Failed) if stands.retryable == Some(true) => {
+                stands.state = JobState::Queued;
+                stands.error = None;
+                stands.started_at = None;
+                stands.finished_at = None;
+                stands.retryable = None;
+            }
+            (true, JobState::Failed) => {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "this job's failure is not retryable",
+                ));
+            }
+            (_, state) => {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    format!(
+                        "a {state:?} job cannot be {}",
+                        if retry { "retried" } else { "cancelled" }
+                    ),
+                ));
+            }
+        }
+        controls.push(mutation);
+        Ok(stands.clone())
     }
 }
 
@@ -438,16 +584,88 @@ impl FakeQueue {
 }
 
 impl FakeUploads {
-    /// Hold `record` in `scope`, in place of the slot of that identity there, as a slot that
-    /// was completed or taken by a job reads afterwards.
+    /// Hold `record` in `scope`, in place of the slot of that identity there (which keeps its
+    /// place in the listing order), as a slot that was completed or taken by a job reads
+    /// afterwards.
     ///
     /// # Errors
     /// Returns when the lock is poisoned.
     pub fn put(&self, scope: &StorageScope, record: UploadRecord) -> Built<()> {
-        let mut slots = lock(&self.slots)?;
-        slots.retain(|(held_in, held)| !(held_in == scope && held.id == record.id));
-        slots.push((scope.clone(), record));
+        let mut state = lock(&self.state)?;
+        if let Some(slot) = state
+            .slots
+            .iter_mut()
+            .find(|slot| slot.scope == *scope && slot.record.id == record.id)
+        {
+            slot.record = record;
+        } else {
+            state.slots.push(Slot {
+                scope: scope.clone(),
+                mutation: None,
+                record,
+                bytes: Vec::new(),
+            });
+        }
         Ok(())
+    }
+
+    /// The slot `upload` of `scope` has received `bytes`, as `put_content` appends them: its
+    /// `received_bytes` is their length.
+    ///
+    /// # Errors
+    /// Returns when the slot is not held or the lock is poisoned.
+    pub fn receive(&self, scope: &StorageScope, upload: UploadId, bytes: &[u8]) -> Built<()> {
+        let mut state = lock(&self.state)?;
+        let slot = state
+            .slots
+            .iter_mut()
+            .find(|slot| slot.scope == *scope && slot.record.id == upload)
+            .ok_or("the fake holds no such upload")?;
+        slot.bytes = bytes.to_vec();
+        slot.record.received_bytes = u64::try_from(bytes.len())?;
+        Ok(())
+    }
+
+    /// The slot `upload` of `scope` as it stands.
+    ///
+    /// # Errors
+    /// Returns when the slot is not held or the lock is poisoned.
+    pub fn held(&self, scope: &StorageScope, upload: UploadId) -> Built<UploadRecord> {
+        Ok(lock(&self.state)?
+            .slots
+            .iter()
+            .find(|slot| slot.scope == *scope && slot.record.id == upload)
+            .map(|slot| slot.record.clone())
+            .ok_or("the fake holds no such upload")?)
+    }
+
+    /// Every slot of `scope`, in the order it was opened or put.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn slots(&self, scope: &StorageScope) -> Built<Vec<UploadRecord>> {
+        Ok(lock(&self.state)?
+            .slots
+            .iter()
+            .filter(|slot| slot.scope == *scope)
+            .map(|slot| slot.record.clone())
+            .collect())
+    }
+
+    /// How many times `create` was called.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn creates(&self) -> Built<usize> {
+        Ok(lock(&self.state)?.creates)
+    }
+
+    /// Every listing asked for, with its workspace, in order.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn queries(&self) -> Built<Vec<(StorageScope, UploadQuery)>> {
+        Ok(lock(&self.state)?.queries.clone())
     }
 }
 
@@ -752,11 +970,12 @@ impl RecordStore for FakeJobs {
     fn create_job<'a>(&'a self, scope: &'a JobScope, job: NewJob) -> PortFuture<'a, Job> {
         Box::pin(async move {
             let mut jobs = lock_api(&self.jobs)?;
-            if let Some((_, _, _, prior)) = jobs
-                .iter()
-                .find(|(mutation, _, _, _)| *mutation == job.mutation_id)
-            {
-                return Ok(prior.clone());
+            if let Some(prior) = jobs.iter().find(|held| {
+                held.created
+                    .as_ref()
+                    .is_some_and(|created| created.mutation_id == job.mutation_id)
+            }) {
+                return Ok(prior.job.clone());
             }
             if !job.spec.fits(scope) {
                 return Err(ApiError::new(
@@ -783,19 +1002,63 @@ impl RecordStore for FakeJobs {
                 finished_at: None,
                 retryable: None,
             };
-            jobs.push((job.mutation_id, scope.clone(), job, wire.clone()));
+            jobs.push(HeldJob {
+                created: Some(job),
+                scope: scope.clone(),
+                job: wire.clone(),
+                sealed: false,
+            });
             Ok(wire)
         })
     }
-    fn get_job<'a>(&'a self, _scope: &'a JobScope, _job: JobId) -> PortFuture<'a, Job> {
-        unused()
+    /// "Read one durable job within its scope." A job of another scope (a tenant's asked in a
+    /// workspace, a workspace's asked at the tenant or in another workspace) is `NotFound`, as
+    /// storage filters on the tenant and the workspace column.
+    fn get_job<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, Job> {
+        Box::pin(async move {
+            lock_api(&self.jobs)?
+                .iter()
+                .find(|held| held.job.id == job && held.scope == *scope)
+                .map(|held| held.job.clone())
+                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such job"))
+        })
     }
+    /// "List durable jobs of one scope, newest first, with bounded pagination." Paged as storage
+    /// pages them: after the position a decimal cursor names (a job's place in the fake's one
+    /// sequence, from 1, as storage's row), with the last listed job's position as the cursor
+    /// while jobs remain; a cursor that is not a position is `InvalidInput` on `/page/cursor`.
     fn list_jobs<'a>(
         &'a self,
-        _scope: &'a JobScope,
-        _page: Page,
+        scope: &'a JobScope,
+        page: Page,
     ) -> PortFuture<'a, ListJobsResponse> {
-        unused()
+        Box::pin(async move {
+            let before = position_cursor(page.cursor.as_deref())?;
+            let limit = usize::from(page.limit.max(1));
+            let jobs = lock_api(&self.jobs)?;
+            let mut items: Vec<(usize, Job)> = Vec::new();
+            let mut more = false;
+            for (index, held) in jobs.iter().enumerate().rev() {
+                let position = index.saturating_add(1);
+                if held.scope != *scope || before.is_some_and(|before| position >= before) {
+                    continue;
+                }
+                if items.len() >= limit {
+                    more = true;
+                    break;
+                }
+                items.push((position, held.job.clone()));
+            }
+            let next_cursor = if more {
+                items.last().map(|(position, _)| position.to_string())
+            } else {
+                None
+            };
+            Ok(ListJobsResponse {
+                items: items.into_iter().map(|(_, job)| job).collect(),
+                next_cursor,
+            })
+        })
     }
     fn claim_job(&self, _job: JobId) -> PortFuture<'_, Option<ClaimedJob>> {
         unused()
@@ -817,21 +1080,34 @@ impl RecordStore for FakeJobs {
     fn seal<'a>(&'a self, _lease: &'a JobLease) -> PortFuture<'a, Job> {
         unused()
     }
+    /// "Cancel pending or running work while retaining recorded state. Unique on
+    /// `mutation_id`: a repeated id makes no second transition and returns the job row as it
+    /// stands. Refuses with `Conflict` ("this job has passed its point of no return"), writing
+    /// nothing, a queued or running job that sealed itself (`seal`)." A finished job is
+    /// `Conflict` and a job of another scope `NotFound`, as storage refuses them; a refusal
+    /// records nothing, so a repeat of its mutation meets it again.
     fn cancel_job<'a>(
         &'a self,
-        _scope: &'a JobScope,
-        _mutation_id: MutationId,
-        _job: JobId,
+        scope: &'a JobScope,
+        mutation_id: MutationId,
+        job: JobId,
     ) -> PortFuture<'a, Job> {
-        unused()
+        Box::pin(async move { self.control(scope, mutation_id, job, false) })
     }
+    /// "Queue a failed job again under the same durable identity. Unique on `mutation_id`: a
+    /// repeated id does not queue the job a second time, even when the job has run and failed
+    /// again since, and returns the job row as it stands." Only a failure recorded retryable
+    /// (`Job::retryable` is `Some(true)`, the flag storage keeps) is queued again, with its error,
+    /// instants and flag cleared; any other job is `Conflict` and a job of another scope
+    /// `NotFound`, as storage refuses them. Kinder than storage: no purge and no archive
+    /// refuses a retry here.
     fn retry_job<'a>(
         &'a self,
-        _scope: &'a JobScope,
-        _mutation_id: MutationId,
-        _job: JobId,
+        scope: &'a JobScope,
+        mutation_id: MutationId,
+        job: JobId,
     ) -> PortFuture<'a, Job> {
-        unused()
+        Box::pin(async move { self.control(scope, mutation_id, job, true) })
     }
     fn record_artifact<'a>(
         &'a self,
@@ -958,13 +1234,49 @@ impl JobQueue for FakeQueue {
 }
 
 impl UploadStore for FakeUploads {
+    /// "Open a slot before authenticated binary bytes arrive. Unique on `mutation_id`: a
+    /// repeated id opens nothing and returns the prior slot." A prior slot of another workspace
+    /// is `NotFound`, as storage reads the slot back within the workspace asked.
     fn create<'a>(
         &'a self,
-        _scope: &'a StorageScope,
-        _mutation_id: MutationId,
-        _upload: NewUpload,
+        scope: &'a StorageScope,
+        mutation_id: MutationId,
+        upload: NewUpload,
     ) -> PortFuture<'a, UploadRecord> {
-        unused()
+        Box::pin(async move {
+            let mut state = lock_api(&self.state)?;
+            state.creates = state.creates.saturating_add(1);
+            if let Some(prior) = state
+                .slots
+                .iter()
+                .find(|slot| slot.mutation == Some(mutation_id))
+            {
+                return if prior.scope == *scope {
+                    Ok(prior.record.clone())
+                } else {
+                    Err(ApiError::new(ErrorCode::NotFound, "no such upload"))
+                };
+            }
+            let record = UploadRecord {
+                id: UploadId(Uuid::new_v4()),
+                filename: upload.filename,
+                relative_path: upload.relative_path,
+                expected_size: upload.expected_size,
+                expected_sha256: upload.expected_sha256,
+                supplied_by: upload.supplied_by,
+                created_at: instant().map_err(internal)?,
+                received_bytes: 0,
+                object: None,
+                consumed_by: None,
+            };
+            state.slots.push(Slot {
+                scope: scope.clone(),
+                mutation: Some(mutation_id),
+                record: record.clone(),
+                bytes: Vec::new(),
+            });
+            Ok(record)
+        })
     }
     /// "Read one slot; `NotFound` when the workspace has no such slot."
     fn get<'a>(
@@ -973,19 +1285,55 @@ impl UploadStore for FakeUploads {
         upload: UploadId,
     ) -> PortFuture<'a, UploadRecord> {
         Box::pin(async move {
-            lock_api(&self.slots)?
+            lock_api(&self.state)?
+                .slots
                 .iter()
-                .find(|(held_in, held)| held_in == scope && held.id == upload)
-                .map(|(_, held)| held.clone())
+                .find(|slot| slot.scope == *scope && slot.record.id == upload)
+                .map(|slot| slot.record.clone())
                 .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such upload"))
         })
     }
+    /// "List the workspace's slots, the most recently opened first, in `query.state`, a page at
+    /// a time ... `InvalidInput` on `/page/cursor` for a cursor that is not a position this
+    /// store writes (a slot's row position). A position another listing of the workspace
+    /// answered, another state's included, is not told apart: the page begins after it." The
+    /// position is the slot's place in the fake's one sequence, from 1, as storage's row.
     fn list<'a>(
         &'a self,
-        _scope: &'a StorageScope,
-        _query: UploadQuery,
+        scope: &'a StorageScope,
+        query: UploadQuery,
     ) -> PortFuture<'a, UploadPage> {
-        unused()
+        Box::pin(async move {
+            let mut state = lock_api(&self.state)?;
+            state.queries.push((scope.clone(), query.clone()));
+            let before = position_cursor(query.page.cursor.as_deref())?;
+            let limit = usize::from(query.page.limit.max(1));
+            let mut items: Vec<(usize, UploadRecord)> = Vec::new();
+            let mut more = false;
+            for (index, slot) in state.slots.iter().enumerate().rev() {
+                let position = index.saturating_add(1);
+                if slot.scope != *scope
+                    || before.is_some_and(|before| position >= before)
+                    || !in_state(&slot.record, query.state)
+                {
+                    continue;
+                }
+                if items.len() >= limit {
+                    more = true;
+                    break;
+                }
+                items.push((position, slot.record.clone()));
+            }
+            let next_cursor = if more {
+                items.last().map(|(position, _)| position.to_string())
+            } else {
+                None
+            };
+            Ok(UploadPage {
+                items: items.into_iter().map(|(_, record)| record).collect(),
+                next_cursor,
+            })
+        })
     }
     fn put_content<'a>(
         &'a self,
@@ -996,13 +1344,49 @@ impl UploadStore for FakeUploads {
     ) -> PortFuture<'a, UploadRecord> {
         unused()
     }
+    /// "Verify the received bytes against the announced length and `sha256`, and retain them.
+    /// Fails with `Conflict` and `ErrorDetail::UploadMismatch` on a length or hash mismatch, and
+    /// retains nothing; completing a complete slot with another `sha256` is such a mismatch.
+    /// Completing a complete slot with the same `sha256` changes nothing and returns the same
+    /// record." As storage, a hash announced when the slot was opened that is not `sha256` is
+    /// such a mismatch too. The received bytes are those a test gave (`receive`).
     fn complete<'a>(
         &'a self,
-        _scope: &'a StorageScope,
-        _upload: UploadId,
-        _sha256: Digest,
+        scope: &'a StorageScope,
+        upload: UploadId,
+        sha256: Digest,
     ) -> PortFuture<'a, UploadRecord> {
-        unused()
+        Box::pin(async move {
+            let mut state = lock_api(&self.state)?;
+            let slot = state
+                .slots
+                .iter_mut()
+                .find(|slot| slot.scope == *scope && slot.record.id == upload)
+                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such upload"))?;
+            let record = &slot.record;
+            if let Some(object) = &record.object {
+                if object.digest == sha256 {
+                    return Ok(record.clone());
+                }
+                return Err(mismatch(record, Some(false)));
+            }
+            if record.received_bytes != record.expected_size {
+                return Err(mismatch(record, None));
+            }
+            let received = sha256_of(&slot.bytes)?;
+            let announced = record
+                .expected_sha256
+                .as_ref()
+                .is_some_and(|announced| *announced != sha256);
+            if announced || received != sha256 {
+                return Err(mismatch(record, Some(false)));
+            }
+            slot.record.object = Some(ObjectInfo {
+                digest: received,
+                size: slot.record.received_bytes,
+            });
+            Ok(slot.record.clone())
+        })
     }
     fn consume<'a>(
         &'a self,
@@ -1217,6 +1601,7 @@ fn wire(position: usize, scope: &EventScope, event: NewEvent) -> Result<Event, A
         connector_id: event.connector_id,
         actor: event.actor,
         operation: event.operation,
+        transport: event.transport,
         proposal_id: event.proposal_id,
         count: event.count,
     })
@@ -1262,6 +1647,61 @@ pub fn uploader() -> Provenance {
 
 fn internal(error: impl std::fmt::Display) -> ApiError {
     ApiError::new(ErrorCode::Internal, error.to_string())
+}
+
+/// The position a page cursor names: `None` without one; `InvalidInput` on `/page/cursor` for a
+/// cursor that is not a decimal position, as storage refuses it.
+fn position_cursor(cursor: Option<&str>) -> Result<Option<usize>, ApiError> {
+    cursor
+        .map(|text| {
+            text.parse::<usize>().map_err(|_| {
+                ApiError::new(
+                    ErrorCode::InvalidInput,
+                    "the page cursor is not one this store issued",
+                )
+                .with_field("/page/cursor")
+            })
+        })
+        .transpose()
+}
+
+/// Whether `record` is in `state`, as `UploadQuery::state` names the states: incomplete (no
+/// retained object), waiting (complete and not consumed) or consumed; every slot for `None`.
+fn in_state(record: &UploadRecord, state: Option<UploadListState>) -> bool {
+    match state {
+        None => true,
+        Some(UploadListState::Incomplete) => record.object.is_none(),
+        Some(UploadListState::Waiting) => record.object.is_some() && record.consumed_by.is_none(),
+        Some(UploadListState::Consumed) => record.consumed_by.is_some(),
+    }
+}
+
+/// Storage's refusal of a slot whose bytes do not match: `Conflict` with
+/// `ErrorDetail::UploadMismatch`, `digest_matches` absent when the length already differs.
+fn mismatch(record: &UploadRecord, digest_matches: Option<bool>) -> ApiError {
+    ApiError::new(
+        ErrorCode::Conflict,
+        "the received bytes do not match the upload",
+    )
+    .with_detail(ErrorDetail::UploadMismatch {
+        expected_bytes: record.expected_size.to_string(),
+        received_bytes: record.received_bytes.to_string(),
+        digest_matches,
+    })
+}
+
+/// The SHA-256 of `bytes`, as the digest a slot's object is named by.
+///
+/// # Errors
+/// Returns `Internal` when the hexadecimal spelling is not a digest, which it always is.
+pub fn sha256_of(bytes: &[u8]) -> Result<Digest, ApiError> {
+    use sha2::Digest as _;
+    use std::fmt::Write as _;
+    let mut text = String::with_capacity(64);
+    for byte in sha2::Sha256::digest(bytes) {
+        write!(text, "{byte:02x}").map_err(internal)?;
+    }
+    Digest::try_from(text).map_err(internal)
 }
 
 /// Lock a fake's mutex for a test, turning poisoning into an error.

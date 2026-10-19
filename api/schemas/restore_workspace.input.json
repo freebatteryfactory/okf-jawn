@@ -22,7 +22,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Fill a blank workspace of this installation from an uploaded workspace archive.\n\nThe restore keeps item ids, rewrites View bindings to this workspace, gives each draft\nwhose editor is a validated subject with `write` here back to that editor, and keeps the\nothers in the archive, unassigned and counted. An archive of this tenant whose workspace\nstill exists, or has a purge record, is refused: purged content never comes back through\nan import. The upload is consumed when the restore starts, before the archive is applied. A\nrestore cancelled before that leaves the upload usable; one that fails after it leaves the\nupload consumed by its job, and only a retry of that job can use it.",
+  "description": "Fill a blank workspace of this installation from an uploaded workspace archive.\n\nThe restore keeps item ids (a View's file names no workspace, so a restored View binds to\nthis one), gives each draft\nwhose editor is a validated subject with `write` here back to that editor, and keeps the\nothers in the archive, unassigned and counted. An archive of this tenant whose workspace\nstill exists, or has a purge record, is refused: purged content never comes back through\nan import. The upload is consumed when the restore starts, before the archive is applied. A\nrestore cancelled before that leaves the upload usable; one that fails after it leaves the\nupload consumed by its job, and only a retry of that job can use it.",
   "properties": {
     "idempotency_key": {
       "$ref": "#/$defs/IdempotencyKey",
