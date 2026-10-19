@@ -16,8 +16,8 @@
 //!   digest), the base must be the head on a first attempt, and the plan's entries are computed
 //!   again at its base with the request's rules for the entries' items, and must be the same,
 //!   in order. Then one commit of `MoveItem`s, with the links each move rewrites (the store
-//!   tells the check the referrers). An entry whose new path another entry holds at the base (a
-//!   chain, a swap) goes through a temporary path, `okf-jawn-renaming-<item id>.md` beside it,
+//!   tells the check the referrers). An entry whose new path, or a folder it needs, an item
+//!   holds at the base goes through a temporary path, `okf-jawn-renaming-<item id>.md` beside it,
 //!   which no committed tree holds; a rename that changes only letter case is one direct move
 //!   (storage takes it through a parked name of its own). A resumed attempt skips the head
 //!   check: its commit may have landed, and the store replays it.
@@ -342,9 +342,9 @@ fn selected(tree: &WorkspaceTree, selection: &NameSelection) -> Result<BTreeSet<
 }
 
 /// The moves that apply `entries` at `tree`'s revision (the module header): first every entry
-/// whose new path no other item holds at the base, straight to it; then every other entry to
-/// its temporary path; then those from there to their new paths. Only a move from the item's
-/// path at the base records an alias.
+/// whose new path no other item holds at the base and whose needed folders no item holds,
+/// straight to it; then every other entry to its temporary path; then those from there to
+/// their new paths. Only a move from the item's path at the base records an alias.
 ///
 /// # Errors
 /// Returns `Internal` when no temporary path is a free workspace path.
@@ -366,10 +366,7 @@ fn moves(entries: &[PlannedEntry], tree: &WorkspaceTree) -> Result<Vec<TreeEdit>
     let mut back = Vec::new();
     for planned in entries {
         let entry = &planned.entry;
-        let held_by_another = holders
-            .get(&entry.to.collision_key())
-            .is_some_and(|holder| *holder != entry.item_id);
-        if held_by_another {
+        if blocked_by_item(&holders, &entry.to, entry.item_id) {
             away.push(TreeEdit::MoveItem {
                 item_id: entry.item_id,
                 destination: temporary(&entry.from, entry.item_id, &mut taken)?,
@@ -391,6 +388,28 @@ fn moves(entries: &[PlannedEntry], tree: &WorkspaceTree) -> Result<Vec<TreeEdit>
     direct.extend(away);
     direct.extend(back);
     Ok(direct)
+}
+
+/// An exact destination held by another item, or any needed folder held by an item, must be
+/// vacated before the final move. The exact own key remains direct for a case-only rename;
+/// an own ancestor still needs parking before its former file path can become a folder.
+fn blocked_by_item(
+    holders: &BTreeMap<String, ItemId>,
+    destination: &WorkspacePath,
+    item: ItemId,
+) -> bool {
+    let key = destination.collision_key();
+    if holders.get(&key).is_some_and(|holder| *holder != item) {
+        return true;
+    }
+    let mut ancestor = key.as_str();
+    while let Some((parent, _)) = ancestor.rsplit_once('/') {
+        if holders.contains_key(parent) {
+            return true;
+        }
+        ancestor = parent;
+    }
+    false
 }
 
 /// The temporary path of an entry's item: `okf-jawn-renaming-<item id>.md` beside `from` (at

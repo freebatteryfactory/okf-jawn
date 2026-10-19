@@ -2,24 +2,36 @@
 //! with its text and the reader's error (`VersionStore::rules`), and the whole tree in one pass
 //! (`VersionStore::tree`), and the old path a move records as an alias
 //! (`TreeEdit::MoveItem::keep_alias`). Named `conventions_*`.
+//! A preview/apply journey also runs the production application over the real adapters,
+//! proving that an item can vacate the folder path another planned move needs.
 #![cfg(feature = "runtime")]
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use git2::Repository;
-use okf_jawn_contract::access::AccessRoute;
+use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
 use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::conventions::{
-    CollisionPolicy, DateOrder, ExtensionPolicy, LetterCase, NamingRule, NamingRules,
+    ApplyNamesRequest, CollisionPolicy, DateOrder, ExtensionPolicy, LetterCase, NameSelection,
+    NamingRule, NamingRules, PreviewNamesRequest,
 };
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::identity::{ItemId, Revision, TenantId, WorkspacePath};
+use okf_jawn_contract::identity::{At, ItemId, JobId, Revision, TenantId, WorkspacePath};
 use okf_jawn_contract::item::ItemKind;
+use okf_jawn_contract::metadata::OperationName;
+use okf_jawn_core::application::{ApplicationConfig, ApplicationService, Ports};
+use okf_jawn_core::context::{Attempt, OperationContext, WorkspaceGrant};
+use okf_jawn_core::conversion::{
+    Conversion, ConversionInput, Converter, ConverterLimits, PageCount,
+};
+use okf_jawn_core::jobs::{JobQueue, JobScope};
+use okf_jawn_core::ports::{Application, PortFuture};
 use okf_jawn_core::storage::{
-    CandidateCheck, CommitChanges, NewWorkspace, Provenance, SourceCard, StorageScope, TreeEdit,
-    VersionStore, WorkspaceCatalog,
+    CandidateCheck, CommitChanges, LocalSource, NewWorkspace, Provenance, SourceCard, StorageScope,
+    TreeEdit, VersionStore, WorkspaceCatalog,
 };
 use okf_jawn_storage::Storage;
 use serde_json::{Value, json};
@@ -38,6 +50,9 @@ type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 /// Accepts every candidate.
 struct Accept;
 
+/// Preview/apply names never starts a job or converts bytes; fail if the journey does either.
+struct NoJobs;
+
 /// A data directory with one blank workspace.
 struct Workspace {
     directory: tempfile::TempDir,
@@ -50,6 +65,33 @@ struct Workspace {
 impl CandidateCheck for Accept {
     fn check(&self, _root: &Path, _rewritten: &[WorkspacePath]) -> Result<Vec<Warning>, ApiError> {
         Ok(Vec::new())
+    }
+}
+
+impl JobQueue for NoJobs {
+    fn enqueue(&self, _scope: JobScope, _job: JobId) -> PortFuture<'_, ()> {
+        not_used()
+    }
+}
+
+impl Converter for NoJobs {
+    fn page_count<'a>(
+        &'a self,
+        _source: &'a LocalSource,
+        _file_name: &'a str,
+    ) -> PortFuture<'a, PageCount> {
+        not_used()
+    }
+
+    fn convert(&self, _input: ConversionInput) -> PortFuture<'_, Conversion> {
+        not_used()
+    }
+
+    fn limits(&self) -> ConverterLimits {
+        ConverterLimits {
+            window_pages: 1,
+            memory_limit_bytes: 1,
+        }
     }
 }
 
@@ -79,6 +121,59 @@ impl Workspace {
             },
             initial: created.head,
         })
+    }
+
+    /// The production service over this workspace's durable adapters and conformance policy.
+    fn service(&self) -> Fallible<ApplicationService> {
+        let unused = Arc::new(NoJobs);
+        Ok(ApplicationService::new(
+            Ports {
+                access: Arc::new(self.storage.access()),
+                mutations: Arc::new(self.storage.mutations()),
+                catalog: Arc::new(self.storage.catalog()),
+                blobs: Arc::new(self.storage.blobs()),
+                backups: Arc::new(self.storage.backups()),
+                versions: Arc::new(self.storage.versions()),
+                records: Arc::new(self.storage.records()),
+                queue: unused.clone(),
+                search: Arc::new(self.storage.search()),
+                converter: unused,
+                proposals: Arc::new(self.storage.proposals()),
+                uploads: Arc::new(self.storage.uploads()),
+                events: Arc::new(self.storage.events()),
+                credentials: Arc::new(self.storage.credentials()),
+                drafts: Arc::new(self.storage.drafts()),
+                confirmations: Arc::new(self.storage.confirmations()),
+                sandbox: Arc::new(self.storage.sandbox()),
+                readiness: Arc::new(self.storage.readiness()),
+            },
+            ApplicationConfig::new(
+                "https://sandbox.example.test".to_owned(),
+                Duration::from_secs(300),
+            ),
+        )?)
+    }
+
+    /// A handler context with already-resolved read/write grants; authorization is not tested here.
+    fn context(&self, operation: OperationName) -> OperationContext {
+        OperationContext {
+            principal: Principal {
+                tenant_id: self.scope.tenant_id.clone(),
+                subject: "ana".to_owned(),
+                route: AccessRoute::LocalOwner,
+                client_id: None,
+                delegation: None,
+            },
+            session_id: Some("session".to_owned()),
+            operation,
+            tenant: None,
+            grants: vec![WorkspaceGrant {
+                scope: self.scope.clone(),
+                permissions: vec![Permission::Read, Permission::Write],
+            }],
+            mutation: None,
+            attempt: Attempt::First,
+        }
     }
 
     /// Commit `edits` as mutation `mutation` on top of `expected`, accepting every candidate.
@@ -158,6 +253,16 @@ impl Workspace {
         )?;
         Ok(Revision::try_from(commit.to_string())?)
     }
+}
+
+/// A job/converter call would be outside this naming journey's purpose.
+fn not_used<'a, T: Send + 'a>() -> PortFuture<'a, T> {
+    Box::pin(async {
+        Err(ApiError::new(
+            ErrorCode::Internal,
+            "naming never starts a job",
+        ))
+    })
 }
 
 /// A fixed UUID spelling numbered `n`.
@@ -651,6 +756,128 @@ async fn conventions_alias_only_the_hop_that_keeps_it_records_one() -> TestResul
             .all(|held| !held.summary.path.as_str().contains("okf-jawn-renaming-")),
         "{item:?}"
     );
+    Ok(())
+}
+
+/// Two moving notes and their referrer: the second note vacates the first note's target folder.
+async fn folder_dependency() -> Fallible<(Workspace, Revision, NamingRules)> {
+    let workspace = Workspace::new().await?;
+    let base = workspace
+        .commit(
+            2,
+            &workspace.initial,
+            vec![
+                note(10, "a/child.md", "# Child\n", json!({}))?,
+                note(11, "z.md", "# Parent\n", json!({}))?,
+                note(
+                    12,
+                    "links.md",
+                    "See [child](a/child.md) and [parent](z.md).\n",
+                    json!({}),
+                )?,
+            ],
+        )
+        .await?;
+    let mut child = rule();
+    "a/*.md".clone_into(&mut child.glob);
+    child.destination = Some("z.md".to_owned());
+    child.date_format = String::new();
+    child.strip_version_suffix = false;
+    let mut parent = child.clone();
+    "z.md".clone_into(&mut parent.glob);
+    parent.destination = Some("elsewhere".to_owned());
+    let rules = NamingRules {
+        schema_version: 1,
+        rules: vec![child, parent],
+    };
+    Ok((workspace, base, rules))
+}
+
+/// SPEC section 6: applying the accepted preview is one change, including link updates.
+/// The final names below are literal rule results, not computed from the apply implementation:
+/// `z.md` vacates its path, which the earlier-sorted child's destination needs as a folder.
+#[tokio::test]
+async fn conventions_apply_vacates_an_item_before_another_move_needs_its_path_as_a_folder()
+-> TestResult {
+    let (workspace, base, rules) = folder_dependency().await?;
+    let service = workspace.service()?;
+    let plan = service
+        .preview_names(
+            &workspace.context(OperationName::PreviewNames),
+            PreviewNamesRequest {
+                workspace_id: workspace.scope.workspace_id,
+                at: At::Revision {
+                    revision: base.clone(),
+                },
+                selection: NameSelection::Workspace,
+                rules: rules.clone(),
+            },
+        )
+        .await?;
+    assert_eq!(
+        plan.entries
+            .iter()
+            .map(|entry| (entry.from.as_str(), entry.to.as_str()))
+            .collect::<Vec<_>>(),
+        [("a/child.md", "z.md/child.md"), ("z.md", "elsewhere/z.md"),]
+    );
+    assert_eq!(plan.refused, 0);
+    assert_eq!(
+        workspace.storage.versions().head(&workspace.scope).await?,
+        base
+    );
+    let mut context = workspace.context(OperationName::ApplyNames);
+    context.mutation = Some(uuid!(3)?);
+    let applied = service
+        .apply_names(
+            &context,
+            ApplyNamesRequest {
+                workspace_id: workspace.scope.workspace_id,
+                plan,
+                rules,
+                idempotency_key: uuid!(3)?,
+            },
+        )
+        .await?;
+    let tree = workspace
+        .storage
+        .versions()
+        .tree(&workspace.scope, &applied.revision)
+        .await?;
+    assert_eq!(
+        tree.items
+            .iter()
+            .map(|item| (item.summary.id, item.summary.path.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (uuid!(11)?, "elsewhere/z.md"),
+            (uuid!(12)?, "links.md"),
+            (uuid!(10)?, "z.md/child.md"),
+        ]
+    );
+    assert_eq!(
+        workspace.aliases(&applied.revision, 10).await?,
+        Some(json!(["a/child.md"]))
+    );
+    assert_eq!(
+        workspace.aliases(&applied.revision, 11).await?,
+        Some(json!(["z.md"]))
+    );
+    let links = workspace
+        .storage
+        .versions()
+        .show(&workspace.scope, &applied.revision, uuid!(12)?)
+        .await?;
+    assert_eq!(
+        links.body.trim_end(),
+        "See [child](z.md/child.md) and [parent](elsewhere/z.md)."
+    );
+    let repository = workspace.repository()?;
+    let commit = repository.find_commit(git2::Oid::from_str(applied.revision.as_str())?)?;
+    assert_eq!(commit.parent_count(), 1);
+    assert_eq!(commit.parent_id(0)?.to_string(), base.as_str());
+    assert_eq!(workspace.path_of(&base, 10).await?, "a/child.md");
+    assert_eq!(workspace.path_of(&base, 11).await?, "z.md");
     Ok(())
 }
 
