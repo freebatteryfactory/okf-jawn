@@ -80,9 +80,11 @@ export function warningsFor(warnings: readonly AttentionItem[], itemId: string):
   return warnings.filter((warning) => warning.item_id === itemId);
 }
 
-/** How many listed warnings name each item: the mark an item carries where it is named. */
+/** Current listed warnings per item; retained uncertain evidence stays in the reader/list. */
 export function useAttentionMarks(workspaceId: string, head: Revision): (itemId: string) => number {
-  const warnings = warningsOf(useAttention(workspaceId, head).data?.pages);
+  const attention = useAttention(workspaceId, head);
+  const previous = attention.isRefetching || attention.isRefetchError || attention.isStale;
+  const warnings = previous ? [] : warningsOf(attention.data?.pages);
   const counts = new Map<string, number>();
   for (const warning of warnings) {
     const itemId = warning.item_id ?? null;
