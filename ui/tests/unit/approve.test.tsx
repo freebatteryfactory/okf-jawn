@@ -144,6 +144,141 @@ describe('Approve', { timeout: 30_000 }, () => {
     expect(api.violations).toEqual([]);
   });
 
+  // R5 and SPEC section 8 require the exact proposed content to be inspectable before Accept.
+  // These fixed limits are the existing display budgets, not expected answers from the parser.
+  it('lets a person read a proposed long line past its first 2000 characters before confirming', async () => {
+    const prefix = 'x'.repeat(2_000);
+    const suffix = 'Transfer approval authority to the contractor.';
+    const proposed = `${prefix}${suffix}`;
+    const { api } = setup({
+      [PROPOSAL]: () =>
+        ok(
+          proposalOf({
+            changes: [
+              {
+                kind: 'edit',
+                item_id: NOTE,
+                body: `# Meeting notes\n\n${proposed}\n`,
+                properties: { type: 'meeting-note' },
+              },
+            ],
+          }),
+        ),
+      [DIFF]: (body) =>
+        ok(diffOf(body, [changeOf('notes/meeting.md', 'The budget is draft.', proposed)])),
+    });
+    const page = await openProposal();
+    fireEvent.click(await within(page).findByRole('button', { name: 'Approve…' }));
+    const dialog = await screen.findByRole('alertdialog');
+    const changes = within(dialog).getByRole('region', { name: 'What it changes' });
+    expect(changes.textContent).toContain(prefix);
+    expect(changes.textContent).not.toContain(suffix);
+    expect(api.violations).toEqual([]);
+    fireEvent.click(within(changes).getByRole('button', { name: 'Continue this line' }));
+    expect(changes.textContent).toContain(suffix);
+    fireEvent.click(within(changes).getByRole('button', { name: 'Earlier in this line' }));
+    expect(changes.textContent).toContain(prefix);
+    expect(changes.textContent).not.toContain(suffix);
+    fireEvent.click(within(changes).getByRole('button', { name: 'Continue this line' }));
+    expect(changes.textContent).toContain(suffix);
+    expect(api.callsTo(CONFIRM)).toEqual([]);
+    expect(api.callsTo(ACCEPT)).toEqual([]);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Accept this proposal' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    expect(api.callsTo(CONFIRM).at(0)).toMatchObject({
+      revision: CANDIDATE,
+      content_digest: CHANGES_DIGEST,
+    });
+    expect(api.callsTo(ACCEPT)).toHaveLength(1);
+    expect(api.violations).toEqual([]);
+  });
+
+  it('lets a person read a later proposed file beyond the shared 2000-line window before confirming', async () => {
+    // One removed line and 1999 added lines fill the first window. The next file's only line
+    // must remain reachable, and must never be described as having no changed text.
+    const rows = Array.from({ length: 1_999 }, (_, index) => `Reviewed budget item ${index + 1}.`);
+    const important = 'All future spending may be authorized by the contractor.';
+    const { api } = setup({
+      [PROPOSAL]: () =>
+        ok(
+          proposalOf({
+            changes: [
+              {
+                kind: 'edit',
+                item_id: NOTE,
+                body: `${rows.join('\n')}\n`,
+                properties: { type: 'meeting-note' },
+              },
+              {
+                kind: 'create',
+                path: 'notes/authority.md',
+                type_name: 'meeting-note',
+                body: `${important}\n`,
+                properties: { type: 'meeting-note' },
+              },
+            ],
+          }),
+        ),
+      [DIFF]: (body) =>
+        ok(
+          diffOf(body, [
+            {
+              ...changeOf('notes/meeting.md', '', ''),
+              patch: [
+                'diff --git a/notes/meeting.md b/notes/meeting.md',
+                '--- a/notes/meeting.md',
+                '+++ b/notes/meeting.md',
+                '@@ -1 +1,1999 @@',
+                '-The budget is draft.',
+                ...rows.map((line) => `+${line}`),
+                '',
+              ].join('\n'),
+            },
+            {
+              ...changeOf('notes/authority.md', '', ''),
+              kind: 'added',
+              old_path: null,
+              patch: [
+                'diff --git a/notes/authority.md b/notes/authority.md',
+                'new file mode 100644',
+                '--- /dev/null',
+                '+++ b/notes/authority.md',
+                '@@ -0,0 +1 @@',
+                `+${important}`,
+                '',
+              ].join('\n'),
+            },
+          ]),
+        ),
+    });
+    const page = await openProposal();
+    fireEvent.click(await within(page).findByRole('button', { name: 'Approve…' }));
+    const dialog = await screen.findByRole('alertdialog');
+    const changes = within(dialog).getByRole('region', { name: 'What it changes' });
+    expect(changes.querySelectorAll('ins, del')).toHaveLength(2_000);
+    expect(changes.textContent).not.toContain(important);
+    expect(api.violations).toEqual([]);
+    expect(changes.textContent).not.toContain('No line of its text changed.');
+    fireEvent.click(within(changes).getByRole('button', { name: 'Next changed lines' }));
+    expect(changes.textContent).toContain(important);
+    expect(changes.querySelectorAll('ins, del')).toHaveLength(1);
+    fireEvent.click(within(changes).getByRole('button', { name: 'Previous changed lines' }));
+    expect(changes.querySelectorAll('ins, del')).toHaveLength(2_000);
+    expect(changes.textContent).not.toContain(important);
+    fireEvent.click(within(changes).getByRole('button', { name: 'Next changed lines' }));
+    expect(changes.textContent).toContain(important);
+    expect(api.callsTo(CONFIRM)).toEqual([]);
+    expect(api.callsTo(ACCEPT)).toEqual([]);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Accept this proposal' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    expect(api.callsTo(CONFIRM).at(0)).toMatchObject({
+      revision: CANDIDATE,
+      content_digest: CHANGES_DIGEST,
+    });
+    expect(api.callsTo(ACCEPT)).toHaveLength(1);
+    expect(api.violations).toEqual([]);
+  });
+
   it('repeats both steps under their own keys after a failure, never asking again', async () => {
     let tries = 0;
     const { api, state } = setup({

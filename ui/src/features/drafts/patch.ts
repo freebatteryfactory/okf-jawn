@@ -10,7 +10,8 @@
  * without the carriage return of a file with Windows line ends.
  *
  * What is read is bounded, because a patch is not: at most `room` lines are kept and the rest are
- * counted, and a line longer than `MAX_LINE_CHARS` is cut and marked as cut.
+ * counted, and a line longer than `MAX_LINE_CHARS` is cut and marked as cut. A caller may ask
+ * for a later window and retain the complete long lines for bounded, explicit inspection.
  *
  * A patch numbers the lines of the whole item file, its properties header included.
  */
@@ -25,6 +26,8 @@ export interface PatchLine {
   text: string;
   /** The line was longer than `MAX_LINE_CHARS`; `text` is its beginning. */
   cut?: true;
+  /** Only requested by an inspectable comparison: the source for successive bounded chunks. */
+  whole?: string;
 }
 
 export interface PatchHunk {
@@ -39,19 +42,33 @@ export interface ReadPatch {
   hunks: PatchHunk[];
   /** How many lines are in `hunks`. */
   shown: number;
-  /** How many further lines the patch holds that were not kept. */
+  /** How many lines the patch holds outside this window, before it or after it. */
   more: number;
+}
+
+export interface PatchWindow {
+  /** How many diff lines precede this window, not counting headers or remarks. */
+  start?: number;
+  /** Retain long lines for inspection; their initial `text` stays bounded. */
+  inspectLongLines?: boolean;
 }
 
 const HUNK = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 const KIND = { '+': 'added', '-': 'removed' } as const;
 
-export function readPatch(patch: string, room: number = MAX_DIFF_LINES): ReadPatch {
+export function readPatch(
+  patch: string,
+  room: number = MAX_DIFF_LINES,
+  { start = 0, inspectLongLines = false }: PatchWindow = {},
+): ReadPatch {
   const hunks: PatchHunk[] = [];
   let hunk: PatchHunk | null = null;
   let inHunk = false;
   let shown = 0;
   let more = 0;
+  let skipped = 0;
+  let oldLine = 0;
+  let newLine = 0;
   const rows = patch.split('\n');
   // A patch ends with a line break: the piece after it is no line.
   if (rows.at(-1) === '') rows.pop();
@@ -61,8 +78,10 @@ export function readPatch(patch: string, room: number = MAX_DIFF_LINES): ReadPat
     if (opened !== null) {
       inHunk = true;
       hunk = null;
-      if (shown < room) {
-        hunk = { oldStart: Number(opened[1]), newStart: Number(opened[2]), lines: [] };
+      oldLine = Number(opened[1]);
+      newLine = Number(opened[2]);
+      if (shown < room && skipped >= start) {
+        hunk = { oldStart: oldLine, newStart: newLine, lines: [] };
         hunks.push(hunk);
       }
       continue;
@@ -70,18 +89,34 @@ export function readPatch(patch: string, room: number = MAX_DIFF_LINES): ReadPat
     // Everything before the first hunk is the header; a remark is about the line above.
     const mark = row.charAt(0);
     if (!inHunk || mark === '\\') continue;
-    if (hunk === null || shown >= room) {
-      more += 1;
-      continue;
-    }
     const kind = mark === '+' || mark === '-' ? KIND[mark] : 'same';
-    const text = row.slice(1);
-    hunk.lines.push(
-      text.length > MAX_LINE_CHARS
-        ? { kind, text: text.slice(0, MAX_LINE_CHARS), cut: true }
-        : { kind, text },
-    );
-    shown += 1;
+    if (skipped < start) {
+      skipped += 1;
+      more += 1;
+    } else if (shown >= room) {
+      more += 1;
+    } else {
+      // A window may begin within a hunk; its displayed start is the line reached, not the
+      // hunk's original start. Removed lines advance only the old file, added only the new.
+      if (hunk === null) {
+        hunk = { oldStart: oldLine, newStart: newLine, lines: [] };
+        hunks.push(hunk);
+      }
+      const text = row.slice(1);
+      hunk.lines.push(
+        text.length > MAX_LINE_CHARS
+          ? {
+              kind,
+              text: text.slice(0, MAX_LINE_CHARS),
+              cut: true,
+              ...(inspectLongLines ? { whole: text } : {}),
+            }
+          : { kind, text },
+      );
+      shown += 1;
+    }
+    if (kind !== 'added') oldLine += 1;
+    if (kind !== 'removed') newLine += 1;
   }
   return { hunks, shown, more };
 }

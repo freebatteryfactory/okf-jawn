@@ -145,7 +145,12 @@ export function ConflictNotice({
         <p>The service listed no changed file.</p>
       ) : (
         keyedFiles(files).map(({ key, value: file }) => (
-          <ChangedFile key={key} change={file.change} hunks={file.hunks} />
+          <ChangedFile
+            key={key}
+            change={file.change}
+            hunks={file.hunks}
+            hiddenLines={file.hiddenLines}
+          />
         ))
       )}
       <MoreLines more={more} />
