@@ -25,6 +25,7 @@ import { BindingsContext, type ResolvedPresentation } from '../../src/features/v
 import { Layout, prepareSpec } from '../../src/features/views/Layout';
 import { datasetRecords, PresentView, parseDataset } from '../../src/features/views/PresentView';
 import { SavedView, type SavedViewProps } from '../../src/features/views/SavedView';
+import { parseViewFile } from '../../src/features/views/view-file';
 import { serverToolData } from '../../src/mcp-apps/view-data';
 
 /** The source the committed dataset cites, as the generated schema reads it. */
@@ -812,5 +813,228 @@ describe('a View says how its data was read, under it', () => {
       'metrics: a unit it declares names no column of its data. The server said: “EUR names no column”',
       'This View (/bindings/9): the server noted “some_future_code”. The server said: “a new note”',
     ]);
+  });
+});
+
+/**
+ * The one parser of a View file, against the examples of core M1.6's own reader
+ * (crates/core/src/views/layout.rs, PR #48 at 8ce63d81): the same files, the same refusals, the
+ * same JSON Pointers.
+ */
+describe('a View file reads as its title, its description and its one block', () => {
+  const workspace = 'aaaaaaaa-bbbb-4ccc-8ddd-000000000001';
+  const titled = { title: 'Pipeline throughput', type: 'Dashboard' };
+  const stored = () => ({
+    schema_version: 1,
+    mode: 'pinned',
+    grammar: 'json_render',
+    bindings: [
+      {
+        name: 'report',
+        source: {
+          item_id: '22222222-3333-4444-8555-666666666666',
+          path: 'reports/pipeline-pdf.md',
+          revision: '0123456789abcdef0123456789abcdef01234567',
+          digest: 'b'.repeat(64),
+          selection: { kind: 'pages', range: { start: 3, end: 3 } },
+        },
+        units: { Documents: 'count' },
+        transforms: [],
+      },
+      {
+        name: 'venue',
+        source: {
+          item_id: '11111111-2222-4333-8444-555555555555',
+          path: 'notes/venue.md',
+          revision: '0123456789abcdef0123456789abcdef01234567',
+          selection: { kind: 'all' },
+        },
+        units: {},
+        transforms: [],
+      },
+    ],
+    spec: { root: 'root', elements: {} },
+    charts: { stages: { data: { name: 'report' }, mark: 'bar' } },
+  });
+  const block = (value: unknown = stored()) => JSON.stringify(value, null, 2);
+  const body = (prose: string, text = block()) =>
+    `${prose}\`\`\`json okf-jawn-view\n${text}\n\`\`\`\n`;
+  const read = (text: string, properties: Record<string, unknown> = titled) =>
+    parseViewFile({ properties, body: text }, workspace);
+  /** The refusal of a file that must not read, or a failed expectation. */
+  function refusal(text: string, properties?: Record<string, unknown>) {
+    const result = read(text, properties);
+    if (result.ok) throw new Error('the file read as a View');
+    return result;
+  }
+  /** The stored block with its first binding (or that binding's source) edited. */
+  function edited(
+    change: (binding: Record<string, unknown>, source: Record<string, unknown>) => void,
+  ) {
+    const value = stored();
+    const binding = value.bindings[0] as unknown as Record<string, unknown>;
+    change(binding, binding.source as Record<string, unknown>);
+    return body('', block(value));
+  }
+
+  it('reads the title property, the prose before the block and the block, in the given workspace', () => {
+    const result = read(body('Two lines\nof prose\n\n\n'));
+    if (!result.ok) throw new Error(result.message);
+    expect(zViewDocument.parse(result.document)).toStrictEqual(result.document);
+    expect(result.document.title).toBe('Pipeline throughput');
+    expect(result.document.description).toBe('Two lines\nof prose');
+    expect(result.document.bindings.map((binding) => binding.source.workspace_id)).toEqual([
+      workspace,
+      workspace,
+    ]);
+    for (const binding of result.document.bindings) {
+      expect(Object.hasOwn(binding, 'materialized')).toBe(false);
+      expect(Object.hasOwn(binding.source, 'locations')).toBe(false);
+    }
+    expect(result.document.bindings[0]?.source.digest).toBe('b'.repeat(64));
+    expect(Object.keys(result.document.charts ?? {})).toEqual(['stages']);
+    const bare = read(body(''));
+    expect(bare.ok && bare.document.description).toBe('');
+    // The same file in another workspace binds there and differs in nothing else.
+    const other = 'aaaaaaaa-bbbb-4ccc-8ddd-000000000002';
+    const elsewhere = parseViewFile(
+      { properties: titled, body: body('Two lines\nof prose\n\n\n') },
+      other,
+    );
+    if (!elsewhere.ok) throw new Error(elsewhere.message);
+    expect(
+      elsewhere.document.bindings.every((binding) => binding.source.workspace_id === other),
+    ).toBe(true);
+    expect(elsewhere.document.spec).toStrictEqual(result.document.spec);
+  });
+
+  it('reads a CRLF file as its LF spelling', () => {
+    const lf = body('Prose\n\n');
+    expect(read(lf.replaceAll('\n', '\r\n'))).toStrictEqual(read(lf));
+  });
+
+  it('keeps a fence of another info string in the prose as prose', () => {
+    const prose = 'An example:\n\n```js\nconsole.log(1);\n```\n\n';
+    const result = read(body(prose));
+    if (!result.ok) throw new Error(result.message);
+    expect(result.document.description).toBe('An example:\n\n```js\nconsole.log(1);\n```');
+  });
+
+  it('refuses a body without exactly one block that ends it', () => {
+    const one = body('');
+    expect(refusal('Only prose.\n')).toMatchObject({ problem: 'no_block', pointer: null });
+    expect(refusal('Only prose.\n').message).toMatch(/ends with one/);
+    const twice = refusal(`${one}\n${one}`);
+    expect(twice.problem).toBe('two_blocks');
+    expect(twice.message).toMatch(/2 okf-jawn-view blocks/);
+    const trailing = refusal(`${one}More prose.\n`);
+    expect(trailing.problem).toBe('not_last');
+    expect(trailing.message).toMatch(/must end the body/);
+    const open = refusal(`\`\`\`json okf-jawn-view\n${block()}\n`);
+    expect(open.problem).toBe('not_closed');
+    expect(open.message).toMatch(/not closed/);
+  });
+
+  it('reads only the exact opening line: a block of another info string is no View block', () => {
+    for (const marker of [
+      '```json',
+      '```JSON okf-jawn-view',
+      ' ```json okf-jawn-view',
+      '````json okf-jawn-view',
+      '~~~json okf-jawn-view',
+      '```json okf-jawn-view extra',
+    ]) {
+      const refused = refusal(`${marker}\n${block()}\n\`\`\`\n`);
+      expect(refused.problem, marker).toBe('no_block');
+    }
+  });
+
+  it('counts the marker quoted inside a fence of the prose as a second block', () => {
+    const quoted = refusal(body('~~~\n```json okf-jawn-view\n~~~\n\n'));
+    expect(quoted.problem).toBe('two_blocks');
+    expect(quoted.message).toMatch(/2 okf-jawn-view blocks/);
+  });
+
+  it('refuses a block that repeats a key, where it repeats', () => {
+    const top = block().replace('"mode": "pinned",', '"mode": "pinned",\n  "mode": "live",');
+    const repeated = refusal(body('', top));
+    expect(repeated).toMatchObject({ problem: 'repeated_key', pointer: null });
+    expect(repeated.message).toMatch(/`mode` is repeated/);
+    const inner = block().replace('"units": {}', '"units": { "a": "x", "a": "y" }');
+    expect(refusal(body('', inner))).toMatchObject({
+      problem: 'repeated_key',
+      pointer: '/bindings/1/units',
+    });
+  });
+
+  it('refuses a derived field by name, and an unknown field, at its pointer', () => {
+    const named: Array<
+      [
+        string,
+        string,
+        RegExp,
+        (binding: Record<string, unknown>, source: Record<string, unknown>) => void,
+      ]
+    > = [
+      [
+        'workspace_id',
+        '/bindings/0/source/workspace_id',
+        /own workspace/,
+        (_, source) => {
+          source.workspace_id = [];
+        },
+      ],
+      [
+        'locations',
+        '/bindings/0/source/locations',
+        /derived/,
+        (_, source) => {
+          source.locations = [];
+        },
+      ],
+      [
+        'materialized',
+        '/bindings/0/materialized',
+        /resolved/,
+        (binding) => {
+          binding.materialized = [];
+        },
+      ],
+    ];
+    for (const [key, pointer, gist, change] of named) {
+      const refused = refusal(edited(change));
+      expect(refused, key).toMatchObject({ problem: 'schema', pointer });
+      expect(refused.message, key).toMatch(gist);
+    }
+    expect(refusal(body('', block({ ...stored(), theme: 'dark' })))).toMatchObject({
+      problem: 'schema',
+      pointer: '/theme',
+    });
+  });
+
+  it('refuses a title that is absent or not a string', () => {
+    expect(refusal(body(''), {}).pointer).toBe('/title');
+    expect(refusal(body(''), { title: 2024 }).pointer).toBe('/title');
+  });
+
+  it('refuses a later version for its version, before its fields', () => {
+    const refused = refusal(body('', block({ ...stored(), schema_version: 2, theme: 'dark' })));
+    expect(refused).toMatchObject({ problem: 'version', pointer: '/schema_version' });
+    expect(refused.message).toMatch(/version 2/);
+  });
+
+  it('refuses a missing or mistyped field at its pointer, and a block that is not JSON', () => {
+    const { mode: _mode, ...modeless } = stored();
+    expect(refusal(body('', block(modeless)))).toMatchObject({
+      problem: 'schema',
+      pointer: '/mode',
+    });
+    const path = edited((_, source) => {
+      source.path = 'notes/<venue>.md';
+    });
+    expect(refusal(path)).toMatchObject({ problem: 'schema', pointer: '/bindings/0/source/path' });
+    const notJson = refusal(body('', '{ "schema_version": 1,'));
+    expect(notJson.problem).toBe('not_json');
+    expect(notJson.message).toMatch(/not JSON/);
   });
 });
