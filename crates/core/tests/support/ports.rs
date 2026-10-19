@@ -349,6 +349,9 @@ impl RecordStore for FakeRecords {
     fn get_job<'a>(&'a self, _scope: &'a JobScope, _job: JobId) -> PortFuture<'a, Job> {
         unused()
     }
+    fn job_mutation<'a>(&'a self, _scope: &'a JobScope, _job: JobId) -> PortFuture<'a, MutationId> {
+        unused()
+    }
     fn list_jobs<'a>(
         &'a self,
         _scope: &'a JobScope,

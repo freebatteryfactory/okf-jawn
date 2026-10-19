@@ -11,6 +11,7 @@ import { Link } from '@tanstack/react-router';
 import { type MouseEvent, useEffect } from 'react';
 import type { Revision } from '../../api/generated/types.gen';
 import { ATTENTION_AUTO_PAGES, useAttention, warningsOf } from './attention';
+import { useAttentionLifecycle } from './freshness';
 
 export interface AttentionLinkProps {
   workspaceId: string;
@@ -24,13 +25,21 @@ export interface AttentionLinkProps {
 
 export function AttentionLink({ workspaceId, head, search, onFollow }: AttentionLinkProps) {
   const attention = useAttention(workspaceId, head);
+  const feed = useAttentionLifecycle(workspaceId, head);
   const { hasNextPage, isFetching, isError, fetchNextPage } = attention;
   const pageCount = attention.data?.pages.length ?? 0;
   useEffect(() => {
-    if (hasNextPage && !isFetching && !isError && pageCount < ATTENTION_AUTO_PAGES) {
+    if (
+      feed !== 'hidden' &&
+      !attention.isStale &&
+      hasNextPage &&
+      !isFetching &&
+      !isError &&
+      pageCount < ATTENTION_AUTO_PAGES
+    ) {
       void fetchNextPage();
     }
-  }, [hasNextPage, isFetching, isError, pageCount, fetchNextPage]);
+  }, [feed, attention.isStale, hasNextPage, isFetching, isError, pageCount, fetchNextPage]);
   const listed = warningsOf(attention.data?.pages).length;
   return (
     <Link
@@ -38,6 +47,11 @@ export function AttentionLink({ workspaceId, head, search, onFollow }: Attention
       params={{ workspaceId }}
       search={search}
       onClick={onFollow}
+      title={
+        feed === 'unavailable'
+          ? 'Live updates are unavailable. Attention rechecks when opened or when you return to this window.'
+          : undefined
+      }
     >
       Attention{listed > 0 ? ` (${listed}${hasNextPage ? '+' : ''})` : ''}
     </Link>
