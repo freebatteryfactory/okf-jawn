@@ -32,7 +32,9 @@
 //!    writes it where an allocation failure reaches it as a typed error), or exactly the
 //!    message Rust's runtime prints before it aborts on one (`memory allocation of N bytes
 //!    failed`), hit the cap. std's own backtrace note after that message is passed over,
-//!    exactly; no other line is.
+//!    exactly; no other line is. The child runs with std's backtrace style off
+//!    (`spawn_capped` removes `RUST_BACKTRACE` and `RUST_LIB_BACKTRACE`), so that note is the
+//!    only line std can print after the message.
 //! 5. A child the macOS watchdog killed hit the cap.
 //! 6. Any other end without a result is a crash.
 
@@ -116,10 +118,20 @@ pub const ALLOCATION_FAILURE_MARKER: &str =
 /// `memory allocation of N bytes failed` (std's default allocation-error handler).
 const RUST_ALLOCATION_FAILURE: (&str, &str) = ("memory allocation of ", " bytes failed");
 
-/// The line std's runtime may print after that message, exactly (observed on Linux under
-/// `RLIMIT_DATA`): it is passed over when the last line is read, and nothing else is.
+/// The line std's runtime prints after that message when its backtrace style is off, exactly
+/// (observed on Linux under `RLIMIT_DATA`): it is passed over when the last line is read, and
+/// nothing else is. The child always runs with the style off: `spawn_capped` removes
+/// `BACKTRACE_VARIABLES` from its environment, so this note is the only line after the message.
+/// With the style on, std's out-of-memory hook prints a backtrace after the message instead, or,
+/// when that printing allocates and fails, re-enters and ends with "skipping backtrace printing
+/// to avoid potential recursion" (Rust 1.99.0 `library/std/src/alloc.rs`,
+/// `default_alloc_error_hook`), and the end would read as a crash.
 const RUST_BACKTRACE_NOTE: &str =
     "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace";
+
+/// The variables that turn std's backtrace style on in the child, removed from its environment
+/// by `spawn_capped` whatever the supervisor's environment or the command set.
+const BACKTRACE_VARIABLES: [&str; 2] = ["RUST_BACKTRACE", "RUST_LIB_BACKTRACE"];
 
 /// How often the macOS watchdog samples the child, within the 50 to 100 ms the plan allows.
 pub const WATCHDOG_SAMPLE_PERIOD_MS: u64 = 75;
@@ -203,10 +215,20 @@ pub fn classify(end: &ChildEnd, limit_bytes: u64, limit_seconds: u32) -> ChildVe
 /// child runs outside the cap. On Linux the child sets its own `RLIMIT_DATA` (`limit_self`). On
 /// macOS `supervise` runs the watchdog.
 ///
+/// The child runs without `RUST_BACKTRACE` and `RUST_LIB_BACKTRACE` (`BACKTRACE_VARIABLES`),
+/// whether the supervisor's environment holds them or `command` set them: with either, std's
+/// out-of-memory hook goes on past its message (a backtrace, or a re-entry that ends "skipping
+/// backtrace printing to avoid potential recursion"), and a child stopped at the cap would no
+/// longer end with the line `classify` reads as the cap where no other evidence says so, as
+/// under Linux's `RLIMIT_DATA` (`RUST_BACKTRACE_NOTE`).
+///
 /// # Errors
 /// Returns `Internal` when the job object cannot be created with the limit or the child cannot
 /// be started: a worker fault, never an uncapped child.
 pub fn spawn_capped(mut command: Command, limit_bytes: u64) -> Result<CappedChild, ApiError> {
+    for variable in BACKTRACE_VARIABLES {
+        let _removed = command.env_remove(variable);
+    }
     let _configured = command
         .env(MEMORY_LIMIT_ENV, limit_bytes.to_string())
         .stdin(Stdio::null())

@@ -29,8 +29,8 @@ use okf_jawn_core::jobs::{
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
     BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges, Committed,
-    DiffQuery, FolderListing, LocalSource, LogQuery, ObjectInfo, ObjectRead, Page, Promotion,
-    RulesFile, StorageScope, VersionStore, WorkspaceTree,
+    CommittedFiles, DiffQuery, FilePage, FolderListing, LocalSource, LogQuery, ObjectInfo,
+    ObjectRead, Page, Promotion, RulesFile, StorageScope, VersionStore, WorkspaceTree,
 };
 use tokio::io::AsyncReadExt;
 
@@ -220,6 +220,14 @@ impl VersionStore for FakeVersions {
         _revision: &'a Revision,
         _mutation_id: MutationId,
     ) -> PortFuture<'a, ObjectInfo> {
+        unused()
+    }
+    fn committed_files<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _revision: &'a Revision,
+        _page: FilePage,
+    ) -> PortFuture<'a, CommittedFiles> {
         unused()
     }
 }

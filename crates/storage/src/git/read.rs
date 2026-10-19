@@ -5,22 +5,29 @@
 //! names, so a moved item is found at its new path. `item_at_path` answers what is at one path
 //! of that revision, by direct tree lookup, and summarizes it exactly as `list` does.
 
-use git2::{Oid, Repository, Tree};
+use git2::{ObjectType, Oid, Repository, Tree};
 use okf_jawn_contract::conventions::NamingRules;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::{SuppliedText, TextOrigin};
 use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath};
 use okf_jawn_contract::item::{ItemDocument, ItemSummary, TypeDefinition};
 use okf_jawn_contract::source::SourceAppearance;
-use okf_jawn_core::portable::item_content_digest;
+use okf_jawn_core::portable::{content_digest, item_content_digest};
 use okf_jawn_core::storage::{
-    FolderListing, Page, Provenance, RulesFile, RulesParseError, TreeItem, WorkspaceTree,
+    CommittedFile, CommittedFiles, CommittedItem, FilePage, FolderListing, Page, Provenance,
+    RulesFile, RulesParseError, TreeItem, WorkspaceTree,
 };
 
 use super::edit::{appearance_file, correction_file, supplied_file};
+use super::export::refuse_off_the_line;
 use super::history::last_change;
 use super::item::{ItemFile, RULES_FILE, TYPES_FILE, is_item_path};
 use super::repo::{blob_bytes, commit_of, files, git, internal};
+
+/// The Git file mode of a regular file.
+const REGULAR_FILE: i32 = 0o100_644;
+/// The Git file mode of an executable file, also a regular file.
+const EXECUTABLE_FILE: i32 = 0o100_755;
 
 /// Every item of a tree with its path, in path order.
 pub(crate) fn items(
@@ -48,7 +55,8 @@ fn items_of(
 
 /// The item a file at `path` holds: `None` when `path` cannot hold an item (`is_item_path`)
 /// or the text carries no application header. `items`, and so `list`, `item_at_path` and the
-/// item-filtered log (`history::log`) decide what is an item here and nowhere else.
+/// item-filtered log (`history::log`), and `committed_files` decide what is an item here and
+/// nowhere else (`item_in`).
 pub(crate) fn item_file(
     repository: &Repository,
     path: &str,
@@ -57,10 +65,122 @@ pub(crate) fn item_file(
     if !is_item_path(path) {
         return Ok(None);
     }
+    item_in(path, blob_bytes(repository, blob)?)
+}
+
+/// The item the bytes of a file at an item path hold (`item_file`).
+fn item_in(path: &str, bytes: Vec<u8>) -> Result<Option<ItemFile>, ApiError> {
     parses::record();
-    let text = String::from_utf8(blob_bytes(repository, blob)?)
-        .map_err(|_| internal(format!("{path} is not UTF-8")))?;
+    let text = String::from_utf8(bytes).map_err(|_| internal(format!("{path} is not UTF-8")))?;
     ItemFile::parse(&text)
+}
+
+/// One page of every file of `revision`'s tree, in byte order of path
+/// (`VersionStore::committed_files`).
+///
+/// The tree's paths are listed first without reading a blob; only the files of the page are
+/// read and, at an item path, parsed. So a whole walk reads each file once and visits the
+/// tree's paths once a page.
+pub(crate) fn committed_files(
+    repository: &Repository,
+    revision: &Revision,
+    page: &FilePage,
+) -> Result<CommittedFiles, ApiError> {
+    let commit = commit_of(repository, revision)?;
+    refuse_off_the_line(repository, commit.id())?;
+    let tree = commit.tree().map_err(|error| git(&error))?;
+    let mut paths = Vec::new();
+    regular_files(repository, &tree, "", &mut paths)?;
+    paths.sort();
+    let limit = usize::from(page.limit.clamp(1, 500));
+    let mut remaining = paths
+        .into_iter()
+        .filter(|(path, _)| {
+            page.after
+                .as_deref()
+                .is_none_or(|after| path.as_str() > after)
+        })
+        .peekable();
+    let mut files = Vec::new();
+    let mut held: u64 = 0;
+    for (path, blob) in remaining.by_ref() {
+        let bytes = blob_bytes(repository, blob)?;
+        held = held.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        let item = if is_item_path(&path) {
+            item_in(&path, bytes.clone())?
+                .map(|file| committed_item(&file))
+                .transpose()?
+        } else {
+            None
+        };
+        files.push(CommittedFile { path, bytes, item });
+        if files.len() >= limit || held > page.max_bytes {
+            break;
+        }
+    }
+    let next_after = remaining
+        .peek()
+        .is_some()
+        .then(|| files.last().map(|file| file.path.clone()))
+        .flatten();
+    Ok(CommittedFiles { files, next_after })
+}
+
+/// What `show` would answer of an item file that a portable export needs: its identity, role,
+/// content digest (computed from the same body and properties `show` builds its document from)
+/// and the digests its header names.
+fn committed_item(file: &ItemFile) -> Result<CommittedItem, ApiError> {
+    Ok(CommittedItem {
+        item_id: file.header.item_id,
+        kind: file.kind(),
+        content_digest: content_digest(&file.document.body, &file.properties())?,
+        source: file.header.source.clone(),
+        record: file
+            .header
+            .extraction
+            .as_ref()
+            .and_then(|extraction| extraction.digest.clone()),
+    })
+}
+
+/// Every regular file under `tree`, as `/`-separated paths below `prefix` with their blobs.
+///
+/// A link or a submodule is `Internal`: no store edit writes one, and a portable export must not
+/// write a link's target text as if it were a file.
+fn regular_files(
+    repository: &Repository,
+    tree: &Tree<'_>,
+    prefix: &str,
+    found: &mut Vec<(String, Oid)>,
+) -> Result<(), ApiError> {
+    for entry in tree {
+        let name = entry
+            .name()
+            .ok()
+            .ok_or_else(|| internal("a tree entry name is not UTF-8"))?;
+        let path = if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        match (entry.kind(), entry.filemode()) {
+            (Some(ObjectType::Tree), _) => {
+                let child = repository
+                    .find_tree(entry.id())
+                    .map_err(|error| git(&error))?;
+                regular_files(repository, &child, &path, found)?;
+            }
+            (Some(ObjectType::Blob), REGULAR_FILE | EXECUTABLE_FILE) => {
+                found.push((path, entry.id()));
+            }
+            _ => {
+                return Err(internal(format!(
+                    "{path} is not a regular file of the tree (a link or a submodule)"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The navigation summary of one item at `revision`. `list` and `item_at_path` both summarize

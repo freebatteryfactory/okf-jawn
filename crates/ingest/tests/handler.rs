@@ -7,9 +7,9 @@
 #[path = "../../../tests/support/check.rs"]
 mod check;
 #[path = "support/ports.rs"]
-mod ports;
+pub mod ports;
 #[path = "support/records.rs"]
-mod records;
+pub mod records;
 
 mod job_handler {
     use std::path::Path;
@@ -915,24 +915,15 @@ mod job_handler {
     #[tokio::test]
     async fn a_kind_not_built_yet_fails_and_is_never_reported_done() -> TestResult {
         let world = world()?;
-        let kinds = [
-            (
-                5,
-                JobSpec::ExportView {
-                    item_id: serde_json::from_value::<ItemId>(json!(
-                        "00000000-0000-0000-0000-0000000000ef"
-                    ))?,
-                    revision: base()?,
-                },
-            ),
-            (
-                21,
-                JobSpec::ExportWorkspace {
-                    revision: base()?,
-                    include_history: true,
-                },
-            ),
-        ];
+        let kinds = [(
+            5,
+            JobSpec::ExportView {
+                item_id: serde_json::from_value::<ItemId>(json!(
+                    "00000000-0000-0000-0000-0000000000ef"
+                ))?,
+                revision: base()?,
+            },
+        )];
         for (number, spec) in kinds {
             let kind = spec.kind();
             let id = job(&world, number, workspace_scope()?, spec)?;
