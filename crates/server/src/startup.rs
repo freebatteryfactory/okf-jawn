@@ -32,11 +32,21 @@
 //! runtime stops (a running job is abandoned under its lease, for the next process); the launch
 //! link file is removed; every store is dropped, which releases the data directory's lock.
 
+use std::future::Future as _;
+use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Router;
+use axum::body::Body;
+use axum::extract::Request;
+use axum::middleware::{self, Next};
+use axum::response::Response;
+use axum::serve::{Listener, ListenerExt as _};
+use futures_util::StreamExt as _;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_core::access::AccessControl;
 use okf_jawn_core::application::{ApplicationConfig, ApplicationService, Ports};
@@ -51,8 +61,10 @@ use okf_jawn_ingest::handler::{DRAIN_BOUND, HandlerLimits, HandlerPorts, IngestH
 use okf_jawn_ingest::runtime::{JobRuntime, RuntimeConfig};
 use okf_jawn_mcp::{DEFAULT_MAX_REQUEST_BODY_BYTES, McpConfig, McpPorts, streamable_http_service};
 use okf_jawn_storage::Storage;
-use tokio::net::TcpListener;
-use tokio_util::sync::CancellationToken;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinError;
+use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 use workos::transport::SharedTransport;
 
 use crate::BoundApplication;
@@ -62,6 +74,7 @@ use crate::authkit::WorkosLogin;
 use crate::config::{AuthConfig, AuthKind, HostedConfig};
 use crate::connect::{ConnectTokens, IssuerKeys, install_crypto};
 use crate::cookies::CrateCookies;
+use crate::errors::error_response;
 use crate::events::{EventStreams, POLL_INTERVAL};
 use crate::grants::{SystemClock, select_access};
 use crate::identity::{BearerAuth, Identity, IdentityPorts};
@@ -96,6 +109,18 @@ pub struct Composition {
 struct Clients {
     transport: SharedTransport,
     hosted: Option<(HostedConfig, Arc<workos::Client>)>,
+}
+
+/// Every accepted socket can be closed at the end of the request grace period.
+struct StoppingListener {
+    listener: TcpListener,
+    stop: CancellationToken,
+}
+
+/// Axum owns its connection tasks: cancelling only the listener task does not stop this IO.
+struct StoppingIo {
+    stream: TcpStream,
+    stop: Pin<Box<WaitForCancellationFutureOwned>>,
 }
 
 /// How long a local browser session lasts (owner, 2026-10-18).
@@ -448,6 +473,19 @@ async fn serve_until(
     stop: &CancellationToken,
     streams_stop: &CancellationToken,
 ) -> Result<(), ApiError> {
+    let hard_stop = CancellationToken::new();
+    let app = until_stopped(app, hard_stop.clone());
+    let sandbox = until_stopped(sandbox, hard_stop.clone());
+    // TapIo's generic Connected implementation keeps the real SocketAddr with our IO wrapper.
+    let app_listener = StoppingListener {
+        listener: app_listener,
+        stop: hard_stop.clone(),
+    }
+    .tap_io(|_| {});
+    let sandbox_listener = StoppingListener {
+        listener: sandbox_listener,
+        stop: hard_stop.clone(),
+    };
     let app_stop = stop.clone();
     let mut app_task = tokio::spawn(async move {
         axum::serve(
@@ -465,7 +503,7 @@ async fn serve_until(
     });
     // Which server ended first, if one did before `stop`: a task already awaited to its end is
     // never awaited again.
-    let (failed, app_running, sandbox_running) = tokio::select! {
+    let (failed, mut app_running, mut sandbox_running) = tokio::select! {
         () = stop.cancelled() => (None, true, true),
         ended = &mut app_task => (Some(ended), false, true),
         ended = &mut sandbox_task => (Some(ended), true, false),
@@ -473,30 +511,137 @@ async fn serve_until(
     // Whatever ended serving, everything stops now.
     stop.cancel();
     streams_stop.cancel();
-    let (app_abort, sandbox_abort) = (app_task.abort_handle(), sandbox_task.abort_handle());
+    let mut served = failed.map_or(Ok(()), listener_result);
     let drained = tokio::time::timeout(SHUTDOWN_GRACE, async {
         if app_running {
-            let _app = app_task.await;
+            let ended = (&mut app_task).await;
+            if served.is_ok() {
+                served = listener_result(ended);
+            }
+            app_running = false;
         }
         if sandbox_running {
-            let _sandbox = sandbox_task.await;
+            let ended = (&mut sandbox_task).await;
+            if served.is_ok() {
+                served = listener_result(ended);
+            }
+            sandbox_running = false;
         }
     })
     .await;
     if drained.is_err() {
-        app_abort.abort();
-        sandbox_abort.abort();
+        // Stop request futures, response bodies and socket IO, then await Axum's connection
+        // drain. Aborting its listener task would detach the connections and retain storage.
+        hard_stop.cancel();
+        if app_running {
+            let ended = app_task.await;
+            if served.is_ok() {
+                served = listener_result(ended);
+            }
+        }
+        if sandbox_running {
+            let ended = sandbox_task.await;
+            if served.is_ok() {
+                served = listener_result(ended);
+            }
+        }
     }
-    match failed {
-        None | Some(Ok(Ok(()))) => Ok(()),
-        Some(Ok(Err(error))) => Err(ApiError::new(
+    served
+}
+
+/// Cancel service futures and streaming bodies as well as network IO at the hard stop.
+fn until_stopped(router: Router, stop: CancellationToken) -> Router {
+    router.layer(middleware::from_fn(move |request: Request, next: Next| {
+        let stop = stop.clone();
+        async move {
+            let response = tokio::select! {
+                biased;
+                () = stop.cancelled() => return error_response(ApiError::new(
+                    ErrorCode::Unavailable, "the server is stopping",
+                )),
+                response = next.run(request) => response,
+            };
+            let (parts, body) = response.into_parts();
+            Response::from_parts(
+                parts,
+                Body::from_stream(body.into_data_stream().take_until(stop.cancelled_owned())),
+            )
+        }
+    }))
+}
+
+/// Preserve a listener failure even if it finishes while the other listener is draining.
+fn listener_result(ended: Result<io::Result<()>, JoinError>) -> Result<(), ApiError> {
+    match ended {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(ApiError::new(
             ErrorCode::Unavailable,
             format!("a listener failed while serving ({:?})", error.kind()),
         )),
-        Some(Err(_)) => Err(ApiError::new(
+        Err(_) => Err(ApiError::new(
             ErrorCode::Internal,
             "a listener's task stopped",
         )),
+    }
+}
+
+impl Listener for StoppingListener {
+    type Io = StoppingIo;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        let (stream, address) = Listener::accept(&mut self.listener).await;
+        (
+            StoppingIo {
+                stream,
+                stop: Box::pin(self.stop.clone().cancelled_owned()),
+            },
+            address,
+        )
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.listener.local_addr()
+    }
+}
+
+impl AsyncRead for StoppingIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.stop.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()));
+        }
+        Pin::new(&mut self.stream).poll_read(cx, buffer)
+    }
+}
+
+impl AsyncWrite for StoppingIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if self.stop.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()));
+        }
+        Pin::new(&mut self.stream).poll_write(cx, buffer)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.stop.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()));
+        }
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.stop.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()));
+        }
+        Pin::new(&mut self.stream).poll_shutdown(cx)
     }
 }
 
