@@ -116,14 +116,6 @@ pub type ExportTreeKey = (String, WorkspaceId, String);
 /// Controlled callback after a page is answered; it may cancel the running export.
 pub type FilePageHook = Box<dyn Fn(usize) -> Result<(), ApiError> + Send + Sync>;
 
-fn export_tree_key(scope: &StorageScope, revision: &Revision) -> ExportTreeKey {
-    (
-        scope.tenant_id.as_str().to_owned(),
-        scope.workspace_id,
-        revision.as_str().to_owned(),
-    )
-}
-
 /// An `UploadStore` holding uploads and recording which job consumed each.
 ///
 /// `consume` encodes the port doc: an incomplete upload is `InvalidInput`, one another job
@@ -1780,6 +1772,14 @@ impl CandidateCheck for RefuseAll {
             "not a conformant OKF bundle",
         ))
     }
+}
+
+fn export_tree_key(scope: &StorageScope, revision: &Revision) -> ExportTreeKey {
+    (
+        scope.tenant_id.as_str().to_owned(),
+        scope.workspace_id,
+        revision.as_str().to_owned(),
+    )
 }
 
 /// Run `check` once over a staged directory holding every item of the candidate tree, as

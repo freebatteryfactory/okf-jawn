@@ -9,9 +9,9 @@
 #[path = "../../../tests/support/check.rs"]
 mod check;
 #[path = "support/ports.rs"]
-mod ports;
+pub mod ports;
 #[path = "support/records.rs"]
-mod records;
+pub mod records;
 
 mod export_workspace {
     use std::collections::BTreeMap;
@@ -42,7 +42,8 @@ mod export_workspace {
     };
     use okf_jawn_core::items::SourceHeader;
     use okf_jawn_core::jobs::{
-        JobHandler, JobScope, JobSpec, NewArtifact, NewJob, RecordStore, RevisionMapping,
+        ArtifactRecord, JobHandler, JobScope, JobSpec, NewArtifact, NewJob, RecordStore,
+        RevisionMapping,
     };
     use okf_jawn_core::portable::content_digest;
     use okf_jawn_core::storage::{
@@ -264,7 +265,7 @@ mod export_workspace {
     }
 
     /// Decode only fixture inputs as storage's YAML projection does; no export-writer result
-    /// is computed here. C3 deliberately does not import the not-yet-built C2 json_of API.
+    /// is computed here. C3 deliberately does not import the not-yet-built C2 `json_of` API.
     fn fixture_json(value: &YamlValue) -> Value {
         match value {
             YamlValue::Null => Value::Null,
@@ -512,7 +513,7 @@ mod export_workspace {
             .set_tree(&storage_scope()?, &base()?, fixture.files.clone())?;
         let id = export_job(&world, 1, false)?;
         assert!(run(&world, id).await?);
-        assert_eq!(world.records.entry(id)?.job.state, JobState::Completed);
+        assert_eq!(world.records.entry(id)?.job.state, JobState::Succeeded);
         let (archive, _) = archive_of(&world, id)?;
         let found = entries(&archive)?;
 
@@ -584,7 +585,10 @@ mod export_workspace {
                 world.blobs.bytes(digest)?.as_slice()
             );
         }
-        assert!(world.versions.histories()?.is_empty());
+        assert_eq!(
+            world.versions.histories()?,
+            [] as [(Revision, MutationId); 0]
+        );
         Ok(())
     }
 
@@ -703,7 +707,10 @@ mod export_workspace {
                 assert_eq!(world.versions.histories()?, [(base()?, mutation(3)?)]);
             } else {
                 assert!(!names(&found).contains(&HISTORY_FILE.to_owned()));
-                assert!(world.versions.histories()?.is_empty());
+                assert_eq!(
+                    world.versions.histories()?,
+                    [] as [(Revision, MutationId); 0]
+                );
             }
         }
         Ok(())
@@ -835,15 +842,15 @@ mod export_workspace {
         let error = some(entry.job.error.as_ref(), "the failure")?;
         assert_eq!(error.code, ErrorCode::NotFound);
         assert!(matches!(
-            &error.detail,
+            error.detail.as_deref(),
             Some(ErrorDetail::Invalidated { purge_id, .. }) if *purge_id == purge
         ));
         assert!(
             world.versions.file_pages()?.is_empty(),
             "nothing read at it"
         );
-        assert!(world.records.artifacts()?.is_empty());
-        assert!(world.blobs.puts()?.is_empty());
+        assert_eq!(world.records.artifacts()?, [] as [ArtifactRecord; 0]);
+        assert_eq!(world.blobs.puts()?, [] as [ObjectInfo; 0]);
         Ok(())
     }
 
@@ -867,8 +874,8 @@ mod export_workspace {
                 some(entry.job.error.as_ref(), "the failure")?.code,
                 ErrorCode::NotFound
             );
-            assert!(world.records.artifacts()?.is_empty());
-            assert!(world.blobs.puts()?.is_empty());
+            assert_eq!(world.records.artifacts()?, [] as [ArtifactRecord; 0]);
+            assert_eq!(world.blobs.puts()?, [] as [ObjectInfo; 0]);
         }
         Ok(())
     }
@@ -892,7 +899,7 @@ mod export_workspace {
         let entry = world.records.entry(id)?;
         assert_eq!(entry.job.state, JobState::Failed);
         assert_eq!(entry.job.retryable, Some(true));
-        assert!(world.records.artifacts()?.is_empty());
+        assert_eq!(world.records.artifacts()?, [] as [ArtifactRecord; 0]);
 
         // Queued again under the same identity, it writes the same bytes, and one artifact.
         world
@@ -934,10 +941,13 @@ mod export_workspace {
             .await?;
         assert!(run(&world, id).await?);
         let entry = world.records.entry(id)?;
-        assert_eq!(entry.job.state, JobState::Completed);
+        assert_eq!(entry.job.state, JobState::Succeeded);
         let completed = some(entry.completions.first(), "the replay's completion")?;
         assert_eq!(completed.artifact, Some(record.id));
-        assert_eq!(completed.outputs, [previous.digest.clone()]);
+        assert_eq!(
+            completed.outputs.as_slice(),
+            std::slice::from_ref(&previous.digest)
+        );
         assert_eq!(world.records.artifacts()?.len(), 1);
         let puts = world.blobs.puts()?;
         assert_eq!(puts.len(), 1);
@@ -1002,9 +1012,9 @@ mod export_workspace {
         let entry = world.records.entry(id)?;
         assert_eq!(entry.job.state, JobState::Cancelled);
         assert!(entry.completions.is_empty());
-        assert!(entry.failures.is_empty());
-        assert!(world.records.artifacts()?.is_empty());
-        assert!(world.blobs.puts()?.is_empty());
+        assert_eq!(entry.failures, [] as [(String, bool); 0]);
+        assert_eq!(world.records.artifacts()?, [] as [ArtifactRecord; 0]);
+        assert_eq!(world.blobs.puts()?, [] as [ObjectInfo; 0]);
         assert_eq!(
             world.versions.file_pages()?.len(),
             1,
@@ -1023,7 +1033,7 @@ mod export_workspace {
         let id = export_job(&world, 13, false)?;
         assert!(run(&world, id).await?);
         let found = entries(&archive_of(&world, id)?.0)?;
-        assert!(!found.is_empty());
+        assert_ne!(found, [] as [Entry; 0]);
         for (name, _, fixed) in &found {
             assert!(fixed, "{name} is stored with the fixed time and mode");
         }
@@ -1201,7 +1211,7 @@ mod export_workspace {
                 ErrorCode::Internal,
                 "{path}"
             );
-            assert!(world.records.artifacts()?.is_empty());
+            assert_eq!(world.records.artifacts()?, [] as [ArtifactRecord; 0]);
         }
         Ok(())
     }
@@ -1231,8 +1241,8 @@ mod export_workspace {
                 ErrorCode::NotFound,
                 "{missing}"
             );
-            assert!(world.records.artifacts()?.is_empty());
-            assert!(world.blobs.puts()?.is_empty());
+            assert_eq!(world.records.artifacts()?, [] as [ArtifactRecord; 0]);
+            assert_eq!(world.blobs.puts()?, [] as [ObjectInfo; 0]);
         }
         Ok(())
     }

@@ -52,9 +52,9 @@
 //! worker (`JobQueue::enqueue`), and answers the queued `Job` (status 202). A failed wake-up
 //! fails the request; its retry answers the same job and wakes the worker again, and the
 //! worker's own sweep re-delivers every pending job in any case. `export_workspace` resolves `at`
-//! once, at acceptance, and the job's specification carries that revision. Stated, not hidden:
-//! ingest's handler does not run an export job yet (request R-I6), so an export job fails as
-//! `NotImplemented`. `backup_workspace`, `restore_workspace` and `backup_installation` reach this
+//! once, at acceptance, and the job's specification carries that revision. Ingest's portable
+//! exporter reads that pinned revision and records the completed archive as an artifact.
+//! `backup_workspace`, `restore_workspace` and `backup_installation` reach this
 //! module only in a human session (dispatch's `HUMAN_SESSION_ONLY`).
 //!
 //! A restore is checked before its job is queued: the upload must be complete, its recorded
