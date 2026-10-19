@@ -8,9 +8,12 @@
 //! sandbox capabilities), `sources` (citations and object reads), `history` (Timeline, Changes,
 //! Who, Snapshot and Rewind), `navigation` (search, links and the graph), `proposals`
 //! (proposals, their acceptance and discussion), `reviews` (confirmations and reviews),
+//! `conventions` (the naming rules: reading and saving them, a rename preview and its apply),
 //! `status` (health, readiness and the session), `purges` (recording, resuming and reading
 //! a workspace purge), `workspaces` (the catalog, archive, export, backup and restore),
 //! `events` (receipts and the two event logs), `connectors` (local connector credentials),
+//! `views` (persistent Views: reading, presenting, resolving and exporting them, and the check
+//! every saved-View write runs first),
 //! `uploads` (upload slots) and `job_control` (reading jobs, retrying and cancelling them),
 //! over the shared steps in `shared` (revision resolution, commits, receipts). Besides the
 //! operations, the service answers dispatch's archive question (`Application::archived_at`)
@@ -105,6 +108,21 @@ macro_rules! route {
     };
     (get_object) => {
         sources::get_object
+    };
+    (get_view) => {
+        views::get_view
+    };
+    (get_catalog) => {
+        views::get_catalog
+    };
+    (present_view) => {
+        views::present_view
+    };
+    (resolve_view) => {
+        views::resolve_view
+    };
+    (export_view) => {
+        views::export_view
     };
     (log_items) => {
         history::log_items
@@ -222,6 +240,18 @@ macro_rules! route {
     };
     (list_reviews) => {
         reviews::list_reviews
+    };
+    (get_rules) => {
+        conventions::get_rules
+    };
+    (set_rules) => {
+        conventions::set_rules
+    };
+    (preview_names) => {
+        conventions::preview_names
+    };
+    (apply_names) => {
+        conventions::apply_names
     };
     (create_upload) => {
         uploads::create_upload
@@ -547,6 +577,7 @@ fn is_origin(text: &str) -> bool {
 }
 
 mod connectors;
+mod conventions;
 mod drafts;
 mod events;
 mod history;
@@ -561,4 +592,5 @@ mod shared;
 mod sources;
 mod status;
 mod uploads;
+mod views;
 mod workspaces;

@@ -304,6 +304,7 @@ fn moved(item: u32, to: &str) -> Fallible<TreeEdit> {
     Ok(TreeEdit::MoveItem {
         item_id: uuid!(item)?,
         destination: path(to)?,
+        keep_alias: false,
     })
 }
 
@@ -652,6 +653,7 @@ async fn a_moved_note_returns_to_its_old_path_and_the_new_path_is_gone() -> Test
                 TreeEdit::MoveItem {
                     item_id: uuid!(10)?,
                     destination: path("archive/a.md")?,
+                    keep_alias: false,
                 },
                 TreeEdit::EditItem {
                     item_id: uuid!(10)?,
@@ -692,6 +694,7 @@ async fn restoring_over_another_items_path_conflicts_and_writes_nothing() -> Tes
                 TreeEdit::MoveItem {
                     item_id: uuid!(10)?,
                     destination: path("b.md")?,
+                    keep_alias: false,
                 },
                 note(11, "a.md", "Eleven.")?,
             ],
@@ -774,14 +777,17 @@ async fn two_items_that_traded_paths_are_restored_in_one_commit() -> TestResult 
                 TreeEdit::MoveItem {
                     item_id: uuid!(10)?,
                     destination: path("parked.md")?,
+                    keep_alias: false,
                 },
                 TreeEdit::MoveItem {
                     item_id: uuid!(11)?,
                     destination: path("x.md")?,
+                    keep_alias: false,
                 },
                 TreeEdit::MoveItem {
                     item_id: uuid!(10)?,
                     destination: path("y.md")?,
+                    keep_alias: false,
                 },
                 TreeEdit::EditItem {
                     item_id: uuid!(11)?,
