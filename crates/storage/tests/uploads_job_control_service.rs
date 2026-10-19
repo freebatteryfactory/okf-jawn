@@ -104,6 +104,7 @@ impl World {
             confirmations: Arc::new(storage.confirmations()),
             sandbox: Arc::new(storage.sandbox()),
             readiness: Arc::new(storage.readiness()),
+            backups: Arc::new(storage.backups()),
         };
         let config = ApplicationConfig::new(
             "https://sandbox.example.test".to_owned(),

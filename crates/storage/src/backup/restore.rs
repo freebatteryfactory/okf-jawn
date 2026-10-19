@@ -38,8 +38,9 @@
 //!   history, but no row; a run again with a good set completes over them
 //!   (`StorageBackups::restore_replacement`).
 //!
-//! Known gap: a View's bindings name its workspace, and the on-disk form of a View document
-//! is not decided yet (core-cli M1.6), so an import does not rewrite them.
+//! A View's file names no workspace: its bindings bind to the workspace that holds it (core
+//! `views::layout`, core M1.6 ruling E1), so an import has nothing to rewrite in it, at the head
+//! or at any revision of its history, and the restore commit keeps the archive head's tree.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

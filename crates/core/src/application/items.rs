@@ -14,7 +14,7 @@
 //! store names them to the check.
 
 use okf_jawn_contract::common::MutationResult;
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::extraction::ExtractionFilter;
 use okf_jawn_contract::identity::{At, WorkspacePath};
 use okf_jawn_contract::item::{
@@ -28,6 +28,7 @@ use super::shared::{
     Touched, Write, commit_with_receipt, invalid, mutation_id, next_page, resolve, resolve_page,
     with_content_digest, workspace_scope,
 };
+use super::views::{ViewFields, check_view_write, created_properties};
 use crate::context::OperationContext;
 use crate::echo::bounded;
 use crate::items::{refuse_header_in_type, refuse_supplied_header};
@@ -149,39 +150,49 @@ pub(super) async fn get_item(
     Ok(document)
 }
 
-/// Create a note at a new path in one commit and return it as committed, with the commit's
-/// receipt and the findings of its check (`CreatedItem`); a resumed attempt answers the first
-/// attempt's receipt and the findings the store kept for the commit.
+/// Create a note or a View at a new path in one commit and return it as committed, with the
+/// commit's receipt and the findings of its check (`CreatedItem`); a resumed attempt answers the
+/// first attempt's receipt and the findings the store kept for the commit.
 ///
 /// A source card comes only from an upload or an import, so `kind: source` is refused. A View
-/// is refused as not implemented until its file layout lands with `get_view` (construction plan
-/// M1.6), because a saved View is validated before it is written.
+/// is checked before it is written (`views::check_view_write`), with the properties the store
+/// will write: the request's, `type` and `title` set from the request.
 ///
 /// # Errors
-/// Returns `InvalidInput` on `/kind` for a source, `NotImplemented` for a View, `InvalidInput`
-/// on `/properties/okf_jawn` for a supplied application header, or any error of the commit.
+/// Returns `InvalidInput` on `/kind` for a source, `InvalidInput` on `/properties/okf_jawn` for
+/// a supplied application header, a View's refusal on `/title` or `/body`, or any error of the
+/// commit.
 pub(super) async fn create_item(
     service: &ApplicationService,
     context: &OperationContext,
     request: CreateItemRequest,
 ) -> Result<CreatedItem, ApiError> {
-    match request.kind {
-        ItemKind::Note => {}
-        ItemKind::Source => {
-            return Err(invalid(
-                "a source card is made only by an upload or an import",
-                "/kind",
-            ));
-        }
-        ItemKind::View => {
-            return Err(ApiError::new(
-                ErrorCode::NotImplemented,
-                "creating a View is not implemented in this build",
-            )
-            .with_field("/kind"));
-        }
+    if request.kind == ItemKind::Source {
+        return Err(invalid(
+            "a source card is made only by an upload or an import",
+            "/kind",
+        ));
     }
     refuse_supplied_header(&request.properties, "/properties")?;
+    if request.kind == ItemKind::View {
+        let stored = created_properties(
+            &request.properties,
+            &request.type_name,
+            Some(&request.title),
+        );
+        check_view_write(
+            service,
+            &workspace_scope(context)?,
+            &stored,
+            &request.body,
+            ViewFields {
+                title: "/title",
+                body: "/body",
+                item: None,
+            },
+        )
+        .await?;
+    }
     let item_id = derive_item_id(mutation_id(context)?, 0);
     let created = request.path.clone();
     let committed = commit_with_receipt(

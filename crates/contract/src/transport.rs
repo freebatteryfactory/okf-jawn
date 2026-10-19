@@ -59,7 +59,7 @@ pub const TRANSPORTS: &[TransportOperation] = &[
         id: "upload_content",
         method: "put",
         path: "/api/workspaces/{workspace_id}/uploads/{upload_id}/content",
-        description: "Stream authenticated original bytes into a preallocated upload, enforcing byte limits and digest verification.",
+        description: "Stream authenticated original bytes into a preallocated upload, enforcing byte limits. complete_upload verifies the expected length and digest.",
         request_media: Some("application/octet-stream"),
         response_media: "application/json",
         status: 200,

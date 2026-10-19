@@ -587,8 +587,10 @@ async fn a_source_drafts_kept_base_is_checked_against_the_purge_map_before_it_is
     Ok(())
 }
 
+/// A View's draft is a View (core M1.6): a body that holds no View block is refused, on the
+/// body, before anything is written.
 #[tokio::test]
-async fn a_draft_of_a_view_is_refused_and_nothing_is_saved() -> TestResult {
+async fn an_invalid_draft_of_a_view_is_refused_and_nothing_is_saved() -> TestResult {
     let world = world_with_a_card_a_view_and_the_note()?;
     let refused = err_of(
         world
@@ -598,20 +600,20 @@ async fn a_draft_of_a_view_is_refused_and_nothing_is_saved() -> TestResult {
                 SaveDraftRequest {
                     item_id: ItemId(Uuid::from_u128(VIEW)),
                     body: "# Board\n".to_owned(),
-                    ..save(revision('a')?, json!({ "type": "View" }))?
+                    ..save(revision('a')?, json!({ "type": "View", "title": "Board" }))?
                 },
             )
             .await,
     )?;
-    assert_eq!(refused.code, ErrorCode::NotImplemented);
-    assert_eq!(refused.field.as_deref(), Some("/item_id"));
+    assert_eq!(refused.code, ErrorCode::InvalidInput);
+    assert_eq!(refused.field.as_deref(), Some("/body"));
     assert!(world.drafts.saves()?.is_empty());
     Ok(())
 }
 
-/// A View's draft that already exists (saved before the rule) takes no further save either.
+/// A View's draft that already exists (saved before the rule) is replaced only by a valid View.
 #[tokio::test]
-async fn a_view_with_a_draft_that_predates_the_rule_takes_no_further_save() -> TestResult {
+async fn a_view_with_a_draft_that_predates_the_rule_takes_only_a_valid_view() -> TestResult {
     let world = world_with_a_card_a_view_and_the_note()?;
     world
         .drafts
@@ -624,13 +626,13 @@ async fn a_view_with_a_draft_that_predates_the_rule_takes_no_further_save() -> T
                 SaveDraftRequest {
                     item_id: ItemId(Uuid::from_u128(VIEW)),
                     body: "# Board, again\n".to_owned(),
-                    ..save(revision('a')?, json!({ "type": "View" }))?
+                    ..save(revision('a')?, json!({ "type": "View", "title": "Board" }))?
                 },
             )
             .await,
     )?;
-    assert_eq!(refused.code, ErrorCode::NotImplemented);
-    assert_eq!(refused.field.as_deref(), Some("/item_id"));
+    assert_eq!(refused.code, ErrorCode::InvalidInput);
+    assert_eq!(refused.field.as_deref(), Some("/body"));
     assert!(world.drafts.saves()?.is_empty());
     Ok(())
 }
@@ -668,7 +670,13 @@ async fn a_snapshot_refuses_a_draft_that_predates_the_rules_and_commits_nothing(
     // archive restore would; each is selected beside the note's valid draft.
     for (id, selection, code, field) in [
         (CARD, [NOTE, CARD], ErrorCode::InvalidInput, "/body"),
-        (VIEW, [NOTE, VIEW], ErrorCode::NotImplemented, "/item_id"),
+        // The archived View draft holds no title: refused there, as `save_draft` refuses it.
+        (
+            VIEW,
+            [NOTE, VIEW],
+            ErrorCode::InvalidInput,
+            "/properties/title",
+        ),
     ] {
         let world = world_with_a_card_a_view_and_the_note()?;
         world

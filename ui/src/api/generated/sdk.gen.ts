@@ -3297,7 +3297,7 @@ export const downloadObject = <ThrowOnError extends boolean = false>(options: Op
 /**
  * upload_content
  *
- * Stream authenticated original bytes into a preallocated upload, enforcing byte limits and digest verification.
+ * Stream authenticated original bytes into a preallocated upload, enforcing byte limits. complete_upload verifies the expected length and digest.
  */
 export const uploadContent = <ThrowOnError extends boolean = false>(options: Options<UploadContentData, ThrowOnError>): RequestResult<UploadContentResponses, unknown, ThrowOnError> => (options.client ?? client).put<UploadContentResponses, unknown, ThrowOnError>({
     bodySerializer: null,

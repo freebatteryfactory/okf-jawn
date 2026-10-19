@@ -11,24 +11,32 @@
 //!   storage's, tested there).
 //! - `FakeGrants` answers raw grants from a table that a test changes between calls, so a
 //!   lookup made fresh is told from a kept one; it counts every `authorize` by permission, and
-//!   fails one `authorize` or one `grant_creator` on request.
+//!   fails one `authorize` or one `grant_creator` on request. Tenant grants come from a table of
+//!   their own (`grant_tenant`), each `authorize_tenant` is counted, and an unscripted tenant
+//!   grant is `Forbidden` (local storage returns empty permissions, which core also refuses).
 //! - `FakeJobs` is the fixture's `FakeRecords` (revision maps, receipts) with jobs: unique on
 //!   the mutation, read and listed within their scope (a tenant's or one workspace's, as storage
 //!   filters them), cancelled and retried once per mutation with storage's refusals, and receipts
 //!   read back within their workspace. It refuses no job, and no retry, for a purge or an archive
 //!   (storage's), and it never claims or runs a job: a test puts one in the state it needs
-//!   (`put_job`).
+//!   (`put_job`). Artifact records are those a test put (`put_artifact`), read back within their
+//!   scope; it checks no record's kind against its scope, which storage's `record_artifact`
+//!   refuses, so a test can hold a misfiled one.
 //! - `FakeQueue` keeps every wake-up and fails one on request.
 //! - `FakeUploads` opens slots unique on the mutation, lists them newest first a page at a time
 //!   after a position cursor, and completes one against the bytes a test says it received
 //!   (`receive`), with storage's length and hash refusals. It holds no files and no blob store:
-//!   a completed slot's object is the received bytes' digest and length, and `put_content`,
-//!   `consume` and `consume_batch` are not modelled.
+//!   a completed slot's object is the received bytes' digest and length. `put_content` appends
+//!   a body within the slot's room (the smaller of the limit and the announced size, less what
+//!   it holds) with storage's refusals, and keeps each call's limit; `consume` and
+//!   `consume_batch` are not modelled.
 //! - `FakeCredentials` issues connectors unique on the mutation with a counter for a secret
 //!   (storage draws 32 random bytes), and keeps their order for listing, newest first.
 //! - `FakeLog` keeps every append, except an identical notification already appended under the
 //!   same mutation, and lists one log after a decimal cursor a page at a time, answering the
 //!   last row's cursor while rows remain, as storage pages it.
+//! - `FakeBackups` opens the installation archives a test put, by tenant and digest, with the
+//!   interval clamped as storage clamps it; it writes and restores nothing.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -44,7 +52,7 @@ use okf_jawn_contract::identity::{
 use okf_jawn_contract::import::{Job, JobState, ListJobsResponse, UploadListState};
 use okf_jawn_contract::purge::{Purge, PurgeTarget};
 use okf_jawn_contract::review::Review;
-use okf_jawn_contract::workspace::Workspace;
+use okf_jawn_contract::workspace::{RestoreReport, Workspace};
 use okf_jawn_core::access::AccessControl;
 use okf_jawn_core::application::{ApplicationConfig, ApplicationService, Ports};
 use okf_jawn_core::context::{TenantGrant, WorkspaceGrant};
@@ -58,10 +66,11 @@ use okf_jawn_core::jobs::{
 };
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
-    ByteReader, NewWorkspace, ObjectInfo, Page, Provenance, StorageScope, WorkspaceArchive,
-    WorkspaceCatalog, WorkspaceUpdate, derive_workspace_id,
+    Backups, ByteReader, NewWorkspace, ObjectInfo, ObjectRead, Page, Provenance, StorageScope,
+    WorkspaceArchive, WorkspaceCatalog, WorkspaceUpdate, WrittenArchive, derive_workspace_id,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadRecord, UploadStore};
+use tokio::io::AsyncReadExt as _;
 use uuid::Uuid;
 
 use crate::fixture::{Built, FakeRecords, Unused, World, config, instant, revision};
@@ -87,6 +96,8 @@ pub struct Tenancy {
     pub credentials: Arc<FakeCredentials>,
     /// Both event logs.
     pub log: Arc<FakeLog>,
+    /// Installation archives.
+    pub backups: Arc<FakeBackups>,
 }
 
 /// `WorkspaceCatalog` over workspaces in creation order.
@@ -119,6 +130,12 @@ struct GrantState {
     workspaces: BTreeMap<String, BTreeMap<WorkspaceId, Vec<Permission>>>,
     /// Answer every grant for this scope instead of the one asked, as a misbehaving adapter.
     foreign: Option<StorageScope>,
+    /// Subject, then the raw tenant grant.
+    tenant: BTreeMap<String, Vec<Permission>>,
+    /// Answer every tenant grant for this tenant instead of the caller's.
+    foreign_tenant: Option<TenantId>,
+    /// The permission of every `authorize_tenant`, in order.
+    tenant_lookups: Vec<Permission>,
 }
 
 /// `RecordStore`: the fixture's records with jobs and receipts that can be read back.
@@ -131,6 +148,9 @@ pub struct FakeJobs {
     receipts: Mutex<Vec<(StorageScope, Receipt)>>,
     ignore_receipt_scope: AtomicBool,
     mapping_lookups: Mutex<Vec<(StorageScope, Revision)>>,
+    /// Every artifact record a test put.
+    artifacts: Mutex<Vec<ArtifactRecord>>,
+    ignore_artifact_scope: AtomicBool,
 }
 
 /// One job as `FakeJobs` holds it.
@@ -165,6 +185,8 @@ struct UploadState {
     queries: Vec<(StorageScope, UploadQuery)>,
     /// How many times `create` was called.
     creates: usize,
+    /// The `limit` of every `put_content`, in order.
+    limits: Vec<u64>,
 }
 
 /// One slot as `FakeUploads` holds it.
@@ -201,6 +223,14 @@ pub struct FakeLog {
     fail_next: AtomicBool,
 }
 
+/// `Backups` holding the installation archives a test put, by tenant and digest; it writes
+/// and restores nothing.
+#[derive(Default)]
+pub struct FakeBackups {
+    archives: Mutex<Vec<(TenantId, Digest, Vec<u8>)>>,
+    opens: Mutex<Vec<(TenantId, Digest)>>,
+}
+
 impl Tenancy {
     /// The service over fresh fakes; the fixture world's head is `revision('a')`.
     ///
@@ -223,6 +253,7 @@ impl Tenancy {
         let uploads = Arc::new(FakeUploads::default());
         let credentials = Arc::new(FakeCredentials::default());
         let log = Arc::new(FakeLog::default());
+        let backups = Arc::new(FakeBackups::default());
         let unused = Arc::new(Unused);
         let ports = Ports {
             access: access.clone(),
@@ -242,6 +273,7 @@ impl Tenancy {
             confirmations: unused,
             sandbox: world.sandbox.clone(),
             readiness: world.readiness.clone(),
+            backups: backups.clone(),
         };
         let service = ApplicationService::new(ports, config)?;
         Ok(Self {
@@ -254,6 +286,7 @@ impl Tenancy {
             uploads,
             credentials,
             log,
+            backups,
         })
     }
 }
@@ -396,6 +429,34 @@ impl FakeGrants {
         Ok(())
     }
 
+    /// Grant `subject` the raw `permissions` on its tenant, replacing any earlier tenant grant.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn grant_tenant(&self, subject: &str, permissions: Vec<Permission>) -> Built<()> {
+        lock(&self.table)?
+            .tenant
+            .insert(subject.to_owned(), permissions);
+        Ok(())
+    }
+
+    /// Answer every later tenant grant for `tenant`, whatever the caller's is.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn answer_tenant_for(&self, tenant: TenantId) -> Built<()> {
+        lock(&self.table)?.foreign_tenant = Some(tenant);
+        Ok(())
+    }
+
+    /// The permission of every `authorize_tenant` so far, in order.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn tenant_lookups(&self) -> Built<Vec<Permission>> {
+        Ok(lock(&self.table)?.tenant_lookups.clone())
+    }
+
     /// Make the next `authorize` fail as an unreachable adapter does.
     pub fn unavailable_next(&self) {
         self.unavailable_next.store(true, Ordering::SeqCst);
@@ -435,7 +496,23 @@ impl FakeJobs {
             receipts: Mutex::new(Vec::new()),
             ignore_receipt_scope: AtomicBool::new(false),
             mapping_lookups: Mutex::new(Vec::new()),
+            artifacts: Mutex::new(Vec::new()),
+            ignore_artifact_scope: AtomicBool::new(false),
         }
+    }
+
+    /// Hold `record`, as a job that produced it recorded it.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn put_artifact(&self, record: ArtifactRecord) -> Built<()> {
+        lock(&self.artifacts)?.push(record);
+        Ok(())
+    }
+
+    /// Answer `get_artifact` from any scope, as a store that ignored the scope would.
+    pub fn ignore_artifact_scope(&self) {
+        self.ignore_artifact_scope.store(true, Ordering::SeqCst);
     }
 
     /// Hold `receipt` in `scope`, as an earlier operation recorded it.
@@ -667,6 +744,14 @@ impl FakeUploads {
     pub fn queries(&self) -> Built<Vec<(StorageScope, UploadQuery)>> {
         Ok(lock(&self.state)?.queries.clone())
     }
+
+    /// The `limit` of every `put_content` so far, in order.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn limits(&self) -> Built<Vec<u64>> {
+        Ok(lock(&self.state)?.limits.clone())
+    }
 }
 
 impl FakeCredentials {
@@ -721,6 +806,90 @@ impl FakeLog {
     /// Returns when the lock is poisoned.
     pub fn lists(&self) -> Built<Vec<(EventScope, EventQuery)>> {
         Ok(lock(&self.lists)?.clone())
+    }
+}
+
+impl FakeBackups {
+    /// Hold `bytes` as the installation archive `digest` of `tenant`.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn put(&self, tenant: &TenantId, digest: Digest, bytes: Vec<u8>) -> Built<()> {
+        lock(&self.archives)?.push((tenant.clone(), digest, bytes));
+        Ok(())
+    }
+
+    /// Every `open_installation_archive` so far: the tenant and the digest asked.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn opens(&self) -> Built<Vec<(TenantId, Digest)>> {
+        Ok(lock(&self.opens)?.clone())
+    }
+}
+
+impl Backups for FakeBackups {
+    fn write_workspace_archive<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _mutation_id: MutationId,
+    ) -> PortFuture<'a, WrittenArchive> {
+        unused()
+    }
+    fn write_installation_archive<'a>(
+        &'a self,
+        _tenant: &'a TenantId,
+        _mutation_id: MutationId,
+    ) -> PortFuture<'a, ObjectInfo> {
+        unused()
+    }
+    /// "Open a selected byte interval of an installation archive in the tenant's store ...;
+    /// `NotFound` when the tenant holds no such object." The interval is clamped to the archive,
+    /// as storage clamps it.
+    fn open_installation_archive<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        digest: &'a Digest,
+        offset: u64,
+        length: u64,
+    ) -> PortFuture<'a, ObjectRead> {
+        Box::pin(async move {
+            lock_api(&self.opens)?.push((tenant.clone(), digest.clone()));
+            let bytes = lock_api(&self.archives)?
+                .iter()
+                .find(|(held_by, held, _)| held_by == tenant && held == digest)
+                .map(|(_, _, bytes)| bytes.clone())
+                .ok_or_else(|| {
+                    ApiError::new(ErrorCode::NotFound, "no such installation archive")
+                })?;
+            let size = u64::try_from(bytes.len()).map_err(internal)?;
+            let start = offset.min(size);
+            let length = length.min(size.saturating_sub(start));
+            let interval = usize::try_from(start)
+                .ok()
+                .zip(usize::try_from(start.saturating_add(length)).ok())
+                .and_then(|(from, to)| bytes.get(from..to))
+                .map(<[u8]>::to_vec)
+                .unwrap_or_default();
+            Ok(ObjectRead {
+                object: ObjectInfo {
+                    digest: digest.clone(),
+                    size,
+                },
+                offset: start,
+                length,
+                body: Box::pin(std::io::Cursor::new(interval)),
+            })
+        })
+    }
+    fn restore_import<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _archive: Digest,
+        _mutation_id: MutationId,
+        _editors: Vec<String>,
+    ) -> PortFuture<'a, RestoreReport> {
+        unused()
     }
 }
 
@@ -876,12 +1045,30 @@ impl AccessControl for FakeGrants {
         })
     }
 
+    /// "Look up the caller's raw tenant grant (before route/delegation intersection)." An
+    /// unscripted grant is `Forbidden`; local storage instead returns empty permissions, which
+    /// core's authorization refuses with that code.
     fn authorize_tenant<'a>(
         &'a self,
-        _principal: &'a Principal,
-        _permission: Permission,
+        principal: &'a Principal,
+        permission: Permission,
     ) -> PortFuture<'a, TenantGrant> {
-        unused()
+        Box::pin(async move {
+            let mut state = lock_api(&self.table)?;
+            state.tenant_lookups.push(permission);
+            let permissions = state
+                .tenant
+                .get(&principal.subject)
+                .cloned()
+                .ok_or_else(|| ApiError::new(ErrorCode::Forbidden, "no tenant grant"))?;
+            Ok(TenantGrant {
+                tenant_id: state
+                    .foreign_tenant
+                    .clone()
+                    .unwrap_or_else(|| principal.tenant_id.clone()),
+                permissions,
+            })
+        })
     }
 
     /// "Enumerate workspace grants for listing; results are filtered by the caller."
@@ -1117,12 +1304,22 @@ impl RecordStore for FakeJobs {
     ) -> PortFuture<'a, ArtifactRecord> {
         unused()
     }
+    /// "Read one artifact record within its scope; `NotFound` when the scope has no artifact
+    /// with that identity." The record is held as a test put it, its kind whatever the test
+    /// chose, so a record whose kind does not belong in its scope can be answered.
     fn get_artifact<'a>(
         &'a self,
-        _scope: &'a JobScope,
-        _artifact: ArtifactId,
+        scope: &'a JobScope,
+        artifact: ArtifactId,
     ) -> PortFuture<'a, ArtifactRecord> {
-        unused()
+        Box::pin(async move {
+            let anywhere = self.ignore_artifact_scope.load(Ordering::SeqCst);
+            lock_api(&self.artifacts)?
+                .iter()
+                .find(|held| held.id == artifact && (anywhere || held.scope == *scope))
+                .cloned()
+                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such artifact"))
+        })
     }
     fn pending_jobs(&self) -> PortFuture<'_, Vec<(JobScope, JobId)>> {
         unused()
@@ -1335,14 +1532,59 @@ impl UploadStore for FakeUploads {
             })
         })
     }
+    /// "Append authenticated bytes to a slot. Fails with `TooLarge` when the slot would exceed
+    /// `limit` or its announced size." As storage: `NotFound` for a slot the workspace does not
+    /// hold, `Conflict` for a complete one, and a refusal appends nothing. It takes at most one
+    /// byte past what the slot has room for, so a longer body is cut, not read to its end. Each
+    /// call's `limit` is kept (`limits`).
     fn put_content<'a>(
         &'a self,
-        _scope: &'a StorageScope,
-        _upload: UploadId,
-        _body: ByteReader,
-        _limit: u64,
+        scope: &'a StorageScope,
+        upload: UploadId,
+        body: ByteReader,
+        limit: u64,
     ) -> PortFuture<'a, UploadRecord> {
-        unused()
+        Box::pin(async move {
+            let room = {
+                let mut state = lock_api(&self.state)?;
+                state.limits.push(limit);
+                let slot = state
+                    .slots
+                    .iter()
+                    .find(|slot| slot.scope == *scope && slot.record.id == upload)
+                    .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such upload"))?;
+                if slot.record.object.is_some() {
+                    return Err(ApiError::new(
+                        ErrorCode::Conflict,
+                        "this upload is already complete",
+                    ));
+                }
+                limit
+                    .min(slot.record.expected_size)
+                    .saturating_sub(slot.record.received_bytes)
+            };
+            let mut taken = Vec::new();
+            body.take(room.saturating_add(1))
+                .read_to_end(&mut taken)
+                .await
+                .map_err(|error| ApiError::new(ErrorCode::Unavailable, error.to_string()))?;
+            let length = u64::try_from(taken.len()).map_err(internal)?;
+            if length > room {
+                return Err(ApiError::new(
+                    ErrorCode::TooLarge,
+                    "the upload would exceed its announced size or the limit; nothing was appended",
+                ));
+            }
+            let mut state = lock_api(&self.state)?;
+            let slot = state
+                .slots
+                .iter_mut()
+                .find(|slot| slot.scope == *scope && slot.record.id == upload)
+                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such upload"))?;
+            slot.bytes.extend_from_slice(&taken);
+            slot.record.received_bytes = slot.record.received_bytes.saturating_add(length);
+            Ok(slot.record.clone())
+        })
     }
     /// "Verify the received bytes against the announced length and `sha256`, and retain them.
     /// Fails with `Conflict` and `ErrorDetail::UploadMismatch` on a length or hash mismatch, and
