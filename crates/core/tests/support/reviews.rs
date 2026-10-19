@@ -94,6 +94,9 @@ impl RecordStore for ReviewRecords {
     fn get_job<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, Job> {
         self.inner.get_job(scope, job)
     }
+    fn job_mutation<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, MutationId> {
+        self.inner.job_mutation(scope, job)
+    }
     fn list_jobs<'a>(
         &'a self,
         scope: &'a JobScope,
