@@ -23,12 +23,17 @@ export const DOM_SELECTORS = Object.freeze({
   chart_mark: 'svg g[class~="role-mark"] > *',
   table: 'table',
   header_cell: 'thead th',
+  revision: 'code[title]',
 });
 
 /** The text, alerts, chart marks and tables of the document this runs in (`doc`). */
 export function readAppDom(selectors, doc = document) {
   return {
     text: doc.body?.innerText ?? '',
+    revisions: Array.from(doc.querySelectorAll(selectors.revision))
+      .filter((node) => node.getClientRects().length > 0 && (node.innerText ?? '').trim().length > 0)
+      .filter((node) => (node.getAttribute('title') ?? '').startsWith(node.innerText.trim()))
+      .map((node) => node.getAttribute('title')),
     alerts: Array.from(doc.querySelectorAll(selectors.alert), (node) => node.innerText ?? ''),
     svgs: doc.querySelectorAll(selectors.svg).length,
     svg_marks: doc.querySelectorAll(selectors.chart_mark).length,
