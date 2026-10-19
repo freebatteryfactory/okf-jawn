@@ -81,8 +81,9 @@ describe('a proposed View', { timeout: 30_000 }, () => {
     // The proposed file, read here: its title, description and bindings, each in this workspace.
     expect(api.callsTo(PRESENT_VIEW)).toEqual([{ workspace_id: WS, view: viewOf() }]);
     const approve = within(page).getByRole('button', { name: 'Approve…' });
-    expect(precedes(changes, proposed)).toBe(true);
-    expect(precedes(proposed, approve)).toBe(true);
+    // The View first, then the exact change of its file, both before Approve.
+    expect(precedes(proposed, changes)).toBe(true);
+    expect(precedes(changes, approve)).toBe(true);
     await waitFor(() => expect(approve.getAttribute('aria-disabled')).toBe('false'));
     expect(api.violations).toEqual([]);
   });

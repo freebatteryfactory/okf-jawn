@@ -3,7 +3,7 @@
  * they change against the version it was made on, through the one diff reader), its discussion,
  * and Approve and Decline.
  *
- * A proposal that would store a View shows each such View drawn as proposed, after what it changes
+ * A proposal that would store a View shows each such View drawn as proposed, beside what it changes
  * and before Approve (`documents/ProposedView.tsx`). What is drawn there, or said of a file that
  * does not read as a View, never holds Approve back: the service checks the View again at accept.
  *
@@ -159,9 +159,19 @@ function ProposalBody({ workspaceId, proposal }: { workspaceId: string; proposal
           ),
         )}
       </ul>
-      <ProposedChanges workspaceId={workspaceId} proposal={proposal} level={3} />
-      {/* Each View it would store, drawn as proposed, after what it changes and before Approve. */}
-      <ProposedViews workspaceId={workspaceId} proposal={proposal} />
+      {/* Each View it would store, drawn as proposed, beside what it changes and before Approve:
+          side by side where the column is wide enough, else the View first, since the change of a
+          View file is its whole block. For a proposal that stores none, its place takes no room. */}
+      <div className="@container">
+        <div className="grid items-start gap-x-6 @5xl:grid-cols-2">
+          <div className="min-w-0 empty:hidden">
+            <ProposedViews workspaceId={workspaceId} proposal={proposal} />
+          </div>
+          <div className="min-w-0">
+            <ProposedChanges workspaceId={workspaceId} proposal={proposal} level={3} />
+          </div>
+        </div>
+      </div>
     </>
   );
 }
