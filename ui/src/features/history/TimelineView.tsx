@@ -13,7 +13,9 @@
  * moves keyboard focus to the first version it brought. A list that fails with nothing listed
  * is a failure notice, never "no versions"; a further page that fails leaves the list as it is,
  * with its notice beside it. While the list is asked again at a new head (after the person's own
- * Rewind), the versions listed stay on screen, so an open panel and keyboard focus stay too.
+ * Rewind), the versions listed stay on screen, labelled with the revision they were read at,
+ * so an open panel and keyboard focus stay too. Their older-page cursor cannot be used while
+ * another revision is being read.
  *
  * Showing a version's Changes keeps keyboard focus on its button, which says which it does
  * (`aria-expanded`). Rewind's panel takes focus when it opens; when it closes, focus goes back to
@@ -43,7 +45,11 @@ export interface TimelineViewProps {
   level: 2 | 3;
 }
 
-export function TimelineView({ workspaceId, revision, item, title, level }: TimelineViewProps) {
+export function TimelineView(props: TimelineViewProps) {
+  return <TimelineState key={`${props.workspaceId} ${props.item?.id ?? ''}`} {...props} />;
+}
+
+function TimelineState({ workspaceId, revision, item, title, level }: TimelineViewProps) {
   const { head, rights } = useWorkspaceChanges();
   const archivedId = useId();
   const itemId = item?.id ?? null;
@@ -51,6 +57,17 @@ export function TimelineView({ workspaceId, revision, item, title, level }: Time
     ...logOptions(workspaceId, revision, itemId),
     placeholderData: keepPreviousData,
   });
+  // Placeholder pages still belong to their original tip, even though the new request's key
+  // already names another revision. Keep the label with the last actual answer, not the props.
+  const [listed, setListed] = useState({ data: log.data, revision });
+  if (
+    log.data !== undefined &&
+    !log.isPlaceholderData &&
+    (listed.data !== log.data || listed.revision !== revision)
+  ) {
+    setListed({ data: log.data, revision });
+  }
+  const listedRevision = log.isPlaceholderData ? listed.revision : revision;
   const commits = (log.data?.pages ?? []).flatMap((page) => page.commits);
   const listRef = useRef<HTMLElement | null>(null);
   const headingId = useId();
@@ -196,9 +213,10 @@ export function TimelineView({ workspaceId, revision, item, title, level }: Time
         {title}
       </Heading>
       <p className="meta">
-        Newest first, from revision <code title={revision}>{short(revision)}</code>
-        {revision === head ? ', the one this workspace shows' : ''}. Each version is a saved state
-        of {item === null ? 'the workspace' : 'this item'}, not a record of everything done in it.
+        Newest first, from revision <code title={listedRevision}>{short(listedRevision)}</code>
+        {listedRevision === head ? ', the one this workspace shows' : ''}. Each version is a saved
+        state of {item === null ? 'the workspace' : 'this item'}, not a record of everything done in
+        it.
       </p>
       {can === 'no-permission' && (
         <Missing action="Rewind, which brings back an earlier version," permission="write" />
@@ -232,9 +250,9 @@ export function TimelineView({ workspaceId, revision, item, title, level }: Time
         <button
           type="button"
           ref={moreRef}
-          aria-disabled={log.isFetchingNextPage}
+          aria-disabled={log.isFetchingNextPage || log.isPlaceholderData}
           onClick={() => {
-            if (log.isFetchingNextPage) return;
+            if (log.isFetchingNextPage || log.isPlaceholderData) return;
             focusFrom.current = count;
             void log.fetchNextPage();
           }}

@@ -16,7 +16,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LOG_PAGE } from '../../src/features/history/history';
 import { formatInstant } from '../../src/lib/instant';
-import { fail, type Handler, mockApi, ok } from './support/api';
+import { fail, type Handler, mockApi, ok, type Reply } from './support/api';
 import {
   changeOf,
   DIFF,
@@ -84,6 +84,47 @@ async function entryOf(message: string) {
 }
 
 describe('the Timeline page', { timeout: 30_000 }, () => {
+  it.each(['pending', 'failed'] as const)(
+    'never labels old Timeline pages as the new head while its listing is %s',
+    async (outcome) => {
+      // SPEC sections 3/7: each page stays tied to the revision it was read at. The old
+      // list may remain for Rewind focus, but its label and cursor must not claim the new tip.
+      const next = 'c'.repeat(40);
+      let head = HEAD;
+      let finish: ((reply: Reply) => void) | undefined;
+      const api = setup({
+        [OPEN]: () => ok({ ...writableWorkspace, head }),
+        [LOG]: (body) =>
+          (body.at as { revision: string }).revision === HEAD
+            ? ok({ commits: VERSIONS.slice(0, 2), next_cursor: 'old-page' })
+            : new Promise<Reply>((resolve) => {
+                finish = resolve;
+              }),
+      });
+      const page = await openTimeline();
+      await entryOf('Publish the budget');
+      head = next;
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+      await screen.findByText(`Refreshed: now showing revision ${next.slice(0, 10)}.`);
+      await waitFor(() => expect(finish).toBeTypeOf('function'));
+      if (outcome === 'failed') {
+        // A non-retryable read failure settles immediately; the application timeout is unchanged.
+        act(() => finish?.(fail(501, 'not_implemented', 'the new history could not be read')));
+        await within(page).findByRole('alert');
+        expect(within(page).queryByText('No versions to show.')).toBeNull();
+      }
+      const oldEntry = within(page).queryByText('Publish the budget');
+      if (oldEntry !== null) {
+        expect(page.querySelector('p.meta code')?.getAttribute('title')).toBe(HEAD);
+      }
+      const older = within(page).queryByRole('button', { name: 'Show older versions' });
+      expect(older === null || older.getAttribute('aria-disabled') === 'true').toBe(true);
+      expect(api.callsTo(LOG).at(-1)?.at).toEqual({ kind: 'revision', revision: next });
+      expect(api.violations).toEqual([]);
+      if (outcome === 'pending') act(() => finish?.(ok({ commits: [], next_cursor: null })));
+    },
+  );
+
   it('is in the workspace’s bar and lists the versions at the head shown, newest first, by message and local time', async () => {
     const api = setup();
     renderAt(`/w/${WS}`);

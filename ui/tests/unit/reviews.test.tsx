@@ -18,7 +18,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Workspace } from '../../src/api/generated/types.gen';
 import { formatInstant } from '../../src/lib/instant';
-import { fail, type Handler, mockApi, ok } from './support/api';
+import { fail, type Handler, mockApi, ok, type Reply } from './support/api';
 import { eventOf, mockEvents } from './support/imports';
 import {
   CONFIRM,
@@ -38,6 +38,7 @@ import {
   NOTE,
   noteSummary,
   OLD,
+  OTHER,
   renderAt,
   WS,
   workspace,
@@ -131,6 +132,130 @@ describe('Verify', { timeout: 30_000 }, () => {
     });
     return api;
   }
+
+  /** Open Verify only after the actual item query has supplied what the dialog must cover. */
+  async function openCurrentVerification() {
+    const panel = await screen.findByRole('region', { name: 'Reviews' });
+    const button = await within(panel).findByRole('button', { name: 'Verify\u2026' });
+    await waitFor(() => expect(button.getAttribute('aria-disabled')).toBe('false'));
+    fireEvent.click(button);
+    return screen.findByRole('alertdialog');
+  }
+
+  it.each([
+    ['another item at the same head', OTHER, HEAD],
+    ['another revision of this item', NOTE, OLD],
+  ] as const)(
+    'keeps a completed Verify announcement with its identity, not %s',
+    async (_case, itemId, revision) => {
+      // SPEC section 8: a review covers the exact displayed item and revision. A's successful
+      // mutation message cannot become an assertion about B merely because both cite HEAD.
+      const api = verifying({ [REVIEWS]: () => ok(reviewsAnswer([])) });
+      const { router } = renderAt(`/w/${WS}/i/${NOTE}`);
+      const panel = await screen.findByRole('region', { name: 'Reviews' });
+      const dialog = await openCurrentVerification();
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Verify this revision' }));
+      await within(panel).findByText(`Your review of revision ${HEAD.slice(0, 10)} is recorded.`);
+      await act(() =>
+        router.navigate({
+          to: '/w/$workspaceId/i/$itemId',
+          params: { workspaceId: WS, itemId },
+          search: { rev: revision },
+        }),
+      );
+      await waitFor(() =>
+        expect(
+          api
+            .callsTo(REVIEWS)
+            .some(
+              (body) =>
+                body.item_id === itemId && (body.at as { revision: string }).revision === revision,
+            ),
+        ).toBe(true),
+      );
+      const current = await screen.findByRole('region', { name: 'Reviews' });
+      expect(within(current).queryByText(/^Your review of revision/)).toBeNull();
+      expect(screen.queryByRole('alertdialog')).toBeNull();
+      expect(api.violations).toEqual([]);
+    },
+  );
+
+  it('does not show a failed Verify of A inside the dialog for B at the same revision', async () => {
+    const api = verifying({
+      [REVIEWS]: () => ok(reviewsAnswer([])),
+      [REVIEW]: () => fail(503, 'unavailable', 'A could not be verified'),
+    });
+    const { router } = renderAt(`/w/${WS}/i/${NOTE}`);
+    const first = await openCurrentVerification();
+    fireEvent.click(within(first).getByRole('button', { name: 'Verify this revision' }));
+    expect((await within(first).findByRole('alert')).textContent).toContain(
+      'A could not be verified',
+    );
+    fireEvent.click(within(first).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    await act(() =>
+      router.navigate({
+        to: '/w/$workspaceId/i/$itemId',
+        params: { workspaceId: WS, itemId: OTHER },
+        search: { rev: HEAD },
+      }),
+    );
+    await waitFor(() =>
+      expect(api.callsTo(ITEM).some((body) => body.item_id === OTHER)).toBe(true),
+    );
+    const second = await openCurrentVerification();
+    expect(
+      screen.getByRole('alertdialog', { name: `Verify Plan at revision ${HEAD.slice(0, 10)}?` }),
+    ).toBe(second);
+    expect(within(second).queryByRole('alert')).toBeNull();
+    expect(within(second).queryByText('The service said: A could not be verified')).toBeNull();
+    expect(api.callsTo(REVIEW)).toHaveLength(1);
+    expect(api.violations).toEqual([]);
+  });
+
+  it("does not let a late Verify completion for A announce success or close B's dialog", async () => {
+    // Browser history can change the active item while a request is pending. The old request
+    // may still finish (mutations are durable); its completion belongs only to its original item.
+    let finish: ((reply: Reply) => void) | undefined;
+    const api = verifying({
+      [REVIEWS]: () => ok(reviewsAnswer([])),
+      [REVIEW]: () =>
+        new Promise<Reply>((resolve) => {
+          finish = resolve;
+        }),
+    });
+    const { router } = renderAt(`/w/${WS}/i/${NOTE}`);
+    const first = await openCurrentVerification();
+    fireEvent.click(within(first).getByRole('button', { name: 'Verify this revision' }));
+    await waitFor(() => expect(finish).toBeTypeOf('function'));
+    await act(() =>
+      router.navigate({
+        to: '/w/$workspaceId/i/$itemId',
+        params: { workspaceId: WS, itemId: OTHER },
+        search: { rev: HEAD },
+      }),
+    );
+    await waitFor(() =>
+      expect(api.callsTo(ITEM).some((body) => body.item_id === OTHER)).toBe(true),
+    );
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    const second = await openCurrentVerification();
+    expect(
+      screen.getByRole('alertdialog', { name: `Verify Plan at revision ${HEAD.slice(0, 10)}?` }),
+    ).toBe(second);
+    await act(async () => {
+      finish?.(ok(reviewOf('current')));
+    });
+    await waitFor(() => expect(screen.queryByText(/^Your review of revision/)).toBeNull());
+    expect(screen.getByRole('alertdialog')).toBe(second);
+    expect(
+      within(second)
+        .getByRole('button', { name: 'Verify this revision' })
+        .getAttribute('aria-disabled'),
+    ).toBe('false');
+    expect(api.callsTo(REVIEW)).toHaveLength(1);
+    expect(api.violations).toEqual([]);
+  });
 
   it('asks in a dialog that shows the revision and the exact content, then confirms that revision and records the review', async () => {
     const api = verifying();

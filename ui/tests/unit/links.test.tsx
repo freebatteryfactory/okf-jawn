@@ -89,6 +89,52 @@ describe('an item’s links', { timeout: 30_000 }, () => {
     expect(api.violations).toEqual([]);
   });
 
+  it.each(['', 'here'])(
+    'identifies each backlink by its source path when its label is "%s"',
+    async (label) => {
+      // SPEC section 7 and Link.from_path: the backlink names its linking item at the
+      // resolved revision. An anchor and the common destination cannot identify that source.
+      const incoming: Link[] = [
+        {
+          from: SOMEONE,
+          from_path: 'elsewhere/someone.md',
+          to: NOTE,
+          to_path: 'notes/meeting.md',
+          label,
+          line: 12,
+        },
+        {
+          from: OTHER,
+          from_path: 'notes/plan.md',
+          to: NOTE,
+          to_path: 'notes/meeting.md',
+          label,
+          line: 27,
+        },
+      ];
+      const api = setup(() => ok({ revision: OLD, links: incoming, next_cursor: null }));
+      const panel = await linksPanel(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+      const to = await within(panel).findByRole('list', { name: 'To this item' });
+      const rows = within(to).getAllByRole('listitem');
+      expect(rows).toHaveLength(2);
+      for (const [index, source] of incoming.entries()) {
+        const row = rows.at(index);
+        if (!row) throw new Error('The service answered two backlinks, so both rows must exist.');
+        expect(row.textContent).toContain(source.from_path);
+        const back = within(row).getByRole('link', { name: label || source.from_path });
+        const target = new URL(back.getAttribute('href') ?? '', 'http://localhost');
+        expect(target.pathname).toBe(`/w/${WS}/i/${source.from}`);
+        expect(target.searchParams.get('rev')).toBe(OLD);
+        expect(JSON.parse(target.searchParams.get('sel') ?? 'null')).toEqual({
+          kind: 'lines',
+          range: { start: source.line, end: source.line },
+        });
+        expect(row.textContent).toContain(`line ${source.line}`);
+      }
+      expect(api.violations).toEqual([]);
+    },
+  );
+
   it('says when nothing links either way', async () => {
     setup(() => ok({ revision: HEAD, links: [], next_cursor: null }));
     const panel = await linksPanel();
