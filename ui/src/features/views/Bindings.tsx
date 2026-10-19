@@ -15,6 +15,11 @@ export interface ResolvedPresentation {
   >;
   /** Why a binding's dataset was refused (malformed, not the converter's, stale): that chart's alert. */
   datasetErrors?: ReadonlyMap<string, string>;
+  /**
+   * Why the server could not produce a binding's dataset: the message of its `dataset_unavailable`
+   * warning, exactly as sent, for the table that reads it (a table has no chart status to say so).
+   */
+  datasetWarnings?: ReadonlyMap<string, string>;
   /** Why a binding's source could not be read: that source excerpt's alert, never the View's. */
   sourceErrors?: ReadonlyMap<string, string>;
   /**

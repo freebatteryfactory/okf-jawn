@@ -14,7 +14,7 @@ import { BindingsContext } from './Bindings';
 import { Chart } from './Chart';
 import { readDataset, readSource, type ViewData } from './data';
 import { Layout } from './Layout';
-import { Resolution } from './Resolution';
+import { Resolution, warnedBinding } from './Resolution';
 
 export interface PresentViewProps {
   response: z.infer<typeof zPresentResponse>;
@@ -221,6 +221,13 @@ export function PresentView({ response, data }: PresentViewProps) {
           datasetErrors.set(binding.name, reason(cause, 'The dataset could not be read'));
         }
       }
+      // The server's own reason a dataset is missing, by the binding its warning locates.
+      const datasetWarnings = new Map<string, string>();
+      for (const warning of response.warnings) {
+        const binding = warnedBinding(response.view, warning.location);
+        if (warning.code === 'dataset_unavailable' && binding !== undefined)
+          datasetWarnings.set(binding, warning.message);
+      }
       if (active)
         setBindings({
           sources,
@@ -228,6 +235,7 @@ export function PresentView({ response, data }: PresentViewProps) {
           tables,
           charts,
           datasetErrors,
+          datasetWarnings,
           sourceErrors,
           chartErrors,
         });

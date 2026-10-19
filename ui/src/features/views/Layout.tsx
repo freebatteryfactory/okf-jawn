@@ -15,8 +15,9 @@ import { catalog } from './catalog';
 import { DataTable } from './DataTable';
 import { type RawElement, rawSpecSchema, repeatSchema, slotsSchema } from './spec-schema';
 
+/** Why a binding has no table: the dataset this browser refused, else what the server said. */
 function refusal(bindings: ReturnType<typeof useBindings>, name: string): string {
-  const why = bindings.datasetErrors?.get(name);
+  const why = bindings.datasetErrors?.get(name) ?? bindings.datasetWarnings?.get(name);
   return why ? `: ${why}` : '';
 }
 

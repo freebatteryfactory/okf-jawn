@@ -1052,3 +1052,40 @@ describe('a json_render View shows its own title and description, as a vega_lite
     expect(screen.getByRole('heading', { name: 'Six-component catalog' })).toBeTruthy();
   });
 });
+
+describe('a dataset the server could not produce says why under its table', () => {
+  it("shows the dataset_unavailable warning's message, as sent, in the table's own alert", async () => {
+    const presented = zPresentResponse.parse(presentResponseFixture);
+    const message = "binding metrics: the source's shown text is not the converter's";
+    const unproduced = {
+      ...presented,
+      resolved_bindings: presented.resolved_bindings.map(
+        ({ materialized: _dropped, ...binding }) => binding,
+      ),
+      charts: [
+        {
+          chart: { kind: 'named' as const, name: 'metrics_chart' },
+          status: {
+            status: 'failed' as const,
+            reason: 'dataset_unavailable' as const,
+            binding: 'metrics',
+            message: "the source's shown text is not the converter's",
+          },
+        },
+      ],
+      warnings: [{ code: 'dataset_unavailable', message, location: '/bindings/1' }],
+    };
+    const data = serverToolData(async () => ({
+      structuredContent: zReadItemResponse.parse(sourceReadItemFixture),
+    }));
+    const { container } = render(<PresentView response={unproduced} data={data} />);
+    const columns = await waitFor(() => {
+      const found = container.querySelector('.view-columns');
+      if (found === null) throw new Error('the columns are not drawn yet');
+      return found as HTMLElement;
+    });
+    expect(within(columns).getByRole('alert').textContent).toBe(
+      `Dataset unavailable: metrics: ${message}`,
+    );
+  });
+});
