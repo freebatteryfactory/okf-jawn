@@ -9,7 +9,7 @@ use git2::{Oid, Repository, Tree};
 use okf_jawn_contract::conventions::NamingRules;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::{SuppliedText, TextOrigin};
-use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath};
+use okf_jawn_contract::identity::{Digest, ItemId, ProposalId, Revision, WorkspacePath};
 use okf_jawn_contract::item::{ItemDocument, ItemSummary, TypeDefinition};
 use okf_jawn_contract::source::SourceAppearance;
 use okf_jawn_core::portable::item_content_digest;
@@ -17,7 +17,7 @@ use okf_jawn_core::storage::{
     FolderListing, Page, Provenance, RulesFile, RulesParseError, TreeItem, WorkspaceTree,
 };
 
-use super::edit::{appearance_file, correction_file, supplied_file};
+use super::edit::{appearance_file, correction_adopts, correction_file, supplied_file};
 use super::history::last_change;
 use super::item::{ItemFile, RULES_FILE, TYPES_FILE, is_item_path};
 use super::repo::{blob_bytes, commit_of, files, git, internal};
@@ -254,7 +254,13 @@ pub(crate) fn show(
     {
         appearance.extraction = extraction;
         if appearance.extraction.text_origin == TextOrigin::SuppliedByAgent {
-            appearance.extraction.supplied = supplied(repository, revision, &tree, item)?;
+            appearance.extraction.supplied = supplied(
+                repository,
+                revision,
+                &tree,
+                item,
+                appearance.extraction.digest.as_ref(),
+            )?;
         }
     }
     let summary = file.summary(&path, revision, source.as_ref());
@@ -368,6 +374,7 @@ fn supplied(
     revision: &Revision,
     tree: &Tree<'_>,
     item: ItemId,
+    digest: Option<&Digest>,
 ) -> Result<Option<SuppliedText>, ApiError> {
     let path = supplied_file(item);
     let entry = match tree.get_path(std::path::Path::new(&path)) {
@@ -387,9 +394,11 @@ fn supplied(
     let Some((approver, approved_at)) = last_change(repository, revision, &path)? else {
         return Ok(None);
     };
+    let proposal_id =
+        serde_json::from_value(record.get("proposal_id").cloned().unwrap_or_default())
+            .map_err(|error| internal(format!("supplied text has no proposal: {error}")))?;
     Ok(Some(SuppliedText {
-        proposal_id: serde_json::from_value(record.get("proposal_id").cloned().unwrap_or_default())
-            .map_err(|error| internal(format!("supplied text has no proposal: {error}")))?,
+        proposal_id,
         supplied_by: supplier.subject,
         client_id: supplier.client_id,
         approved_by: approver,
@@ -400,8 +409,33 @@ fn supplied(
         .map_err(|error| internal(error.to_string()))?,
         pages: serde_json::from_value(record.get("pages").cloned().unwrap_or_default())
             .unwrap_or_default(),
-        kept_by: None,
+        kept_by: keeper(repository, revision, tree, item, digest, proposal_id)?,
     }))
+}
+
+/// Adoption changes the correction file, not the original approval. Read the keeper from
+/// that choice's commit so a later conversion cannot relabel the original approver.
+fn keeper(
+    repository: &Repository,
+    revision: &Revision,
+    tree: &Tree<'_>,
+    item: ItemId,
+    digest: Option<&Digest>,
+    proposal: ProposalId,
+) -> Result<Option<String>, ApiError> {
+    let Some(digest) = digest else {
+        return Ok(None);
+    };
+    let path = correction_file(item, digest);
+    let Some(blob) = blob_at(tree, &path)? else {
+        return Ok(None);
+    };
+    let record: serde_json::Value = serde_json::from_slice(&blob_bytes(repository, blob)?)
+        .map_err(|error| internal(format!("a correction does not parse: {error}")))?;
+    if correction_adopts(&record)? != Some(proposal) {
+        return Ok(None);
+    }
+    Ok(last_change(repository, revision, &path)?.map(|(subject, _)| subject))
 }
 
 /// How many item files `item_file` parsed on this thread, counted in unit tests so the cost of
