@@ -21,7 +21,15 @@ import {
   ATTENTION_PAGE,
   NOT_A_CERTIFICATE,
 } from '../../src/features/attention/attention';
-import { fail, fromNewerService, type Handler, type Json, mockApi, ok } from './support/api';
+import {
+  fail,
+  fromNewerService,
+  type Handler,
+  type Json,
+  mockApi,
+  notImplemented,
+  ok,
+} from './support/api';
 import { ATTENTION } from './support/imports';
 import {
   explorerHandlers,
@@ -79,7 +87,7 @@ const answer = (items: AttentionItem[], next: string | null = null, revision = H
   ok({ items, next_cursor: next, revision });
 
 function setup(attention: Handler | null) {
-  return mockApi(explorerHandlers(attention === null ? {} : { [ATTENTION]: attention }));
+  return mockApi(explorerHandlers({ [ATTENTION]: attention ?? (() => notImplemented(ATTENTION)) }));
 }
 
 async function openAttention() {
