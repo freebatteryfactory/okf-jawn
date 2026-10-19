@@ -85,6 +85,7 @@ fn app(hosted: bool) -> Result<Router, Box<dyn std::error::Error>> {
 
         cors_origins: Vec::new(),
         ui_dir: None,
+        sandbox_origin: None,
         extra: okf_jawn_server::schemas::routes(),
     })?)
 }

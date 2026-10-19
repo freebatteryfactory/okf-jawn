@@ -209,6 +209,7 @@ impl Stream {
             hosted: None,
             cors_origins: Vec::new(),
             ui_dir: None,
+            sandbox_origin: None,
             extra: events::routes(streams),
         })?;
         Ok(Self {

@@ -187,6 +187,81 @@ async fn the_ui_build_is_served_and_api_paths_stay_json() -> TestResult {
     Ok(())
 }
 
+/// The policy every page carries, framing the test service's sandbox origin.
+const PAGE_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' \
+    'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; \
+    worker-src 'self'; frame-src http://127.0.0.1:8788; frame-ancestors 'none'; base-uri 'none'; \
+    form-action 'self'; object-src 'none'";
+
+#[tokio::test]
+async fn every_page_carries_the_security_headers() -> TestResult {
+    let ui = UiDir::new("headers")?;
+    let app = local(Vec::new(), Some(ui.0.clone()))?;
+    for path in ["/", "/index.html", "/app.js", "/w/some/client/route"] {
+        let page = app.clone().oneshot(get(path)?).await?;
+        assert_eq!(page.status(), StatusCode::OK, "{path}");
+        let header = |name: &str| {
+            page.headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            header("content-security-policy").as_deref(),
+            Some(PAGE_POLICY),
+            "{path}"
+        );
+        assert_eq!(header("x-content-type-options").as_deref(), Some("nosniff"));
+        assert_eq!(header("referrer-policy").as_deref(), Some("no-referrer"));
+        assert_eq!(header("x-frame-options").as_deref(), Some("DENY"));
+        assert_eq!(
+            header("cross-origin-opener-policy").as_deref(),
+            Some("same-origin")
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_page_policy_without_a_sandbox_frames_nothing() -> TestResult {
+    let ui = UiDir::new("no-sandbox")?;
+    let base = LocalApp::new()?;
+    let app = okf_jawn_server::app::service(okf_jawn_server::app::ServiceParts {
+        sandbox_origin: None,
+        ..base.parts(Router::new(), Vec::new(), Some(ui.0.clone()))
+    })?;
+    let page = app.oneshot(get("/")?).await?;
+    let policy = page
+        .headers()
+        .get("content-security-policy")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(policy.contains("frame-src 'none';"), "{policy}");
+    Ok(())
+}
+
+#[test]
+fn a_host_list_with_an_empty_entry_is_refused() -> TestResult {
+    let base = LocalApp::new()?;
+    for hosts in [
+        vec![String::new()],
+        vec![HOST.to_owned(), String::new()],
+        vec![HOST.to_owned(), " ".to_owned()],
+        vec![format!(" {HOST}")],
+    ] {
+        let refused = check::err_of(okf_jawn_server::app::service(
+            okf_jawn_server::app::ServiceParts {
+                hosts: hosts.clone(),
+                ..base.parts(Router::new(), Vec::new(), None)
+            },
+        ))?;
+        assert_eq!(refused.code, ErrorCode::InvalidInput, "{hosts:?}");
+        assert_eq!(refused.field.as_deref(), Some("hosts"));
+    }
+    Ok(())
+}
+
 #[test]
 fn the_operating_system_secret_source_yields_fresh_256_bit_secrets() -> TestResult {
     let first = OsSecrets.secret()?;

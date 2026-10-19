@@ -66,6 +66,7 @@ fn local_service(credentials: Arc<FakeCredentials>) -> Result<Router, Box<dyn st
 
         cors_origins: Vec::new(),
         ui_dir: None,
+        sandbox_origin: None,
         extra: okf_jawn_server::mcp::routes(mcp),
     })?)
 }

@@ -69,9 +69,18 @@ const MAX_TOKEN_CHARS: usize = 256;
 /// The sandbox origin's service.
 ///
 /// # Errors
-/// Returns `InvalidInput` naming `app_origin` when the application origin is not an origin, so
-/// the service never starts with an isolation header it could not build.
+/// Returns `InvalidInput` naming `host` when the sandbox host is empty or holds whitespace (an
+/// empty host would match a request that names none), and naming `app_origin` when the
+/// application origin is not an origin, so the service never starts with an isolation header
+/// it could not build.
 pub fn service(parts: SandboxParts) -> Result<Router, ApiError> {
+    if parts.host.is_empty() || parts.host.chars().any(char::is_whitespace) {
+        return Err(ApiError::new(
+            ErrorCode::InvalidInput,
+            "The sandbox origin's host may not be empty or hold whitespace",
+        )
+        .with_field("host"));
+    }
     let host = parts.host.clone();
     let app_origin = parts.app_origin.clone();
     let routes = Router::new()
@@ -145,7 +154,7 @@ pub fn isolation_headers(app_origin: &str) -> Result<HeaderMap, ApiError> {
 /// Every other
 /// character is refused, so nothing that means something in a policy (`;`, `,`, `*`, a quote,
 /// whitespace) can enter the header through the origin.
-fn is_origin(text: &str) -> bool {
+pub(crate) fn is_origin(text: &str) -> bool {
     let Some((scheme, authority)) = text.split_once("://") else {
         return false;
     };

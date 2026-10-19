@@ -67,6 +67,9 @@ pub const HOST: &str = "127.0.0.1:7711";
 /// The test service's own origin.
 pub const ORIGIN: &str = "http://127.0.0.1:7711";
 
+/// The sandbox origin the test service's pages may frame.
+pub const SANDBOX_ORIGIN: &str = "http://127.0.0.1:8788";
+
 /// The workspace the owner and the connector may read.
 pub const WORKSPACE: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -326,14 +329,29 @@ impl LocalApp {
         ui_dir: Option<PathBuf>,
     ) -> Result<Router, ApiError> {
         service(ServiceParts {
-            bound: self.bound(),
             identity,
+            ..self.parts(extra, cors_origins, ui_dir)
+        })
+    }
+
+    /// The parts of the local service: `extra` routes, the given CORS origins and UI
+    /// directory, its pages framing the sandbox origin `SANDBOX_ORIGIN`.
+    pub fn parts(
+        &self,
+        extra: Router,
+        cors_origins: Vec<String>,
+        ui_dir: Option<PathBuf>,
+    ) -> ServiceParts {
+        ServiceParts {
+            bound: self.bound(),
+            identity: self.identity(),
             hosts: vec![HOST.to_owned()],
             hosted: None,
             cors_origins,
             ui_dir,
+            sandbox_origin: Some(SANDBOX_ORIGIN.to_owned()),
             extra,
-        })
+        }
     }
 }
 
