@@ -7,6 +7,7 @@
 #![cfg(feature = "runtime")]
 
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead as _, BufReader, Read as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -163,9 +164,9 @@ impl Installation {
         Ok(settings)
     }
 
-    fn spawn_binary(
+    fn spawn_binary<K: AsRef<OsStr>, V: AsRef<OsStr>>(
         &self,
-        settings: &BTreeMap<String, String>,
+        settings: impl IntoIterator<Item = (K, V)>,
         args: &[&str],
         close_stdout: bool,
     ) -> Result<Binary, Box<dyn std::error::Error>> {
@@ -920,6 +921,39 @@ async fn composed_uploads_stream_bytes_and_refuse_an_oversized_body_without_appe
 }
 
 #[tokio::test]
+async fn shutdown_cancels_a_stalled_upload_and_releases_the_storage_lock() -> TestResult {
+    // Design section 1.6: an in-flight request gets five seconds, then cannot retain storage.
+    // A literal incomplete HTTP body keeps the real upload adapter awaiting its next byte.
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let installation = Installation::new()?;
+    let mut running = installation.start(installation.local()?).await?;
+    let browser = Browser::sign_in(&running).await?;
+    let workspace = browser.workspace().await?;
+    let upload: Upload = browser.request(reqwest::Method::POST, "/api/imports/create-upload")
+        .json(&json!({ "workspace_id": workspace.id, "filename": "stalled.txt", "relative_path": "", "size": "3", "idempotency_key": "00000000-0000-4000-8000-000000000015" }))
+        .send().await?.error_for_status()?.json().await?;
+    let mut socket = tokio::net::TcpStream::connect(running.authority()).await?;
+    socket.write_all(format!(
+        "PUT {} HTTP/1.1\r\nHost: {}\r\nCookie: {}\r\nOrigin: {}\r\nx-okf-csrf: {}\r\nContent-Length: 3\r\nExpect: 100-continue\r\n\r\n",
+        upload.upload_path, running.authority(), browser.cookie, browser.origin, browser.csrf,
+    ).as_bytes()).await?;
+    let mut continued = vec![0; b"HTTP/1.1 100 Continue\r\n\r\n".len()];
+    tokio::time::timeout(Duration::from_secs(5), socket.read_exact(&mut continued)).await??;
+    assert_eq!(continued, b"HTTP/1.1 100 Continue\r\n\r\n");
+    socket.write_all(b"a").await?;
+    running.stop.cancel();
+    tokio::time::timeout(Duration::from_secs(10), &mut running.served).await???;
+    // Keep the client socket open while reclaiming the lock: closing it would hide a detached
+    // server connection. Reopening must succeed without waiting for a client to finish its body.
+    drop(Storage::open(&running.data)?);
+    assert!(!running.data.join(LAUNCH_FILE).exists());
+    let mut tail = Vec::new();
+    tokio::time::timeout(Duration::from_secs(1), socket.read_to_end(&mut tail)).await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn composed_backups_download_for_the_owner_and_are_refused_to_a_connector() -> TestResult {
     // SPEC section 12: both artifact routes must use kind/route authorization and real archives.
     let installation = Installation::new()?;
@@ -1016,6 +1050,36 @@ fn the_binary_refuses_configuration_and_usage_before_opening_data() -> TestResul
         );
         assert!(!installation.data().exists());
     }
+    Ok(())
+}
+
+#[cfg(any(windows, unix))]
+#[test]
+fn the_binary_refuses_non_unicode_settings_instead_of_selecting_defaults() -> TestResult {
+    // Design section 1.2: a present invalid setting is refused by name, never treated as unset.
+    #[cfg(windows)]
+    let invalid = {
+        use std::os::windows::ffi::OsStringExt as _;
+        OsString::from_wide(&[0xd800])
+    };
+    #[cfg(unix)]
+    let invalid = {
+        use std::os::unix::ffi::OsStringExt as _;
+        OsString::from_vec(vec![0xff])
+    };
+    let installation = Installation::new()?;
+    let mut settings: BTreeMap<OsString, OsString> = installation
+        .local()?
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect();
+    // Keep an explicit valid data directory even on the failing implementation, so the red
+    // cannot touch this user's per-machine default installation.
+    settings.insert("OKF_AUTH_MODE".into(), invalid);
+    let mut binary = installation.spawn_binary(&settings, &[], false)?;
+    assert_eq!(binary.exit()?.code(), Some(1));
+    assert!(binary.stderr()?.contains("OKF_AUTH_MODE"));
+    assert!(!installation.data().exists());
     Ok(())
 }
 

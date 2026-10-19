@@ -57,6 +57,7 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::ListEventsResponse;
 use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 
 use crate::errors::{Readable, error_response, retry_response};
 use crate::identity::{Credential, Identity};
@@ -76,6 +77,8 @@ pub struct EventStreams {
     interval: Duration,
     /// How many streams each caller holds open now.
     open: Arc<Mutex<BTreeMap<CallerKey, usize>>>,
+    /// Shutdown of the composed service ends streams even while a poll or its wait is pending.
+    stop: CancellationToken,
 }
 
 /// A caller, as the grant cache keys one: tenant, subject, route and client.
@@ -149,7 +152,15 @@ impl EventStreams {
             identity,
             interval,
             open: Arc::new(Mutex::new(BTreeMap::new())),
+            stop: CancellationToken::new(),
         })
+    }
+
+    /// End every stream when `stop` is cancelled, interrupting its next poll or interval wait.
+    #[must_use]
+    pub fn with_stop(mut self, stop: CancellationToken) -> Self {
+        self.stop = stop;
+        self
     }
 
     /// A place for one more stream of `principal`, or `None` when it holds
@@ -321,7 +332,17 @@ fn more_waiting(page: &ListEventsResponse) -> bool {
 }
 
 /// The stream's next SSE event: a pending notification, or the result of the next poll.
-async fn next_event(mut state: Polling) -> Option<(Result<SseEvent, axum::Error>, Polling)> {
+async fn next_event(state: Polling) -> Option<(Result<SseEvent, axum::Error>, Polling)> {
+    let stop = state.streams.stop.clone();
+    tokio::select! {
+        biased;
+        () = stop.cancelled() => None,
+        event = advance(state) => event,
+    }
+}
+
+/// Advance while shutdown is not signalled; the outer select also interrupts store calls.
+async fn advance(mut state: Polling) -> Option<(Result<SseEvent, axum::Error>, Polling)> {
     loop {
         if state.ended {
             return None;

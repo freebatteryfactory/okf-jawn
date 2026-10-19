@@ -188,12 +188,16 @@ pub mod offline;
 #[cfg(feature = "runtime")]
 pub mod outbound;
 pub mod public;
+#[cfg(feature = "runtime")]
+pub mod run;
 pub mod sandbox;
 pub mod schemas;
 #[cfg(feature = "runtime")]
 pub mod sessions;
 #[cfg(feature = "runtime")]
 pub mod settings;
+#[cfg(feature = "runtime")]
+pub mod startup;
 #[cfg(feature = "runtime")]
 pub mod transfers;
 #[cfg(feature = "runtime")]

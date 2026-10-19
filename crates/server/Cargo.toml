@@ -9,6 +9,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[[bin]]
+name = "okf-jawn-server"
+path = "src/main.rs"
+required-features = ["runtime"]
+
 [dependencies]
 okf-jawn-contract = { path = "../contract" }
 okf-jawn-core = { path = "../core" }
