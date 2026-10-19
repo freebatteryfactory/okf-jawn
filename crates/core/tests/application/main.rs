@@ -1,5 +1,5 @@
 //! `ApplicationService` handlers over fakes of their ports: what each operation of the item,
-//! read, source, history, search, health, session, proposal, review, purge, naming-rules
+//! folder, read, source, history, search, health, session, proposal, review, purge, naming-rules
 //! (conventions), workspace, event and connector modules asks of the ports, and what it
 //! answers.
 //!
@@ -18,6 +18,7 @@ mod drafts;
 mod events;
 #[path = "../support/application.rs"]
 mod fixture;
+mod folders;
 mod history;
 mod items;
 mod navigation;

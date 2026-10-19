@@ -1592,8 +1592,9 @@ fn title_words(words: &[&str]) -> Vec<String> {
 }
 
 /// Whether a segment of `path` is one the server keeps: `.okf`, `index.md` or `log.md`,
-/// compared by collision key.
-fn reserved(path: &str) -> bool {
+/// compared by collision key. The folder operations refuse such a folder or destination with it
+/// too (`application::folders`).
+pub(crate) fn reserved(path: &str) -> bool {
     collision_key_of(path).split('/').any(|segment| {
         segment == APP_DIR
             || okf_core::RESERVED_FILENAMES

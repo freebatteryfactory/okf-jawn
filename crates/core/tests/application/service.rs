@@ -139,7 +139,8 @@ async fn an_operation_of_a_later_part_answers_not_implemented() -> TestResult {
 
 /// The rows contract batch 2 added and no part has built yet answer `NotImplemented`, naming
 /// themselves, through the production service: core's `route!` sends an operation it does not
-/// name to `pending`. (The sixth row, `list_comments`, is built with the proposals.)
+/// name to `pending`. (The sixth row, `list_comments`, is built with the proposals, and
+/// `move_folder` with the folders work item: `tests/application/folders.rs`.)
 #[tokio::test]
 async fn the_rows_of_contract_batch_2_answer_not_implemented() -> TestResult {
     let world = World::new()?;
@@ -183,18 +184,6 @@ async fn the_rows_of_contract_batch_2_answer_not_implemented() -> TestResult {
         err_of(
             world
                 .service
-                .move_folder(
-                    &alice(OperationName::MoveFolder, None)?,
-                    serde_json::from_value(json!({
-                        "workspace_id": workspace, "base_revision": base, "folder": "a",
-                        "destination": "b", "idempotency_key": key
-                    }))?,
-                )
-                .await,
-        )?,
-        err_of(
-            world
-                .service
                 .delete_folder(
                     &alice(OperationName::DeleteFolder, None)?,
                     serde_json::from_value(json!({
@@ -209,7 +198,6 @@ async fn the_rows_of_contract_batch_2_answer_not_implemented() -> TestResult {
         "get_upload",
         "list_uploads",
         "discard_upload",
-        "move_folder",
         "delete_folder",
     ];
     for (error, name) in refused.iter().zip(names) {
