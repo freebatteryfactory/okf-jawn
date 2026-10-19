@@ -108,7 +108,13 @@ test('canceled product runtimes are not imported as application dependencies',as
 });
 test('CLI, UI, browser tests and examples agree on the local service endpoint',async()=>{
  for(const file of ['crates/cli/src/lib.rs','ui/vite.config.ts','ui/playwright.config.ts','deploy/.env.example']){
-  const source=await readFile(join(root,file),'utf8');
+  let source=await readFile(join(root,file),'utf8');
+  if(file==='deploy/.env.example'){
+   // The sandbox is a separate origin/listener (SPEC 11), not another application endpoint.
+   assert.match(source,/^OKF_SANDBOX_BIND=127\.0\.0\.1:7712\r?$/m);
+   assert.match(source,/^OKF_SANDBOX_ORIGIN=http:\/\/127\.0\.0\.1:7712\r?$/m);
+   source=source.split(/\r?\n/).filter(line=>!/^OKF_SANDBOX_(?:BIND|ORIGIN)=/.test(line)).join('\n');
+  }
   assert.match(source,/127\.0\.0\.1:7711/,file);
   assert.doesNotMatch(source,/127\.0\.0\.1:(?!7711\b)\d+/,file);
  }
