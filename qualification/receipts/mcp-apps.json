@@ -1,5 +1,5 @@
 {
-  "git_sha": "887056a26d3ee0e20cda63cb38391b88a5e75ec8",
+  "git_sha": "f83cca726386a32f9037a190133efe49e71b11de",
   "inputs": [
     ".bun-version",
     ".cargo/config.toml",
@@ -23,7 +23,7 @@
     "ui/tsconfig.json",
     "ui/vite.config.ts"
   ],
-  "produced_at": "2026-10-19T18:49:36.339Z",
+  "produced_at": "2026-10-19T19:30:24.029Z",
   "component": "mcp-apps-protocol-qualification",
   "gate": "mcp-apps-protocol-qualification",
   "result": "PASS",
@@ -212,7 +212,7 @@
   ],
   "not_judged": [],
   "harness_error_detail": [],
-  "finished_at": "2026-10-19T18:51:15.533Z",
+  "finished_at": "2026-10-19T19:31:13.690Z",
   "scope": {
     "summary": "This run renders the real MCP App bundle in a real MCP Apps host, against a fixture MCP server. It qualifies the App side and the protocol libraries; it does not test the product server.",
     "real": [
