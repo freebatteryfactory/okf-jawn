@@ -12,13 +12,15 @@
 //! - **`backup`** prints each archive it wrote, one path a line; **`restore`** prints one JSON
 //!   `RestoreReport` a line, one for each workspace.
 
+use std::cell::RefCell;
 use std::io::Write as _;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use tokio_util::sync::CancellationToken;
 
+use crate::config::invalid;
 use crate::offline::{BackupArgs, RestoreArgs, backup, restore};
-use crate::settings::{Places, offline_settings};
+use crate::settings::{Places, Settings, offline_settings};
 use crate::startup;
 
 /// Run the service from the process environment until a shutdown signal.
@@ -27,6 +29,8 @@ use crate::startup;
 /// Returns the first refusal of startup, or a listener's failure while serving.
 pub fn serve_from_environment() -> Result<(), ApiError> {
     install_diagnostics();
+    let settings =
+        from_environment(|lookup| Settings::from_lookup(lookup, &Places::of_this_machine()))?;
     runtime()?.block_on(async {
         let stop = CancellationToken::new();
         let signalled = stop.clone();
@@ -34,13 +38,7 @@ pub fn serve_from_environment() -> Result<(), ApiError> {
             shutdown_signal().await;
             signalled.cancel();
         });
-        startup::serve(
-            |name| std::env::var(name).ok(),
-            &Places::of_this_machine(),
-            &print_line,
-            stop,
-        )
-        .await
+        startup::serve_settings(settings, &print_line, stop).await
     })
 }
 
@@ -51,7 +49,7 @@ pub fn serve_from_environment() -> Result<(), ApiError> {
 pub fn backup_from_environment(args: &BackupArgs) -> Result<(), ApiError> {
     install_diagnostics();
     let (kind, data_dir) =
-        offline_settings(|name| std::env::var(name).ok(), &Places::of_this_machine())?;
+        from_environment(|lookup| offline_settings(lookup, &Places::of_this_machine()))?;
     let written = runtime()?.block_on(backup(kind, &data_dir, args))?;
     for path in written {
         print_line(&path.display().to_string());
@@ -66,7 +64,7 @@ pub fn backup_from_environment(args: &BackupArgs) -> Result<(), ApiError> {
 pub fn restore_from_environment(args: &RestoreArgs) -> Result<(), ApiError> {
     install_diagnostics();
     let (_kind, data_dir) =
-        offline_settings(|name| std::env::var(name).ok(), &Places::of_this_machine())?;
+        from_environment(|lookup| offline_settings(lookup, &Places::of_this_machine()))?;
     let reports = runtime()?.block_on(restore(&data_dir, args))?;
     for report in reports {
         let line = serde_json::to_string(&report).map_err(|_| {
@@ -75,6 +73,27 @@ pub fn restore_from_environment(args: &RestoreArgs) -> Result<(), ApiError> {
         print_line(&line);
     }
     Ok(())
+}
+
+/// Read only the settings the pure parser requests, preserving a present non-Unicode refusal.
+/// The parser can inspect defaults, but no parsed configuration reaches IO after that refusal.
+/// Explicit local mode still ignores hosted credentials, as the authentication parser specifies.
+fn from_environment<T>(
+    parse: impl FnOnce(&dyn Fn(&str) -> Option<String>) -> Result<T, ApiError>,
+) -> Result<T, ApiError> {
+    let refused = RefCell::new(None);
+    let parsed = parse(&|name| match std::env::var(name) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            refused.borrow_mut().get_or_insert_with(|| name.to_owned());
+            None
+        }
+    });
+    match refused.into_inner() {
+        Some(name) => Err(invalid(&name, "must contain valid Unicode")),
+        None => parsed,
+    }
 }
 
 /// Write one line to stdout; a stdout that cannot be written to is noted on stderr, never fatal.

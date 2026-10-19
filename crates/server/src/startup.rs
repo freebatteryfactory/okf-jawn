@@ -136,6 +136,15 @@ pub async fn serve(
     stop: CancellationToken,
 ) -> Result<(), ApiError> {
     let settings = Settings::from_lookup(lookup, places)?;
+    serve_settings(settings, print, stop).await
+}
+
+/// Serve settings already read and refused by the process-environment boundary.
+pub(crate) async fn serve_settings(
+    settings: Settings,
+    print: &(dyn Fn(&str) + Send + Sync),
+    stop: CancellationToken,
+) -> Result<(), ApiError> {
     settings.check_files()?;
     let clients = clients(&settings)?;
     let app_listener = bind("OKF_BIND", settings.bind).await?;
