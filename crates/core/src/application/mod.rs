@@ -15,7 +15,8 @@
 //! `views` (persistent Views: reading, presenting, resolving and exporting them, and the check
 //! every saved-View write runs first),
 //! `uploads` (upload slots), `job_control` (reading jobs, retrying and cancelling them), and
-//! `attention` (advisory workspace observations and index rebuild jobs),
+//! `attention` (advisory workspace observations and index rebuild jobs), and `imports`
+//! (import acceptance, conversion again and corrections),
 //! over the shared steps in `shared` (revision resolution, commits, receipts). Besides the
 //! operations, the service answers dispatch's archive question (`Application::archived_at`)
 //! from its catalog, records a sign-in for the server's session routes
@@ -292,6 +293,15 @@ macro_rules! route {
     (get_attention) => {
         attention::get_attention
     };
+    (start_import) => {
+        imports::start_import
+    };
+    (redigest_item) => {
+        imports::redigest_item
+    };
+    (correct_digest) => {
+        imports::correct_digest
+    };
     (rebuild_index) => {
         attention::rebuild_index
     };
@@ -427,7 +437,7 @@ impl ApplicationConfig {
     /// Returns `InvalidInput` naming `sandbox_origin` when it is not an absolute `http` or
     /// `https` origin of a host and an optional port in `1..=65535`, without a path, query,
     /// fragment or user information, naming `sandbox_ttl` when it is zero, and naming
-    /// `max_upload_bytes` when it is zero.
+    /// `max_upload_bytes` when it is zero, or the conversion settings field that is out of bounds.
     pub fn check(&self) -> Result<(), ApiError> {
         if !is_origin(&self.sandbox_origin) {
             return Err(ApiError::new(
@@ -450,6 +460,7 @@ impl ApplicationConfig {
             )
             .with_field("max_upload_bytes"));
         }
+        self.conversion_defaults.check()?;
         Ok(())
     }
 }
@@ -602,6 +613,7 @@ mod conventions;
 mod drafts;
 mod events;
 mod history;
+mod imports;
 mod items;
 mod job_control;
 mod navigation;

@@ -1,6 +1,6 @@
 //! Imports, conversion again and corrections (SPEC section 5): `start_import`, `redigest_item`
 //! and `correct_digest`. The first two record a job and wake the worker
-//! (`shared::start_job`), answered with the queued `Job` (status 202); ingest runs the job.
+//! (`workspaces::start_job`), answered with the queued `Job` (status 202); ingest runs the job.
 //!
 //! `start_import` checks, before its job is queued, in this order, so a refused request queues
 //! nothing:
@@ -17,8 +17,9 @@
 //!   with the same collision key as the destination's folder at that level but another spelling
 //!   is refused as `invalid_input` on `/destination`, naming the spelling the base holds, so the
 //!   cards never land in a second spelling of an existing folder. A level the base does not hold
-//!   ends the walk: the rest is new. The store's commit still refuses such a collision whatever
-//!   lands meanwhile.
+//!   ends the walk: the rest is new. An item at any segment, including a collision-key variant,
+//!   is refused before a job is created. The store's commit still refuses such a collision
+//!   whatever lands meanwhile.
 //! - every upload, in the request's order: held by the workspace (the store's `NotFound`, named
 //!   on `/upload_ids/<i>`), complete (`invalid_input` on `/upload_ids/<i>`), and not taken by a
 //!   job (`conflict` on `/upload_ids/<i>`, naming the job that took it).
@@ -30,16 +31,14 @@
 //!
 //! Settings: absent ones are the deployment's (`ApplicationConfig::conversion_defaults`),
 //! resolved into the job's specification now, so a retry of the job converts the same way.
-//! `apply_naming_rules` is passed on as asked; ingest fails such a job as `NotImplemented` until
-//! core can name a card under the workspace rules (ingest request R-I4).
+//! `apply_naming_rules` is passed on as asked; ingest uses core's naming engine for card names.
 //!
 //! A resumed attempt (`Attempt::Resumed`) runs the same checks and is answered the job its first
 //! attempt created (`RecordStore::create_job` is unique on the mutation). That job may have taken
-//! the uploads meanwhile: when the import's first commit (its pending cards, ordinal 0 of
-//! `storage::derive_commit_mutation_id`) is on the history after the base, the uploads were
-//! taken by this request's own job, and the job is answered. Known limit: a resumed attempt that
-//! comes after the job took the uploads and before that commit landed, or after the job failed
-//! between the two, is refused as `Conflict`, naming the job that took them (its own).
+//! the uploads meanwhile: `RecordStore::job_mutation` reads the consuming job's immutable
+//! creating mutation within this workspace. Matching it recognizes this request's own job
+//! even before its first commit or after it failed. Every later upload is still checked; no
+//! ownership match returns early or creates a job before all acceptance checks pass.
 //!
 //! `redigest_item` follows the import's rule for its base (contract ruling 26, the integration
 //! owner's ruling R3 for core M1.5): the base must be a revision of the workspace (the revision
@@ -83,13 +82,13 @@ use sha2::{Digest as _, Sha256};
 
 use super::ApplicationService;
 use super::shared::{
-    Touched, Write, check_named, commit_with_receipt, invalid, mutation_id, start_job,
-    workspace_scope,
+    Touched, Write, check_named, commit_with_receipt, invalid, mutation_id, workspace_scope,
 };
 use super::sources::record_of;
+use super::workspaces::start_job;
 use crate::context::{Attempt, OperationContext};
 use crate::jobs::{JobScope, JobSpec};
-use crate::storage::{Page, StorageScope, TreeEdit, derive_commit_mutation_id};
+use crate::storage::{Page, StorageScope, TreeEdit};
 
 /// How many entries of a folder are read at a time while the destination is walked.
 const FOLDER_PAGE: u16 = 500;
@@ -126,15 +125,7 @@ pub(super) async fn start_import(
     let base = request.base_revision;
     check_named(service, &scope, &base).await?;
     check_destination(service, &scope, &base, destination.as_ref()).await?;
-    check_uploads(
-        service,
-        context,
-        &scope,
-        mutation,
-        &base,
-        &request.upload_ids,
-    )
-    .await?;
+    check_uploads(service, context, &scope, mutation, &request.upload_ids).await?;
     let settings = request
         .settings
         .unwrap_or_else(|| service.config().conversion_defaults.clone());
@@ -338,11 +329,12 @@ async fn check_destination(
 }
 
 /// The child folder of `parent` at `base` whose collision key is `wanted`'s, read from every
-/// page of the listing; `None` when the base holds none.
+/// page of the listing; `None` when the base holds none. An item with that key cannot become
+/// a destination folder or an ancestor of one.
 ///
 /// # Errors
-/// Returns any error of listing the folder: the store lists a folder the revision does not hold
-/// as empty, so `NotFound` here is an unknown revision, never "no such folder".
+/// Returns `InvalidInput` on `/destination` for an item occupying the wanted path, or any
+/// listing error: a missing folder is empty, so `NotFound` here is an unknown revision.
 async fn folder_by_key(
     service: &ApplicationService,
     scope: &StorageScope,
@@ -365,6 +357,19 @@ async fn folder_by_key(
                 },
             )
             .await?;
+        if let Some(item) = listing
+            .items
+            .iter()
+            .find(|item| item.path.collision_key() == key)
+        {
+            return Err(invalid(
+                format!(
+                    "the destination names the item {} as a folder",
+                    item.path.as_str()
+                ),
+                DESTINATION,
+            ));
+        }
         if let Some(found) = listing
             .folders
             .into_iter()
@@ -391,10 +396,10 @@ async fn check_uploads(
     context: &OperationContext,
     scope: &StorageScope,
     mutation: MutationId,
-    base: &Revision,
     uploads: &[UploadId],
 ) -> Result<(), ApiError> {
     let store = &service.ports().uploads;
+    let jobs = JobScope::Workspace(scope.clone());
     for (index, upload) in uploads.iter().enumerate() {
         let field = format!("/upload_ids/{index}");
         let record = store.get(scope, *upload).await.map_err(|error| {
@@ -408,9 +413,10 @@ async fn check_uploads(
             return Err(invalid("the upload is not complete", &field));
         }
         if let Some(job) = record.consumed_by {
-            if context.attempt == Attempt::Resumed && imported_by(service, scope, mutation, base).await?
+            if context.attempt == Attempt::Resumed
+                && service.ports().records.job_mutation(&jobs, job).await? == mutation
             {
-                return Ok(());
+                continue;
             }
             return Err(ApiError::new(
                 ErrorCode::Conflict,
@@ -420,25 +426,6 @@ async fn check_uploads(
         }
     }
     Ok(())
-}
-
-/// Whether the import job of `mutation` has landed its first commit (its pending cards) after
-/// `base`: then the uploads were consumed by that job.
-///
-/// # Errors
-/// Returns any port error.
-async fn imported_by(
-    service: &ApplicationService,
-    scope: &StorageScope,
-    mutation: MutationId,
-    base: &Revision,
-) -> Result<bool, ApiError> {
-    Ok(service
-        .ports()
-        .versions
-        .find_commit(scope, derive_commit_mutation_id(mutation, 0), Some(base))
-        .await?
-        .is_some())
 }
 
 /// The pages a redigest of only the unconverted pages converts: the `not_converted` pages of the
