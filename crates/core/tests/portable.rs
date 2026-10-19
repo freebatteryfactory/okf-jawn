@@ -38,6 +38,26 @@ struct EchoingRewritten;
 /// A candidate directory under the system temporary directory, removed when dropped.
 struct Candidate(PathBuf);
 
+/// A committed note for M2a's export writer (design VW1-VW3), with an extension and body to keep.
+const STORED_EXPORT_NOTE: &str = concat!(
+    "---\n",
+    "type: Note\n",
+    "title: Plan\n",
+    "generated:\n",
+    "  by: agent:writer\n",
+    "  at: '2026-10-01T08:00:00Z'\n",
+    "stale_after: '2027-01-01'\n",
+    "x_team: 7\n",
+    "okf_jawn:\n",
+    "  item_id: 00000000-0000-0000-0000-00000000000a\n",
+    "  kind: note\n",
+    "---\n",
+    "\n",
+    "# Plan\n",
+    "\n",
+    "Ship it.\n",
+);
+
 impl CandidateCheck for ScriptedConformance {
     fn check(
         &self,
@@ -161,26 +181,6 @@ fn yaml(value: &Value) -> YamlValue {
 fn properties(value: Value) -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
     Ok(serde_json::from_value(value)?)
 }
-
-/// A committed note for M2a's export writer (design VW1-VW3), with an extension and body to keep.
-const STORED_EXPORT_NOTE: &str = concat!(
-    "---\n",
-    "type: Note\n",
-    "title: Plan\n",
-    "generated:\n",
-    "  by: agent:writer\n",
-    "  at: '2026-10-01T08:00:00Z'\n",
-    "stale_after: '2027-01-01'\n",
-    "x_team: 7\n",
-    "okf_jawn:\n",
-    "  item_id: 00000000-0000-0000-0000-00000000000a\n",
-    "  kind: note\n",
-    "---\n",
-    "\n",
-    "# Plan\n",
-    "\n",
-    "Ship it.\n",
-);
 
 /// The actual content fingerprint of the fixed note, using the existing item test helper.
 fn export_note_fingerprint() -> Result<Digest, Box<dyn Error>> {
