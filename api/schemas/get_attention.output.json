@@ -8,6 +8,17 @@
           "$ref": "#/$defs/OperationName",
           "description": "Suggested existing operation, never executable code."
         },
+        "instruction_like": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InstructionEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present only for instruction-like warnings; absence never certifies safety."
+        },
         "item": {
           "anyOf": [
             {
@@ -217,6 +228,10 @@
         }
       ]
     },
+    "Digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
     "ExtractionStatus": {
       "description": "The converter's verdict on one source, as a listing and a filter use it.",
       "oneOf": [
@@ -270,6 +285,95 @@
         "corrected"
       ],
       "type": "object"
+    },
+    "InstructionEvidence": {
+      "additionalProperties": false,
+      "description": "Bounded current evidence for one item's instruction-like observation.",
+      "properties": {
+        "findings": {
+          "description": "First matches in source order, at most 32 for version one.",
+          "items": {
+            "$ref": "#/$defs/InstructionFinding"
+          },
+          "maxItems": 32,
+          "type": "array"
+        },
+        "language": {
+          "description": "Language supported by this rule set; version one is English only (`en`).",
+          "type": "string"
+        },
+        "omitted_findings": {
+          "description": "Additional matches counted but not included in this bounded evidence list.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "language",
+        "findings",
+        "omitted_findings"
+      ],
+      "type": "object"
+    },
+    "InstructionFinding": {
+      "additionalProperties": false,
+      "description": "One advisory match, quoted from the original text and located like an ordinary citation.",
+      "properties": {
+        "passage": {
+          "description": "Original matching lines; normalization never rewrites the displayed evidence.",
+          "type": "string"
+        },
+        "rule_id": {
+          "$ref": "#/$defs/InstructionRule",
+          "description": "Rule that matched, not a verdict about intent or safety."
+        },
+        "rule_set_version": {
+          "description": "Exact version of the rules that produced this finding.",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceReference",
+          "description": "The same revision, representation and locator used by application reads."
+        }
+      },
+      "required": [
+        "rule_id",
+        "rule_set_version",
+        "passage",
+        "source"
+      ],
+      "type": "object"
+    },
+    "InstructionRule": {
+      "description": "Explainable rules in the local English instruction-warning detector.",
+      "oneOf": [
+        {
+          "const": "role_impersonation",
+          "description": "Text impersonates a system, developer or administrator message.",
+          "type": "string"
+        },
+        {
+          "const": "override_instructions",
+          "description": "Text asks for earlier instructions to be ignored or overridden.",
+          "type": "string"
+        },
+        {
+          "const": "reveal_secrets",
+          "description": "Text asks for credentials, prompts or hidden instructions.",
+          "type": "string"
+        },
+        {
+          "const": "external_action",
+          "description": "Text asks an assistant to execute an action or send data elsewhere.",
+          "type": "string"
+        },
+        {
+          "const": "hidden_text",
+          "description": "Invisible or bidirectional controls occur within the text.",
+          "type": "string"
+        }
+      ]
     },
     "ItemId": {
       "description": "Stable item identity independent of its current relative path.",
@@ -1001,6 +1105,184 @@
         }
       ]
     },
+    "SourceLocation": {
+      "description": "A location and how it was obtained; an inferred location is a different variant from a\ndirect one, so no consumer can show it as direct by accident.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "From the converter's own provenance.",
+          "properties": {
+            "locator": {
+              "$ref": "#/$defs/SourceLocator",
+              "description": "Where."
+            },
+            "provenance": {
+              "const": "direct",
+              "type": "string"
+            }
+          },
+          "required": [
+            "provenance",
+            "locator"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Found by matching text against the page text layer (ingest-locates-unlocated-items).",
+          "properties": {
+            "locator": {
+              "$ref": "#/$defs/SourceLocator",
+              "description": "Where."
+            },
+            "provenance": {
+              "const": "inferred",
+              "type": "string"
+            }
+          },
+          "required": [
+            "provenance",
+            "locator"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Not known; never given a guessed box.",
+          "properties": {
+            "provenance": {
+              "const": "unresolved",
+              "type": "string"
+            },
+            "reason": {
+              "$ref": "#/$defs/UnresolvedReason",
+              "description": "Why."
+            }
+          },
+          "required": [
+            "provenance",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SourceLocator": {
+      "description": "Where in the original bytes something is.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A whole page or slide.",
+          "properties": {
+            "kind": {
+              "const": "page",
+              "type": "string"
+            },
+            "page_no": {
+              "description": "One-based page or slide number.",
+              "format": "uint32",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "page_no"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A box on a page, slide or image.",
+          "properties": {
+            "kind": {
+              "const": "region",
+              "type": "string"
+            },
+            "region": {
+              "$ref": "#/$defs/PageRegion",
+              "description": "The box."
+            }
+          },
+          "required": [
+            "kind",
+            "region"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Spreadsheet cells.",
+          "properties": {
+            "kind": {
+              "const": "cells",
+              "type": "string"
+            },
+            "range": {
+              "$ref": "#/$defs/CellRange",
+              "description": "Sheet and one-based inclusive cell range."
+            }
+          },
+          "required": [
+            "kind",
+            "range"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SourceReference": {
+      "additionalProperties": false,
+      "description": "A precise citation that can be reopened independently of current state.",
+      "properties": {
+        "digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exact derived artifact hash."
+        },
+        "item_id": {
+          "$ref": "#/$defs/ItemId",
+          "description": "Stable application item identity; paths remain the portable OKF identity."
+        },
+        "locations": {
+          "description": "Where the cited selection of the digest lies in the original, one entry per located\nitem it covers, in reading order.\n\nThe server computes it from (item, revision, digest, selection). A response always\nfills it. In a request an omitted list means \"fill it\"; a present list must equal what\nthe server computes, or the request is `invalid_input` on `.../locations`, so a caller\nnever supplies a location. A saved View file does not keep locations: they are derived,\nand the server fills them when it returns the View.",
+          "items": {
+            "$ref": "#/$defs/SourceLocation"
+          },
+          "type": "array"
+        },
+        "path": {
+          "$ref": "#/$defs/WorkspacePath",
+          "description": "Relative path at the resolved source revision."
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Resolved source revision."
+        },
+        "selection": {
+          "$ref": "#/$defs/Selection",
+          "description": "Resolved page, lines, cells, region, section, or entire source."
+        },
+        "workspace_id": {
+          "$ref": "#/$defs/WorkspaceId",
+          "description": "Workspace whose permissions and storage scope apply."
+        }
+      },
+      "required": [
+        "workspace_id",
+        "item_id",
+        "path",
+        "revision",
+        "selection"
+      ],
+      "type": "object"
+    },
     "TextOrigin": {
       "description": "Whose text a source card shows and search indexes.",
       "oneOf": [
@@ -1043,6 +1325,163 @@
         "end"
       ],
       "type": "object"
+    },
+    "UnresolvedReason": {
+      "description": "Why a location is not known; one variant per reason the producing rule states.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The format has no page geometry (DOCX, HTML, Markdown).",
+          "properties": {
+            "kind": {
+              "const": "format_has_no_locator",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The converter gave this item no location and no rule locates it (PPTX, XLSX).",
+          "properties": {
+            "kind": {
+              "const": "not_located_by_converter",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The page text layer could not be read.",
+          "properties": {
+            "kind": {
+              "const": "no_text_layer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A table or picture: there is no text to look up.",
+          "properties": {
+            "kind": {
+              "const": "no_text_to_match",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Neither the parent nor an earlier sibling is located.",
+          "properties": {
+            "kind": {
+              "const": "no_page_to_search",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "No text-layer item on the searched pages has exactly this text.",
+          "properties": {
+            "kind": {
+              "const": "no_match",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Several text-layer items have exactly this text.",
+          "properties": {
+            "kind": {
+              "const": "ambiguous_match",
+              "type": "string"
+            },
+            "occurrences": {
+              "description": "How many.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "occurrences"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The one match has no area or lies outside the page.",
+          "properties": {
+            "kind": {
+              "const": "match_not_a_location",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The cited text is a human correction, which has no place in the original.",
+          "properties": {
+            "kind": {
+              "const": "corrected_text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The cited text was supplied by an agent; its page claims are not locations.",
+          "properties": {
+            "kind": {
+              "const": "supplied_text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
     },
     "WorkspacePath": {
       "description": "A relative path inside one workspace, in Unicode NFC, with `/` between segments. At most 4096 bytes in UTF-8: a character takes one to four.",

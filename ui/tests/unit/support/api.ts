@@ -37,6 +37,8 @@ import {
   zDiscardDraftRequest,
   zDraft,
   zEmpty,
+  zGetAttentionRequest,
+  zGetAttentionResponse,
   zGetGraphRequest,
   zGetGraphResponse,
   zGetItemRequest,
@@ -104,6 +106,10 @@ export interface Call {
  * other features add their operations to it (`imports.ts`).
  */
 export const CONTRACT: Record<string, { request: ZodType; response: ZodType }> = {
+  '/api/attention/get-attention': {
+    request: zGetAttentionRequest,
+    response: zGetAttentionResponse,
+  },
   '/api/workspaces/list-workspaces': {
     request: zListWorkspacesRequest,
     response: zListWorkspacesResponse,

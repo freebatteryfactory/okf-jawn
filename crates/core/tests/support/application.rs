@@ -993,8 +993,11 @@ impl VersionState {
 
     fn require_known(&self, revision: &Revision) -> Result<(), ApiError> {
         let known = self.head.as_ref() == Some(revision)
-            || self.commits.iter().any(|(_, at)| at == revision)
-            || self.landed.iter().any(|(at, _)| at == revision)
+            || self.commits.iter().any(|(changes, at)| {
+                at == revision || &changes.expected_head == revision
+            })
+            // Moving the head does not erase the revision it moved from, including an empty tree.
+            || self.landed.iter().any(|(at, parent)| at == revision || parent == revision)
             || self.documents.iter().any(|(at, _)| at == revision)
             || self.listings.iter().any(|(at, _, _)| at == revision)
             || self.logs.iter().any(|(at, _, _)| at == revision)
@@ -1737,6 +1740,9 @@ impl RecordStore for FakeRecords {
         unused()
     }
     fn get_job<'a>(&'a self, _scope: &'a JobScope, _job: JobId) -> PortFuture<'a, Job> {
+        unused()
+    }
+    fn job_mutation<'a>(&'a self, _scope: &'a JobScope, _job: JobId) -> PortFuture<'a, MutationId> {
         unused()
     }
     fn list_jobs<'a>(
@@ -2577,6 +2583,7 @@ pub fn config() -> ApplicationConfig {
         sandbox_origin: SANDBOX_ORIGIN.to_owned(),
         sandbox_ttl: Duration::from_secs(300),
         max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
+        conversion_defaults: ConversionSettings::default(),
     }
 }
 

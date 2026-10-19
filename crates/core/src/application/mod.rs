@@ -14,7 +14,9 @@
 //! `events` (receipts and the two event logs), `connectors` (local connector credentials),
 //! `views` (persistent Views: reading, presenting, resolving and exporting them, and the check
 //! every saved-View write runs first),
-//! `uploads` (upload slots) and `job_control` (reading jobs, retrying and cancelling them),
+//! `uploads` (upload slots), `job_control` (reading jobs, retrying and cancelling them), and
+//! `attention` (advisory workspace observations and index rebuild jobs), and `imports`
+//! (import acceptance, conversion again and corrections),
 //! over the shared steps in `shared` (revision resolution, commits, receipts). Besides the
 //! operations, the service answers dispatch's archive question (`Application::archived_at`)
 //! from its catalog, records a sign-in for the server's session routes
@@ -35,6 +37,7 @@ use std::time::Duration;
 
 use okf_jawn_contract::access::Principal;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::extraction::ConversionSettings;
 use okf_jawn_contract::identity::{TenantId, Timestamp, WorkspaceId};
 use okf_jawn_contract::import::DEFAULT_MAX_UPLOAD_BYTES;
 use time::OffsetDateTime;
@@ -287,6 +290,21 @@ macro_rules! route {
     (cancel_job) => {
         job_control::cancel_job
     };
+    (get_attention) => {
+        attention::get_attention
+    };
+    (start_import) => {
+        imports::start_import
+    };
+    (redigest_item) => {
+        imports::redigest_item
+    };
+    (correct_digest) => {
+        imports::correct_digest
+    };
+    (rebuild_index) => {
+        attention::rebuild_index
+    };
     ($pending:ident) => {
         pending
     };
@@ -377,6 +395,9 @@ pub struct ApplicationConfig {
     /// `import::DEFAULT_MAX_UPLOAD_BYTES`, and a deployment may set another. `get_session`
     /// reports it (`Limits::upload_bytes`).
     pub max_upload_bytes: u64,
+    /// Conversion settings resolved into an import job when the request supplies none.
+    /// `ApplicationConfig::new` uses the contract's `ConversionSettings::default`.
+    pub conversion_defaults: ConversionSettings,
 }
 
 /// Where the service reads the current instant: the system clock unless a test fixes it
@@ -399,13 +420,14 @@ type IndexBuilds = Mutex<BTreeMap<(TenantId, WorkspaceId), Arc<tokio::sync::Mute
 
 impl ApplicationConfig {
     /// The settings of a deployment with the default upload limit
-    /// (`import::DEFAULT_MAX_UPLOAD_BYTES`).
+    /// (`import::DEFAULT_MAX_UPLOAD_BYTES`) and contract conversion settings.
     #[must_use]
-    pub const fn new(sandbox_origin: String, sandbox_ttl: Duration) -> Self {
+    pub fn new(sandbox_origin: String, sandbox_ttl: Duration) -> Self {
         Self {
             sandbox_origin,
             sandbox_ttl,
             max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
+            conversion_defaults: ConversionSettings::default(),
         }
     }
 
@@ -415,7 +437,7 @@ impl ApplicationConfig {
     /// Returns `InvalidInput` naming `sandbox_origin` when it is not an absolute `http` or
     /// `https` origin of a host and an optional port in `1..=65535`, without a path, query,
     /// fragment or user information, naming `sandbox_ttl` when it is zero, and naming
-    /// `max_upload_bytes` when it is zero.
+    /// `max_upload_bytes` when it is zero, or the conversion settings field that is out of bounds.
     pub fn check(&self) -> Result<(), ApiError> {
         if !is_origin(&self.sandbox_origin) {
             return Err(ApiError::new(
@@ -438,6 +460,7 @@ impl ApplicationConfig {
             )
             .with_field("max_upload_bytes"));
         }
+        self.conversion_defaults.check()?;
         Ok(())
     }
 }
@@ -584,11 +607,13 @@ fn is_origin(text: &str) -> bool {
     host_ok && port_ok
 }
 
+mod attention;
 mod connectors;
 mod conventions;
 mod drafts;
 mod events;
 mod history;
+mod imports;
 mod items;
 mod job_control;
 mod navigation;
