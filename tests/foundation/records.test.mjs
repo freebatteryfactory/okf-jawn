@@ -396,6 +396,22 @@ test('the deployment example declares and describes every image the compose file
  for(const name of images)assert.ok(described(name).length>0,`${name} has no description`);
  assert.match(described('BUN_IMAGE'),/\.bun-version/,'BUN_IMAGE must be described the way compose.yaml and the Dockerfile require it');
 });
+test('the application image ships the three connected binaries and requires existing read-only converter models',async()=>{
+ const docker=await read('deploy/Dockerfile');
+ const compose=await read('deploy/compose.yaml');
+ // Construction plan section 4 requires server, CLI and conversion child together.
+ for(const [pkg,bin,runtime] of [['okf-jawn-server','okf-jawn-server',true],['okf-jawn-cli','okf-jawn',false],['okf-jawn-ingest','okf-jawn-convert',true]]){
+  const build=docker.split(/\r?\n/).find(line=>line.startsWith('RUN cargo build ')&&line.includes(`--package ${pkg} `));
+  assert.ok(build,`missing build for ${pkg}`);
+  assert.ok(build.includes(`--bin ${bin}`),`wrong binary for ${pkg}`);
+  if(runtime)assert.match(build,/--features runtime\b/,`${pkg} must enable its runtime`);
+  assert.ok(docker.includes(`/workspace/target/release/${bin} /app/${bin}`),`missing runtime ${bin}`);
+ }
+ assert.match(docker,/EXPOSE 7711 7712/,'both configured listeners belong to the image');
+ assert.match(compose,/DOCLING_RS_MODELS_DIR: \/opt\/docling\/models/);
+ assert.match(compose,/source: \$\{DOCLING_MODELS_DIR:\?/,'the operator must supply the qualified model directory');
+ assert.match(compose,/target: \/opt\/docling\/models\s+read_only: true\s+bind:\s+create_host_path: false/,'a typo must not create an empty model directory');
+});
 test('README states the generated counts and tool names, and neither prose file remembers a number',async()=>{
  const readme=await read('README.md'),agents=await read('AGENTS.md');
  const operations=JSON.parse(await read('api/operations.json')),transports=JSON.parse(await read('api/transports.json'));

@@ -19,6 +19,7 @@ services:
       # Set only the ingress proxy IPs; forward Host and Origin unchanged.
       OKF_TRUSTED_PROXIES: ${OKF_TRUSTED_PROXIES:?Set the trusted ingress proxy IPs}
       OKF_DATA_DIR: /data
+      DOCLING_RS_MODELS_DIR: /opt/docling/models
       OKF_AUTH_MODE: workos
       WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:?Configure WorkOS}
       WORKOS_ISSUER: ${WORKOS_ISSUER:?Configure the WorkOS issuer}
@@ -30,6 +31,13 @@ services:
       - "127.0.0.1:7712:7712"
     volumes:
       - okf-data:/data
+      # Use the qualified model bytes; do not download or invent models at startup.
+      - type: bind
+        source: ${DOCLING_MODELS_DIR:?Set the absolute directory of qualified Docling models}
+        target: /opt/docling/models
+        read_only: true
+        bind:
+          create_host_path: false
     restart: unless-stopped
     init: true
     security_opt:
