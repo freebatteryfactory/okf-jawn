@@ -7,7 +7,9 @@
  * existed shows none. The attempt number is shown from the second attempt on. A finished job leads to the items it made: a link for each, pinned to the revision
  * the job reports, with the item's conversion state beside it when it is a source. A job that
  * reports no revision gets no links: a link without a revision would read whatever the workspace
- * shows, which may not hold the items yet.
+ * shows, which may not hold the items yet. A finished job that produced an artifact (an export,
+ * a backup) says what it is, its size and its SHA-256, and offers its download by the artifact's
+ * own rule (`ArtifactDownload`); only a job the service answered as succeeded does.
  *
  * Cancel is offered while the job is waiting or running, and asks first, in place: "Keep it
  * running" has focus. "Try the job again" is offered for a failed job the service says it will
@@ -34,16 +36,16 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useId, useLayoutEffect, useRef, useState } from 'react';
 import { cancelJob, retryJob } from '../../api/generated/sdk.gen';
-import type { ArtifactKind, Job, Revision } from '../../api/generated/types.gen';
+import type { Job, Revision } from '../../api/generated/types.gen';
 import { type HeldFocus, takeHeld, useWatchedPart } from '../../lib/focus';
 import { Instant } from '../../lib/instant';
 import { keyed } from '../../lib/keys';
-import { wordsFor } from '../../lib/words';
 import { itemOptions } from '../documents/DocumentView';
 import { conversionWord, short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, type FailureMessage, messageFor } from '../errors/failure';
 import { useRetry } from '../errors/retry';
+import { ArtifactDownload } from './ArtifactDownload';
 import { mayControl, useControlRights } from './job-control';
 import { canCancel, canRetry, jobName, jobState } from './job-words';
 import { jobUncertain, rememberJob, unfinished } from './jobs';
@@ -55,13 +57,6 @@ export interface JobRowProps {
 
 /** Item links shown at first, and added by each "Show more". */
 export const JOB_ITEMS_STEP = 25;
-
-const ARTIFACT: Record<ArtifactKind, string> = {
-  export: 'an export of the workspace',
-  workspace_backup: 'a backup of the workspace',
-  installation_backup: 'a backup of the installation',
-  view_export: 'an export of a View',
-};
 
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
@@ -313,14 +308,7 @@ function Outcome({ workspaceId, job }: { workspaceId: string; job: Job }) {
           It made revision <code title={revision}>{short(revision)}</code> of the workspace.
         </p>
       )}
-      {artifact !== null && (
-        <p>
-          It produced{' '}
-          {wordsFor(ARTIFACT, artifact.kind) ??
-            `something of a kind this page does not know (“${artifact.kind}”)`}
-          : {artifact.size} bytes.
-        </p>
-      )}
+      {artifact !== null && <ArtifactDownload workspaceId={workspaceId} artifact={artifact} />}
       {restore !== null && (
         <p>
           It restored {count(restore.items, 'item', 'items')} and{' '}
