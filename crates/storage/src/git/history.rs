@@ -726,6 +726,7 @@ mod tests {
         Ok(TreeEdit::MoveItem {
             item_id: id(n),
             destination: WorkspacePath::try_from(to.to_owned())?,
+            keep_alias: false,
         })
     }
 
