@@ -1,8 +1,8 @@
 //! The byte transfers through `ApplicationService` (`transfers::Transfers`) over the tenancy
 //! fakes: what each transfer asks of the ports on each route, the interval and bytes it answers,
 //! and how it refuses. Every `Forbidden` a transfer answers is recorded as `permission_denied`
-//! naming its transport and no operation, in the asked workspace's log; a refusal with any other
-//! code is recorded nowhere.
+//! naming its transport and no operation, in the asked workspace's log, or the tenant's for an
+//! installation archive; a refusal with any other code is recorded nowhere.
 
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
@@ -10,11 +10,14 @@ use std::sync::{Arc, Mutex};
 use okf_jawn_contract::access::AccessRoute::{BrowserSession, LocalOwner, McpDelegation, Service};
 use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
-use okf_jawn_contract::identity::{Digest, ItemId, MutationId, PurgeId, UploadId, WorkspaceId};
+use okf_jawn_contract::events::{EventActor, EventKind};
+use okf_jawn_contract::identity::{
+    ArtifactId, Digest, ItemId, JobId, MutationId, PurgeId, TenantId, UploadId, WorkspaceId,
+};
 use okf_jawn_contract::transport::TransportName;
 use okf_jawn_core::application::{ApplicationConfig, ApplicationService};
 use okf_jawn_core::events::{EventScope, NewEvent};
-use okf_jawn_core::jobs::RevisionMapping;
+use okf_jawn_core::jobs::{ArtifactKind, ArtifactRecord, JobScope, RevisionMapping};
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
     BlobStore, ByteReader, LocalSource, ObjectInfo, ObjectRead, StorageScope,
@@ -55,6 +58,8 @@ const CARD: u128 = 10;
 const ORIGINAL: &[u8] = b"hello world";
 /// Another workspace of the fixture tenant.
 const OTHER: u128 = 2;
+/// The bytes of every artifact in these tests.
+const ARCHIVE: &[u8] = b"PK\x03\x04 an archive";
 /// Every permission but `write`.
 const ALL_BUT_WRITE: [Permission; 5] = [
     Permission::Read,
@@ -196,12 +201,27 @@ fn refusal(
     route: AccessRoute,
     transport: TransportName,
     log: EventScope,
-) -> Built<Vec<(EventScope, Option<MutationId>, NewEvent)>> {
-    Ok(vec![(
+) -> Vec<(EventScope, Option<MutationId>, NewEvent)> {
+    vec![(
         log,
         None,
-        NewEvent::transport_denied(&principal(route)?, transport),
-    )])
+        NewEvent {
+            kind: EventKind::PermissionDenied,
+            revision: None,
+            item_id: None,
+            job_id: None,
+            connector_id: None,
+            actor: Some(EventActor {
+                subject: ALICE.to_owned(),
+                route,
+                client_id: None,
+            }),
+            operation: None,
+            transport: Some(transport),
+            proposal_id: None,
+            count: None,
+        },
+    )]
 }
 
 /// The fixture workspace's neighbour in the tenant.
@@ -313,6 +333,77 @@ async fn original(
     .await
 }
 
+/// The fixture tenant's log.
+fn tenant_log() -> Built<EventScope> {
+    Ok(EventScope::Tenant(scope()?.tenant_id))
+}
+
+fn workspace_scope() -> Built<JobScope> {
+    Ok(JobScope::Workspace(scope()?))
+}
+
+fn tenant_scope() -> Built<JobScope> {
+    Ok(JobScope::Tenant(scope()?.tenant_id))
+}
+
+/// An artifact numbered `n` of `kind` in `scope`, its bytes `digest('c')` of `size` bytes.
+fn artifact(n: u128, scope: JobScope, kind: ArtifactKind, size: usize) -> Built<ArtifactRecord> {
+    Ok(ArtifactRecord {
+        id: ArtifactId(Uuid::from_u128(n)),
+        scope,
+        kind,
+        object: ObjectInfo {
+            digest: digest('c')?,
+            size: u64::try_from(size)?,
+        },
+        media_type: "application/zip".to_owned(),
+        created_by_job: JobId(Uuid::from_u128(n.saturating_add(100))),
+    })
+}
+
+/// Hold `record` with `ARCHIVE` as its bytes, where its transport reads them: the blob store
+/// for a workspace artifact, the backups for a tenant one.
+fn hold(tenancy: &Tenancy, record: &ArtifactRecord) -> Built<()> {
+    tenancy.jobs.put_artifact(record.clone())?;
+    match &record.scope {
+        JobScope::Workspace(_) => tenancy
+            .world
+            .blobs
+            .put_object(record.object.digest.clone(), ARCHIVE.to_vec())?,
+        JobScope::Tenant(tenant) => {
+            tenancy
+                .backups
+                .put(tenant, record.object.digest.clone(), ARCHIVE.to_vec())?;
+        }
+    }
+    Ok(())
+}
+
+async fn workspace_artifact(
+    tenancy: &Tenancy,
+    route: AccessRoute,
+    workspace: WorkspaceId,
+    artifact: ArtifactId,
+) -> Result<Download, ApiError> {
+    let caller = caller(route).map_err(internal)?;
+    tenancy
+        .service
+        .download_artifact(&caller, workspace, artifact)
+        .await
+}
+
+async fn tenant_artifact(
+    tenancy: &Tenancy,
+    route: AccessRoute,
+    artifact: ArtifactId,
+) -> Result<Download, ApiError> {
+    let caller = caller(route).map_err(internal)?;
+    tenancy
+        .service
+        .download_tenant_artifact(&caller, artifact)
+        .await
+}
+
 // ---- upload_content ----
 
 #[tokio::test]
@@ -381,7 +472,7 @@ async fn upload_content_on_each_route_refuses_only_a_connector_and_records_it() 
             );
             assert_eq!(
                 tenancy.log.appended()?,
-                refusal(route, TransportName::UploadContent, workspace_log()?)?
+                refusal(route, TransportName::UploadContent, workspace_log()?)
             );
         } else {
             outcome?;
@@ -410,7 +501,7 @@ async fn upload_content_needs_write_on_the_workspace() -> TestResult {
     );
     assert_eq!(
         tenancy.log.appended()?,
-        refusal(LocalOwner, TransportName::UploadContent, workspace_log()?)?
+        refusal(LocalOwner, TransportName::UploadContent, workspace_log()?)
     );
     // A workspace the adapter holds no grant on: its own `Forbidden` is recorded the same way,
     // in that workspace's log.
@@ -431,7 +522,7 @@ async fn upload_content_needs_write_on_the_workspace() -> TestResult {
         LocalOwner,
         TransportName::UploadContent,
         EventScope::Workspace(other),
-    )?;
+    );
     assert_eq!(tenancy.log.appended()?.get(1), expected.first());
     Ok(())
 }
@@ -695,7 +786,7 @@ async fn download_object_on_each_route_refuses_only_a_connector_and_records_it()
             );
             assert_eq!(
                 tenancy.log.appended()?,
-                refusal(route, TransportName::DownloadObject, workspace_log()?)?
+                refusal(route, TransportName::DownloadObject, workspace_log()?)
             );
         } else {
             assert_eq!(
@@ -721,7 +812,7 @@ async fn download_object_needs_read_on_the_workspace() -> TestResult {
     );
     assert_eq!(
         tenancy.log.appended()?,
-        refusal(LocalOwner, TransportName::DownloadObject, workspace_log()?)?
+        refusal(LocalOwner, TransportName::DownloadObject, workspace_log()?)
     );
     Ok(())
 }
@@ -742,6 +833,344 @@ async fn download_object_refuses_a_foreign_grant_and_keeps_its_refusal_when_the_
         tenancy.world.blobs.opens()?.is_empty(),
         "nothing was opened"
     );
+    assert!(tenancy.log.appended()?.is_empty(), "no event is recorded");
+    Ok(())
+}
+
+// ---- download_artifact and download_tenant_artifact ----
+
+/// Whether `route` may download a workspace artifact of `kind`, as the contract's transport
+/// declaration states it: an export on every route but an agent's, a workspace archive only in a
+/// human browser session.
+fn may_download(kind: ArtifactKind, route: &AccessRoute) -> bool {
+    match kind {
+        ArtifactKind::Export | ArtifactKind::ViewExport => *route != McpDelegation,
+        ArtifactKind::WorkspaceBackup | ArtifactKind::InstallationBackup => {
+            matches!(route, BrowserSession | LocalOwner)
+        }
+    }
+}
+
+#[tokio::test]
+async fn download_artifact_serves_each_workspace_kind_by_its_own_permission_and_routes()
+-> TestResult {
+    for (kind, permission) in [
+        (ArtifactKind::Export, Permission::Read),
+        (ArtifactKind::ViewExport, Permission::Read),
+        (ArtifactKind::WorkspaceBackup, Permission::Admin),
+    ] {
+        for route in ROUTES {
+            // The grant holds exactly the permission the kind needs, and nothing else.
+            let tenancy = world(&[permission])?;
+            let held = artifact(41, workspace_scope()?, kind, ARCHIVE.len())?;
+            hold(&tenancy, &held)?;
+            let outcome =
+                workspace_artifact(&tenancy, route.clone(), scope()?.workspace_id, held.id).await;
+            if may_download(kind, &route) {
+                assert_eq!(
+                    received(outcome?).await?,
+                    whole("application/zip", ARCHIVE)?,
+                    "{kind:?} on {route:?}"
+                );
+                assert_eq!(tenancy.access.lookups()?, vec![permission], "{kind:?}");
+                assert!(tenancy.log.appended()?.is_empty(), "{kind:?} on {route:?}");
+            } else {
+                let refused = err_of(outcome.map(drop))?;
+                assert_eq!(refused.code, ErrorCode::Forbidden, "{kind:?} on {route:?}");
+                assert!(
+                    tenancy.access.lookups()?.is_empty(),
+                    "{kind:?} on {route:?}: refused by its route before any lookup"
+                );
+                assert!(
+                    tenancy.world.blobs.opens()?.is_empty(),
+                    "{kind:?} on {route:?}"
+                );
+                assert_eq!(
+                    tenancy.log.appended()?,
+                    refusal(route, TransportName::DownloadArtifact, workspace_log()?)
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn download_tenant_artifact_serves_an_installation_archive_to_a_tenant_administrator()
+-> TestResult {
+    for route in ROUTES {
+        let tenancy = world(&[])?;
+        tenancy
+            .access
+            .grant_tenant(ALICE, vec![Permission::Admin])?;
+        let held = artifact(
+            42,
+            tenant_scope()?,
+            ArtifactKind::InstallationBackup,
+            ARCHIVE.len(),
+        )?;
+        hold(&tenancy, &held)?;
+        let outcome = tenant_artifact(&tenancy, route.clone(), held.id).await;
+        if may_download(ArtifactKind::InstallationBackup, &route) {
+            assert_eq!(
+                received(outcome?).await?,
+                whole("application/zip", ARCHIVE)?,
+                "{route:?}"
+            );
+            assert_eq!(tenancy.access.tenant_lookups()?, vec![Permission::Admin]);
+            assert_eq!(
+                tenancy.backups.opens()?,
+                vec![(scope()?.tenant_id, held.object.digest.clone())]
+            );
+            assert!(
+                tenancy.world.blobs.opens()?.is_empty(),
+                "not the blob store"
+            );
+            assert!(tenancy.log.appended()?.is_empty(), "{route:?}");
+        } else {
+            let refused = err_of(outcome.map(drop))?;
+            assert_eq!(refused.code, ErrorCode::Forbidden, "{route:?}");
+            assert!(tenancy.access.tenant_lookups()?.is_empty(), "{route:?}");
+            assert!(tenancy.backups.opens()?.is_empty(), "{route:?}");
+            assert_eq!(
+                tenancy.log.appended()?,
+                refusal(route, TransportName::DownloadTenantArtifact, tenant_log()?)
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_artifact_download_needs_the_permission_its_kind_names() -> TestResult {
+    // An export without `read`, a workspace archive without `admin`.
+    for (kind, granted) in [
+        (
+            ArtifactKind::Export,
+            vec![
+                Permission::Write,
+                Permission::Propose,
+                Permission::Approve,
+                Permission::Review,
+                Permission::Admin,
+            ],
+        ),
+        (
+            ArtifactKind::WorkspaceBackup,
+            vec![
+                Permission::Read,
+                Permission::Write,
+                Permission::Propose,
+                Permission::Approve,
+                Permission::Review,
+            ],
+        ),
+    ] {
+        let tenancy = world(&granted)?;
+        let held = artifact(43, workspace_scope()?, kind, ARCHIVE.len())?;
+        hold(&tenancy, &held)?;
+        let refused = err_of(
+            workspace_artifact(&tenancy, LocalOwner, scope()?.workspace_id, held.id)
+                .await
+                .map(drop),
+        )?;
+        assert_eq!(refused.code, ErrorCode::Forbidden, "{kind:?}");
+        assert!(tenancy.world.blobs.opens()?.is_empty(), "{kind:?}");
+        assert_eq!(
+            tenancy.log.appended()?,
+            refusal(
+                LocalOwner,
+                TransportName::DownloadArtifact,
+                workspace_log()?
+            )
+        );
+    }
+    // An installation archive without the tenant's `admin`.
+    let tenancy = world(&[])?;
+    tenancy.access.grant_tenant(
+        ALICE,
+        vec![
+            Permission::Read,
+            Permission::Write,
+            Permission::Propose,
+            Permission::Approve,
+            Permission::Review,
+        ],
+    )?;
+    let held = artifact(
+        44,
+        tenant_scope()?,
+        ArtifactKind::InstallationBackup,
+        ARCHIVE.len(),
+    )?;
+    hold(&tenancy, &held)?;
+    let refused = err_of(
+        tenant_artifact(&tenancy, LocalOwner, held.id)
+            .await
+            .map(drop),
+    )?;
+    assert_eq!(refused.code, ErrorCode::Forbidden);
+    assert_eq!(tenancy.access.tenant_lookups()?, vec![Permission::Admin]);
+    assert!(tenancy.backups.opens()?.is_empty(), "no archive was opened");
+    assert_eq!(
+        tenancy.log.appended()?,
+        refusal(
+            LocalOwner,
+            TransportName::DownloadTenantArtifact,
+            tenant_log()?
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_artifact_is_found_only_through_its_own_scope() -> TestResult {
+    let tenancy = world(&[Permission::Read, Permission::Admin])?;
+    tenancy
+        .access
+        .grant_tenant(ALICE, vec![Permission::Admin])?;
+    let other = StorageScope {
+        workspace_id: WorkspaceId(Uuid::from_u128(OTHER)),
+        ..scope()?
+    };
+    tenancy
+        .access
+        .grant(ALICE, other.workspace_id, vec![Permission::Read])?;
+    let archive = artifact(45, workspace_scope()?, ArtifactKind::WorkspaceBackup, 4)?;
+    let installation = artifact(46, tenant_scope()?, ArtifactKind::InstallationBackup, 4)?;
+    let elsewhere = artifact(47, JobScope::Workspace(other), ArtifactKind::Export, 4)?;
+    for held in [&archive, &installation, &elsewhere] {
+        hold(&tenancy, held)?;
+    }
+    let workspace = scope()?.workspace_id;
+    for (what, outcome) in [
+        (
+            "a workspace archive asked at the tenant",
+            tenant_artifact(&tenancy, LocalOwner, archive.id).await,
+        ),
+        (
+            "an installation archive asked in a workspace",
+            workspace_artifact(&tenancy, LocalOwner, workspace, installation.id).await,
+        ),
+        (
+            "another workspace's export",
+            workspace_artifact(&tenancy, LocalOwner, workspace, elsewhere.id).await,
+        ),
+    ] {
+        let refused = err_of(outcome.map(drop))?;
+        assert_eq!(refused.code, ErrorCode::NotFound, "{what}");
+    }
+    assert!(
+        tenancy.access.lookups()?.is_empty(),
+        "no grant was looked up"
+    );
+    assert!(
+        tenancy.access.tenant_lookups()?.is_empty(),
+        "no tenant grant was looked up"
+    );
+    assert!(
+        tenancy.log.appended()?.is_empty(),
+        "a not_found is no denial"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_artifact_the_store_answers_outside_the_scope_asked_is_an_internal_fault() -> TestResult
+{
+    let tenancy = world(&[Permission::Read, Permission::Admin])?;
+    tenancy
+        .access
+        .grant_tenant(ALICE, vec![Permission::Admin])?;
+    // A record whose kind does not belong in the scope it is held in.
+    let misfiled = artifact(48, tenant_scope()?, ArtifactKind::WorkspaceBackup, 4)?;
+    hold(&tenancy, &misfiled)?;
+    let refused = err_of(
+        tenant_artifact(&tenancy, LocalOwner, misfiled.id)
+            .await
+            .map(drop),
+    )?;
+    assert_eq!(refused.code, ErrorCode::Internal, "{}", refused.message);
+    // A store that ignores the scope asked.
+    let other = StorageScope {
+        workspace_id: WorkspaceId(Uuid::from_u128(OTHER)),
+        ..scope()?
+    };
+    let elsewhere = artifact(49, JobScope::Workspace(other), ArtifactKind::Export, 4)?;
+    hold(&tenancy, &elsewhere)?;
+    tenancy.jobs.ignore_artifact_scope();
+    let refused = err_of(
+        workspace_artifact(&tenancy, LocalOwner, scope()?.workspace_id, elsewhere.id)
+            .await
+            .map(drop),
+    )?;
+    assert_eq!(refused.code, ErrorCode::Internal, "{}", refused.message);
+    assert!(
+        tenancy.world.blobs.opens()?.is_empty(),
+        "nothing was opened"
+    );
+    assert!(tenancy.backups.opens()?.is_empty(), "no archive was opened");
+    assert!(tenancy.log.appended()?.is_empty(), "no event is recorded");
+    Ok(())
+}
+
+#[tokio::test]
+async fn download_artifact_refuses_a_foreign_grant_and_keeps_its_refusal_when_the_log_fails()
+-> TestResult {
+    let tenancy = world(&[Permission::Admin])?;
+    let archive = artifact(54, workspace_scope()?, ArtifactKind::WorkspaceBackup, 4)?;
+    hold(&tenancy, &archive)?;
+    let workspace = scope()?.workspace_id;
+    tenancy.log.fail_next();
+    let refused = err_of(
+        workspace_artifact(&tenancy, McpDelegation, workspace, archive.id)
+            .await
+            .map(drop),
+    )?;
+    assert_eq!(refused.code, ErrorCode::Forbidden, "{}", refused.message);
+    assert!(tenancy.log.appended()?.is_empty(), "the append failed");
+    tenancy.access.answer_for(other_scope()?)?;
+    let foreign = err_of(
+        workspace_artifact(&tenancy, LocalOwner, workspace, archive.id)
+            .await
+            .map(drop),
+    )?;
+    assert_eq!(foreign.code, ErrorCode::Internal, "{}", foreign.message);
+    assert!(
+        tenancy.world.blobs.opens()?.is_empty(),
+        "nothing was opened"
+    );
+    assert!(tenancy.log.appended()?.is_empty(), "no event is recorded");
+    Ok(())
+}
+
+#[tokio::test]
+async fn download_tenant_artifact_refuses_a_foreign_grant_and_keeps_its_refusal_when_the_log_fails()
+-> TestResult {
+    let tenancy = world(&[])?;
+    tenancy
+        .access
+        .grant_tenant(ALICE, vec![Permission::Admin])?;
+    let installation = artifact(55, tenant_scope()?, ArtifactKind::InstallationBackup, 4)?;
+    hold(&tenancy, &installation)?;
+    tenancy.log.fail_next();
+    let refused = err_of(
+        tenant_artifact(&tenancy, McpDelegation, installation.id)
+            .await
+            .map(drop),
+    )?;
+    assert_eq!(refused.code, ErrorCode::Forbidden, "{}", refused.message);
+    assert!(tenancy.log.appended()?.is_empty(), "the append failed");
+    tenancy
+        .access
+        .answer_tenant_for(TenantId::try_from("elsewhere".to_owned())?)?;
+    let foreign = err_of(
+        tenant_artifact(&tenancy, LocalOwner, installation.id)
+            .await
+            .map(drop),
+    )?;
+    assert_eq!(foreign.code, ErrorCode::Internal, "{}", foreign.message);
+    assert!(tenancy.backups.opens()?.is_empty(), "no archive was opened");
     assert!(tenancy.log.appended()?.is_empty(), "no event is recorded");
     Ok(())
 }

@@ -25,12 +25,15 @@
 //!   end, or ends before it starts, is `invalid_input` (the contract's statuses are a closed set:
 //!   no 416); an end past the last byte is cut to it; without a range the whole object is sent.
 //!   No receipt is written.
-//! - The two artifact downloads are not built yet: each answers `NotImplemented`, naming it.
+//! - Artifact downloads first find the record in the requested scope, then require its kind's
+//!   route and permission. Workspace artifacts open through `BlobStore`; installation backups
+//!   require tenant Admin and open through `Backups`. Neither transport accepts a range.
 //!
 //! Every `Forbidden` a transfer answers, its own or a port's, is recorded as a `permission_denied`
 //! event naming the transport and no operation (`NewEvent::transport_denied`), in the asked
-//! workspace's log. The refusal is the answer, so a failed append does not change it (dispatch's
-//! rule); any other error is returned without an event. A download's body yields at most its
+//! workspace's log, or the tenant's for an installation artifact. The refusal is the answer, so
+//! a failed append does not change it (dispatch's rule); any other error is returned without an
+//! event. A download's body yields at most its
 //! `length` bytes: the stream the store opened is cut to it.
 
 use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
@@ -44,9 +47,10 @@ use super::ApplicationService;
 use super::shared::check_named;
 use super::sources::served_media_type;
 use super::workspaces::archived_at;
-use crate::access::{authorize_workspace, check_route};
+use crate::access::{authorize_tenant, authorize_workspace, check_route};
 use crate::context::WorkspaceGrant;
 use crate::events::{EventScope, NewEvent};
+use crate::jobs::{ArtifactKind, ArtifactRecord, JobScope};
 use crate::ports::PortFuture;
 use crate::storage::{ByteReader, ObjectRead, StorageScope};
 use crate::transfers::{ByteRange, Download, TransferCaller, Transfers};
@@ -94,20 +98,124 @@ impl Transfers for ApplicationService {
 
     fn download_artifact<'a>(
         &'a self,
-        _caller: &'a TransferCaller,
-        _workspace: WorkspaceId,
-        _artifact: ArtifactId,
+        caller: &'a TransferCaller,
+        workspace: WorkspaceId,
+        artifact: ArtifactId,
     ) -> PortFuture<'a, Download> {
-        Box::pin(async { Err(pending(TransportName::DownloadArtifact)) })
+        Box::pin(async move {
+            let principal = &caller.principal;
+            let outcome = download_artifact(self, principal, workspace, artifact).await;
+            recorded(
+                self,
+                &workspace_log(principal, workspace),
+                principal,
+                TransportName::DownloadArtifact,
+                outcome,
+            )
+            .await
+        })
     }
 
     fn download_tenant_artifact<'a>(
         &'a self,
-        _caller: &'a TransferCaller,
-        _artifact: ArtifactId,
+        caller: &'a TransferCaller,
+        artifact: ArtifactId,
     ) -> PortFuture<'a, Download> {
-        Box::pin(async { Err(pending(TransportName::DownloadTenantArtifact)) })
+        Box::pin(async move {
+            let principal = &caller.principal;
+            let outcome = download_tenant_artifact(self, principal, artifact).await;
+            recorded(
+                self,
+                &EventScope::Tenant(principal.tenant_id.clone()),
+                principal,
+                TransportName::DownloadTenantArtifact,
+                outcome,
+            )
+            .await
+        })
     }
+}
+
+/// Find a workspace artifact before applying its kind's route and permission, then open it.
+async fn download_artifact(
+    service: &ApplicationService,
+    principal: &Principal,
+    workspace: WorkspaceId,
+    artifact: ArtifactId,
+) -> Result<Download, ApiError> {
+    let scope = StorageScope {
+        tenant_id: principal.tenant_id.clone(),
+        workspace_id: workspace,
+    };
+    let asked = JobScope::Workspace(scope.clone());
+    let record = service
+        .ports()
+        .records
+        .get_artifact(&asked, artifact)
+        .await?;
+    if record.scope != asked || record.kind == ArtifactKind::InstallationBackup {
+        return Err(foreign_artifact());
+    }
+    artifact_route(principal, &record)?;
+    workspace_grant(
+        service,
+        principal,
+        workspace,
+        record.kind.download_permission(),
+    )
+    .await?;
+    let read = service
+        .ports()
+        .blobs
+        .open(&scope, &record.object.digest, 0, u64::MAX)
+        .await?;
+    Ok(cut(record.media_type, 0, read.object.size, read))
+}
+
+/// Installation backups are tenant artifacts, available only to a human tenant administrator.
+async fn download_tenant_artifact(
+    service: &ApplicationService,
+    principal: &Principal,
+    artifact: ArtifactId,
+) -> Result<Download, ApiError> {
+    let asked = JobScope::Tenant(principal.tenant_id.clone());
+    let record = service
+        .ports()
+        .records
+        .get_artifact(&asked, artifact)
+        .await?;
+    if record.scope != asked || record.kind != ArtifactKind::InstallationBackup {
+        return Err(foreign_artifact());
+    }
+    artifact_route(principal, &record)?;
+    let permission = record.kind.download_permission();
+    check_route(principal, permission)?;
+    let raw = service
+        .ports()
+        .access
+        .authorize_tenant(principal, permission)
+        .await?;
+    if raw.tenant_id != principal.tenant_id {
+        return Err(foreign_grant());
+    }
+    authorize_tenant(principal, raw, permission)?;
+    let read = service
+        .ports()
+        .backups
+        .open_installation_archive(&principal.tenant_id, &record.object.digest, 0, u64::MAX)
+        .await?;
+    Ok(cut(record.media_type, 0, read.object.size, read))
+}
+
+/// A kind's explicit route boundary applies regardless of the caller's grants.
+fn artifact_route(principal: &Principal, record: &ArtifactRecord) -> Result<(), ApiError> {
+    if !record.kind.download_routes().contains(&principal.route) {
+        return Err(ApiError::new(
+            ErrorCode::Forbidden,
+            "This access route cannot download this kind of artifact",
+        ));
+    }
+    Ok(())
 }
 
 /// Append the body to the slot, as `Transfers::upload_content`.
@@ -281,10 +389,10 @@ fn foreign_grant() -> ApiError {
     )
 }
 
-/// The answer of a transfer whose construction part has not landed.
-fn pending(transport: TransportName) -> ApiError {
+/// An adapter's artifact record with a different scope or a kind that cannot live there.
+fn foreign_artifact() -> ApiError {
     ApiError::new(
-        ErrorCode::NotImplemented,
-        format!("{} is not implemented in this build", transport.as_str()),
+        ErrorCode::Internal,
+        "Record store returned an artifact for a different scope or artifact kind",
     )
 }
