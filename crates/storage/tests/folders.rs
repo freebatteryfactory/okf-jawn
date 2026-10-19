@@ -405,6 +405,7 @@ impl Service {
             blobs: Arc::new(storage.blobs()),
             versions: Arc::new(storage.versions()),
             records: Arc::new(storage.records()),
+            backups: Arc::new(storage.backups()),
             queue: Arc::new(NoQueue),
             search: Arc::new(storage.search()),
             converter: Arc::new(NoConverter),
