@@ -121,6 +121,88 @@ async fn a_repeated_job_mutation_returns_the_first_job() -> TestResult {
     Ok(())
 }
 
+/// SPEC section 5: "a retried request returns the job it already created". The origin of
+/// that known job stays its first literal mutation, before a pending-card commit and after
+/// completion; reading it creates no second job or claim.
+#[tokio::test]
+async fn job_mutation_is_the_immutable_origin_of_the_known_job() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let records = storage.records();
+    let scope = workspace_scope()?;
+    let job = records
+        .create_job(&scope, new_job(5, JobSpec::RebuildIndex)?)
+        .await?;
+    assert_eq!(records.job_mutation(&scope, job.id).await?, uuid!(5)?);
+    assert_eq!(records.get_job(&scope, job.id).await?.attempt, 0);
+    let claimed = some(records.claim_job(job.id).await?, "the claim")?;
+    records.complete_job(completion(claimed.lease)).await?;
+    assert_eq!(records.job_mutation(&scope, job.id).await?, uuid!(5)?);
+    let again = records
+        .create_job(&scope, new_job(5, JobSpec::BackupWorkspace)?)
+        .await?;
+    assert_eq!(again.id, job.id);
+    assert_eq!(records.job_mutation(&scope, again.id).await?, uuid!(5)?);
+    assert_eq!(
+        records
+            .list_jobs(
+                &scope,
+                Page {
+                    cursor: None,
+                    limit: 10
+                }
+            )
+            .await?
+            .items
+            .len(),
+        1
+    );
+    Ok(())
+}
+
+/// The internal origin lookup has get_job's tenant/workspace boundary. Knowing a JobId
+/// supplies no authority to read its origin in another scope (SPEC section 11).
+#[tokio::test]
+async fn job_mutation_refuses_an_unknown_job_or_a_wrong_tenant_or_workspace() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let records = storage.records();
+    let scope = workspace_scope()?;
+    let job = records
+        .create_job(&scope, new_job(5, JobSpec::RebuildIndex)?)
+        .await?;
+    let other_tenant = TenantId::try_from("other".to_owned())?;
+    for wrong in [
+        JobScope::Workspace(StorageScope {
+            tenant_id: tenant()?,
+            workspace_id: uuid!(2)?,
+        }),
+        JobScope::Workspace(StorageScope {
+            tenant_id: other_tenant.clone(),
+            workspace_id: crate::scope()?.workspace_id,
+        }),
+        JobScope::Tenant(tenant()?),
+    ] {
+        let refused = err_of(records.job_mutation(&wrong, job.id).await)?;
+        assert_eq!(refused.code, ErrorCode::NotFound);
+    }
+    let refused = err_of(records.job_mutation(&scope, uuid!(999)?).await)?;
+    assert_eq!(refused.code, ErrorCode::NotFound);
+    let tenant_scope = JobScope::Tenant(tenant()?);
+    let installation = records
+        .create_job(&tenant_scope, new_job(6, JobSpec::BackupInstallation)?)
+        .await?;
+    assert_eq!(
+        records.job_mutation(&tenant_scope, installation.id).await?,
+        uuid!(6)?
+    );
+    for wrong in [scope, JobScope::Tenant(other_tenant)] {
+        let refused = err_of(records.job_mutation(&wrong, installation.id).await)?;
+        assert_eq!(refused.code, ErrorCode::NotFound);
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_job_that_does_not_fit_its_scope_is_refused() -> TestResult {
     let directory = tempfile::tempdir()?;

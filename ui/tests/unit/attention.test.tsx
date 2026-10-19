@@ -44,6 +44,7 @@ configure({ asyncUtilTimeout: 10_000 });
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -330,7 +331,9 @@ describe('a check that fails after the list was read', () => {
     fails = true;
     fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
     await screen.findByText('Listing the warnings again: Something went wrong in the service.');
-    expect(screen.getByText('No warnings found.')).toBeDefined();
+    expect(screen.queryByText('No warnings found.')).toBeNull();
+    expect(screen.getByText('Previous check found no warnings.')).toBeDefined();
+    expect(screen.getByText(/Showing the previous check/)).toBeDefined();
   });
 });
 
@@ -371,7 +374,7 @@ describe('a long list', () => {
     ).toBeDefined();
   });
 
-  it('does not ask again for a revision it has listed, however long the page is open and whatever opens later', async () => {
+  it('does not scan on idle time or new observers, then rechecks explicitly when the person returns', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const api = setup(paged);
     renderAt(`/w/${WS}`);
@@ -381,13 +384,15 @@ describe('a long list', () => {
     // An item is opened: its tab and its reader read the same list.
     fireEvent.click(await screen.findByRole('treeitem', { name: /Annual report/ }));
     await screen.findByRole('tab', { name: 'Annual report' });
+    expect(api.callsTo(ATTENTION)).toHaveLength(ATTENTION_AUTO_PAGES);
     // The person comes back to the window.
     act(() => {
       window.dispatchEvent(new Event('focus'));
       document.dispatchEvent(new Event('visibilitychange'));
     });
     await act(() => vi.advanceTimersByTimeAsync(5_000));
-    expect(api.callsTo(ATTENTION)).toHaveLength(ATTENTION_AUTO_PAGES);
+    // A return is a lifecycle check, including at the same head; its retained five pages refresh.
+    expect(api.callsTo(ATTENTION)).toHaveLength(ATTENTION_AUTO_PAGES * 2);
     vi.useRealTimers();
   });
 
@@ -554,6 +559,9 @@ describe('the mark on an item', () => {
     const row = await screen.findByRole('treeitem', { name: /^Meeting notes/ });
     expect(row.getAttribute('aria-label')).toBe('Meeting notes, type meeting-note');
     expect(screen.getByRole('link', { name: 'Attention' })).toBeDefined();
-    expect(screen.queryByText('Attention:')).toBeNull();
+    expect(screen.getByText('Attention:')).toBeDefined();
+    expect(
+      screen.getByText("Checking this item's warnings: Something went wrong in the service."),
+    ).toBeDefined();
   });
 });

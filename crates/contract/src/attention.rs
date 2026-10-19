@@ -35,6 +35,49 @@ pub enum AttentionKind {
     UploadsWaiting,
 }
 
+/// Explainable rules in the local English instruction-warning detector.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InstructionRule {
+    /// Text impersonates a system, developer or administrator message.
+    RoleImpersonation,
+    /// Text asks for earlier instructions to be ignored or overridden.
+    OverrideInstructions,
+    /// Text asks for credentials, prompts or hidden instructions.
+    RevealSecrets,
+    /// Text asks an assistant to execute an action or send data elsewhere.
+    ExternalAction,
+    /// Invisible or bidirectional controls occur within the text.
+    HiddenText,
+}
+
+/// One advisory match, quoted from the original text and located like an ordinary citation.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InstructionFinding {
+    /// Rule that matched, not a verdict about intent or safety.
+    pub rule_id: InstructionRule,
+    /// Exact version of the rules that produced this finding.
+    pub rule_set_version: String,
+    /// Original matching lines; normalization never rewrites the displayed evidence.
+    pub passage: String,
+    /// The same revision, representation and locator used by application reads.
+    pub source: crate::source::SourceReference,
+}
+
+/// Bounded current evidence for one item's instruction-like observation.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InstructionEvidence {
+    /// Language supported by this rule set; version one is English only (`en`).
+    pub language: String,
+    /// First matches in source order, at most 32 for version one.
+    #[schemars(length(max = 32))]
+    pub findings: Vec<InstructionFinding>,
+    /// Additional matches counted but not included in this bounded evidence list.
+    pub omitted_findings: u64,
+}
+
 /// An observation with a useful next action.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -56,6 +99,9 @@ pub struct AttentionItem {
     pub message: String,
     /// Suggested existing operation, never executable code.
     pub action: crate::metadata::OperationName,
+    /// Present only for instruction-like warnings; absence never certifies safety.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_like: Option<InstructionEvidence>,
 }
 
 /// Read workspace diagnostics at an explicit revision.

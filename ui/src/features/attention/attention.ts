@@ -11,12 +11,11 @@
  * the tree and on the tabs cover them; the rest come when the person asks for more. Marks
  * therefore cover the warnings listed so far, and the Attention page says when more exist.
  *
- * What it costs. The list is asked at a resolved revision, and what the checks found at a
- * revision does not change: an answer is kept for as long as the workspace shows that revision and
- * is not asked for again by itself, whatever mounts later (a tab, a reader) and however long the
- * page stays open. A new head (Refresh, a Snapshot) is another revision and asks anew; "Check
- * again" on the Attention page asks by hand. A page that failed is not kept, and is asked again
- * where a retry is offered.
+ * What it costs. Each page scans the workspace. No clock repeats that scan. AttentionLink is
+ * the one event-lifecycle owner: subscribe/reconnect, return to the window and relevant events
+ * ask anew, including at an unchanged head after a service/rule-set upgrade. Opening Attention
+ * and "Check again" also request a current check. Other observers share those answers. While
+ * a check is pending, failed or invalidated, retained data is explicitly previous evidence.
  *
  * What a warning is not. These are hints from automatic checks: advisory, with false alarms
  * expected (SPEC section 11). A list that comes back empty says only that the checks found
@@ -61,7 +60,7 @@ export function attentionOptions(workspaceId: string, head: Revision) {
     },
     initialPageParam: null as string | null,
     getNextPageParam: (last) => last.next_cursor ?? undefined,
-    // The key names the revision: its answer does not go stale (see "What it costs").
+    // No clock-driven expiry: the single lifecycle owner explicitly invalidates this query.
     staleTime: Number.POSITIVE_INFINITY,
   });
 }
