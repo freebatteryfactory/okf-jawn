@@ -195,6 +195,10 @@ function service(
     },
     '/api/reads/get-sources': (body) =>
       ok({ revision: revisionAsked(body, state.head), sources: [], declared: [] }),
+    // No review is recorded and no item links to another (UI M3 reads them beside the item).
+    '/api/reviews/list-reviews': () => ok({ items: [], imported: [] }),
+    '/api/search/get-links': (body) =>
+      ok({ revision: revisionAsked(body, state.head), links: [], next_cursor: null }),
     '/api/items/list-drafts': () =>
       ok(draftsPage(drafts.map((id) => draftOf(id, saved.get(id)?.base ?? HEAD)))),
     [SAVE]: (body) => {

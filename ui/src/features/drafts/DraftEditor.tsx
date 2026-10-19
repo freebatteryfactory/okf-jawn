@@ -21,7 +21,7 @@
  */
 import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useId, useLayoutEffect, useRef } from 'react';
-import { takeHeld, useWatchedPart } from '../../lib/focus';
+import { pageHeading, takeHeld, useWatchedPart } from '../../lib/focus';
 import { Instant } from '../../lib/instant';
 import { short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
@@ -45,6 +45,11 @@ export interface DraftEditorProps {
   title: string;
   /** The draft is gone: the pane reads the committed text again. */
   onDiscarded: () => void;
+  /**
+   * The item is a Source: its text changes only through corrections, so the draft changes its
+   * properties alone and no text box is drawn.
+   */
+  textFixed?: boolean;
 }
 
 const MEBIBYTE = 1024 * 1024;
@@ -90,7 +95,7 @@ function SaveState({ session }: { session: DraftSession }) {
   );
 }
 
-export function DraftEditor({ session, title, onDiscarded }: DraftEditorProps) {
+export function DraftEditor({ session, title, onDiscarded, textFixed = false }: DraftEditorProps) {
   const client = useQueryClient();
   const { workspaceId, itemId } = session;
   const stateId = useId();
@@ -119,20 +124,41 @@ export function DraftEditor({ session, title, onDiscarded }: DraftEditorProps) {
   useLayoutEffect(() => {
     if (takeHeld(heldStop)) textBox()?.focus();
   });
+  // The text box leaves when the item is read as a Source with the draft's text unchanged: the
+  // draft goes on with its properties alone. Focus that was in it goes to the draft's first
+  // control, or to the page's heading.
+  const heldText = useRef<HTMLElement | null>(null);
+  const [, textRef] = useWatchedPart<HTMLDivElement>(heldText);
+  useLayoutEffect(() => {
+    if (!takeHeld(heldText)) return;
+    (sectionRef.current?.querySelector<HTMLElement>('button') ?? pageHeading())?.focus();
+  });
 
   return (
     <section ref={sectionRef} className="draft-editor" aria-label={`Draft of ${title}`}>
       <p role="note" className="notice">
-        <strong>Draft.</strong> This is your own text, not the committed text. It becomes part of
-        the workspace when you take a Snapshot. It started from revision{' '}
+        <strong>Draft.</strong>{' '}
+        {textFixed
+          ? 'These are your own properties, not the committed ones.'
+          : 'This is your own text, not the committed text.'}{' '}
+        It becomes part of the workspace when you take a Snapshot. It started from revision{' '}
         <code title={session.baseRevision}>{short(session.baseRevision)}</code>.
       </p>
-      <MarkdownEditor
-        label={`Text of ${title}`}
-        initialText={session.body}
-        describedBy={stateId}
-        onChange={(body) => editSession(client, workspaceId, itemId, { body })}
-      />
+      {textFixed ? (
+        <p className="meta">
+          A Source’s text changes only through corrections, so this draft changes its properties
+          alone; its text stays as committed.
+        </p>
+      ) : (
+        <div ref={textRef}>
+          <MarkdownEditor
+            label={`Text of ${title}`}
+            initialText={session.body}
+            describedBy={stateId}
+            onChange={(body) => editSession(client, workspaceId, itemId, { body })}
+          />
+        </div>
+      )}
       {/* Present from the start, so each change of state is announced. */}
       <p id={stateId} role="status" className="meta save-state">
         <SaveState session={session} />

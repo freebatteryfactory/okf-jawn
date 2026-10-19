@@ -28,7 +28,7 @@ import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
 
 /** How a request reached the service, in words. */
-const ROUTE_WORDS: Partial<Record<AccessRoute, string>> = {
+export const ROUTE_WORDS: Partial<Record<AccessRoute, string>> = {
   browser_session: 'a signed-in browser',
   mcp_delegation: 'an agent connected through MCP',
   local_owner: 'the local owner of this installation',

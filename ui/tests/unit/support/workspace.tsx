@@ -195,6 +195,12 @@ export function explorerHandlers(overrides: Record<string, Handler> = {}): Recor
     // The person has no drafts, and the workspace defines no types, unless a test says so.
     '/api/items/list-drafts': () => ok(draftsPage([])),
     '/api/types/list-types': () => ok({ items: [] }),
+    // No review of any item is recorded, and no item links to another, unless a test says so.
+    '/api/reviews/list-reviews': () => ok({ items: [], imported: [] }),
+    '/api/search/get-links': (body) => {
+      const at = body.at as { revision?: unknown } | undefined;
+      return ok({ revision: typeof at?.revision === 'string' ? at.revision : HEAD, links: [] });
+    },
     ...overrides,
   };
 }

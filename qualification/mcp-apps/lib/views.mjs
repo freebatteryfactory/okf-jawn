@@ -63,6 +63,7 @@ export const MCP_APPS_INPUTS = [
 export const UPSTREAM_HOST_RULES = ['color-contrast', 'frame-title'];
 
 const REVISION = '0123456789abcdef0123456789abcdef01234567';
+const HISTORY_REVISION = '89abcdef0123456789abcdef0123456789abcdef';
 const SOURCE_ONLY = 'Contract-valid ReadItemResponse fixture for the MCP Apps harness.';
 const CHANGES_ONLY = 'Harness fixture line.';
 const TIMELINE_ONLY = 'Qualification timeline fixture';
@@ -79,14 +80,16 @@ export const VIEWS = [
   {
     tool: 'render_changes',
     view: 'changes',
-    mustContain: ['Changes', '89abcdef0123456789abcdef0123456789abcdef', 'fixtures/qualification-source.md', CHANGES_ONLY],
+    mustContain: ['Changes', '0123456789', '89abcdef01', 'fixtures/qualification-source.md', CHANGES_ONLY],
+    revisions: [REVISION, HISTORY_REVISION],
     mustNotContain: [SOURCE_ONLY, TIMELINE_ONLY, PRESENT_ONLY],
     alerts: [],
   },
   {
     tool: 'render_timeline',
     view: 'timeline',
-    mustContain: ['Timeline', TIMELINE_ONLY, 'okf-qualify-mcp-apps', '89abcdef0123456789abcdef0123456789abcdef'],
+    mustContain: ['Timeline', TIMELINE_ONLY, 'okf-qualify-mcp-apps', '89abcdef01'],
+    revisions: [HISTORY_REVISION],
     mustNotContain: [SOURCE_ONLY, CHANGES_ONLY, PRESENT_ONLY],
     alerts: [],
   },
@@ -127,16 +130,19 @@ export function judgeView(view, observed) {
   const alerts = [...(observed?.alerts ?? [])].map((alert) => alert.trim()).sort();
   const expected_alerts = [...view.alerts].sort();
   const missing = view.mustContain.filter((needle) => !text.includes(needle));
+  // M3 displays abbreviated revisions; their exact identities remain on visible code titles.
+  const missing_revisions = (view.revisions ?? []).filter((revision) => !(observed?.revisions ?? []).includes(revision));
   const foreign = view.mustNotContain.filter((needle) => text.includes(needle));
   const blocking = BLOCKING_TEXT.filter((pattern) => pattern.test(text)).map(String);
   const ok =
     observed !== null &&
     observed !== undefined &&
     missing.length === 0 &&
+    missing_revisions.length === 0 &&
     foreign.length === 0 &&
     blocking.length === 0 &&
     JSON.stringify(alerts) === JSON.stringify(expected_alerts);
-  return { ok, missing, foreign, blocking, alerts, expected_alerts };
+  return { ok, missing, missing_revisions, foreign, blocking, alerts, expected_alerts };
 }
 
 /** Tool calls the harness reported on stderr, in order; any other line is ignored. */
