@@ -10395,7 +10395,7 @@ export type UploadContentData = {
 
 export type UploadContentResponses = {
     /**
-     * Stream authenticated original bytes into a preallocated upload, enforcing byte limits and digest verification.
+     * Stream authenticated original bytes into a preallocated upload, enforcing byte limits. complete_upload verifies the expected length and digest.
      */
     200: Upload;
 };
