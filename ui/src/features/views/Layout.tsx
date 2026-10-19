@@ -93,7 +93,11 @@ const { registry } = defineRegistry(catalog, {
         <section>
           <h3>{props.title}</h3>
           {failure === undefined && spec && datasets.length === reads.length ? (
-            <Chart spec={spec} datasets={datasets} />
+            <Chart
+              spec={spec}
+              datasets={datasets}
+              derived={bindings.derivedDatasets?.get(props.chart)}
+            />
           ) : (
             <p role="alert">{failure ?? 'Resolved chart data or specification unavailable.'}</p>
           )}

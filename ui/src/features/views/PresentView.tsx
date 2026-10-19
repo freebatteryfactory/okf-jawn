@@ -1,6 +1,6 @@
 /** Resolve a presentation through the host's `ViewData` and preserve exact source bindings. */
 import { useEffect, useState } from 'react';
-import { compile, type TopLevelSpec } from 'vega-lite';
+import type { TopLevelSpec } from 'vega-lite';
 import type { z } from 'zod';
 import {
   zDataset,
@@ -11,11 +11,11 @@ import {
 } from '../../api/generated/zod.gen';
 import type { ResolvedPresentation } from './Bindings';
 import { BindingsContext } from './Bindings';
-import { Chart } from './Chart';
+import { Chart, parseVegaLiteSpec } from './Chart';
 import { readDataset, readSource, type ViewData } from './data';
 import { Layout } from './Layout';
 import { Resolution, warnedBinding } from './Resolution';
-import { withBindingTransforms } from './transforms';
+import { type DerivedDataset, planChart } from './transforms';
 
 export interface PresentViewProps {
   response: z.infer<typeof zPresentResponse>;
@@ -140,16 +140,6 @@ export function parseDataset(
     );
   return datasetRecords(parsed.data);
 }
-/** Runtime-validate a Vega-Lite grammar value (SPEC §10); never cast untrusted specs. */
-export function parseVegaLiteSpec(value: unknown): TopLevelSpec {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('Vega-Lite specification must be a JSON object');
-  }
-  const candidate = value as TopLevelSpec;
-  compile(candidate);
-  return candidate;
-}
-
 const failureLabel = {
   invalid_spec: 'Invalid specification',
   unknown_binding: 'Unknown binding',
@@ -179,13 +169,21 @@ function chartsFromView(
   charts: Map<string, TopLevelSpec>;
   errors: Map<string, string>;
   reads: Map<string, readonly string[]>;
+  derived: Map<string, readonly DerivedDataset[]>;
 } {
   const charts = new Map<string, TopLevelSpec>();
   const errors = new Map<string, string>();
   const reads = new Map<string, readonly string[]>();
+  const derived = new Map<string, readonly DerivedDataset[]>();
   for (const [name, value] of Object.entries(view.charts ?? {})) {
+    const plan = planChart(value, transforms);
+    if (!plan.ok) {
+      errors.set(name, `Chart "${name}" cannot be drawn: ${plan.message}`);
+      continue;
+    }
     try {
-      charts.set(name, parseVegaLiteSpec(withBindingTransforms(value, transforms)));
+      charts.set(name, parseVegaLiteSpec(plan.spec));
+      if (plan.derived.length > 0) derived.set(name, plan.derived);
     } catch (cause) {
       errors.set(
         name,
@@ -200,7 +198,7 @@ function chartsFromView(
     if (status.status === 'ready') reads.set(name, status.bindings);
     else errors.set(name, `${failureLabel[status.reason]}: ${status.message}`);
   }
-  return { charts, errors, reads };
+  return { charts, errors, reads, derived };
 }
 
 function reason(cause: unknown, fallback: string): string {
@@ -227,6 +225,7 @@ export function PresentView({ response, data }: PresentViewProps) {
         charts,
         errors: chartErrors,
         reads: chartBindings,
+        derived: derivedDatasets,
       } = chartsFromView(
         response.view,
         response.charts,
@@ -274,6 +273,7 @@ export function PresentView({ response, data }: PresentViewProps) {
             sourceErrors,
             chartErrors,
             chartBindings,
+            derivedDatasets,
           },
         });
     };
@@ -327,11 +327,11 @@ function VegaLiteChart({
 }) {
   const failed = resolved.chartErrors?.get('');
   if (failed !== undefined) return <p role="alert">{failed}</p>;
+  const plan = planChart(view.spec, bindingTransforms(response.resolved_bindings));
+  if (!plan.ok) return <p role="alert">{`The chart cannot be drawn: ${plan.message}`}</p>;
   let chartSpec: TopLevelSpec;
   try {
-    chartSpec = parseVegaLiteSpec(
-      withBindingTransforms(view.spec, bindingTransforms(response.resolved_bindings)),
-    );
+    chartSpec = parseVegaLiteSpec(plan.spec);
   } catch (cause) {
     return <p role="alert">{reason(cause, 'Vega-Lite specification failed runtime validation')}</p>;
   }
@@ -362,7 +362,7 @@ function VegaLiteChart({
   }
   return (
     <>
-      <Chart spec={chartSpec} datasets={datasets} />
+      <Chart spec={chartSpec} datasets={datasets} derived={plan.derived} />
       {cited.map((binding) => (
         <p key={binding.name}>
           {binding.source.path} @ <code>{binding.source.revision}</code>

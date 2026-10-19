@@ -4,6 +4,7 @@ import { createContext, useContext } from 'react';
 import type { TopLevelSpec } from 'vega-lite';
 import type { z } from 'zod';
 import type { zReadItemResponse, zViewBinding } from '../../api/generated/zod.gen';
+import type { DerivedDataset } from './transforms';
 
 export interface ResolvedPresentation {
   charts: ReadonlyMap<string, TopLevelSpec>;
@@ -33,6 +34,11 @@ export interface ResolvedPresentation {
    * `chartErrors`. A chart is given every one of them.
    */
   chartBindings?: ReadonlyMap<string, readonly string[]>;
+  /**
+   * What each chart's lookups read that its bindings' transforms make, in the order to make it
+   * (`planChart`); the key as in `chartErrors`. None when a chart looks up nothing transformed.
+   */
+  derivedDatasets?: ReadonlyMap<string, readonly DerivedDataset[]>;
 }
 export const BindingsContext = createContext<ResolvedPresentation | null>(null);
 export function useBindings(): ResolvedPresentation {
