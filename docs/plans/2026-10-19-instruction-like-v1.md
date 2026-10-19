@@ -32,6 +32,8 @@ Keep source text, normalized matching text, and displayed matched passages disti
 
 ## Verification and finish line
 
+Implementation selections: keep the first 32 findings per item in source order, with a count of omitted findings. Carry findings together on one `InstructionLike` Attention row so the existing pagination key remains unique. A finding carries the original matching passage, its versioned rule id, and a `SourceReference` built by the same citation path as other application reads. Original line ranges may span several lines; normalization must not change the displayed passage. Corrected and supplied text retain their existing explicit unresolved-original-location reasons. These choices are test targets, not implementation or qualification claims.
+
 Write tests first and observe them fail before implementing each behavior. Each rule has a positive and negative corpus, including ordinary prose about instructions or passwords and near-misses. Cover Unicode normalization and case handling, hidden-character locations, corrected and supplied text, text and rule-version changes, the findings bound and omitted count, stable pagination, and preservation of the converter result and source text.
 
 Use local focused checks and affected tests, followed by full CI at the final branch revision under the owner's approved CI policy. This work is complete only when the real Attention path emits current findings with the required evidence and advisory wording; helper-only tests do not establish that connection.
