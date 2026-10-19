@@ -36,9 +36,12 @@
 //! interval. This relies on `list_events` answering a cursor only while it read something: when
 //! the log has no more, its cursor is the last hidden event's and the next page is empty with
 //! no cursor, which waits. Each open stream costs one `list_events` per interval while it is
-//! caught up; nothing here limits the streams of one principal (carried to M2).
+//! caught up. A caller (tenant, subject, route and client) holds at most [`MAX_STREAMS_PER_CALLER`]
+//! streams open at once; one more is refused `Unavailable` with `Retry-After`, and a stream that
+//! ends for any reason gives its place back.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use axum::Extension;
@@ -49,13 +52,13 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use futures_util::stream;
-use okf_jawn_contract::access::Principal;
+use okf_jawn_contract::access::{AccessRoute, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::ListEventsResponse;
 use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
 use serde_json::json;
 
-use crate::errors::{Readable, error_response};
+use crate::errors::{Readable, error_response, retry_response};
 use crate::identity::{Credential, Identity};
 use crate::{BoundApplication, SessionId};
 
@@ -71,6 +74,17 @@ pub struct EventStreams {
     /// How long an open stream waits after a page that was neither full nor carried a cursor;
     /// never zero.
     interval: Duration,
+    /// How many streams each caller holds open now.
+    open: Arc<Mutex<BTreeMap<CallerKey, usize>>>,
+}
+
+/// A caller, as the grant cache keys one: tenant, subject, route and client.
+type CallerKey = (String, String, u8, Option<String>);
+
+/// One open stream's place among its caller's: given back when the stream ends, however it ends.
+struct Slot {
+    open: Arc<Mutex<BTreeMap<CallerKey, usize>>>,
+    caller: CallerKey,
 }
 
 /// Where an open stream stands.
@@ -82,6 +96,8 @@ struct Polling {
     workspace_id: String,
     after: Option<String>,
     pending: VecDeque<okf_jawn_contract::events::Event>,
+    /// Held for as long as the stream lives.
+    _slot: Slot,
     /// The last page's cursor: where the next poll resumes once `pending` is delivered.
     resume: Option<String>,
     /// Whether more may be waiting after the last page: it was full or it carried a cursor.
@@ -97,6 +113,12 @@ pub const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Most notifications one poll reads; a poll that returns this many is a full page.
 pub const PAGE_LIMIT: u16 = 100;
+
+/// Most event streams one caller (tenant, subject, route, client) holds open at once.
+pub const MAX_STREAMS_PER_CALLER: usize = 16;
+
+/// The `Retry-After`, in seconds, of a stream refused because its caller holds too many.
+const STREAM_RETRY_SECONDS: u32 = 5;
 
 /// Longest `Last-Event-ID` accepted; a cursor is short and opaque.
 pub const MAX_CURSOR_CHARS: usize = 256;
@@ -126,7 +148,38 @@ impl EventStreams {
             bound,
             identity,
             interval,
+            open: Arc::new(Mutex::new(BTreeMap::new())),
         })
+    }
+
+    /// A place for one more stream of `principal`, or `None` when it holds
+    /// [`MAX_STREAMS_PER_CALLER`] open already.
+    fn take_slot(&self, principal: &Principal) -> Result<Option<Slot>, ApiError> {
+        let caller = caller_key(principal);
+        let mut open = lock(&self.open)?;
+        let held = open.entry(caller.clone()).or_insert(0);
+        if *held >= MAX_STREAMS_PER_CALLER {
+            return Ok(None);
+        }
+        *held = held.saturating_add(1);
+        Ok(Some(Slot {
+            open: Arc::clone(&self.open),
+            caller,
+        }))
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        // A poisoned count keeps the place taken: the caller may open fewer streams, never more.
+        if let Ok(mut open) = self.open.lock()
+            && let Some(held) = open.get_mut(&self.caller)
+        {
+            *held = held.saturating_sub(1);
+            if *held == 0 {
+                open.remove(&self.caller);
+            }
+        }
     }
 }
 
@@ -212,6 +265,19 @@ async fn stream_events(
             "Authentication is required",
         ));
     };
+    let slot = match streams.take_slot(&principal) {
+        Ok(Some(slot)) => slot,
+        Ok(None) => {
+            return retry_response(
+                ApiError::new(
+                    ErrorCode::Unavailable,
+                    "Too many event streams are open for this caller; close one and try again",
+                ),
+                STREAM_RETRY_SECONDS,
+            );
+        }
+        Err(error) => return error_response(error),
+    };
     let session_id = session.map(|Extension(SessionId(id))| id);
     let after = match last_event_id(&headers) {
         Ok(after) => after,
@@ -240,6 +306,7 @@ async fn stream_events(
         resume: first.next_cursor,
         pending: first.events.into(),
         ended: false,
+        _slot: slot,
     };
     let events = stream::unfold(state, next_event);
     Sse::new(events)
@@ -298,4 +365,32 @@ async fn next_event(mut state: Polling) -> Option<(Result<SseEvent, axum::Error>
             Err(_) => state.ended = true,
         }
     }
+}
+
+/// The caller a stream counts against: tenant, subject, route and client.
+fn caller_key(principal: &Principal) -> CallerKey {
+    let route = match principal.route {
+        AccessRoute::BrowserSession => 0,
+        AccessRoute::McpDelegation => 1,
+        AccessRoute::LocalOwner => 2,
+        AccessRoute::Service => 3,
+    };
+    (
+        principal.tenant_id.as_str().to_owned(),
+        principal.subject.clone(),
+        route,
+        principal.client_id.clone(),
+    )
+}
+
+/// The open-stream counts, locked.
+fn lock(
+    open: &Mutex<BTreeMap<CallerKey, usize>>,
+) -> Result<MutexGuard<'_, BTreeMap<CallerKey, usize>>, ApiError> {
+    open.lock().map_err(|_| {
+        ApiError::new(
+            ErrorCode::Internal,
+            "the open event streams' count is poisoned",
+        )
+    })
 }

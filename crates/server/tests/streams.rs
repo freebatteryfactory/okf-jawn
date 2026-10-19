@@ -1101,6 +1101,33 @@ async fn a_path_that_cannot_be_read_is_an_api_error_on_every_byte_and_event_rout
     Ok(())
 }
 
+#[tokio::test]
+async fn a_caller_holds_at_most_sixteen_open_streams() -> TestResult {
+    assert_eq!(okf_jawn_server::events::MAX_STREAMS_PER_CALLER, 16);
+    let stream = Stream::new(NEVER, Vec::new())?;
+    let bearer = format!("Bearer {SECRET}");
+    let mut open = Vec::new();
+    for _ in 0..16 {
+        let response = stream.open(&[("authorization", &bearer)]).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        open.push(response);
+    }
+    let refused = stream.open(&[("authorization", &bearer)]).await?;
+    assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(header(&refused, "retry-after").as_deref(), Some("5"));
+    let error: ApiError = serde_json::from_slice(&to_bytes(refused.into_body(), 4096).await?)?;
+    assert_eq!(error.code, ErrorCode::Unavailable);
+    // Another caller is counted apart.
+    let cookie = stream.session("another-session-secret", FAR_FUTURE)?;
+    let other = stream.open(&[("cookie", &cookie)]).await?;
+    assert_eq!(other.status(), StatusCode::OK);
+    // A stream that ends gives its place back.
+    drop(open.pop());
+    let again = stream.open(&[("authorization", &bearer)]).await?;
+    assert_eq!(again.status(), StatusCode::OK);
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
 #[path = "../../core/tests/support/mod.rs"]
