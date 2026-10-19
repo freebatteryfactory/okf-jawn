@@ -498,7 +498,7 @@ describe('the naming rules', () => {
       'notes/plan.mdnotes/2025-plan.mdNo date was found.',
     ]);
     expect(panel().textContent).toContain(
-      '2 items would be renamed, and 1 keeps its name, of the 3 items considered in the whole workspace',
+      '2 items would be renamed, 1 keeps its name, and 0 items are refused, of the 3 items considered in the whole workspace',
     );
     expect(panel().textContent).toContain('No archived item is among them.');
     expect(panel().textContent).toContain('Index files are not renamed.');
@@ -532,6 +532,7 @@ describe('the naming rules', () => {
           warnings: [],
           considered: 4,
           unchanged: 3,
+          refused: 0,
           archived_left_out: 2,
         }),
     });
@@ -539,11 +540,57 @@ describe('the naming rules', () => {
     await setPrefix('2025-');
     await previewNow();
     expect(panel().textContent).toContain(
-      '1 item would be renamed, and 3 keep their names, of the 4 items considered in the whole workspace',
+      '1 item would be renamed, 3 keep their names, and 0 items are refused, of the 4 items considered in the whole workspace',
     );
     expect(panel().textContent).toContain(
       '2 archived items are left out: archived items are never renamed.',
     );
+  });
+
+  // The M3 carried sentence and core M1.3b's refused-count ruling partition considered items
+  // into entries, unchanged and refused; a refused name must not be described as unchanged.
+  it.each([
+    {
+      refused: 1,
+      unchanged: 2,
+      considered: 4,
+      hasRename: true,
+      words:
+        '1 item would be renamed, 2 keep their names, and 1 item is refused, of the 4 items considered in the whole workspace',
+    },
+    {
+      refused: 2,
+      unchanged: 0,
+      considered: 2,
+      hasRename: false,
+      words:
+        '0 items would be renamed, 0 keep their names, and 2 items are refused, of the 2 items considered in the whole workspace',
+    },
+  ])('accounts for refused names when $refused items cannot be renamed', async (example) => {
+    const { api } = service({
+      [PREVIEW]: (body) =>
+        ok({
+          base_revision: revisionAsked(body, HEAD),
+          rules_digest: DIGEST,
+          entries: example.hasRename
+            ? [{ item_id: NOTE, from: noteSummary.path, to: 'notes/2025-meeting.md', warnings: [] }]
+            : [],
+          duplicate_observations: [],
+          warnings: [{ code: 'name_refused', message: 'A proposed name cannot be used.' }],
+          considered: example.considered,
+          unchanged: example.unchanged,
+          refused: example.refused,
+          archived_left_out: 0,
+        }),
+    });
+    await openRules();
+    await setPrefix('2025-');
+    await previewNow();
+    expect(panel().textContent).toContain(example.words);
+    expect(screen.getByRole('note', { name: '' }).textContent).toContain(
+      'A proposed name cannot be used.',
+    );
+    expect(api.violations).toEqual([]);
   });
 
   it('gives the documents back their place when an item is opened from the folders', async () => {
