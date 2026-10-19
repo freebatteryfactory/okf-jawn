@@ -132,6 +132,7 @@ impl Workspace {
                 mutations: Arc::new(self.storage.mutations()),
                 catalog: Arc::new(self.storage.catalog()),
                 blobs: Arc::new(self.storage.blobs()),
+                backups: Arc::new(self.storage.backups()),
                 versions: Arc::new(self.storage.versions()),
                 records: Arc::new(self.storage.records()),
                 queue: unused.clone(),

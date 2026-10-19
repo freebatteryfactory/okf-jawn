@@ -181,7 +181,7 @@ export function rememberJob(client: QueryClient, workspaceId: string, job: Job) 
  * itself for a query that holds an answer; a first request it would wait for instead (`Query.fetch`
  * cancels only when there is data), so that one is cancelled here.
  */
-async function askAgain(client: QueryClient, filters: QueryFilters) {
+export async function askAgain(client: QueryClient, filters: QueryFilters) {
   await client.cancelQueries({
     ...filters,
     predicate: (query) => query.state.data === undefined && (filters.predicate?.(query) ?? true),

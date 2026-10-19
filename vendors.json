@@ -867,24 +867,31 @@
     },
     {
       "name": "cytoscape",
-      "use_sites": [],
-      "planned_use_sites": [
-        "ui/src/features/graph"
+      "use_sites": [
+        "ui/src/features/graph/GraphDrawing.tsx"
       ],
+      "planned_use_sites": [],
       "official_sources": [
         "https://js.cytoscape.org/"
       ],
       "symbols": [
         "cytoscape",
+        "container",
         "elements",
-        "layout",
-        "destroy"
+        "layout: { name: 'cose', animate: false }",
+        "style",
+        "boxSelectionEnabled",
+        "autoungrabify",
+        "cy.on('tap', 'node', handler)",
+        "event.target.id",
+        "cy.destroy"
       ],
       "context7_library_id": null,
       "context7_query": null,
-      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "knowledge_source": "The installed cytoscape 3.34.3 package (index.d.ts); no Context7 lookup was run",
       "offline_notes": [
-        "Graph projects the same links as the tree/backlinks API. It is not a second knowledge store."
+        "Graph projects the same links as the tree/backlinks API. It is not a second knowledge store.",
+        "The drawing is one view of `get_graph`; an accessible list of the same nodes and links stands beside it (workspace-ui M3, R8). The instance is destroyed when the component unmounts."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
       "qualification": []
@@ -1371,11 +1378,13 @@
     {
       "name": "base-ui",
       "use_sites": [
-        "ui/package.json"
+        "ui/package.json",
+        "ui/src/features/explorer/DocumentPanes.tsx",
+        "ui/src/features/documents/PropertiesYaml.tsx",
+        "ui/src/features/conventions/NamingRules.tsx",
+        "ui/src/features/reviews/ConfirmDialog.tsx"
       ],
-      "planned_use_sites": [
-        "ui/src/features/explorer/DocumentPanes.tsx"
-      ],
+      "planned_use_sites": [],
       "official_sources": [
         "https://www.npmjs.com/package/@base-ui/react",
         "https://base-ui.com"
@@ -1386,13 +1395,20 @@
         "Tabs.List",
         "Tabs.Tab",
         "Tabs.Panel",
-        "Tabs.Indicator"
+        "Tabs.Indicator",
+        "@base-ui/react/alert-dialog",
+        "AlertDialog.Root",
+        "AlertDialog.Portal",
+        "AlertDialog.Backdrop",
+        "AlertDialog.Popup (initialFocus, finalFocus)",
+        "AlertDialog.Title",
+        "AlertDialog.Description"
       ],
       "context7_library_id": null,
       "context7_query": null,
-      "knowledge_source": "npm and the installed @base-ui/react 1.8.0 package (README, tabs declarations); no Context7 lookup was run",
+      "knowledge_source": "npm and the installed @base-ui/react 1.8.0 package (README, tabs and alert-dialog declarations); no Context7 lookup was run",
       "offline_notes": [
-        "@base-ui/react: unstyled, accessible React components; styling stays in the application's CSS. Components are imported by subpath, such as @base-ui/react/tabs, whose parts are Tabs.Root, Tabs.List, Tabs.Tab, Tabs.Panel and Tabs.Indicator (the document panes in workspace-ui). MIT."
+        "@base-ui/react: unstyled, accessible React components; styling stays in the application's CSS. Components are imported by subpath: @base-ui/react/tabs (Tabs.Root, Tabs.List, Tabs.Tab, Tabs.Panel, Tabs.Indicator) for the document panes, the properties editor and the naming rules; @base-ui/react/alert-dialog for the revision-bound confirmations of Accept and Verify (workspace-ui M3, R5), where focus moves into the dialog and returns to what opened it. MIT."
       ],
       "version_authority": "ui/package.json and bun.lock",
       "qualification": [
@@ -1559,10 +1575,10 @@
     },
     {
       "name": "glob",
-      "use_sites": [],
-      "planned_use_sites": [
+      "use_sites": [
         "crates/core/src/conventions.rs"
       ],
+      "planned_use_sites": [],
       "official_sources": [
         "https://docs.rs/glob/0.3.4/glob/struct.Pattern.html"
       ],
@@ -1580,17 +1596,17 @@
         "`**` must form a whole path component (`**a` and `b**` are invalid); `[!...]` negates; `{` is an ordinary character (no alternation).",
         "MatchOptions.require_literal_separator keeps `*`, `?` and `[...]` from matching `/`; matching walks chars, so `?` is one Unicode scalar value.",
         "Case folding is ASCII only (chars_eq, issue #9084): match collision keys of both sides (contract `collision_key_of`) case-sensitively instead.",
-        "Separators include `` on Windows (std::path::is_separator), so a glob holding `` is refused."
+        "Separators include `\\` on Windows (std::path::is_separator), so a glob holding `\\` is refused."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
       "qualification": []
     },
     {
       "name": "convert_case",
-      "use_sites": [],
-      "planned_use_sites": [
+      "use_sites": [
         "crates/core/src/conventions.rs"
       ],
+      "planned_use_sites": [],
       "official_sources": [
         "https://docs.rs/convert_case/0.12.0/convert_case/"
       ],
@@ -1620,10 +1636,10 @@
     },
     {
       "name": "regex",
-      "use_sites": [],
-      "planned_use_sites": [
+      "use_sites": [
         "crates/core/src/conventions.rs"
       ],
+      "planned_use_sites": [],
       "official_sources": [
         "https://docs.rs/regex/1.13.1/regex/"
       ],

@@ -674,7 +674,8 @@ test.describe('editing a document', () => {
     await expect(above).toContainText('held back');
     await expect(page.getByLabel(/^Room/)).toHaveCount(0);
     await shot(page, '20-choice');
-    const link = page.getByLabel(/^Link/);
+    // The field, by its role: the item's "Links" beside it (UI M3) is named like it.
+    const link = page.getByRole('textbox', { name: /^Link/ });
     await link.focus();
     await page.keyboard.type('https://meet.example/weekly');
     await expect(saveState(page)).toContainText('Saved as a draft at');
