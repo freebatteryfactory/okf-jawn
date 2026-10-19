@@ -166,9 +166,14 @@ const failureLabel = {
 function chartsFromView(
   view: z.infer<typeof zPresentResponse>['view'],
   statuses: z.infer<typeof zPresentResponse>['charts'],
-): { charts: Map<string, TopLevelSpec>; errors: Map<string, string> } {
+): {
+  charts: Map<string, TopLevelSpec>;
+  errors: Map<string, string>;
+  reads: Map<string, readonly string[]>;
+} {
   const charts = new Map<string, TopLevelSpec>();
   const errors = new Map<string, string>();
+  const reads = new Map<string, readonly string[]>();
   for (const [name, value] of Object.entries(view.charts ?? {})) {
     try {
       charts.set(name, parseVegaLiteSpec(value));
@@ -182,11 +187,11 @@ function chartsFromView(
     }
   }
   for (const { chart, status } of statuses) {
-    if (status.status !== 'failed') continue;
     const name = chart.kind === 'named' ? chart.name : '';
-    errors.set(name, `${failureLabel[status.reason]}: ${status.message}`);
+    if (status.status === 'ready') reads.set(name, status.bindings);
+    else errors.set(name, `${failureLabel[status.reason]}: ${status.message}`);
   }
-  return { charts, errors };
+  return { charts, errors, reads };
 }
 
 function reason(cause: unknown, fallback: string): string {
@@ -199,7 +204,11 @@ export function PresentView({ response, data }: PresentViewProps) {
   useEffect(() => {
     let active = true;
     const load = async () => {
-      const { charts, errors: chartErrors } = chartsFromView(response.view, response.charts);
+      const {
+        charts,
+        errors: chartErrors,
+        reads: chartBindings,
+      } = chartsFromView(response.view, response.charts);
       const sources = new Map<string, z.infer<typeof zReadItemResponse>>();
       const definitions = new Map<string, z.infer<typeof zViewBinding>>();
       const tables = new Map<string, ReadonlyArray<Row>>();
@@ -238,6 +247,7 @@ export function PresentView({ response, data }: PresentViewProps) {
           datasetWarnings,
           sourceErrors,
           chartErrors,
+          chartBindings,
         });
     };
     // Each binding and chart is caught on its own; this is for what nobody foresaw, so that the
@@ -291,31 +301,35 @@ function VegaLiteChart({
     'data' in chartSpec && chartSpec.data && 'name' in chartSpec.data
       ? chartSpec.data.name
       : undefined;
-  const first = wanted
-    ? response.resolved_bindings.find((binding) => binding.name === wanted)
-    : response.resolved_bindings.at(0);
-  if (!first)
-    return (
-      <p role="alert">
-        {wanted
-          ? `Unknown binding "${wanted}": the chart names a binding this View does not resolve.`
-          : 'A chart requires a retained materialized dataset. No model-provided data was substituted.'}
-      </p>
-    );
-  const rows = resolved.tables.get(first.name);
-  if (!rows)
-    return (
-      <p role="alert">
-        {resolved.datasetErrors?.get(first.name) ??
-          'A chart requires a retained materialized dataset. No model-provided data was substituted.'}
-      </p>
-    );
+  // What the server says the chart reads; else the dataset its spec names, else the first binding.
+  const fallback = wanted ?? response.resolved_bindings.at(0)?.name;
+  const reads = resolved.chartBindings?.get('') ?? (fallback === undefined ? [] : [fallback]);
+  const unmaterialized =
+    'A chart requires a retained materialized dataset. No model-provided data was substituted.';
+  if (reads.length === 0) return <p role="alert">{unmaterialized}</p>;
+  const datasets = [];
+  const cited = [];
+  for (const name of reads) {
+    const binding = resolved.bindings.get(name);
+    if (!binding)
+      return (
+        <p role="alert">
+          {`Unknown binding "${name}": the chart names a binding this View does not resolve.`}
+        </p>
+      );
+    const rows = resolved.tables.get(name);
+    if (!rows) return <p role="alert">{resolved.datasetErrors?.get(name) ?? unmaterialized}</p>;
+    datasets.push({ name, rows });
+    cited.push(binding);
+  }
   return (
     <>
-      <Chart spec={chartSpec} rows={rows} bindingName={first.name} />
-      <p>
-        {first.source.path} @ <code>{first.source.revision}</code>
-      </p>
+      <Chart spec={chartSpec} datasets={datasets} />
+      {cited.map((binding) => (
+        <p key={binding.name}>
+          {binding.source.path} @ <code>{binding.source.revision}</code>
+        </p>
+      ))}
     </>
   );
 }

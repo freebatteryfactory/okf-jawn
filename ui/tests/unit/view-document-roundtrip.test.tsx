@@ -302,7 +302,9 @@ async function presentMany(datasets: Record<string, unknown>) {
   fixture.charts = [
     {
       chart: { kind: 'named', name: 'metrics_chart' },
-      status: { status: 'ready', bindings: Object.keys(datasets) },
+      // What the server reports: the chart's spec reads `metrics` alone, whichever binding a
+      // component showing it cites.
+      status: { status: 'ready', bindings: ['metrics'] },
     },
   ];
   const response = zPresentResponse.parse(fixture);

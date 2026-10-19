@@ -28,6 +28,11 @@ export interface ResolvedPresentation {
    * `vega_lite` chart. That chart's alert alone.
    */
   chartErrors?: ReadonlyMap<string, string>;
+  /**
+   * The bindings each chart reads, as the server's `ready` status names them; the key as in
+   * `chartErrors`. A chart is given every one of them.
+   */
+  chartBindings?: ReadonlyMap<string, readonly string[]>;
 }
 export const BindingsContext = createContext<ResolvedPresentation | null>(null);
 export function useBindings(): ResolvedPresentation {

@@ -1,6 +1,6 @@
 /** Layout normalize → validate pipeline and PresentView render path. */
 
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { compile, type TopLevelSpec } from 'vega-lite';
 import { describe, expect, it } from 'vitest';
 import type { z } from 'zod';
@@ -1118,5 +1118,175 @@ describe('PresentView reads through the ViewData it is given', () => {
     expect(source).toMatch(/^Source binding unavailable: report: .*"markdown"/s);
     expect(table).toMatch(/^Dataset unavailable: metrics: .*"data_base64"/s);
     expect(screen.queryByRole('table')).toBeNull();
+  });
+});
+
+describe('a chart draws every binding its ready status names', () => {
+  const workspace = 'aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff';
+  const revision = '0123456789abcdef0123456789abcdef01234567';
+  const cite = (item: string, path: string) => ({
+    item_id: item,
+    path,
+    revision,
+    selection: { kind: 'all' as const },
+    workspace_id: workspace,
+  });
+  const cited = {
+    metrics: cite('11111111-2222-4333-8444-555555555555', 'fixtures/metrics.json'),
+    targets: cite('22222222-2222-4333-8444-555555555555', 'fixtures/targets.json'),
+  };
+  const rows = {
+    metrics: [
+      ['a', 1],
+      ['b', 2],
+    ],
+    targets: [
+      ['a', 3],
+      ['b', 4],
+      ['c', 5],
+    ],
+  };
+  /** The converter's Dataset of one binding, as its bytes. */
+  const bytesOf = (name: keyof typeof cited) =>
+    new TextEncoder().encode(
+      JSON.stringify({
+        schema_version: 1,
+        source: cited[name],
+        text_origin: 'converter',
+        columns: [
+          { name: 'category', kind: 'string' },
+          { name: 'value', kind: 'integer' },
+        ],
+        rows: rows[name],
+      }),
+    );
+  async function digestOf(bytes: BufferSource) {
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+    return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  }
+  const layer = (name: string, mark: string) => ({
+    data: { name },
+    mark,
+    encoding: {
+      x: { field: 'category', type: 'nominal' },
+      y: { field: 'value', type: 'quantitative' },
+    },
+  });
+  const layered = {
+    $schema: 'https://vega.github.io/schema/vega-lite/v6.json',
+    layer: [layer('metrics', 'bar'), layer('targets', 'point')],
+  };
+
+  /**
+   * A board of one chart whose server status reads both bindings: a json_render Chart citing
+   * `metrics`, or a vega_lite View whose spec is the layered chart.
+   */
+  async function board(grammar: 'json_render' | 'vega_lite' = 'json_render') {
+    const served = new Map<string, Uint8Array>();
+    const digests: Record<string, string> = {};
+    for (const name of ['metrics', 'targets'] as const) {
+      const bytes = bytesOf(name);
+      digests[name] = await digestOf(bytes);
+      served.set(digests[name], bytes);
+    }
+    const response = {
+      view: {
+        schema_version: 1,
+        title: 'Layered board',
+        description: 'One chart over two bindings',
+        mode: 'pinned',
+        grammar,
+        bindings: [],
+        ...(grammar === 'vega_lite'
+          ? { spec: layered }
+          : {
+              charts: { both: layered },
+              spec: {
+                root: 'root',
+                elements: {
+                  root: {
+                    type: 'Chart',
+                    props: { binding: 'metrics', chart: 'both', title: 'Both bindings' },
+                    children: [],
+                  },
+                },
+              },
+            }),
+      },
+      resolved_bindings: (['metrics', 'targets'] as const).map((name) => ({
+        name,
+        source: cited[name],
+        units: {},
+        transforms: [],
+        materialized: digests[name],
+      })),
+      charts: [
+        {
+          chart: grammar === 'vega_lite' ? { kind: 'spec' } : { kind: 'named', name: 'both' },
+          status: { status: 'ready', bindings: ['metrics', 'targets'] },
+        },
+      ],
+      as_of: '2026-10-08T14:03:07.250Z',
+      warnings: [],
+      receipt_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    } as z.infer<typeof zPresentResponse>;
+    const data: ViewData = {
+      readItem: async (request) => ({
+        markdown: 'source',
+        media: [],
+        outline: [],
+        receipt_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+        source: request.item_id === cited.targets.item_id ? cited.targets : cited.metrics,
+        truncated: false,
+        view: 'text',
+        warnings: [],
+      }),
+      getObject: async (request) => {
+        const bytes = served.get(request.object) ?? new Uint8Array();
+        let binary = '';
+        for (const byte of bytes) binary += String.fromCharCode(byte);
+        return {
+          data_base64: btoa(binary),
+          has_more: false,
+          media_type: 'application/json',
+          offset: '0',
+          sha256: request.object,
+          total_size: String(bytes.byteLength),
+        };
+      },
+    };
+    return render(<PresentView response={response} data={data} />).container;
+  }
+
+  it('draws a layered chart over two bindings with both, and tables both', {
+    timeout: 30_000,
+  }, async () => {
+    const container = await board();
+    const marks = () =>
+      Array.from(
+        container.querySelectorAll('svg g[class~="role-mark"]'),
+        (group) => group.children.length,
+      );
+    await expect.poll(marks, { timeout: 15_000 }).toEqual([2, 3]);
+    expect(screen.queryByRole('alert')).toBeNull();
+    const chart = screen.getByRole('heading', { name: 'Both bindings' }).closest('section');
+    if (chart === null) throw new Error('the chart has no section');
+    expect(within(chart).getByRole('table', { name: 'metrics' })).toBeTruthy();
+    expect(within(chart).getByRole('table', { name: 'targets' })).toBeTruthy();
+  });
+
+  it('draws a vega_lite View layered over two bindings with both, and tables both', {
+    timeout: 30_000,
+  }, async () => {
+    const container = await board('vega_lite');
+    const marks = () =>
+      Array.from(
+        container.querySelectorAll('svg g[class~="role-mark"]'),
+        (group) => group.children.length,
+      );
+    await expect.poll(marks, { timeout: 15_000 }).toEqual([2, 3]);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('table', { name: 'metrics' })).toBeTruthy();
+    expect(screen.getByRole('table', { name: 'targets' })).toBeTruthy();
   });
 });
