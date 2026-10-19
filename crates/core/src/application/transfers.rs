@@ -25,9 +25,11 @@
 //!   end, or ends before it starts, is `invalid_input` (the contract's statuses are a closed set:
 //!   no 416); an end past the last byte is cut to it; without a range the whole object is sent.
 //!   No receipt is written.
-//! - Artifact downloads first find the record in the requested scope, then require its kind's
-//!   route and permission. Workspace artifacts open through `BlobStore`; installation backups
-//!   require tenant Admin and open through `Backups`. Neither transport accepts a range.
+//! - Artifact downloads reject routes forbidden for the whole endpoint before looking up a
+//!   record. Tenant downloads also require Admin before that lookup, because every tenant
+//!   artifact is an installation backup. Workspace downloads then find the scoped record and
+//!   require its kind's route and permission. Workspace artifacts open through `BlobStore`;
+//!   installation backups open through `Backups`. Neither transport accepts a range.
 //!
 //! Every `Forbidden` a transfer answers, its own or a port's, is recorded as a `permission_denied`
 //! event naming the transport and no operation (`NewEvent::transport_denied`), in the asked
@@ -50,7 +52,7 @@ use super::workspaces::archived_at;
 use crate::access::{authorize_tenant, authorize_workspace, check_route};
 use crate::context::WorkspaceGrant;
 use crate::events::{EventScope, NewEvent};
-use crate::jobs::{ArtifactKind, ArtifactRecord, JobScope};
+use crate::jobs::{ArtifactKind, JobScope};
 use crate::ports::PortFuture;
 use crate::storage::{ByteReader, ObjectRead, StorageScope};
 use crate::transfers::{ByteRange, Download, TransferCaller, Transfers};
@@ -136,13 +138,19 @@ impl Transfers for ApplicationService {
     }
 }
 
-/// Find a workspace artifact before applying its kind's route and permission, then open it.
+/// Refuse connectors first, then find and authorize a workspace artifact by its kind.
 async fn download_artifact(
     service: &ApplicationService,
     principal: &Principal,
     workspace: WorkspaceId,
     artifact: ArtifactId,
 ) -> Result<Download, ApiError> {
+    if principal.route == AccessRoute::McpDelegation {
+        return Err(ApiError::new(
+            ErrorCode::Forbidden,
+            "Artifact bytes are not sent to a connected AI",
+        ));
+    }
     let scope = StorageScope {
         tenant_id: principal.tenant_id.clone(),
         workspace_id: workspace,
@@ -156,7 +164,7 @@ async fn download_artifact(
     if record.scope != asked || record.kind == ArtifactKind::InstallationBackup {
         return Err(foreign_artifact());
     }
-    artifact_route(principal, &record)?;
+    artifact_route(principal, record.kind)?;
     workspace_grant(
         service,
         principal,
@@ -178,17 +186,8 @@ async fn download_tenant_artifact(
     principal: &Principal,
     artifact: ArtifactId,
 ) -> Result<Download, ApiError> {
-    let asked = JobScope::Tenant(principal.tenant_id.clone());
-    let record = service
-        .ports()
-        .records
-        .get_artifact(&asked, artifact)
-        .await?;
-    if record.scope != asked || record.kind != ArtifactKind::InstallationBackup {
-        return Err(foreign_artifact());
-    }
-    artifact_route(principal, &record)?;
-    let permission = record.kind.download_permission();
+    artifact_route(principal, ArtifactKind::InstallationBackup)?;
+    let permission = ArtifactKind::InstallationBackup.download_permission();
     check_route(principal, permission)?;
     let raw = service
         .ports()
@@ -199,6 +198,15 @@ async fn download_tenant_artifact(
         return Err(foreign_grant());
     }
     authorize_tenant(principal, raw, permission)?;
+    let asked = JobScope::Tenant(principal.tenant_id.clone());
+    let record = service
+        .ports()
+        .records
+        .get_artifact(&asked, artifact)
+        .await?;
+    if record.scope != asked || record.kind != ArtifactKind::InstallationBackup {
+        return Err(foreign_artifact());
+    }
     let read = service
         .ports()
         .backups
@@ -208,8 +216,8 @@ async fn download_tenant_artifact(
 }
 
 /// A kind's explicit route boundary applies regardless of the caller's grants.
-fn artifact_route(principal: &Principal, record: &ArtifactRecord) -> Result<(), ApiError> {
-    if !record.kind.download_routes().contains(&principal.route) {
+fn artifact_route(principal: &Principal, kind: ArtifactKind) -> Result<(), ApiError> {
+    if !kind.download_routes().contains(&principal.route) {
         return Err(ApiError::new(
             ErrorCode::Forbidden,
             "This access route cannot download this kind of artifact",
