@@ -186,3 +186,5 @@ pub mod sessions;
 pub mod settings;
 #[cfg(feature = "runtime")]
 pub mod transfers;
+#[cfg(feature = "runtime")]
+pub mod workos_access;
