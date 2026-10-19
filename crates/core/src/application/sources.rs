@@ -95,6 +95,9 @@ pub(super) async fn get_sources(
     } else {
         Vec::new()
     };
+    // Bindings keep their exact selections and digests. Only declared note sources share
+    // whole-item citations with other declared entries, even at a binding's item and revision.
+    let first_declared = sources.len();
     let mut declared = Vec::new();
     for NoteSource { entry, target } in note_sources(&document.properties, &document.summary.path) {
         let cited = match target {
@@ -110,8 +113,11 @@ pub(super) async fn get_sources(
             Ok(item) => {
                 let index = if let Some(index) = sources
                     .iter()
-                    .position(|citation| citation.item_id == item && citation.revision == revision)
-                {
+                    .enumerate()
+                    .skip(first_declared)
+                    .find_map(|(index, citation)| {
+                        (citation.item_id == item && citation.revision == revision).then_some(index)
+                    }) {
                     index
                 } else {
                     let document = ports.versions.show(&scope, &revision, item).await?;

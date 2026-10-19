@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use okf_jawn_contract::common::TextRange;
+use okf_jawn_contract::common::{PageRange, TextRange};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::extraction::{Extraction, TextOrigin};
 use okf_jawn_contract::history::{CommitRequest, FileChange, FileChangeKind, RestoreRequest};
@@ -19,8 +19,9 @@ use okf_jawn_contract::item::{
     CreateItemRequest, DraftContent, ItemDocument, ItemKind, SaveDraftRequest,
 };
 use okf_jawn_contract::metadata::OperationName;
+use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::source::{
-    GetObjectRequest, GetSourcesRequest, SourceLocation, SourceLocator,
+    DeclaredOutcome, GetObjectRequest, GetSourcesRequest, SourceLocation, SourceLocator,
 };
 use okf_jawn_contract::views::{
     ChartFailure, ChartRef, ChartResult, ChartStatus, Dataset, ExportViewRequest,
@@ -440,6 +441,57 @@ async fn get_sources_of_a_view_answers_its_bindings_citations() -> TestResult {
             (id(NOTE), revision('c')?, Vec::new())
         ]
     );
+    Ok(())
+}
+
+/// SPEC section 7 and ruling E11 keep a binding's exact selection, while an OKF note source
+/// cites the whole item. The same item and revision cannot make those selections equivalent.
+#[tokio::test]
+async fn a_views_declared_source_keeps_a_whole_citation_beside_its_partial_binding() -> TestResult {
+    let block = block_with("/bindings/0/source/revision", json!(revision('a')?))?;
+    let body = view_body(
+        "Revenue, with the whole report declared as a source.",
+        &block,
+    )?;
+    let world = view_world(&body)?;
+    let entry = json!({ "id": "whole-report", "resource": "../reports/revenue-pdf.md" });
+    let mut document = view_item(&revision('a')?, &body)?;
+    document
+        .properties
+        .insert("sources".to_owned(), json!([entry.clone()]));
+    world.versions.replace_document(&revision('a')?, document)?;
+
+    let response = world
+        .service
+        .get_sources(
+            &alice(OperationName::GetSources, None)?,
+            GetSourcesRequest {
+                workspace_id: scope()?.workspace_id,
+                item_id: id(VIEW),
+                at: At::Latest,
+            },
+        )
+        .await?;
+    let binding = some(response.sources.first(), "the partial binding citation")?;
+    assert_eq!(binding.item_id, id(SOURCE));
+    assert_eq!(binding.revision, revision('a')?);
+    assert_eq!(
+        binding.selection,
+        Selection::Pages {
+            range: PageRange { start: 2, end: 2 }
+        }
+    );
+    let declared = some(response.declared.first(), "the declared whole report")?;
+    assert_eq!(declared.entry, entry);
+    // Two binding citations precede the separate whole-item citation required by the entry.
+    assert_eq!(declared.outcome, DeclaredOutcome::Cited { index: 2 });
+    assert_eq!(response.sources.len(), 3);
+    let whole = some(response.sources.get(2), "the whole report citation")?;
+    assert_eq!(whole.item_id, id(SOURCE));
+    assert_eq!(whole.revision, revision('a')?);
+    assert_eq!(whole.digest, Some(digest('b')?));
+    assert_eq!(whole.selection, Selection::All);
+    assert_eq!(whole.locations, vec![page(1), page(2)]);
     Ok(())
 }
 
