@@ -839,6 +839,132 @@ async fn download_object_refuses_a_foreign_grant_and_keeps_its_refusal_when_the_
 
 // ---- download_artifact and download_tenant_artifact ----
 
+/// Connector routes can download no workspace artifact (the transport contract), so the
+/// refusal and its audit event must not reveal whether the supplied identity exists.
+#[tokio::test]
+async fn forbidden_workspace_artifact_probes_do_not_reveal_existence() -> TestResult {
+    for exists in [false, true] {
+        let tenancy = world(&[Permission::Read, Permission::Admin])?;
+        let held = artifact(71, workspace_scope()?, ArtifactKind::Export, ARCHIVE.len())?;
+        if exists {
+            hold(&tenancy, &held)?;
+        }
+        let refused = err_of(
+            workspace_artifact(&tenancy, McpDelegation, scope()?.workspace_id, held.id)
+                .await
+                .map(drop),
+        )?;
+        assert_eq!(refused.code, ErrorCode::Forbidden, "exists={exists}");
+        assert!(
+            tenancy.access.lookups()?.is_empty(),
+            "route refused before grants"
+        );
+        assert!(
+            tenancy.world.blobs.opens()?.is_empty(),
+            "no artifact opened"
+        );
+        assert_eq!(
+            tenancy.log.appended()?,
+            refusal(
+                McpDelegation,
+                TransportName::DownloadArtifact,
+                workspace_log()?
+            )
+        );
+    }
+    Ok(())
+}
+
+/// The tenant endpoint serves installation backups only, restricted to human sessions.
+#[tokio::test]
+async fn forbidden_tenant_artifact_probes_do_not_reveal_existence() -> TestResult {
+    for route in [McpDelegation, Service] {
+        for exists in [false, true] {
+            let tenancy = world(&[])?;
+            tenancy
+                .access
+                .grant_tenant(ALICE, vec![Permission::Admin])?;
+            let held = artifact(
+                72,
+                tenant_scope()?,
+                ArtifactKind::InstallationBackup,
+                ARCHIVE.len(),
+            )?;
+            if exists {
+                hold(&tenancy, &held)?;
+            }
+            let refused = err_of(
+                tenant_artifact(&tenancy, route.clone(), held.id)
+                    .await
+                    .map(drop),
+            )?;
+            assert_eq!(
+                refused.code,
+                ErrorCode::Forbidden,
+                "{route:?}, exists={exists}"
+            );
+            assert!(
+                tenancy.access.tenant_lookups()?.is_empty(),
+                "route refused before grants"
+            );
+            assert!(tenancy.backups.opens()?.is_empty(), "no backup opened");
+            assert_eq!(
+                tenancy.log.appended()?,
+                refusal(
+                    route.clone(),
+                    TransportName::DownloadTenantArtifact,
+                    tenant_log()?
+                )
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Every tenant artifact needs Admin; unauthorized human probes must also have one answer.
+#[tokio::test]
+async fn unauthorized_tenant_artifact_probes_do_not_reveal_existence() -> TestResult {
+    for route in [BrowserSession, LocalOwner] {
+        for exists in [false, true] {
+            let tenancy = world(&[])?;
+            tenancy.access.grant_tenant(ALICE, vec![Permission::Read])?;
+            let held = artifact(
+                73,
+                tenant_scope()?,
+                ArtifactKind::InstallationBackup,
+                ARCHIVE.len(),
+            )?;
+            if exists {
+                hold(&tenancy, &held)?;
+            }
+            let refused = err_of(
+                tenant_artifact(&tenancy, route.clone(), held.id)
+                    .await
+                    .map(drop),
+            )?;
+            assert_eq!(
+                refused.code,
+                ErrorCode::Forbidden,
+                "{route:?}, exists={exists}"
+            );
+            assert_eq!(tenancy.access.tenant_lookups()?, vec![Permission::Admin]);
+            assert!(
+                tenancy.backups.opens()?.is_empty(),
+                "no unauthorized backup opened"
+            );
+            assert_eq!(
+                tenancy.log.appended()?,
+                refusal(
+                    route.clone(),
+                    TransportName::DownloadTenantArtifact,
+                    tenant_log()?
+                )
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Whether `route` may download a workspace artifact of `kind`, as the contract's transport
 /// declaration states it: an export on every route but an agent's, a workspace archive only in a
 /// human browser session.
@@ -1064,9 +1190,10 @@ async fn an_artifact_is_found_only_through_its_own_scope() -> TestResult {
         tenancy.access.lookups()?.is_empty(),
         "no grant was looked up"
     );
-    assert!(
-        tenancy.access.tenant_lookups()?.is_empty(),
-        "no tenant grant was looked up"
+    assert_eq!(
+        tenancy.access.tenant_lookups()?,
+        vec![Permission::Admin],
+        "tenant Admin is required before looking up any tenant artifact"
     );
     assert!(
         tenancy.log.appended()?.is_empty(),
