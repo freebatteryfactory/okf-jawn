@@ -336,7 +336,6 @@ export function PresentView({ response, callTool }: PresentViewProps) {
     };
   }, [response, callTool]);
   if (failure !== null) return <p role="alert">{failure}</p>;
-  if (failure !== null) return <p role="alert">{failure}</p>;
   if (!bindings) return <p role="status">Resolving the presentation's exact source references…</p>;
   const view = response.view;
   if (view.grammar === 'json_render') {
