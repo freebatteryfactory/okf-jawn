@@ -4143,11 +4143,18 @@ export type RenamePlan = {
      */
     entries: Array<RenameEntry>;
     /**
+     * Considered items whose rules give a name that is refused, so the item keeps its path: a
+     * collision under `reject`, a result that is no workspace path, or an ambiguous date. Each
+     * is named in `warnings`; none is in `entries` or counted in `unchanged`, so
+     * `considered` is `entries` plus `unchanged` plus `refused`.
+     */
+    refused: number;
+    /**
      * Digest of the exact canonical rules.
      */
     rules_digest: Digest;
     /**
-     * Considered items whose path would not change; they are not in `entries`.
+     * Considered items whose rules leave the path as it is; they are not in `entries`.
      */
     unchanged: number;
     /**
@@ -10395,7 +10402,7 @@ export type UploadContentData = {
 
 export type UploadContentResponses = {
     /**
-     * Stream authenticated original bytes into a preallocated upload, enforcing byte limits and digest verification.
+     * Stream authenticated original bytes into a preallocated upload, enforcing byte limits. complete_upload verifies the expected length and digest.
      */
     200: Upload;
 };

@@ -14,6 +14,33 @@ const prefix='bun scripts/dev.mjs premerge --step ';
 const node20Pins=['11bd71901bbe5b1630ceea73d27597364c9af683','ea165f8d65b6e75b540449e92b4886f43607fa02'];
 const checkout=job=>workflow.jobs[job].steps.find(step=>step.uses?.startsWith('actions/checkout@'));
 
+test('CI uses the approved Blacksmith images while retaining the required platform check names',async()=>{
+ // Owner decision 2026-10-19: full CI replaces duplicate full local gates. The
+ // documented Blacksmith tags keep Ubuntu 24.04, Windows 2025 and macOS 15.
+ assert.equal(workflow.jobs['source-tooling']['runs-on'],'blacksmith-2vcpu-ubuntu-2404');
+ for(const id of ['foundation','lane'])assert.equal(workflow.jobs[id]['runs-on'],'blacksmith-4vcpu-ubuntu-2404',id);
+ assert.equal(workflow.jobs.audit['runs-on'],'blacksmith-2vcpu-ubuntu-2404');
+ assert.deepEqual(workflow.jobs.platforms.strategy.matrix.include,[
+  {os:'windows-2025',runner:'blacksmith-4vcpu-windows-2025'},
+  {os:'macos-15',runner:'blacksmith-6vcpu-macos-15'},
+ ]);
+ assert.equal(workflow.jobs.platforms.name,'Contract and storage on ${{ matrix.os }}, whose file system ignores case');
+ assert.equal(workflow.jobs.foundation.name,'Actual pinned generators and consumers, every feature');
+ const contract=Bun.YAML.parse(await read('.github/workflows/contract.yml'));
+ const qualify=Bun.YAML.parse(await read('.github/workflows/qualify.yml'));
+ assert.equal(contract.jobs['fuzz-read-contract']['runs-on'],'blacksmith-2vcpu-ubuntu-2404');
+ assert.equal(qualify.jobs['mcp-apps-protocol']['runs-on'],'blacksmith-4vcpu-ubuntu-2404');
+});
+
+test('compiled caches never restore across CPU architectures',()=>{
+ for(const [id,job] of Object.entries(workflow.jobs)){
+  for(const step of job.steps.filter(step=>step.uses?.startsWith('actions/cache@')&&step.with.path.includes('~/.cargo/registry'))){
+   assert.ok(step.with.key.includes('${{ runner.arch }}'),id);
+   for(const key of step.with['restore-keys'].trim().split('\n'))assert.ok(key.includes('${{ runner.arch }}'),`${id}: ${key}`);
+  }
+ }
+});
+
 test('CI runs exactly the premerge sequence, one step each, and a failure does not hide later steps',()=>{
  const steps=workflow.jobs.foundation.steps;
  const gated=steps.filter(step=>typeof step.run==='string'&&step.run.startsWith(prefix));
@@ -103,9 +130,9 @@ test('a pull request from this repository runs CI once, and an upload that finds
 });
 test('the contract and storage are tested on Windows and macOS, whose file systems ignore case',()=>{
  const job=workflow.jobs.platforms;
- assert.deepEqual(job.strategy.matrix.os,['windows-2025','macos-15']);
+ assert.deepEqual(job.strategy.matrix.include.map(entry=>entry.os),['windows-2025','macos-15']);
  assert.equal(job.strategy['fail-fast'],false,'a failure on one system must not hide the other');
- assert.equal(job['runs-on'],'${{ matrix.os }}');
+ assert.equal(job['runs-on'],'${{ matrix.runner }}');
  assert.match(job.if,/github\.event_name != 'schedule'/);
  const test=job.steps.find(step=>step.run?.startsWith('cargo test '))?.run??'';
  for(const part of ['--locked','--all-features','-p okf-jawn-contract','-p okf-jawn-storage'])assert.ok(test.split(' ').includes(part.split(' ').at(-1)),part);

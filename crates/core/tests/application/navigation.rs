@@ -606,6 +606,7 @@ fn detached(
         confirmations: unused.clone(),
         sandbox: world.sandbox.clone(),
         readiness: world.readiness.clone(),
+        backups: unused.clone(),
     };
     Ok((ApplicationService::new(ports, config())?, counters))
 }

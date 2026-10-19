@@ -7474,12 +7474,18 @@
             },
             "type": "array"
           },
+          "refused": {
+            "description": "Considered items whose rules give a name that is refused, so the item keeps its path: a\ncollision under `reject`, a result that is no workspace path, or an ambiguous date. Each\nis named in `warnings`; none is in `entries` or counted in `unchanged`, so\n`considered` is `entries` plus `unchanged` plus `refused`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "rules_digest": {
             "$ref": "#/components/schemas/Digest",
             "description": "Digest of the exact canonical rules."
           },
           "unchanged": {
-            "description": "Considered items whose path would not change; they are not in `entries`.",
+            "description": "Considered items whose rules leave the path as it is; they are not in `entries`.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
@@ -7500,6 +7506,7 @@
           "warnings",
           "considered",
           "unchanged",
+          "refused",
           "archived_left_out"
         ],
         "type": "object"
@@ -22085,7 +22092,7 @@
     },
     "/api/workspaces/{workspace_id}/uploads/{upload_id}/content": {
       "put": {
-        "description": "Stream authenticated original bytes into a preallocated upload, enforcing byte limits and digest verification.",
+        "description": "Stream authenticated original bytes into a preallocated upload, enforcing byte limits. complete_upload verifies the expected length and digest.",
         "operationId": "upload_content",
         "parameters": [
           {
@@ -22125,7 +22132,7 @@
                 }
               }
             },
-            "description": "Stream authenticated original bytes into a preallocated upload, enforcing byte limits and digest verification."
+            "description": "Stream authenticated original bytes into a preallocated upload, enforcing byte limits. complete_upload verifies the expected length and digest."
           }
         },
         "summary": "upload_content",

@@ -1,6 +1,6 @@
 {
   "project": "okf-jawn",
-  "phase_0_qualified": true,
+  "phase_0_qualified": false,
   "reopened": {
     "decision": "Phase 0 was reopened because the terminal record made before it claimed more than its harnesses had tested and the shared contract and ports had gaps. The web-host check moved to acceptance, and both library qualifications are run again on a clean commit.",
     "decided_on": "2026-10-05",
@@ -143,7 +143,7 @@
           "harness": "mcp-apps",
           "receipt": "qualification/receipts/mcp-apps.json",
           "criteria": "qualification/mcp-apps/criteria.json",
-          "status": "passed",
+          "status": "incomplete",
           "covers": "A pass proves that every criterion pinned in qualification/mcp-apps/criteria.json was judged and passed on the clean commit the receipt cites: the App bundle built in the run is one HTML resource with the SDK's MIME type and a production React build; a fixture MCP server (the harness, answering from committed fixtures) lists and serves that resource over Streamable HTTP with four render tools of its own (render_source, render_changes, render_timeline, render_present: the product catalog has no tool of these names; their results are fixtures the App parses with the product's generated schemas) and with show and read_object marked app-only, of which only read_object carries the product's schemas (the harness declares show itself; the product declares show for the model and the App), and read_object is served in ranged blocks that hash to the dataset's digest and refuses an unknown digest or argument; and in the ext-apps basic-host example under Chromium each of the four views shows its own text with no alert and no serious or critical axe violation in the App frame, the present view drawing its chart and tables from the dataset it fetched. It does not prove the product's tool declarations other than the read_object schemas, the product server's show and read_object handlers or its blob store, rendering in claude.ai or ChatGPT (the acceptance gate mcp-apps-web-hosts) or the production MCP server over the Application."
         },
         {
@@ -179,7 +179,7 @@
               "bun scripts/dev.mjs bootstrap"
             ]
           },
-          "covers": "Every CI run starts from a fresh clone of the pushed commit: bootstrap installs from the committed lockfiles only, builds the generator, generates, and builds and type-checks the UI before the gated steps run, so nothing can depend on an uncommitted file. Cargo's registry and target directory are restored from a cache keyed on rust-toolchain.toml and Cargo.lock, with a fallback to the newest cargo cache of the same runner OS when none has that key, so `target` can come from another lockfile state and cargo's own fingerprints under `--locked` decide what is rebuilt; Bun's install cache is keyed on .bun-version and bun.lock and has no fallback. CI asserts that the checkout is unchanged directly after bootstrap (the deterministic-foundation gate) and not again after the gated steps, and it does not run the audit; `bun scripts/dev.mjs clean-checkout` asserts a clean tree after the whole sequence and runs the audit locally, and is a tool, not a gate."
+          "covers": "Every CI run starts from a fresh clone of the pushed commit: bootstrap installs from the committed lockfiles only, builds the generator, generates, and builds and type-checks the UI before the gated steps run, so nothing can depend on an uncommitted file. Cargo's registry and target directory are restored from a cache keyed on rust-toolchain.toml and Cargo.lock, with a fallback to the newest cargo cache of the same runner OS and architecture when none has that key, so `target` can come from another lockfile state and cargo's own fingerprints under `--locked` decide what is rebuilt; Bun's install cache is keyed on .bun-version and bun.lock and has no fallback. CI asserts that the checkout is unchanged directly after bootstrap (the deterministic-foundation gate) and not again after the gated steps, and it does not run the audit; `bun scripts/dev.mjs clean-checkout` asserts a clean tree after the whole sequence and runs the audit locally, and is a tool, not a gate."
         },
         {
           "id": "github-actions-ci-receipt",
