@@ -1181,7 +1181,13 @@ describe('a chart draws every binding its ready status names', () => {
    * A board of one chart whose server status reads both bindings: a json_render Chart citing
    * `metrics`, or a vega_lite View whose spec is the layered chart.
    */
-  async function board(grammar: 'json_render' | 'vega_lite' = 'json_render') {
+  async function board(
+    grammar: 'json_render' | 'vega_lite' = 'json_render',
+    {
+      chart = layered,
+      transforms = {},
+    }: { chart?: unknown; transforms?: Record<string, unknown[]> } = {},
+  ) {
     const served = new Map<string, Uint8Array>();
     const digests: Record<string, string> = {};
     for (const name of ['metrics', 'targets'] as const) {
@@ -1198,9 +1204,9 @@ describe('a chart draws every binding its ready status names', () => {
         grammar,
         bindings: [],
         ...(grammar === 'vega_lite'
-          ? { spec: layered }
+          ? { spec: chart }
           : {
-              charts: { both: layered },
+              charts: { both: chart },
               spec: {
                 root: 'root',
                 elements: {
@@ -1217,7 +1223,7 @@ describe('a chart draws every binding its ready status names', () => {
         name,
         source: cited[name],
         units: {},
-        transforms: [],
+        transforms: transforms[name] ?? [],
         materialized: digests[name],
       })),
       charts: [
@@ -1273,6 +1279,47 @@ describe('a chart draws every binding its ready status names', () => {
     if (chart === null) throw new Error('the chart has no section');
     expect(within(chart).getByRole('table', { name: 'metrics' })).toBeTruthy();
     expect(within(chart).getByRole('table', { name: 'targets' })).toBeTruthy();
+  });
+
+  /** The number of marks each mark group of the drawn chart holds, once it is drawn. */
+  const drawn = (container: HTMLElement) => () =>
+    Array.from(
+      container.querySelectorAll('svg g[class~="role-mark"]'),
+      (group) => group.children.length,
+    );
+
+  it("puts a binding's transforms before the chart's own, in the layer that reads it only", {
+    timeout: 30_000,
+  }, async () => {
+    // `metrics` is (a, 1), (b, 2). Its own filter keeps one row; had the layer's calculate run
+    // first (10, 20), it would keep both. `targets` has no transforms: its three points stay.
+    const ordered = {
+      ...layered,
+      layer: [
+        { ...layer('metrics', 'bar'), transform: [{ calculate: 'datum.value * 10', as: 'value' }] },
+        layer('targets', 'point'),
+      ],
+    };
+    const container = await board('json_render', {
+      chart: ordered,
+      transforms: { metrics: [{ filter: 'datum.value > 1' }] },
+    });
+    await expect.poll(drawn(container), { timeout: 15_000 }).toEqual([1, 3]);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it("puts a binding's transforms before a vega_lite View's own", { timeout: 30_000 }, async () => {
+    const single = {
+      $schema: 'https://vega.github.io/schema/vega-lite/v6.json',
+      ...layer('metrics', 'bar'),
+      transform: [{ calculate: 'datum.value * 10', as: 'value' }],
+    };
+    const container = await board('vega_lite', {
+      chart: single,
+      transforms: { metrics: [{ filter: 'datum.value > 1' }] },
+    });
+    await expect.poll(drawn(container), { timeout: 15_000 }).toEqual([1]);
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   it('draws a vega_lite View layered over two bindings with both, and tables both', {

@@ -15,6 +15,7 @@ import { Chart } from './Chart';
 import { readDataset, readSource, type ViewData } from './data';
 import { Layout } from './Layout';
 import { Resolution, warnedBinding } from './Resolution';
+import { withBindingTransforms } from './transforms';
 
 export interface PresentViewProps {
   response: z.infer<typeof zPresentResponse>;
@@ -163,9 +164,17 @@ const failureLabel = {
  * diagnostic is the source of truth for its own failure; a chart it calls ready is still judged
  * here, because renderer specs need runtime validation as well as the wire schema.
  */
+/** Each binding's declared transforms, by its name. */
+function bindingTransforms(
+  bindings: z.infer<typeof zPresentResponse>['resolved_bindings'],
+): ReadonlyMap<string, readonly unknown[]> {
+  return new Map(bindings.map((binding) => [binding.name, binding.transforms]));
+}
+
 function chartsFromView(
   view: z.infer<typeof zPresentResponse>['view'],
   statuses: z.infer<typeof zPresentResponse>['charts'],
+  transforms: ReadonlyMap<string, readonly unknown[]>,
 ): {
   charts: Map<string, TopLevelSpec>;
   errors: Map<string, string>;
@@ -176,7 +185,7 @@ function chartsFromView(
   const reads = new Map<string, readonly string[]>();
   for (const [name, value] of Object.entries(view.charts ?? {})) {
     try {
-      charts.set(name, parseVegaLiteSpec(value));
+      charts.set(name, parseVegaLiteSpec(withBindingTransforms(value, transforms)));
     } catch (cause) {
       errors.set(
         name,
@@ -208,7 +217,11 @@ export function PresentView({ response, data }: PresentViewProps) {
         charts,
         errors: chartErrors,
         reads: chartBindings,
-      } = chartsFromView(response.view, response.charts);
+      } = chartsFromView(
+        response.view,
+        response.charts,
+        bindingTransforms(response.resolved_bindings),
+      );
       const sources = new Map<string, z.infer<typeof zReadItemResponse>>();
       const definitions = new Map<string, z.infer<typeof zViewBinding>>();
       const tables = new Map<string, ReadonlyArray<Row>>();
@@ -293,7 +306,9 @@ function VegaLiteChart({
   if (failed !== undefined) return <p role="alert">{failed}</p>;
   let chartSpec: TopLevelSpec;
   try {
-    chartSpec = parseVegaLiteSpec(view.spec);
+    chartSpec = parseVegaLiteSpec(
+      withBindingTransforms(view.spec, bindingTransforms(response.resolved_bindings)),
+    );
   } catch (cause) {
     return <p role="alert">{reason(cause, 'Vega-Lite specification failed runtime validation')}</p>;
   }
