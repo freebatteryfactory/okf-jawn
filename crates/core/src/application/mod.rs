@@ -8,6 +8,7 @@
 //! sandbox capabilities), `sources` (citations and object reads), `history` (Timeline, Changes,
 //! Who, Snapshot and Rewind), `navigation` (search, links and the graph), `proposals`
 //! (proposals, their acceptance and discussion), `reviews` (confirmations and reviews),
+//! `conventions` (the naming rules: reading and saving them, a rename preview and its apply),
 //! `status` (health, readiness and the session), `purges` (recording, resuming and reading
 //! a workspace purge), `workspaces` (the catalog, archive, export, backup and restore),
 //! `events` (receipts and the two event logs), `connectors` (local connector credentials),
@@ -30,6 +31,7 @@ use std::time::Duration;
 
 use okf_jawn_contract::access::Principal;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::extraction::ConversionSettings;
 use okf_jawn_contract::identity::{TenantId, Timestamp, WorkspaceId};
 use okf_jawn_contract::import::DEFAULT_MAX_UPLOAD_BYTES;
 use time::OffsetDateTime;
@@ -223,6 +225,18 @@ macro_rules! route {
     (list_reviews) => {
         reviews::list_reviews
     };
+    (get_rules) => {
+        conventions::get_rules
+    };
+    (set_rules) => {
+        conventions::set_rules
+    };
+    (preview_names) => {
+        conventions::preview_names
+    };
+    (apply_names) => {
+        conventions::apply_names
+    };
     (create_upload) => {
         uploads::create_upload
     };
@@ -339,6 +353,9 @@ pub struct ApplicationConfig {
     /// `import::DEFAULT_MAX_UPLOAD_BYTES`, and a deployment may set another. `get_session`
     /// reports it (`Limits::upload_bytes`).
     pub max_upload_bytes: u64,
+    /// Conversion settings resolved into an import job when the request supplies none.
+    /// `ApplicationConfig::new` uses the contract's `ConversionSettings::default`.
+    pub conversion_defaults: ConversionSettings,
 }
 
 /// Where the service reads the current instant: the system clock unless a test fixes it
@@ -361,13 +378,14 @@ type IndexBuilds = Mutex<BTreeMap<(TenantId, WorkspaceId), Arc<tokio::sync::Mute
 
 impl ApplicationConfig {
     /// The settings of a deployment with the default upload limit
-    /// (`import::DEFAULT_MAX_UPLOAD_BYTES`).
+    /// (`import::DEFAULT_MAX_UPLOAD_BYTES`) and contract conversion settings.
     #[must_use]
-    pub const fn new(sandbox_origin: String, sandbox_ttl: Duration) -> Self {
+    pub fn new(sandbox_origin: String, sandbox_ttl: Duration) -> Self {
         Self {
             sandbox_origin,
             sandbox_ttl,
             max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
+            conversion_defaults: ConversionSettings::default(),
         }
     }
 
@@ -547,6 +565,7 @@ fn is_origin(text: &str) -> bool {
 }
 
 mod connectors;
+mod conventions;
 mod drafts;
 mod events;
 mod history;

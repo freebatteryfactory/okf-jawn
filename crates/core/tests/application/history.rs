@@ -2572,7 +2572,7 @@ async fn restoring_a_deleted_item_at_an_older_path_moves_it_there_from_its_last_
             edits.as_slice(),
             [
                 TreeEdit::RestoreItem { item_id: put_back, from: held },
-                TreeEdit::MoveItem { item_id: moved, destination },
+                TreeEdit::MoveItem { item_id: moved, destination, keep_alias: false },
                 TreeEdit::RestoreItem { item_id: restored, from },
             ] if [put_back, moved, restored].iter().all(|id| **id == item(NOTE))
                 && *held == last
@@ -2710,12 +2710,28 @@ async fn a_rewind_moves_no_links_when_they_have_nothing_to_follow() -> TestResul
 }
 
 #[tokio::test]
-async fn a_rewind_between_two_spellings_of_one_path_is_one_restore() -> TestResult {
-    // `report.md` became `Report.md` (by way of another name, since the store refuses a move
-    // that changes only letter case) and was deleted. To the store the two are one path: it
-    // would refuse the move back, so the Rewind is the one restore, and it lands.
+async fn a_rewind_between_two_spellings_of_one_path_moves_its_links_back_too() -> TestResult {
+    // `report.md` became `Report.md` and was deleted, so its links name `Report.md`. The store
+    // moves between two spellings of one path as one move through a parked name (PR #34), so
+    // the Rewind takes the three edits, and the move rewrites the links to the restored
+    // spelling.
     let world = deleted_since("notes/report.md", "notes/Report.md")?;
-    assert!(one_restore(&rewound(&world).await?)?);
+    let edits = rewound(&world).await?;
+    let (last, target) = (revision('d')?, revision('a')?);
+    assert!(
+        matches!(
+            edits.as_slice(),
+            [
+                TreeEdit::RestoreItem { item_id: put_back, from: held },
+                TreeEdit::MoveItem { item_id: moved, destination, keep_alias: false },
+                TreeEdit::RestoreItem { item_id: restored, from },
+            ] if [put_back, moved, restored].iter().all(|id| **id == item(NOTE))
+                && *held == last
+                && destination.as_str() == "notes/report.md"
+                && *from == target
+        ),
+        "{edits:?}"
+    );
     let shown = world
         .versions
         .show(&scope()?, &revision('c')?, item(NOTE))

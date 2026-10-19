@@ -416,6 +416,7 @@ async fn record_store_calls(
     let job_scope = JobScope::Workspace(scope.clone());
     let job = records.create_job(&job_scope, new_job).await?;
     records.get_job(&job_scope, job.id).await?;
+    records.job_mutation(&job_scope, job.id).await?;
     let page = Page {
         cursor: None,
         limit: 50,
@@ -971,7 +972,8 @@ fn a_proposed_change_becomes_the_matching_tree_edit() -> TestResult {
     );
     assert!(matches!(
         moved,
-        TreeEdit::MoveItem { item_id, destination } if item_id == existing && destination == path
+        TreeEdit::MoveItem { item_id, destination, keep_alias: false }
+            if item_id == existing && destination == path
     ));
     let edited = TreeEdit::from_change(
         Change::Edit {

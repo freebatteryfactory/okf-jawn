@@ -3463,11 +3463,14 @@ name = "okf-jawn-core"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "convert_case",
+ "glob",
  "jsonschema",
  "okf-core",
  "okf-jawn-contract",
  "okf-validator",
  "pulldown-cmark",
+ "regex",
  "schemars",
  "serde",
  "serde_json",
@@ -3563,6 +3566,7 @@ dependencies = [
  "okf-core",
  "okf-jawn-contract",
  "okf-jawn-core",
+ "okf-jawn-ingest",
  "rusqlite",
  "rusqlite_migration",
  "serde",

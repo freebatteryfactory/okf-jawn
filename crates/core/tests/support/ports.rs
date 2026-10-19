@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use okf_jawn_contract::{
-    conventions::NamingRules,
     error::{ApiError, ErrorCode},
     events::Receipt,
     history::{BlameResponse, DiffResponse, LogResponse},
@@ -31,7 +30,7 @@ use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
     BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges, Committed,
     DiffQuery, FolderListing, LocalSource, LogQuery, ObjectInfo, ObjectRead, Page, Promotion,
-    StorageScope, VersionStore,
+    RulesFile, StorageScope, VersionStore, WorkspaceTree,
 };
 use tokio::io::AsyncReadExt;
 
@@ -124,11 +123,18 @@ impl VersionStore for FakeVersions {
     ) -> PortFuture<'a, Vec<u8>> {
         unused()
     }
+    fn tree<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _revision: &'a Revision,
+    ) -> PortFuture<'a, WorkspaceTree> {
+        unused()
+    }
     fn rules<'a>(
         &'a self,
         _scope: &'a StorageScope,
         _revision: &'a Revision,
-    ) -> PortFuture<'a, Option<NamingRules>> {
+    ) -> PortFuture<'a, Option<RulesFile>> {
         unused()
     }
     fn types<'a>(
@@ -341,6 +347,9 @@ impl RecordStore for FakeRecords {
         unused()
     }
     fn get_job<'a>(&'a self, _scope: &'a JobScope, _job: JobId) -> PortFuture<'a, Job> {
+        unused()
+    }
+    fn job_mutation<'a>(&'a self, _scope: &'a JobScope, _job: JobId) -> PortFuture<'a, MutationId> {
         unused()
     }
     fn list_jobs<'a>(

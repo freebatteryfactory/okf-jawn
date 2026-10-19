@@ -12,6 +12,8 @@ pub mod confirmations;
 pub mod conformance;
 /// Per-request authorization context and grants.
 pub mod context;
+/// The naming rules engine: which rule names an item, the name it builds, a selection's plan.
+pub mod conventions;
 /// Connector credentials, sessions, and installation identity.
 pub mod credentials;
 /// JSON-boundary dispatch into typed application methods.
