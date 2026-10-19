@@ -3566,6 +3566,7 @@ dependencies = [
  "okf-core",
  "okf-jawn-contract",
  "okf-jawn-core",
+ "okf-jawn-ingest",
  "rusqlite",
  "rusqlite_migration",
  "serde",
