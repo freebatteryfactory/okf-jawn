@@ -111,6 +111,15 @@ struct Clients {
     hosted: Option<(HostedConfig, Arc<workos::Client>)>,
 }
 
+/// The application and shared ports constructed before its transport bindings.
+struct ApplicationWiring {
+    application: Arc<ApplicationService>,
+    bound: BoundApplication,
+    runtime: JobRuntime,
+    security: Arc<SecurityEvents>,
+    credentials: Arc<dyn CredentialStore>,
+}
+
 /// Every accepted socket can be closed at the end of the request grace period.
 struct StoppingListener {
     listener: TcpListener,
@@ -124,10 +133,10 @@ struct StoppingIo {
 }
 
 /// How long a local browser session lasts (owner, 2026-10-18).
-pub const SESSION_LIFETIME_LOCAL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+pub const SESSION_LIFETIME_LOCAL: Duration = Duration::from_hours(168);
 
 /// How long a hosted browser session lasts (owner, 2026-10-18).
-pub const SESSION_LIFETIME_HOSTED: Duration = Duration::from_secs(12 * 60 * 60);
+pub const SESSION_LIFETIME_HOSTED: Duration = Duration::from_hours(12);
 
 /// How long a minted sandbox capability resolves.
 pub const SANDBOX_TTL: Duration = Duration::from_secs(300);
@@ -147,6 +156,66 @@ pub const SWEEP_INTERVAL: Duration = Duration::from_secs(100);
 
 /// How long requests in flight are given at shutdown.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+impl Listener for StoppingListener {
+    type Io = StoppingIo;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        let (stream, address) = Listener::accept(&mut self.listener).await;
+        (
+            StoppingIo {
+                stream,
+                stop: Box::pin(self.stop.clone().cancelled_owned()),
+            },
+            address,
+        )
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.listener.local_addr()
+    }
+}
+
+impl AsyncRead for StoppingIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.stop.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()));
+        }
+        Pin::new(&mut self.stream).poll_read(cx, buffer)
+    }
+}
+
+impl AsyncWrite for StoppingIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if self.stop.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()));
+        }
+        Pin::new(&mut self.stream).poll_write(cx, buffer)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.stop.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()));
+        }
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.stop.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()));
+        }
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
 
 /// Run the service with the settings `lookup` reads and this machine's `places`, until `stop`.
 /// Each stdout line goes through `print` (`okf-jawn-server: <key> <value>`).
@@ -269,154 +338,43 @@ fn compose_with_clients(
     clients: Clients,
 ) -> Result<Composition, ApiError> {
     let Clients { transport, hosted } = clients;
-    let security = Arc::new(SecurityEvents::new(
-        Arc::new(storage.events()),
-        Arc::new(SystemClock),
-    ));
-    let events: Arc<dyn EventLog> = security.clone();
-    let records: Arc<dyn RecordStore> = Arc::new(storage.records());
-    let access: Arc<dyn AccessControl> = match &hosted {
-        Some((_, client)) => select_access(
-            AuthKind::Hosted,
-            Arc::new(WorkosAccess::new(
-                client.clone(),
-                Arc::new(storage.catalog()),
-                ACCESS_TIME_LIMIT,
-            )),
-            Arc::new(SystemClock),
-        ),
-        None => Arc::new(storage.access()),
-    };
-    let mutations: Arc<dyn MutationStore> = Arc::new(storage.mutations());
-    let converter: Arc<dyn Converter> = Arc::new(DoclingConverter::new(ConverterConfig {
-        child: settings.converter.clone(),
-        limits: ConverterLimits {
-            window_pages: DEFAULT_WINDOW_PAGES,
-            memory_limit_bytes: settings.converter_memory_limit_bytes,
-        },
-    }));
-    let handler: Arc<dyn JobHandler> = Arc::new(IngestHandler::new(HandlerPorts {
-        records: records.clone(),
-        versions: Arc::new(storage.versions()),
-        search: Arc::new(storage.search()),
-        events: events.clone(),
-        backups: Arc::new(storage.backups()),
-        purger: Arc::new(storage.purger()),
-        uploads: Arc::new(storage.uploads()),
-        blobs: Arc::new(storage.blobs()),
-        converter: converter.clone(),
-        check: Arc::new(OkfConformance),
-        limits: HandlerLimits {
-            heartbeat: HEARTBEAT,
-            window_timeout: WINDOW_TIMEOUT,
-            drain: DRAIN_BOUND,
-        },
-    }));
-    let (runtime, queue) = JobRuntime::start(
-        &records,
-        &events,
-        &handler,
-        RuntimeConfig {
-            workers: WORKERS,
-            sweep_interval: SWEEP_INTERVAL,
-        },
-    );
-    let credentials: Arc<dyn CredentialStore> = Arc::new(storage.credentials());
-    let application = Arc::new(ApplicationService::new(
-        Ports {
-            access: access.clone(),
-            mutations: mutations.clone(),
-            catalog: Arc::new(storage.catalog()),
-            blobs: Arc::new(storage.blobs()),
-            versions: Arc::new(storage.versions()),
-            records,
-            queue: Arc::new(queue),
-            search: Arc::new(storage.search()),
-            converter,
-            proposals: Arc::new(storage.proposals()),
-            uploads: Arc::new(storage.uploads()),
-            events: events.clone(),
-            credentials: credentials.clone(),
-            drafts: Arc::new(storage.drafts()),
-            confirmations: Arc::new(storage.confirmations()),
-            sandbox: Arc::new(storage.sandbox()),
-            readiness: Arc::new(storage.readiness()),
-            backups: Arc::new(storage.backups()),
-        },
-        ApplicationConfig::new(resolved.sandbox_origin.clone(), SANDBOX_TTL),
-    )?);
-    let bound = BoundApplication {
-        application: application.clone(),
-        access: access.clone(),
-        mutations: mutations.clone(),
-        events: events.clone(),
-    };
-    let bearer = match &hosted {
-        Some((config, _)) => BearerAuth::Hosted {
-            connect: Arc::new(ConnectTokens::new(
-                Arc::new(IssuerKeys::new(transport, &config.issuer)),
-                config,
-                Arc::new(SystemClock),
-            )?),
-            resource_metadata: format!("{}{RESOURCE_METADATA_PATH}", resolved.public_origin),
-        },
-        None => BearerAuth::Local,
-    };
-    let identity = Identity::new(
-        bearer,
-        IdentityPorts {
-            credentials: credentials.clone(),
-            events: events.clone(),
-            cookies: Arc::new(CrateCookies),
-            refusals: security.clone(),
-        },
-        vec![resolved.public_origin.clone()],
-    );
+    let ApplicationWiring {
+        application,
+        bound,
+        runtime,
+        security,
+        credentials,
+    } = application_wiring(settings, resolved, storage, hosted.as_ref())?;
+    let identity = application_identity(
+        resolved,
+        hosted.as_ref(),
+        transport,
+        &bound,
+        &credentials,
+        &security,
+    )?;
     let tokens = Arc::new(LaunchTokens::new(
         LAUNCH_TOKEN_LIFETIME,
         Arc::new(SystemClock),
     ));
-    let (entry, lifetime) = match &hosted {
-        Some((config, client)) => (
-            SessionEntry::Hosted {
-                login: Arc::new(WorkosLogin::new(client.clone(), config)),
-            },
-            SESSION_LIFETIME_HOSTED,
-        ),
-        None => (
-            SessionEntry::Local {
-                tokens: tokens.clone(),
-            },
-            SESSION_LIFETIME_LOCAL,
-        ),
-    };
-    let sessions = crate::sessions::routes(Sessions::new(SessionParts {
+    let sessions = session_routes(
+        settings,
+        hosted.as_ref(),
+        &identity,
+        &bound,
         credentials,
-        events: events.clone(),
-        refusals: security.clone(),
-        secrets: Arc::new(OsSecrets),
-        policy: identity.cookie_policy(lifetime),
-        entry,
-    }));
-    let sessions = match &hosted {
-        Some(_) => guard(
-            Arc::new(SignInLimit::new(
-                settings.trusted_proxies.clone(),
-                Arc::new(SystemClock),
-            )),
-            sessions,
-        ),
-        None => sessions,
-    };
+        &security,
+        &tokens,
+    );
     let streams_stop = CancellationToken::new();
     let streams = EventStreams::new(bound.clone(), identity.clone(), POLL_INTERVAL)?
         .with_stop(streams_stop.clone());
     let mcp = streamable_http_service(
         McpPorts {
             application: application.clone(),
-            access,
-            mutations,
-            events,
+            access: bound.access.clone(),
+            mutations: bound.mutations.clone(),
+            events: bound.events.clone(),
         },
         McpConfig {
             app_bundle: settings.mcp_app.clone(),
@@ -461,6 +419,191 @@ fn compose_with_clients(
         launch,
         streams_stop,
     })
+}
+
+/// Construct the application once, after starting its real ingest runtime.
+fn application_wiring(
+    settings: &Settings,
+    resolved: &Resolved,
+    storage: &Storage,
+    hosted: Option<&(HostedConfig, Arc<workos::Client>)>,
+) -> Result<ApplicationWiring, ApiError> {
+    let security = Arc::new(SecurityEvents::new(
+        Arc::new(storage.events()),
+        Arc::new(SystemClock),
+    ));
+    let events: Arc<dyn EventLog> = security.clone();
+    let records: Arc<dyn RecordStore> = Arc::new(storage.records());
+    let access: Arc<dyn AccessControl> = match hosted {
+        Some((_, client)) => select_access(
+            AuthKind::Hosted,
+            Arc::new(WorkosAccess::new(
+                client.clone(),
+                Arc::new(storage.catalog()),
+                ACCESS_TIME_LIMIT,
+            )),
+            Arc::new(SystemClock),
+        ),
+        None => Arc::new(storage.access()),
+    };
+    let mutations: Arc<dyn MutationStore> = Arc::new(storage.mutations());
+    let converter: Arc<dyn Converter> = Arc::new(DoclingConverter::new(ConverterConfig {
+        child: settings.converter.clone(),
+        limits: ConverterLimits {
+            window_pages: DEFAULT_WINDOW_PAGES,
+            memory_limit_bytes: settings.converter_memory_limit_bytes,
+        },
+    }));
+    let handler = ingest_handler(storage, &records, &events, &converter);
+    let (runtime, queue) = JobRuntime::start(
+        &records,
+        &events,
+        &handler,
+        RuntimeConfig {
+            workers: WORKERS,
+            sweep_interval: SWEEP_INTERVAL,
+        },
+    );
+    let credentials: Arc<dyn CredentialStore> = Arc::new(storage.credentials());
+    let application = Arc::new(ApplicationService::new(
+        Ports {
+            access: access.clone(),
+            mutations: mutations.clone(),
+            catalog: Arc::new(storage.catalog()),
+            blobs: Arc::new(storage.blobs()),
+            versions: Arc::new(storage.versions()),
+            records,
+            queue: Arc::new(queue),
+            search: Arc::new(storage.search()),
+            converter,
+            proposals: Arc::new(storage.proposals()),
+            uploads: Arc::new(storage.uploads()),
+            events: events.clone(),
+            credentials: credentials.clone(),
+            drafts: Arc::new(storage.drafts()),
+            confirmations: Arc::new(storage.confirmations()),
+            sandbox: Arc::new(storage.sandbox()),
+            readiness: Arc::new(storage.readiness()),
+            backups: Arc::new(storage.backups()),
+        },
+        ApplicationConfig::new(resolved.sandbox_origin.clone(), SANDBOX_TTL),
+    )?);
+    let bound = BoundApplication {
+        application: application.clone(),
+        access: access.clone(),
+        mutations: mutations.clone(),
+        events: events.clone(),
+    };
+    Ok(ApplicationWiring {
+        application,
+        bound,
+        runtime,
+        security,
+        credentials,
+    })
+}
+
+/// The ingest handler shares the application's records, events and converter.
+fn ingest_handler(
+    storage: &Storage,
+    records: &Arc<dyn RecordStore>,
+    events: &Arc<dyn EventLog>,
+    converter: &Arc<dyn Converter>,
+) -> Arc<dyn JobHandler> {
+    Arc::new(IngestHandler::new(HandlerPorts {
+        records: records.clone(),
+        versions: Arc::new(storage.versions()),
+        search: Arc::new(storage.search()),
+        events: events.clone(),
+        backups: Arc::new(storage.backups()),
+        purger: Arc::new(storage.purger()),
+        uploads: Arc::new(storage.uploads()),
+        blobs: Arc::new(storage.blobs()),
+        converter: converter.clone(),
+        check: Arc::new(OkfConformance),
+        limits: HandlerLimits {
+            heartbeat: HEARTBEAT,
+            window_timeout: WINDOW_TIMEOUT,
+            drain: DRAIN_BOUND,
+        },
+    }))
+}
+
+/// The identity boundary uses the preflighted transport and the application's shared ports.
+fn application_identity(
+    resolved: &Resolved,
+    hosted: Option<&(HostedConfig, Arc<workos::Client>)>,
+    transport: SharedTransport,
+    bound: &BoundApplication,
+    credentials: &Arc<dyn CredentialStore>,
+    security: &Arc<SecurityEvents>,
+) -> Result<Identity, ApiError> {
+    let bearer = match hosted {
+        Some((config, _)) => BearerAuth::Hosted {
+            connect: Arc::new(ConnectTokens::new(
+                Arc::new(IssuerKeys::new(transport, &config.issuer)),
+                config,
+                Arc::new(SystemClock),
+            )?),
+            resource_metadata: format!("{}{RESOURCE_METADATA_PATH}", resolved.public_origin),
+        },
+        None => BearerAuth::Local,
+    };
+    Ok(Identity::new(
+        bearer,
+        IdentityPorts {
+            credentials: credentials.clone(),
+            events: bound.events.clone(),
+            cookies: Arc::new(CrateCookies),
+            refusals: security.clone(),
+        },
+        vec![resolved.public_origin.clone()],
+    ))
+}
+
+/// Bind the selected session entry to the same identity, stores and security-event allowance.
+fn session_routes(
+    settings: &Settings,
+    hosted: Option<&(HostedConfig, Arc<workos::Client>)>,
+    identity: &Identity,
+    bound: &BoundApplication,
+    credentials: Arc<dyn CredentialStore>,
+    security: &Arc<SecurityEvents>,
+    tokens: &Arc<LaunchTokens>,
+) -> Router {
+    let events = &bound.events;
+    let (entry, lifetime) = match hosted {
+        Some((config, client)) => (
+            SessionEntry::Hosted {
+                login: Arc::new(WorkosLogin::new(client.clone(), config)),
+            },
+            SESSION_LIFETIME_HOSTED,
+        ),
+        None => (
+            SessionEntry::Local {
+                tokens: tokens.clone(),
+            },
+            SESSION_LIFETIME_LOCAL,
+        ),
+    };
+    let sessions = crate::sessions::routes(Sessions::new(SessionParts {
+        credentials,
+        events: events.clone(),
+        refusals: security.clone(),
+        secrets: Arc::new(OsSecrets),
+        policy: identity.cookie_policy(lifetime),
+        entry,
+    }));
+    match hosted {
+        Some(_) => guard(
+            Arc::new(SignInLimit::new(
+                settings.trusted_proxies.clone(),
+                Arc::new(SystemClock),
+            )),
+            sessions,
+        ),
+        None => sessions,
+    }
 }
 
 /// Serve both services until `stop` (or until one fails); then end the event streams, give the
@@ -582,66 +725,6 @@ fn listener_result(ended: Result<io::Result<()>, JoinError>) -> Result<(), ApiEr
             ErrorCode::Internal,
             "a listener's task stopped",
         )),
-    }
-}
-
-impl Listener for StoppingListener {
-    type Io = StoppingIo;
-    type Addr = SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        let (stream, address) = Listener::accept(&mut self.listener).await;
-        (
-            StoppingIo {
-                stream,
-                stop: Box::pin(self.stop.clone().cancelled_owned()),
-            },
-            address,
-        )
-    }
-
-    fn local_addr(&self) -> io::Result<Self::Addr> {
-        self.listener.local_addr()
-    }
-}
-
-impl AsyncRead for StoppingIo {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buffer: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        if self.stop.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()));
-        }
-        Pin::new(&mut self.stream).poll_read(cx, buffer)
-    }
-}
-
-impl AsyncWrite for StoppingIo {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buffer: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        if self.stop.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()));
-        }
-        Pin::new(&mut self.stream).poll_write(cx, buffer)
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if self.stop.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()));
-        }
-        Pin::new(&mut self.stream).poll_flush(cx)
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if self.stop.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()));
-        }
-        Pin::new(&mut self.stream).poll_shutdown(cx)
     }
 }
 

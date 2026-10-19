@@ -73,10 +73,10 @@ impl Scripted {
 
     /// The URLs of requests that found no reply left.
     pub fn unscripted(&self) -> Vec<String> {
-        self.unscripted
-            .lock()
-            .map(|unscripted| unscripted.clone())
-            .unwrap_or_else(|_| vec!["the unscripted list is poisoned".to_owned()])
+        self.unscripted.lock().map_or_else(
+            |_| vec!["the unscripted list is poisoned".to_owned()],
+            |unscripted| unscripted.clone(),
+        )
     }
 
     /// How many scripted replies were not used.
@@ -170,7 +170,7 @@ fn split(url: &str) -> (String, BTreeMap<String, String>) {
 }
 
 /// A WorkOS list response: `data` and an `after` cursor when more pages follow.
-pub fn list(data: Vec<Value>, after: Option<&str>) -> Value {
+pub fn list(data: &[Value], after: Option<&str>) -> Value {
     serde_json::json!({
         "object": "list",
         "data": data,

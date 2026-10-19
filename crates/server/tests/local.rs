@@ -132,10 +132,10 @@ fn a_token_given_back_works_once_more_and_only_once() -> TestResult {
     let tokens = tokens();
     let secrets = Sequence(Mutex::new(vec!["the-token"]));
     let token = tokens.issue(&secrets)?;
-    let taken = some(tokens.redeem(&token)?, "the taken token")?;
+    let claim = some(tokens.redeem(&token)?, "the taken token")?;
     // While the exchange that took it runs, a second exchange is refused.
     assert!(tokens.redeem(&token)?.is_none());
-    tokens.give_back(taken)?;
+    tokens.give_back(claim)?;
     assert!(tokens.redeem(&token)?.is_some());
     assert!(tokens.redeem(&token)?.is_none());
     Ok(())
@@ -149,9 +149,9 @@ fn a_token_is_refused_from_the_instant_its_lifetime_ends() -> TestResult {
     let secrets = Sequence(Mutex::new(vec!["the-token"]));
     let token = tokens.issue(&secrets)?;
     clock.advance(Duration::from_millis(599_999))?;
-    let taken = some(tokens.redeem(&token)?, "the token one millisecond short")?;
+    let claim = some(tokens.redeem(&token)?, "the token one millisecond short")?;
     // Given back, it keeps the instant it was issued at: no extension.
-    tokens.give_back(taken)?;
+    tokens.give_back(claim)?;
     clock.advance(Duration::from_millis(1))?;
     assert!(tokens.redeem(&token)?.is_none());
     Ok(())
@@ -163,9 +163,9 @@ fn a_token_given_back_after_its_lifetime_is_not_kept() -> TestResult {
     let tokens = LaunchTokens::new(Duration::from_secs(600), clock.clone());
     let secrets = Sequence(Mutex::new(vec!["the-token"]));
     let token = tokens.issue(&secrets)?;
-    let taken = some(tokens.redeem(&token)?, "the taken token")?;
+    let claim = some(tokens.redeem(&token)?, "the taken token")?;
     clock.advance(Duration::from_secs(600))?;
-    tokens.give_back(taken)?;
+    tokens.give_back(claim)?;
     assert_eq!(tokens.outstanding()?, 0);
     assert!(tokens.redeem(&token)?.is_none());
     Ok(())

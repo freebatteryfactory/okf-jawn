@@ -80,7 +80,10 @@ fn published(file: &Path) -> std::io::Result<String> {
 
 /// Wait until the file holds another link than `old`, at most ten seconds.
 async fn next_after(file: &Path, old: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = some(
+        tokio::time::Instant::now().checked_add(Duration::from_secs(10)),
+        "the launch deadline",
+    )?;
     loop {
         if let Ok(link) = published(file)
             && link != old

@@ -20,7 +20,7 @@ use okf_jawn_server::grants::Clock;
 use okf_jawn_server::identity::SignInRefusals as _;
 use tokio_util::sync::CancellationToken;
 
-use check::{TestResult, err_of};
+use check::{TestResult, err_of, some};
 
 /// A clock that moves only when a test advances it.
 struct TestClock {
@@ -118,14 +118,14 @@ impl EventLog for Recorded {
     }
 }
 
-fn principal(subject: &str) -> Result<Principal, Box<dyn std::error::Error>> {
-    Ok(Principal {
+fn principal(subject: &str) -> Principal {
+    Principal {
         subject: subject.to_owned(),
         tenant_id: TenantId::local(),
         route: AccessRoute::McpDelegation,
         client_id: Some("connector-1".to_owned()),
         delegation: None,
-    })
+    }
 }
 
 fn tenant_scope() -> EventScope {
@@ -137,7 +137,7 @@ async fn deny(
     who: &Principal,
     times: usize,
 ) -> Result<usize, Box<dyn std::error::Error>> {
-    let mut counted = 0;
+    let mut counted: usize = 0;
     for _ in 0..times {
         let appended = events
             .append(
@@ -148,7 +148,7 @@ async fn deny(
             .await;
         if let Err(error) = appended {
             assert_eq!(error.code, ErrorCode::Unavailable);
-            counted += 1;
+            counted = some(counted.checked_add(1), "the refusal count")?;
         }
     }
     Ok(counted)
@@ -166,7 +166,7 @@ async fn ten_refusals_in_a_minute_are_ten_events_and_no_aggregate() -> TestResul
     assert_eq!(WINDOW, Duration::from_secs(60));
     let clock = TestClock::new();
     let (inner, events) = new(&clock);
-    assert_eq!(deny(&events, &principal("agent")?, 10).await?, 0);
+    assert_eq!(deny(&events, &principal("agent"), 10).await?, 0);
     clock.advance(WINDOW)?;
     events.flush_due().await;
     let denied = inner.of(&EventKind::PermissionDenied)?;
@@ -179,7 +179,7 @@ async fn ten_refusals_in_a_minute_are_ten_events_and_no_aggregate() -> TestResul
 async fn the_rest_of_the_minute_is_one_aggregate_with_its_count() -> TestResult {
     let clock = TestClock::new();
     let (inner, events) = new(&clock);
-    let agent = principal("agent")?;
+    let agent = principal("agent");
     assert_eq!(deny(&events, &agent, 25).await?, 15);
     assert_eq!(inner.of(&EventKind::PermissionDenied)?.len(), 10);
     // Not before the minute ends.
@@ -209,7 +209,7 @@ async fn the_rest_of_the_minute_is_one_aggregate_with_its_count() -> TestResult 
 async fn a_refusal_at_the_end_of_the_minute_opens_the_next() -> TestResult {
     let clock = TestClock::new();
     let (inner, events) = new(&clock);
-    let agent = principal("agent")?;
+    let agent = principal("agent");
     assert_eq!(deny(&events, &agent, 11).await?, 1);
     clock.advance(Duration::from_millis(59_999))?;
     // Still the first minute: counted.
@@ -232,9 +232,9 @@ async fn a_refusal_at_the_end_of_the_minute_opens_the_next() -> TestResult {
 async fn two_actors_have_their_own_allowance() -> TestResult {
     let clock = TestClock::new();
     let (inner, events) = new(&clock);
-    assert_eq!(deny(&events, &principal("first")?, 10).await?, 0);
-    assert_eq!(deny(&events, &principal("second")?, 10).await?, 0);
-    let mut other_client = principal("first")?;
+    assert_eq!(deny(&events, &principal("first"), 10).await?, 0);
+    assert_eq!(deny(&events, &principal("second"), 10).await?, 0);
+    let mut other_client = principal("first");
     other_client.client_id = Some("connector-2".to_owned());
     assert_eq!(deny(&events, &other_client, 10).await?, 0);
     assert_eq!(inner.of(&EventKind::PermissionDenied)?.len(), 30);
@@ -245,7 +245,7 @@ async fn two_actors_have_their_own_allowance() -> TestResult {
 async fn shutdown_writes_the_aggregates_of_open_minutes() -> TestResult {
     let clock = TestClock::new();
     let (inner, events) = new(&clock);
-    assert_eq!(deny(&events, &principal("agent")?, 13).await?, 3);
+    assert_eq!(deny(&events, &principal("agent"), 13).await?, 3);
     let events = Arc::new(events);
     let stop = CancellationToken::new();
     let running = tokio::spawn(events.clone().run(stop.clone()));
@@ -266,7 +266,7 @@ async fn every_other_event_passes_through_with_its_mutation() -> TestResult {
     let (inner, events) = new(&clock);
     let mutation: MutationId =
         serde_json::from_value(serde_json::json!("00000000-0000-4000-8000-000000000001"))?;
-    let agent = principal("agent")?;
+    let agent = principal("agent");
     for _ in 0..15 {
         events
             .append(&tenant_scope(), None, NewEvent::signed_in(&agent))
@@ -318,7 +318,7 @@ async fn refused_sign_ins_are_bounded_by_their_source() -> TestResult {
 async fn a_failed_aggregate_is_not_retried_and_stops_nothing() -> TestResult {
     let clock = TestClock::new();
     let (inner, events) = new(&clock);
-    assert_eq!(deny(&events, &principal("agent")?, 12).await?, 2);
+    assert_eq!(deny(&events, &principal("agent"), 12).await?, 2);
     inner.refusing.store(true, Ordering::SeqCst);
     clock.advance(WINDOW)?;
     events.flush_due().await;
@@ -338,11 +338,11 @@ async fn past_its_source_bound_new_sources_share_one_counted_aggregate() -> Test
     let clock = TestClock::new();
     let inner = Arc::new(Recorded::default());
     let events = SecurityEvents::with_bound(inner.clone(), clock.clone(), 2);
-    assert_eq!(deny(&events, &principal("first")?, 1).await?, 0);
-    assert_eq!(deny(&events, &principal("second")?, 1).await?, 0);
+    assert_eq!(deny(&events, &principal("first"), 1).await?, 0);
+    assert_eq!(deny(&events, &principal("second"), 1).await?, 0);
     // The third and fourth sources are past the bound: counted, never recorded one by one.
-    assert_eq!(deny(&events, &principal("third")?, 1).await?, 1);
-    assert_eq!(deny(&events, &principal("fourth")?, 2).await?, 2);
+    assert_eq!(deny(&events, &principal("third"), 1).await?, 1);
+    assert_eq!(deny(&events, &principal("fourth"), 2).await?, 2);
     clock.advance(WINDOW)?;
     events.flush_due().await;
     let denied = inner.of(&EventKind::PermissionDenied)?;
@@ -358,8 +358,8 @@ async fn past_its_source_bound_new_sources_share_one_counted_aggregate() -> Test
     );
     // After the minute the stale windows are gone: the third and fourth sources are tracked and
     // recorded, and the bound is full again.
-    assert_eq!(deny(&events, &principal("third")?, 1).await?, 0);
-    assert_eq!(deny(&events, &principal("fourth")?, 1).await?, 0);
+    assert_eq!(deny(&events, &principal("third"), 1).await?, 0);
+    assert_eq!(deny(&events, &principal("fourth"), 1).await?, 0);
     assert_eq!(inner.of(&EventKind::PermissionDenied)?.len(), 5);
     // A counted refusal answers `unavailable`, which every writer of these kinds ignores.
     let counted = err_of(
@@ -367,7 +367,7 @@ async fn past_its_source_bound_new_sources_share_one_counted_aggregate() -> Test
             .append(
                 &tenant_scope(),
                 None,
-                NewEvent::permission_denied(&principal("fifth")?, OperationName::CreateItem),
+                NewEvent::permission_denied(&principal("fifth"), OperationName::CreateItem),
             )
             .await,
     )?;

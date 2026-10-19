@@ -252,7 +252,10 @@ impl Installation {
             )
             .await
         });
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        let deadline = some(
+            tokio::time::Instant::now().checked_add(Duration::from_secs(120)),
+            "the startup deadline",
+        )?;
         loop {
             let lines = printed.lock().map_err(|_| "poisoned")?.clone();
             let value = |key: &str| {
@@ -325,7 +328,10 @@ impl Binary {
     }
 
     fn exit(&mut self) -> Result<ExitStatus, Box<dyn std::error::Error>> {
-        let until = Instant::now() + Duration::from_secs(10);
+        let until = some(
+            Instant::now().checked_add(Duration::from_secs(10)),
+            "the refusing binary's exit deadline",
+        )?;
         loop {
             if let Some(status) = self.child.try_wait()? {
                 return Ok(status);
@@ -339,7 +345,10 @@ impl Binary {
 
     fn stderr(&self) -> Result<String, Box<dyn std::error::Error>> {
         // The reader finishes at EOF after exit; wait for its captured diagnostic, not a fixed sleep.
-        let until = Instant::now() + Duration::from_secs(5);
+        let until = some(
+            Instant::now().checked_add(Duration::from_secs(5)),
+            "the exited binary's diagnostic deadline",
+        )?;
         loop {
             let errors = self.errors.lock().map_err(|_| "poisoned")?.clone();
             if !errors.is_empty() {
@@ -419,7 +428,10 @@ impl Browser {
             .await?;
         assert_eq!(accepted.status(), StatusCode::ACCEPTED);
         let mut job: Job = accepted.json().await?;
-        let until = tokio::time::Instant::now() + Duration::from_secs(30);
+        let until = some(
+            tokio::time::Instant::now().checked_add(Duration::from_secs(30)),
+            "the backup deadline",
+        )?;
         loop {
             match job.state {
                 JobState::Succeeded => {
@@ -692,10 +704,7 @@ async fn a_hosted_service_begins_its_sign_in_at_authkit_and_publishes_its_metada
     assert_eq!(location.host_str(), Some("api.workos.com"));
     assert_eq!(location.path(), "/user_management/authorize");
     let query: BTreeMap<_, _> = location.query_pairs().collect();
-    assert_eq!(
-        query.get("provider").map(|value| value.as_ref()),
-        Some("authkit")
-    );
+    assert_eq!(query.get("provider").map(AsRef::as_ref), Some("authkit"));
     let metadata = composed
         .app
         .clone()

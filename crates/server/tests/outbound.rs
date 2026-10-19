@@ -18,6 +18,8 @@ use tokio::net::TcpListener;
 
 use check::{TestResult, err_of};
 
+const KEY_SET: &str = r#"{"keys":[]}"#;
+
 /// A listener on 127.0.0.1 that counts the connections it accepts and answers none.
 async fn counting_listener() -> std::io::Result<(String, Arc<AtomicUsize>)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -44,8 +46,6 @@ async fn serve(router: Router) -> std::io::Result<String> {
     });
     Ok(format!("http://{address}"))
 }
-
-const KEY_SET: &str = r#"{"keys":[]}"#;
 
 #[tokio::test]
 async fn the_production_client_refuses_plain_http_before_connecting() -> TestResult {

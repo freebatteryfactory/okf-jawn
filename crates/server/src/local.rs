@@ -54,6 +54,9 @@ pub struct Taken {
 /// Outstanding token hashes paired with their original issue time.
 type Outstanding = Vec<([u8; 32], Instant)>;
 
+/// How long a launch token works in production: ten minutes.
+pub const LAUNCH_TOKEN_LIFETIME: Duration = Duration::from_secs(600);
+
 impl Taken {
     /// Consume the exchange's claim when returning its token; it cannot be returned twice.
     fn give_back(self, tokens: &LaunchTokens) -> Result<(), ApiError> {
@@ -64,9 +67,6 @@ impl Taken {
         Ok(())
     }
 }
-
-/// How long a launch token works in production: ten minutes.
-pub const LAUNCH_TOKEN_LIFETIME: Duration = Duration::from_secs(600);
 
 impl LaunchTokens {
     /// No token issued yet; each one issued works for `lifetime` by `clock`.

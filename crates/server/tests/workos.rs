@@ -15,6 +15,7 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{MutationId, TenantId, WorkspaceId};
 use okf_jawn_contract::workspace::Workspace;
 use okf_jawn_core::access::AccessControl;
+use okf_jawn_core::context::WorkspaceGrant;
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
     NewWorkspace, Provenance, StorageScope, WorkspaceArchive, WorkspaceCatalog, WorkspaceUpdate,
@@ -45,6 +46,7 @@ const MEMBERSHIP: &str = "om_1";
 const A: &str = "11111111-1111-4111-8111-111111111111";
 const B: &str = "22222222-2222-4222-8222-222222222222";
 const C: &str = "33333333-3333-4333-8333-333333333333";
+const BOUND: Duration = Duration::from_secs(30);
 
 const ALL: [Permission; 6] = [
     Permission::Read,
@@ -190,21 +192,14 @@ fn access(
     Ok(WorkosAccess::new(client, Arc::new(catalog), bound))
 }
 
-const BOUND: Duration = Duration::from_secs(30);
-
 /// The membership listing's answer: one member with `roles`.
 fn member(roles: &[&str]) -> Reply {
-    Reply::Json(
-        200,
-        list(vec![membership(MEMBERSHIP, USER, ORG, roles)], None),
-    )
+    Reply::Json(200, list(&[membership(MEMBERSHIP, USER, ORG, roles)], None))
 }
 
 fn permissions(slugs: &[&str], after: Option<&str>) -> Reply {
-    Reply::Json(
-        200,
-        list(slugs.iter().map(|slug| permission(slug)).collect(), after),
-    )
+    let data: Vec<_> = slugs.iter().map(|slug| permission(slug)).collect();
+    Reply::Json(200, list(&data, after))
 }
 
 fn permissions_path(workspace: &str) -> String {
@@ -315,17 +310,17 @@ async fn a_workspace_the_tenant_does_not_hold_is_no_grant_and_asks_workos_nothin
     let adapter = access(&script, &[(A, false)], BOUND)?;
     for asked in [Permission::Read, Permission::Admin] {
         let grant = adapter.authorize(&caller()?, id(B)?, asked).await?;
-        assert!(grant.permissions.is_empty());
+        assert_eq!(grant.permissions, [] as [Permission; 0]);
         assert_eq!(grant.scope.workspace_id, id(B)?);
     }
-    assert!(
+    assert_eq!(
         adapter
             .editors(&StorageScope {
                 tenant_id: TenantId::try_from(ORG.to_owned())?,
                 workspace_id: id(B)?,
             })
-            .await?
-            .is_empty()
+            .await?,
+        [] as [String; 0]
     );
     assert!(script.seen().is_empty());
     Ok(())
@@ -334,35 +329,35 @@ async fn a_workspace_the_tenant_does_not_hold_is_no_grant_and_asks_workos_nothin
 #[tokio::test]
 async fn a_caller_without_a_membership_holds_nothing() -> TestResult {
     let script = Scripted::new(vec![
-        Reply::Json(200, list(Vec::new(), None)),
-        Reply::Json(200, list(Vec::new(), None)),
-        Reply::Json(200, list(Vec::new(), None)),
+        Reply::Json(200, list(&[], None)),
+        Reply::Json(200, list(&[], None)),
+        Reply::Json(200, list(&[], None)),
         // No organization by that id: no membership either.
         error(404, "organization_not_found"),
     ]);
     let adapter = access(&script, &[(A, false)], BOUND)?;
     let principal = caller()?;
-    assert!(
+    assert_eq!(
         adapter
             .authorize(&principal, id(A)?, Permission::Read)
             .await?
-            .permissions
-            .is_empty()
+            .permissions,
+        [] as [Permission; 0]
     );
-    assert!(
+    assert_eq!(
         adapter
             .authorize_tenant(&principal, Permission::Admin)
             .await?
-            .permissions
-            .is_empty()
+            .permissions,
+        [] as [Permission; 0]
     );
-    assert!(adapter.grants(&principal).await?.is_empty());
-    assert!(
+    assert_eq!(adapter.grants(&principal).await?, [] as [WorkspaceGrant; 0]);
+    assert_eq!(
         adapter
             .authorize(&principal, id(A)?, Permission::Read)
             .await?
-            .permissions
-            .is_empty()
+            .permissions,
+        [] as [Permission; 0]
     );
     exhausted(&script)?;
     Ok(())
@@ -373,7 +368,7 @@ async fn two_memberships_of_one_user_in_one_organization_are_a_fault() -> TestRe
     let script = Scripted::new(vec![Reply::Json(
         200,
         list(
-            vec![
+            &[
                 membership(MEMBERSHIP, USER, ORG, &["member"]),
                 membership("om_2", USER, ORG, &["admin"]),
             ],
@@ -413,7 +408,7 @@ async fn an_organization_admin_holds_everything_without_asking_for_permissions()
     let tenant = adapter
         .authorize_tenant(&caller()?, Permission::Admin)
         .await?;
-    assert!(tenant.permissions.is_empty());
+    assert_eq!(tenant.permissions, [] as [Permission; 0]);
     Ok(())
 }
 
@@ -424,7 +419,7 @@ async fn a_workspace_workos_has_no_resource_for_is_no_grant() -> TestResult {
     let grant = adapter
         .authorize(&caller()?, id(A)?, Permission::Read)
         .await?;
-    assert!(grant.permissions.is_empty());
+    assert_eq!(grant.permissions, [] as [Permission; 0]);
     exhausted(&script)?;
     Ok(())
 }
@@ -532,7 +527,7 @@ async fn a_member_s_listing_is_its_assigned_held_workspaces_with_permissions() -
         Reply::Json(
             200,
             list(
-                vec![
+                &[
                     assignment(MEMBERSHIP, "workspace-editor", A),
                     assignment(MEMBERSHIP, "workspace-viewer", B),
                     assignment(MEMBERSHIP, "workspace-viewer", C),
@@ -589,7 +584,7 @@ async fn the_creator_s_resource_and_role_are_written_when_absent() -> TestResult
         member(&["admin"]),
         error(404, "resource_not_found"),
         Reply::Json(201, resource(A, ORG)),
-        Reply::Json(200, list(Vec::new(), None)),
+        Reply::Json(200, list(&[], None)),
         Reply::Json(201, assignment(MEMBERSHIP, "workspace-admin", A)),
     ]);
     let adapter = access(&script, &[(A, false)], BOUND)?;
@@ -645,7 +640,7 @@ async fn a_retried_creation_finds_both_and_writes_nothing() -> TestResult {
         Reply::Json(200, resource(A, ORG)),
         Reply::Json(
             200,
-            list(vec![assignment(MEMBERSHIP, "workspace-admin", A)], None),
+            list(&[assignment(MEMBERSHIP, "workspace-admin", A)], None),
         ),
     ]);
     let adapter = access(&script, &[(A, false)], BOUND)?;
@@ -681,7 +676,7 @@ async fn a_resource_of_another_organization_is_a_fault_and_nothing_is_written() 
 
 #[tokio::test]
 async fn a_creator_without_a_membership_is_refused() -> TestResult {
-    let script = Scripted::new(vec![Reply::Json(200, list(Vec::new(), None))]);
+    let script = Scripted::new(vec![Reply::Json(200, list(&[], None))]);
     let adapter = access(&script, &[(A, false)], BOUND)?;
     let error = err_of(adapter.grant_creator(&caller()?, id(A)?).await)?;
     assert_eq!(error.code, ErrorCode::Forbidden);
@@ -695,7 +690,7 @@ async fn editors_are_active_write_holders_and_every_organization_admin() -> Test
         Reply::Json(
             200,
             list(
-                vec![
+                &[
                     resource_member("om_u1", "user_u1", ORG, "active"),
                     resource_member("om_u2", "user_u2", ORG, "inactive"),
                 ],
@@ -705,7 +700,7 @@ async fn editors_are_active_write_holders_and_every_organization_admin() -> Test
         Reply::Json(
             200,
             list(
-                vec![
+                &[
                     membership("om_u2", "user_u2", ORG, &["admin"]),
                     membership("om_u3", "user_u3", ORG, &["member", "admin"]),
                     membership("om_u4", "user_u4", ORG, &["member"]),

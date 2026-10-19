@@ -23,6 +23,12 @@ struct UiDir(PathBuf);
 const LIST_ITEMS: &str = "/api/items/list-items";
 const PARTNER: &str = "https://partner.example.test";
 
+/// The policy every page carries, framing the test service's sandbox origin.
+const PAGE_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' \
+    'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; \
+    worker-src 'self'; frame-src http://127.0.0.1:8788; frame-ancestors 'none'; base-uri 'none'; \
+    form-action 'self'; object-src 'none'";
+
 impl UiDir {
     fn new(name: &str) -> std::io::Result<Self> {
         let directory = std::env::temp_dir().join(format!(
@@ -186,12 +192,6 @@ async fn the_ui_build_is_served_and_api_paths_stay_json() -> TestResult {
     assert!(!text(outside).await?.contains("[workspace]"));
     Ok(())
 }
-
-/// The policy every page carries, framing the test service's sandbox origin.
-const PAGE_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' \
-    'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; \
-    worker-src 'self'; frame-src http://127.0.0.1:8788; frame-ancestors 'none'; base-uri 'none'; \
-    form-action 'self'; object-src 'none'";
 
 #[tokio::test]
 async fn every_page_carries_the_security_headers() -> TestResult {

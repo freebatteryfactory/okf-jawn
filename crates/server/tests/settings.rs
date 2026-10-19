@@ -3,7 +3,7 @@
 #![cfg(feature = "runtime")]
 
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
@@ -96,7 +96,7 @@ fn nothing_set_is_a_loopback_installation_with_every_default() -> TestResult {
         DEFAULT_CONVERTER_MEMORY_LIMIT_BYTES
     );
     assert_eq!(DEFAULT_CONVERTER_MEMORY_LIMIT_BYTES, 4_294_967_296);
-    assert!(settings.trusted_proxies.is_empty());
+    assert_eq!(settings.trusted_proxies, [] as [IpAddr; 0]);
     let resolved = settings.resolve(settings.bind, settings.sandbox_bind)?;
     assert_eq!(resolved.public_origin, "http://127.0.0.1:7711");
     assert_eq!(resolved.hosts, vec!["127.0.0.1:7711".to_owned()]);
