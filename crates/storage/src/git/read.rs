@@ -9,7 +9,7 @@ use git2::{Oid, Repository, Sort, Tree};
 use okf_jawn_contract::conventions::NamingRules;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::{SuppliedText, TextOrigin};
-use okf_jawn_contract::identity::{Digest, ItemId, ProposalId, Revision, WorkspacePath};
+use okf_jawn_contract::identity::{Digest, ItemId, ProposalId, Revision, Timestamp, WorkspacePath};
 use okf_jawn_contract::item::{ItemDocument, ItemSummary, TypeDefinition};
 use okf_jawn_contract::source::SourceAppearance;
 use okf_jawn_core::portable::item_content_digest;
@@ -389,10 +389,12 @@ fn supplied(
         .get("markdown")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    let Some((approver, approved_at)) = last_change(repository, &supplied_at, &path)? else {
+    let proposal_id = supplied_proposal(&record)?;
+    let Some((approver, approved_at)) =
+        supplied_approval(repository, &supplied_at, &path, proposal_id)?
+    else {
         return Ok(None);
     };
-    let proposal_id = supplied_proposal(&record)?;
     Ok(Some(SuppliedText {
         proposal_id,
         supplied_by: supplier.subject,
@@ -463,6 +465,47 @@ fn supplied_blob(repository: &Repository, blob: Oid) -> Result<serde_json::Value
 fn supplied_proposal(record: &serde_json::Value) -> Result<ProposalId, ApiError> {
     serde_json::from_value(record.get("proposal_id").cloned().unwrap_or_default())
         .map_err(|error| internal(format!("supplied text has no proposal: {error}")))
+}
+
+/// The original acceptance is the earliest introduction of this immutable proposal on the
+/// resolved accepted line. Rewind can reintroduce the same blob, but its committer is not the
+/// approver. First parents exclude draft refs and merge side branches; promotion makes a new
+/// commit on that line, with the accepting human as committer and the candidate as no parent.
+fn supplied_approval(
+    repository: &Repository,
+    revision: &Revision,
+    path: &str,
+    proposal: ProposalId,
+) -> Result<Option<(String, Timestamp)>, ApiError> {
+    let mut next = Some(commit_of(repository, revision)?.id());
+    let mut approval = None;
+    while let Some(oid) = next {
+        let commit = repository.find_commit(oid).map_err(|error| git(&error))?;
+        next = commit.parent_ids().next();
+        let tree = commit.tree().map_err(|error| git(&error))?;
+        let Some(blob) = blob_at(&tree, path)? else {
+            continue;
+        };
+        let before = if let Some(parent) = next {
+            let parent = repository
+                .find_commit(parent)
+                .map_err(|error| git(&error))?;
+            let tree = parent.tree().map_err(|error| git(&error))?;
+            blob_at(&tree, path)?
+        } else {
+            None
+        };
+        if before == Some(blob) || supplied_proposal(&supplied_blob(repository, blob)?)? != proposal
+        {
+            continue;
+        }
+        let committer = commit.committer();
+        approval = Some((
+            committer.name().unwrap_or_default().to_owned(),
+            crate::seam::unix_instant(committer.when().seconds())?,
+        ));
+    }
+    Ok(approval)
 }
 
 fn adopted_proposal(
