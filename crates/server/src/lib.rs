@@ -181,4 +181,6 @@ pub mod schemas;
 #[cfg(feature = "runtime")]
 pub mod sessions;
 #[cfg(feature = "runtime")]
+pub mod settings;
+#[cfg(feature = "runtime")]
 pub mod transfers;
