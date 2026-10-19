@@ -90,13 +90,13 @@
 //!   retained record cannot give back the previous text of each window (request R-I5).
 //! - The type name of a new source card is `SOURCE_CARD_TYPE`; no SPEC sentence fixes it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use okf_jawn_contract::common::{PageRange, Warning};
-use okf_jawn_contract::conventions::{numbered_source_card_name, source_card_name};
+use okf_jawn_contract::conventions::{NamingRules, source_card_name};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::EventKind;
 use okf_jawn_contract::extraction::{
@@ -115,8 +115,8 @@ use okf_jawn_core::items::without_header;
 use okf_jawn_core::jobs::ClaimedJob;
 use okf_jawn_core::portable::ImportCheck;
 use okf_jawn_core::storage::{
-    CandidateCheck, CommitChanges, Committed, LocalSource, Page, SourceCard, StorageScope,
-    TreeEdit, derive_commit_mutation_id, derive_item_id,
+    CandidateCheck, CommitChanges, Committed, LocalSource, SourceCard, StorageScope, TreeEdit,
+    derive_commit_mutation_id, derive_item_id,
 };
 
 use crate::handler::{Attempt, Done, HandlerPorts, Renewed, announce_commit, job_event, renewing};
@@ -204,9 +204,6 @@ pub const CARD_NOT_WRITTEN: &str = "import_card_not_written";
 /// The completion warning of an import that applies the naming rules when none are saved at its
 /// base: the cards are named without them.
 pub const NAMING_RULES_ABSENT: &str = "naming_rules_absent";
-
-/// How many entries one folder listing asks for.
-const LIST_PAGE: u16 = 500;
 
 /// How many times one import commit reads the head again after it moved under the write,
 /// before the attempt gives up as retryable.
@@ -510,27 +507,23 @@ async fn pending_cards(
     Ok((cards, naming))
 }
 
-/// The card paths of `names` without naming rules: `free_path` of each, in order, against the
-/// destination folder at the base and the cards named before it.
+/// Name cards without saved rules using the same full-tree occupancy checks as ruled imports.
+/// An item cannot become a destination folder, even when rules are disabled or absent.
 async fn unruled_paths(
     ports: &HandlerPorts,
     scope: &StorageScope,
     request: &ImportRequest<'_>,
     names: &[&str],
 ) -> Result<Vec<WorkspacePath>, ApiError> {
-    let mut taken = taken_keys(ports, scope, request.base_revision, request.destination).await?;
-    names
-        .iter()
-        .enumerate()
-        .map(|(index, name)| {
-            free_path(
-                request.destination,
-                name,
-                &format!("/upload_ids/{index}"),
-                &mut taken,
-            )
-        })
-        .collect()
+    let rules = CompiledRules::compile(
+        &NamingRules {
+            schema_version: 1,
+            rules: Vec::new(),
+        },
+        "",
+    )?;
+    let (paths, _warnings) = paths_by_rules(ports, scope, request, names, &rules).await?;
+    Ok(paths)
 }
 
 /// The card paths of `names` under the naming rules saved at the import's base, and the
@@ -577,7 +570,18 @@ async fn ruled_paths(
         Some(field) => unusable(format!("{field}: {}", error.message)),
         None => unusable(error.message),
     })?;
-    let tree = ports.versions.tree(scope, base).await?;
+    paths_by_rules(ports, scope, request, names, &rules).await
+}
+
+/// Reserve each new card against all items and folders before consuming any upload.
+async fn paths_by_rules(
+    ports: &HandlerPorts,
+    scope: &StorageScope,
+    request: &ImportRequest<'_>,
+    names: &[&str],
+    rules: &CompiledRules,
+) -> Result<(Vec<WorkspacePath>, Vec<Warning>), ApiError> {
+    let tree = ports.versions.tree(scope, request.base_revision).await?;
     let mut taken = TakenPaths::new(&tree.items, &tree.folders);
     let mut paths = Vec::new();
     let mut warnings = Vec::new();
@@ -585,7 +589,7 @@ async fn ruled_paths(
         let field = format!("/upload_ids/{index}");
         let unruled = card_path(request.destination, &source_card_name(name), name, &field)?;
         let chosen = name_new_item(
-            &rules,
+            rules,
             &Subject {
                 path: &unruled,
                 type_name: SOURCE_CARD_TYPE,
@@ -1198,57 +1202,6 @@ async fn commit_on(
             check,
         )
         .await
-}
-
-/// The collision keys of every item and folder in the destination at the base revision.
-async fn taken_keys(
-    ports: &HandlerPorts,
-    scope: &StorageScope,
-    revision: &Revision,
-    destination: Option<&WorkspacePath>,
-) -> Result<BTreeSet<String>, ApiError> {
-    let mut taken = BTreeSet::new();
-    let mut cursor = None;
-    loop {
-        let listing = ports
-            .versions
-            .list(
-                scope,
-                revision,
-                destination,
-                Page {
-                    cursor: cursor.take(),
-                    limit: LIST_PAGE,
-                },
-            )
-            .await?;
-        taken.extend(listing.items.iter().map(|item| item.path.collision_key()));
-        taken.extend(listing.folders.iter().map(WorkspacePath::collision_key));
-        match listing.next_cursor {
-            Some(next) => cursor = Some(next),
-            None => return Ok(taken),
-        }
-    }
-}
-
-/// The card path for `file_name` in `destination`, with the numbered-suffix rule against the
-/// keys already taken; the chosen key is taken too. A later card is named by
-/// `conventions::numbered_source_card_name`, so its extension marker and number (`-pdf-2.md`)
-/// are never cut and the name fits one path segment.
-fn free_path(
-    destination: Option<&WorkspacePath>,
-    file_name: &str,
-    field: &str,
-    taken: &mut BTreeSet<String>,
-) -> Result<WorkspacePath, ApiError> {
-    for number in 1_u32.. {
-        let candidate = numbered_source_card_name(file_name, number);
-        let path = card_path(destination, &candidate, file_name, field)?;
-        if taken.insert(path.collision_key()) {
-            return Ok(path);
-        }
-    }
-    Err(fault("no numbered name was free"))
 }
 
 /// The media type of an occurrence, detected from its bytes, else from its extension.

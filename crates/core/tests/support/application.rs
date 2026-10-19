@@ -95,7 +95,7 @@ use okf_jawn_contract::search::{
     GetGraphResponse, GetLinksResponse, Link, LinkDirection, SearchHit, SearchResponse,
 };
 use okf_jawn_contract::source::{SourceAppearance, SourceLocation, SourceLocator, SourceReference};
-use okf_jawn_contract::workspace::Workspace;
+use okf_jawn_contract::workspace::{RestoreReport, Workspace};
 use okf_jawn_core::access::AccessControl;
 use okf_jawn_core::application::{ApplicationConfig, ApplicationService, Ports};
 use okf_jawn_core::confirmations::{ConfirmationConsume, ConfirmationCreate, ConfirmationStore};
@@ -122,11 +122,11 @@ use okf_jawn_core::readiness::ReadinessProbe;
 use okf_jawn_core::sandbox::{SandboxCapabilityStore, SandboxMint, SandboxResolved};
 use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
-    BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges, Committed,
-    DiffQuery, FolderListing, LocalSource, LogQuery, NewWorkspace, ObjectInfo, ObjectRead, Page,
-    Promotion, Provenance, RulesFile, StorageScope, TreeEdit, TreeItem, VersionStore,
-    WorkspaceArchive, WorkspaceCatalog, WorkspaceTree, WorkspaceUpdate,
-    replay_warnings_unavailable,
+    Backups, BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges,
+    Committed, DiffQuery, FolderListing, LocalSource, LogQuery, NewWorkspace, ObjectInfo,
+    ObjectRead, Page, Promotion, Provenance, RulesFile, StorageScope, TreeEdit, TreeItem,
+    VersionStore, WorkspaceArchive, WorkspaceCatalog, WorkspaceTree, WorkspaceUpdate,
+    WrittenArchive, replay_warnings_unavailable,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadRecord, UploadStore};
 use serde_json::Value;
@@ -339,6 +339,7 @@ impl World {
             confirmations: unused.clone(),
             sandbox: sandbox.clone(),
             readiness: readiness.clone(),
+            backups: unused.clone(),
         };
         let service = ApplicationService::new(ports, config)?;
         Ok(Self {
@@ -2219,6 +2220,41 @@ impl AccessControl for Unused {
         unused()
     }
     fn editors<'a>(&'a self, _scope: &'a StorageScope) -> PortFuture<'a, Vec<String>> {
+        unused()
+    }
+}
+
+impl Backups for Unused {
+    fn write_workspace_archive<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _mutation_id: MutationId,
+    ) -> PortFuture<'a, WrittenArchive> {
+        unused()
+    }
+    fn write_installation_archive<'a>(
+        &'a self,
+        _tenant: &'a TenantId,
+        _mutation_id: MutationId,
+    ) -> PortFuture<'a, ObjectInfo> {
+        unused()
+    }
+    fn open_installation_archive<'a>(
+        &'a self,
+        _tenant: &'a TenantId,
+        _digest: &'a Digest,
+        _offset: u64,
+        _length: u64,
+    ) -> PortFuture<'a, ObjectRead> {
+        unused()
+    }
+    fn restore_import<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _archive: Digest,
+        _mutation_id: MutationId,
+        _editors: Vec<String>,
+    ) -> PortFuture<'a, RestoreReport> {
         unused()
     }
 }

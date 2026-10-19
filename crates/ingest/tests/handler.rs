@@ -2984,6 +2984,45 @@ mod job_handler {
         Ok(())
     }
 
+    /// SPEC section 6: selecting the fallback must not consume uploads before discovering
+    /// that the destination is a file. Both absent rules and disabled rules use this path.
+    async fn refuses_unruled_item_destination(apply_naming_rules: bool) -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        card_at_base(&world, 90, "archive.md", "archive.pdf")?;
+        let report = upload(&world, 2071, "report.pdf", b"%PDF")?;
+        let id = job(
+            &world,
+            207,
+            workspace_scope()?,
+            JobSpec::Import {
+                base_revision: base()?,
+                upload_ids: vec![report],
+                destination: Some(WorkspacePath::try_from("archive.md".to_owned())?),
+                apply_naming_rules,
+                settings: ConversionSettings::default(),
+            },
+        )?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        let error = some(entry.job.error.as_ref(), "the destination refusal")?;
+        assert_eq!(error.code, ErrorCode::InvalidInput);
+        assert_eq!(error.field.as_deref(), Some("/destination"));
+        assert!(world.uploads.consumed()?.is_empty());
+        assert!(world.versions.written()?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unruled_item_destination_is_refused_when_rules_are_absent() -> TestResult {
+        refuses_unruled_item_destination(true).await
+    }
+
+    #[tokio::test]
+    async fn unruled_item_destination_is_refused_when_rules_are_disabled() -> TestResult {
+        refuses_unruled_item_destination(false).await
+    }
+
     #[tokio::test]
     async fn conventions_import_im2_im3_cards_are_named_by_the_rules_and_by_each_other()
     -> TestResult {

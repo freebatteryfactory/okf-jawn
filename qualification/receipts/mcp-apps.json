@@ -1,5 +1,5 @@
 {
-  "git_sha": "340441bfd2d633d2512cd34d07cdd7a870c49b3f",
+  "git_sha": "9859c61d771571aaa2fcc2ce43bb64838fe9a799",
   "inputs": [
     ".bun-version",
     ".cargo/config.toml",
@@ -23,7 +23,7 @@
     "ui/tsconfig.json",
     "ui/vite.config.ts"
   ],
-  "produced_at": "2026-10-19T00:35:29.736Z",
+  "produced_at": "2026-10-19T16:02:29.957Z",
   "component": "mcp-apps-protocol-qualification",
   "gate": "mcp-apps-protocol-qualification",
   "result": "PASS",
@@ -212,7 +212,7 @@
   ],
   "not_judged": [],
   "harness_error_detail": [],
-  "finished_at": "2026-10-19T00:45:22.038Z",
+  "finished_at": "2026-10-19T16:03:04.480Z",
   "scope": {
     "summary": "This run renders the real MCP App bundle in a real MCP Apps host, against a fixture MCP server. It qualifies the App side and the protocol libraries; it does not test the product server.",
     "real": [
@@ -279,17 +279,17 @@
     },
     "http": {
       "status": "listening",
-      "endpoint": "http://127.0.0.1:18765/mcp",
-      "requested": "http://127.0.0.1:18765/mcp"
+      "endpoint": "http://127.0.0.1:18769/mcp",
+      "requested": "http://127.0.0.1:18769/mcp"
     }
   },
   "harness_binary": {
     "path": "<abs>/release/okf-qualify-mcp-apps.exe",
     "bytes": 5330432,
-    "sha256": "ced5f1a2af5cbd8b99eb7074895f96adf8fa2a4151e790c1d98b3bbec0896272",
+    "sha256": "04781e884949fa074ea0d77ac46bb6d7856fd07ef2c0d3ee67dae3358b9852bc",
     "args": [
       "--http",
-      "127.0.0.1:18765"
+      "127.0.0.1:18769"
     ]
   },
   "harness_process": {
@@ -541,18 +541,18 @@
   "basic_host": {
     "status": "passed",
     "source": {
-      "status": "fetched",
+      "status": "cached",
       "repository": "https://github.com/modelcontextprotocol/ext-apps",
       "requested_tag": "v2.0.3",
       "commit": "82221c0c8ce7661efa6771c9d461511b1650495f",
-      "commit_resolved_at": "2026-10-19T00:41:27.868Z",
+      "commit_resolved_at": "2026-10-19T15:48:43.192Z",
       "files_verified": 14,
       "files_expected": 14,
       "package": {
         "name": "@modelcontextprotocol/ext-apps-basic-host",
         "version": "2.0.3"
       },
-      "lockfile_sha256": "27f97aef6f62fc3cdeed9f0ea02b6a7a2fb20367ee3b1554b09adf3e6c07de4e"
+      "lockfile_sha256": "c3c6af27f70c56a7e1a29119fdfdf5447ddb37332fcb5e1bf89ed0e64fa5ede6"
     },
     "browser": {
       "name": "chromium",
@@ -853,12 +853,12 @@
     "opened_at": null,
     "closed_at": null,
     "public_url": null,
-    "local_port": 18765,
+    "local_port": 18769,
     "note": "OKF_MCP_APPS_NGROK is not 1"
   },
   "host_render": {
     "status": "not_run",
-    "meaning": "No files under .artifacts/qualification/mcp-apps/hosts/. Host render for claude.ai / ChatGPT remains not_run until screenshots or notes are placed there. This receipt does not invent PASS.",
+    "meaning": "hosts/ directory exists but is empty. Place screenshots or notes from claude.ai / ChatGPT before claiming an observed host render.",
     "gate": "mcp-apps-web-hosts"
   },
   "static_bundle_smoke": {

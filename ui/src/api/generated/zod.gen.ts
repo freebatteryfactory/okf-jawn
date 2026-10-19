@@ -3589,7 +3589,7 @@ export const zUploadContentPath = z.object({
 });
 
 /**
- * Stream authenticated original bytes into a preallocated upload, enforcing byte limits and digest verification.
+ * Stream authenticated original bytes into a preallocated upload, enforcing byte limits. complete_upload verifies the expected length and digest.
  */
 export const zUploadContentResponse = zUpload;
 
