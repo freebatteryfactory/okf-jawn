@@ -687,6 +687,7 @@ pub fn plan(
     folders: &[WorkspacePath],
     selected: &BTreeSet<ItemId>,
 ) -> Result<PlanBody, ApiError> {
+    let folder_spellings = folder_spellings(folders);
     let mut items: Vec<&TreeItem> = tree.iter().collect();
     items.sort_by(|left, right| left.summary.path.as_str().cmp(right.summary.path.as_str()));
     let mut counts = Counts::default();
@@ -710,7 +711,7 @@ pub fn plan(
             type_name: &summary.type_name,
             original_name: item.original_name.as_deref(),
         };
-        match propose(rules, &subject) {
+        match propose_in_folders(rules, &subject, &folder_spellings) {
             Proposal::Unmatched => {
                 counts.unchanged = increment(counts.unchanged);
                 stayers.push(summary);
@@ -762,6 +763,61 @@ pub fn plan(
         refused: count(counts.refused)?,
         archived_left_out: count(counts.archived)?,
     })
+}
+
+/// Folder keys retain their stored paths: a naming rule cannot respell an existing folder.
+fn folder_spellings(folders: &[WorkspacePath]) -> BTreeMap<String, String> {
+    folders
+        .iter()
+        .map(|folder| (folder.collision_key(), folder.as_str().to_owned()))
+        .collect()
+}
+
+/// Name a subject using the deepest stored ancestor spelling, including any new folders
+/// below it. An expanded stored spelling must still fit the workspace path bounds.
+fn propose_in_folders(
+    rules: &CompiledRules,
+    subject: &Subject<'_>,
+    folders: &BTreeMap<String, String>,
+) -> Proposal {
+    match propose(rules, subject) {
+        Proposal::Renamed {
+            path,
+            policy,
+            keep_alias,
+            mut warnings,
+        } => match in_stored_folders(&path, folders) {
+            Ok(path) => Proposal::Renamed {
+                path,
+                policy,
+                keep_alias,
+                warnings,
+            },
+            Err(error) => {
+                warnings.push(warning(subject.path.as_str(), PATH_NOT_VALID, error.0));
+                Proposal::Refused { warnings }
+            }
+        },
+        other => other,
+    }
+}
+
+/// The candidate in its deepest existing folder, leaving the file name and new folders intact.
+fn in_stored_folders(
+    path: &WorkspacePath,
+    folders: &BTreeMap<String, String>,
+) -> Result<WorkspacePath, IdentityError> {
+    let stored = ancestors(path.as_str()).filter_map(|ancestor| {
+        folders
+            .get(&collision_key_of(ancestor))
+            .map(|spelling| (ancestor, spelling))
+    });
+    match stored.last() {
+        Some((ancestor, spelling)) => {
+            WorkspacePath::from_supplied(&path.as_str().replacen(ancestor, spelling, 1))
+        }
+        None => Ok(path.clone()),
+    }
 }
 
 /// The entries of `movers` by their `outcomes` (`plan`): a mover that takes another path is an

@@ -1652,6 +1652,46 @@ fn conventions_collision_a_folder_holds_its_name() -> TestResult {
     Ok(())
 }
 
+/// SPEC section 3 compares folders by collision key; section 6's accepted preview must
+/// retain the folder spelling storage accepts, including empty and nested folders.
+#[test]
+fn conventions_destination_reuses_the_stored_folder_spelling() -> TestResult {
+    let items = [item(1, "inbox/Report.md")?, item(2, "notes/existing.md")?];
+    let selected = BTreeSet::from([id(1)]);
+    for (destination, folder, expected) in [
+        ("Notes", "notes", "notes/report.md"),
+        ("ARCHIVE", "Archive", "Archive/report.md"),
+        ("Notes/New", "notes", "notes/New/report.md"),
+        ("Notes/PAST/New", "notes/Past", "notes/Past/New/report.md"),
+    ] {
+        let body = plan(
+            &compiled(vec![routed("inbox", destination)])?,
+            &items,
+            &[path("notes")?, path(folder)?],
+            &selected,
+        )?;
+        assert_eq!(
+            moves(&body),
+            [(id(1), expected.to_owned())],
+            "{destination}"
+        );
+        assert!(body.warnings.is_empty(), "{destination}");
+        assert_eq!(body.refused, 0, "{destination}");
+        counts_add_up(&body)?;
+    }
+    Ok(())
+}
+
+/// A rule's respelling of a folder alone is not an item rename (SPEC sections 3 and 6).
+#[test]
+fn conventions_destination_a_stored_folder_respelling_alone_is_unchanged() -> TestResult {
+    let items = [item(1, "notes/report.md")?];
+    let body = plan_all(vec![routed("notes", "Notes")], &items)?;
+    assert!(body.entries.is_empty());
+    assert_eq!((body.unchanged, body.refused), (1, 0));
+    counts_add_up(&body)
+}
+
 #[test]
 fn conventions_collision_a_kept_mover_holds_its_name_in_a_second_round() -> TestResult {
     // B would free `b/x.md` for A, but B's own name is taken by C under keep_existing, so B
