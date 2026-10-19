@@ -193,6 +193,7 @@ fn application(storage: &Storage) -> Result<ApplicationService, ApiError> {
         confirmations: Arc::new(storage.confirmations()),
         sandbox: Arc::new(storage.sandbox()),
         readiness: Arc::new(storage.readiness()),
+        backups: Arc::new(storage.backups()),
     };
     ApplicationService::new(
         ports,
@@ -291,6 +292,7 @@ async fn append(
                 connector_id: None,
                 actor: None,
                 operation: None,
+                transport: None,
                 proposal_id: None,
                 count: None,
             }

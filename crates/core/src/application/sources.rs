@@ -15,7 +15,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath};
-use okf_jawn_contract::item::ItemDocument;
+use okf_jawn_contract::item::{ItemDocument, ItemKind};
 use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::source::{
     DeclaredOutcome, DeclaredSource, GetObjectRequest, GetObjectResponse, GetSourcesRequest,
@@ -24,15 +24,18 @@ use okf_jawn_contract::source::{
 use tokio::io::AsyncReadExt as _;
 
 use super::ApplicationService;
-use super::reads::shown_outline;
 use super::shared::{check_named, invalid, resolve, workspace_scope};
+use super::views::{stored_fault, view_ports};
 use crate::context::OperationContext;
 use crate::conversion::ConversionRecord;
 use crate::reading::{
-    NoteSource, ObjectRole, SourceTarget, authorize_object, cited_locations, fill_locations,
-    note_sources, read_conversion_record, section_lines,
+    NoteSource, ObjectRole, SourceTarget, appearance_record, authorize_object, check_citation,
+    citation_locations, cited_locations, computed_locations, fill_locations, note_sources,
+    read_conversion_record,
 };
 use crate::storage::StorageScope;
+use crate::views::layout::view_of;
+use crate::views::resolve::cite;
 
 /// Most bytes one `get_object` block returns, 1 MiB; larger objects take the streaming route.
 ///
@@ -45,14 +48,16 @@ const JSON_MEDIA_TYPE: &str = "application/json";
 
 /// An item's supporting citations and, for a source card, its appearance; for a note, every
 /// entry of its OKF `sources` declared in the file's order, exactly as written, with what it
-/// resolved to.
+/// resolved to; for a View, first its bindings' citations in binding order, as `get_view` answers
+/// them, then its OKF `sources` declared as a note's.
 ///
 /// A note's entry that names an item at the resolved revision is cited: the item's whole-item
 /// citation is in `sources` and the entry's outcome is its position there. Two entries that
 /// name one item share its one citation. Every other entry is declared uncited, with its reason.
 ///
 /// # Errors
-/// Returns the typed `NotFound` of an invalidated revision, or any port error.
+/// Returns the typed `NotFound` of an invalidated revision, `Unsupported` on `/item_id` for a
+/// View this build does not read, or any port error.
 pub(super) async fn get_sources(
     service: &ApplicationService,
     context: &OperationContext,
@@ -79,7 +84,20 @@ pub(super) async fn get_sources(
             declared: Vec::new(),
         });
     }
-    let mut sources: Vec<SourceReference> = Vec::new();
+    // A View is supported by its bindings' citations (ruling E11), as `get_view` answers them.
+    let mut sources: Vec<SourceReference> = if document.summary.kind == ItemKind::View {
+        let mut view = view_of(&document, scope.workspace_id).map_err(stored_fault)?;
+        cite(view_ports(service), &scope, &mut view).await?;
+        view.bindings
+            .into_iter()
+            .map(|binding| binding.source)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // Bindings keep their exact selections and digests. Only declared note sources share
+    // whole-item citations with other declared entries, even at a binding's item and revision.
+    let first_declared = sources.len();
     let mut declared = Vec::new();
     for NoteSource { entry, target } in note_sources(&document.properties, &document.summary.path) {
         let cited = match target {
@@ -93,9 +111,13 @@ pub(super) async fn get_sources(
         let outcome = match cited {
             Err(reason) => DeclaredOutcome::Uncited { reason },
             Ok(item) => {
-                let index = if let Some(index) =
-                    sources.iter().position(|citation| citation.item_id == item)
-                {
+                let index = if let Some(index) = sources
+                    .iter()
+                    .enumerate()
+                    .skip(first_declared)
+                    .find_map(|(index, citation)| {
+                        (citation.item_id == item && citation.revision == revision).then_some(index)
+                    }) {
                     index
                 } else {
                     let document = ports.versions.show(&scope, &revision, item).await?;
@@ -316,152 +338,57 @@ pub(super) fn citation(
     }
 }
 
-/// The locations the server computes for a citation of `digest` with the selection `located`
-/// (a section already resolved to its lines) of an item whose appearance is `appearance`
-/// (Stage 1b design section 2: from item, revision, digest and selection).
-///
-/// - A citation of a source card's text, by its conversion record's digest (or by no digest
-///   when the card has no record), locates the selection in the original
-///   (`reading::cited_locations`).
-/// - A citation of one of the record's retained images is that image's own location.
-/// - Every other citation (a note, the original, a structured export, a derived object) has
-///   none.
-pub(super) fn computed_locations(
-    appearance: Option<&SourceAppearance>,
-    record: Option<&ConversionRecord>,
-    digest: Option<&Digest>,
-    located: &Selection,
-) -> Vec<SourceLocation> {
-    let Some(appearance) = appearance else {
-        return Vec::new();
-    };
-    if digest == appearance.extraction.digest.as_ref() {
-        return cited_locations(&appearance.extraction, record, located);
-    }
-    record
-        .and_then(|record| {
-            record
-                .assets
-                .iter()
-                .find(|asset| Some(&asset.digest) == digest)
-        })
-        .map(|asset| vec![asset.location.clone()])
-        .unwrap_or_default()
-}
-
 /// A citation a request asks the server to keep (a comment's or a review's `source`), checked as
-/// every citation is: its revision against the revision map first (`reading::check_revision`),
-/// then its item at that revision, its path as that revision holds the item, its digest, when it
-/// names one, as an object of that item revision (`reading::authorize_object`), and its
-/// locations by the citation rule (`reading::fill_locations`: omitted, the server fills them;
-/// present, they must equal the computed ones). Answers the checked citation and the cited
-/// item's document. The caller passes the scope of the citation's own workspace.
+/// every citation is (`reading::check_citation`, at `/source`): its revision against the
+/// revision map first, then its item at that revision, its path as that revision holds the
+/// item, its digest, when it names one, as an object of that item revision, and its locations
+/// by the citation rule (omitted, the server fills them; present, they must equal the computed
+/// ones). Answers the checked citation and the cited item's document. The caller passes the
+/// scope of the citation's own workspace.
 ///
 /// # Errors
 /// Returns the typed `NotFound` of an invalidated revision, `NotFound` for an item the revision
 /// does not hold, `InvalidInput` on `/source/path` for a path that is not the item's there,
 /// `NotFound` on `/source/digest` for a digest that is none of the revision's objects,
 /// `InvalidInput` on `/source/locations` for supplied locations that are not the computed ones,
-/// the section refusals of `server_locations`, or any port error.
+/// the section refusals of `reading::citation_locations`, or any port error.
 pub(super) async fn checked_citation(
     service: &ApplicationService,
     scope: &StorageScope,
-    mut source: SourceReference,
+    source: SourceReference,
 ) -> Result<(SourceReference, ItemDocument), ApiError> {
-    check_named(service, scope, &source.revision).await?;
     let ports = service.ports();
-    let document = ports
-        .versions
-        .show(scope, &source.revision, source.item_id)
-        .await?;
-    if document.summary.path != source.path {
-        return Err(invalid(
-            "the cited path is not the item's path at the cited revision",
-            "/source/path",
-        ));
-    }
-    if let Some(digest) = source.digest.as_ref() {
-        authorize_object(
-            ports.versions.as_ref(),
-            ports.blobs.as_ref(),
-            ports.records.as_ref(),
-            scope,
-            source.item_id,
-            &source.revision,
-            digest,
-        )
-        .await
-        .map_err(|error| {
-            if error.code == ErrorCode::NotFound {
-                error.with_field("/source/digest")
-            } else {
-                error
-            }
-        })?;
-    }
-    let computed = located_in(service, scope, &document, &source).await?;
-    fill_locations(&mut source, computed, "/source")?;
-    Ok((source, document))
+    check_citation(
+        ports.versions.as_ref(),
+        ports.blobs.as_ref(),
+        ports.records.as_ref(),
+        scope,
+        source,
+        "/source",
+    )
+    .await
 }
 
 /// The locations the server computes for a citation a request carries, read through the ports:
-/// the ones a response carries for the same citation (`computed_locations`).
+/// the ones a response carries for the same citation (`reading::computed_locations`).
 ///
 /// # Errors
-/// As `located_in`, or any port error of reading the cited item.
+/// As `reading::citation_locations`, or any port error of reading the cited item.
 async fn server_locations(
     service: &ApplicationService,
     scope: &StorageScope,
     source: &SourceReference,
 ) -> Result<Vec<SourceLocation>, ApiError> {
-    let document = service
-        .ports()
+    let ports = service.ports();
+    let document = ports
         .versions
         .show(scope, &source.revision, source.item_id)
         .await?;
-    located_in(service, scope, &document, source).await
+    citation_locations(ports.blobs.as_ref(), scope, &document, source, "/source").await
 }
 
-/// The locations the server computes for `source`, a citation of `document`.
-///
-/// The conversion record is read only when the citation is not of the original, and a section
-/// is resolved to its lines through the outline of the shown text, as `read_item` resolves it.
-///
-/// # Errors
-/// Returns `NotFound` on `/source/selection/heading` for a section the text does not have,
-/// `InvalidInput` there for an ambiguous one, or any port error.
-async fn located_in(
-    service: &ApplicationService,
-    scope: &StorageScope,
-    document: &ItemDocument,
-    source: &SourceReference,
-) -> Result<Vec<SourceLocation>, ApiError> {
-    let Some(appearance) = document.source.as_ref() else {
-        return Ok(Vec::new());
-    };
-    if source.digest.as_ref() == Some(&appearance.object) {
-        return Ok(Vec::new());
-    }
-    let record = record_of(service, scope, Some(appearance)).await?;
-    let located = match &source.selection {
-        Selection::Section { heading } if source.digest == appearance.extraction.digest => {
-            let (_, outline) = shown_outline(document, record.as_ref());
-            Selection::Lines {
-                range: section_lines(&outline, heading)
-                    .map_err(|error| error.with_field("/source/selection/heading"))?,
-            }
-        }
-        other => other.clone(),
-    };
-    Ok(computed_locations(
-        Some(appearance),
-        record.as_ref(),
-        source.digest.as_ref(),
-        &located,
-    ))
-}
-
-/// The conversion record a source appearance names, if it names one.
+/// The conversion record a source appearance names, if it names one
+/// (`reading::appearance_record`).
 ///
 /// # Errors
 /// Returns any error of reading the record.
@@ -470,12 +397,7 @@ pub(super) async fn record_of(
     scope: &StorageScope,
     source: Option<&SourceAppearance>,
 ) -> Result<Option<ConversionRecord>, ApiError> {
-    match source.and_then(|source| source.extraction.digest.as_ref()) {
-        Some(digest) => Ok(Some(
-            read_conversion_record(service.ports().blobs.as_ref(), scope, digest).await?,
-        )),
-        None => Ok(None),
-    }
+    appearance_record(service.ports().blobs.as_ref(), scope, source).await
 }
 
 /// The first of `paths` that names an item at `revision` other than the citing note itself,

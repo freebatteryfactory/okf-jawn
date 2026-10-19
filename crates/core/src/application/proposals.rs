@@ -5,9 +5,8 @@
 //! (`VersionStore::create_candidate`), then the proposal's row, then a `proposal_updated` event:
 //!
 //! - Before any port is called: a `create` change whose properties supply the application header
-//!   is refused as `create_item` refuses it (`items::refuse_supplied_header`); a `create` of a
-//!   View answers `not_implemented` until the View file layout lands (construction plan M1.6),
-//!   and the contract's check has already refused a `create` of a source; a proposal of supplied
+//!   is refused as `create_item` refuses it (`items::refuse_supplied_header`), and the
+//!   contract's check has already refused a `create` of a source; a proposal of supplied
 //!   text (`ProposalKind::SupplyExtraction`) is accepted only from an agent's delegated route
 //!   (`invalid_input` on `/changes` otherwise: a person corrects text with `correct_digest`).
 //! - The base is checked against the revision map first; it need not be the head.
@@ -17,6 +16,10 @@
 //!   unsupported (`conflict` on its `item_id` otherwise; `invalid_input` there for an item that
 //!   is no source), and its `based_on` is that source's digest at the base (`conflict` on its
 //!   `based_on` otherwise).
+//! - A View the proposal would store, a `create` with `item_kind: view` or an `edit` of an item
+//!   that is a View at the base, is checked as every saved-View write is
+//!   (`views::check_view_write`; a `create`'s properties with `type` set from its `type_name`),
+//!   refused on `/changes/<n>/body` or `/changes/<n>/properties/title`.
 //! - The candidate is judged by the edit check (`conformance::EditCheck`) over every path the
 //!   changes write (a create's path; the path at the base of the item an edit, an archive, a move
 //!   or a supply names; a move's destination) and the files the store reports it rewrote. A
@@ -40,7 +43,11 @@
 //! 1. A browser session is required (`forbidden` without one, before any port): a confirmation
 //!    is a person's browser action. The proposal must be `open`: `declined` and `conflict` are
 //!    refused with `conflict`, and so is an `accepted` one unless this mutation accepted it.
-//!    `proposal_revision` must be the proposal's (`conflict` on `/proposal_revision`).
+//!    `proposal_revision` must be the proposal's (`conflict` on `/proposal_revision`). Every View
+//!    the proposal would store is checked again as `open_proposal` checked it (ruling E6: the
+//!    rules, the build or a cited revision may have changed since), refused with `conflict` and
+//!    no field, the change and the fault named in the message; a resumed attempt whose promotion
+//!    already landed is answered before this check, so it is never refused by it.
 //! 2. The confirmation is consumed for this mutation (`accept_proposal`, the proposal, its
 //!    revision and content digest, the caller's session and subject), before anything is
 //!    promoted, so no promotion happens without a consumed confirmation.
@@ -134,6 +141,7 @@ use super::shared::{
     announce, check_named, invalid, mutation_id, now, record_receipt, workspace_scope,
 };
 use super::sources::checked_citation;
+use super::views::{ViewFields, check_view_write, created_properties};
 use crate::access::authorize_workspace;
 use crate::confirmations::ConfirmationConsume;
 use crate::conformance::EditCheck;
@@ -152,12 +160,12 @@ use crate::storage::{
 ///
 /// # Errors
 /// Returns `InvalidInput` on `/changes/<n>/properties/okf_jawn` for a supplied or changed
-/// application header, `NotImplemented` on `/changes/<n>/item_kind` for a View, `InvalidInput`
-/// on `/changes` for supplied text from a route that is not an agent's, `InvalidInput` on
-/// `/changes/<n>/item_id` for supplied text of an item that is no source, `Conflict` there for a
-/// source that is not unprocessed and on `/changes/<n>/based_on` for a digest that is not the
-/// source's, the typed `NotFound` of an invalidated base, the candidate check's refusal, or any
-/// port error.
+/// application header, `InvalidInput` on `/changes` for supplied text from a route that is not
+/// an agent's, a View's refusal on `/changes/<n>/body` or `/changes/<n>/properties/title`
+/// (`views::check_view_write`), `InvalidInput` on `/changes/<n>/item_id` for supplied text of an
+/// item that is no source, `Conflict` there for a source that is not unprocessed and on
+/// `/changes/<n>/based_on` for a digest that is not the source's, the typed `NotFound` of an
+/// invalidated base, the candidate check's refusal, or any port error.
 pub(super) async fn open_proposal(
     service: &ApplicationService,
     context: &OperationContext,
@@ -169,13 +177,6 @@ pub(super) async fn open_proposal(
             let pointer = format!("/changes/{index}");
             refuse_supplied_header(properties, &format!("{pointer}/properties"))?;
             change.check_kind(&pointer)?;
-            if change.created_kind() == Some(ItemKind::View) {
-                return Err(ApiError::new(
-                    ErrorCode::NotImplemented,
-                    "proposing a View is not implemented in this build",
-                )
-                .with_field(format!("{pointer}/item_kind")));
-            }
         }
     }
     if kind == ProposalKind::SupplyExtraction
@@ -327,6 +328,7 @@ pub(super) async fn accept_proposal(
                 .with_field("/proposal_revision"),
         );
     }
+    recheck_proposed_views(service, &scope, &proposal).await?;
     ports
         .confirmations
         .consume(
@@ -561,6 +563,93 @@ pub(super) async fn remapped(
     Ok((source, Some(mapping.purge_id)))
 }
 
+/// Check, as every saved-View write is checked (`views::check_view_write`), the View that change
+/// `index` would store: a `create` of a View (its properties with `type` set from its
+/// `type_name`, as the store writes them), or an `edit` of an item whose kind at the base is
+/// `edited` View. Any other change stores no View and passes.
+///
+/// # Errors
+/// The refusals of `views::check_view_write`, on `/changes/<index>/body` or
+/// `/changes/<index>/properties/title`.
+async fn check_proposed_view(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    change: &Change,
+    index: usize,
+    edited: Option<&ItemKind>,
+) -> Result<(), ApiError> {
+    let (properties, body) = match change {
+        Change::Create {
+            type_name,
+            body,
+            properties,
+            ..
+        } if change.created_kind() == Some(ItemKind::View) => {
+            (created_properties(properties, type_name, None), body)
+        }
+        Change::Edit {
+            body, properties, ..
+        } if edited == Some(&ItemKind::View) => (properties.clone(), body),
+        _ => return Ok(()),
+    };
+    let title = format!("/changes/{index}/properties/title");
+    let body_field = format!("/changes/{index}/body");
+    check_view_write(
+        service,
+        scope,
+        &properties,
+        body,
+        ViewFields {
+            title: &title,
+            body: &body_field,
+            item: None,
+        },
+    )
+    .await
+}
+
+/// Check again every View an open proposal would store, as `open_proposal` checked it (ruling
+/// E6), before its acceptance uses the confirmation.
+///
+/// # Errors
+/// Returns `Conflict` with no field, naming the change's field and the fault, for invalid View
+/// content or a missing/invalidated citation. Operational errors retain their code, field and
+/// detail: a storage failure does not establish that the proposal no longer validates.
+async fn recheck_proposed_views(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    proposal: &Proposal,
+) -> Result<(), ApiError> {
+    for (index, change) in proposal.changes.iter().enumerate() {
+        let edited = match change {
+            Change::Edit { item_id, .. } => Some(
+                service
+                    .ports()
+                    .versions
+                    .show(scope, &proposal.base_revision, *item_id)
+                    .await?
+                    .summary
+                    .kind,
+            ),
+            _ => None,
+        };
+        check_proposed_view(service, scope, change, index, edited.as_ref())
+            .await
+            .map_err(|error| {
+                if matches!(error.code, ErrorCode::InvalidInput | ErrorCode::NotFound) {
+                    conflict(&format!(
+                        "the proposal's View no longer validates ({}): {}",
+                        error.field.as_deref().unwrap_or("/changes"),
+                        error.message
+                    ))
+                } else {
+                    error
+                }
+            })?;
+    }
+    Ok(())
+}
+
 /// The edits of a proposal's changes on top of its base and the paths the changes write, after
 /// the refusals that need the base (a changed header, a supply change's source and digest).
 ///
@@ -584,6 +673,7 @@ async fn candidate_edits(
         let new_item_id = derive_item_id(mutation, created);
         match change {
             Change::Create { path, .. } => {
+                check_proposed_view(service, scope, change, index, None).await?;
                 touched.push(path.clone());
                 created = created.saturating_add(1);
             }
@@ -598,6 +688,8 @@ async fn candidate_edits(
                     properties,
                     &format!("{pointer}/properties"),
                 )?;
+                check_proposed_view(service, scope, change, index, Some(&stored.summary.kind))
+                    .await?;
                 touched.push(stored.summary.path);
             }
             Change::Archive { item_id } => {
@@ -918,6 +1010,7 @@ async fn proposal_updated(
                 connector_id: None,
                 actor: None,
                 operation: None,
+                transport: None,
                 proposal_id: Some(proposal),
                 count: None,
             },

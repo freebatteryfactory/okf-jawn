@@ -74,7 +74,7 @@ use serde_json::Value;
 
 use crate::blobs::LocalBlobs;
 use crate::db::sql;
-use crate::git::repo::git;
+use crate::git::repo::{git, git_message};
 
 /// Every commit of a repository on the walked references, and the objects its cards name.
 #[derive(Debug, Default)]
@@ -659,7 +659,7 @@ fn missing(error: &git2::Error, what: &str) -> Result<String, ApiError> {
     if error.code() == git2::ErrorCode::NotFound {
         Ok(format!(
             "the history does not hold {what}: {}",
-            error.message()
+            git_message(error)
         ))
     } else {
         Err(git(error))

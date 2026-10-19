@@ -179,7 +179,7 @@
               "bun scripts/dev.mjs bootstrap"
             ]
           },
-          "covers": "Every CI run starts from a fresh clone of the pushed commit: bootstrap installs from the committed lockfiles only, builds the generator, generates, and builds and type-checks the UI before the gated steps run, so nothing can depend on an uncommitted file. Cargo's registry and target directory are restored from a cache keyed on rust-toolchain.toml and Cargo.lock, with a fallback to the newest cargo cache of the same runner OS when none has that key, so `target` can come from another lockfile state and cargo's own fingerprints under `--locked` decide what is rebuilt; Bun's install cache is keyed on .bun-version and bun.lock and has no fallback. CI asserts that the checkout is unchanged directly after bootstrap (the deterministic-foundation gate) and not again after the gated steps, and it does not run the audit; `bun scripts/dev.mjs clean-checkout` asserts a clean tree after the whole sequence and runs the audit locally, and is a tool, not a gate."
+          "covers": "Every CI run starts from a fresh clone of the pushed commit: bootstrap installs from the committed lockfiles only, builds the generator, generates, and builds and type-checks the UI before the gated steps run, so nothing can depend on an uncommitted file. Cargo's registry and target directory are restored from a cache keyed on rust-toolchain.toml and Cargo.lock, with a fallback to the newest cargo cache of the same runner OS and architecture when none has that key, so `target` can come from another lockfile state and cargo's own fingerprints under `--locked` decide what is rebuilt; Bun's install cache is keyed on .bun-version and bun.lock and has no fallback. CI asserts that the checkout is unchanged directly after bootstrap (the deterministic-foundation gate) and not again after the gated steps, and it does not run the audit; `bun scripts/dev.mjs clean-checkout` asserts a clean tree after the whole sequence and runs the audit locally, and is a tool, not a gate."
         },
         {
           "id": "github-actions-ci-receipt",
@@ -305,7 +305,7 @@
           "id": "view-server-validation",
           "status": "blocked_on_lanes",
           "owner": "core-cli",
-          "receipt": "cargo test -p okf-jawn-core -- views::",
+          "receipt": "cargo test -p okf-jawn-core -- views:: --skip reviews::",
           "meaning": "views::validate against catalog.schema.json and vega-lite.schema.json plus referential checks, and a binding outside the View's workspace is rejected (`ViewDocument::bindings_outside`); present and saved-view writes call it first"
         },
         {

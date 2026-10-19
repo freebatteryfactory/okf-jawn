@@ -1327,7 +1327,7 @@
   },
   {
     "alias": "",
-    "allowed_while_archived": false,
+    "allowed_while_archived": true,
     "description": "Issue a local MCP connector credential scoped to read, or read and propose; never review or approve. Local owner only; hosted agents use WorkOS Connect.",
     "destructive": false,
     "human_session_only": false,

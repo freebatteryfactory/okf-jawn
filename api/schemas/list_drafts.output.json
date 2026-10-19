@@ -137,7 +137,7 @@
         },
         {
           "const": "view",
-          "description": "A source-bound declarative visual artifact.",
+          "description": "A source-bound declarative visual artifact. Its file is an OKF concept: the `title`\nproperty, then a body that is the View's description as Markdown followed by exactly one\nfenced code block whose info string is `json okf-jawn-view`, holding `schema_version`, `mode`,\n`grammar`, `bindings` (without `workspace_id`, `locations` or `materialized`, which the\nserver derives), `spec` and `charts`; the block ends the body.",
           "type": "string"
         }
       ]

@@ -79,6 +79,9 @@ const COMMENTING: u128 = 1000;
 /// The mutation under which a test sets a proposal's status in the store itself.
 const SETTING: u128 = 90;
 
+/// A proposed View in the fixture tree.
+const PROPOSED_VIEW: u128 = 45;
+
 fn key() -> IdempotencyKey {
     IdempotencyKey(Uuid::from_u128(77))
 }
@@ -441,7 +444,7 @@ async fn an_edit_may_echo_the_stored_header_and_is_refused_when_it_changes_it() 
 }
 
 #[tokio::test]
-async fn a_proposed_view_is_not_implemented_and_a_proposed_source_is_refused() -> TestResult {
+async fn a_proposed_view_is_checked_as_a_view_and_a_proposed_source_is_refused() -> TestResult {
     let world = proposal_world()?;
     let with_kind = |kind| -> Built<Change> {
         let Change::Create {
@@ -463,11 +466,12 @@ async fn a_proposed_view_is_not_implemented_and_a_proposed_source_is_refused() -
         })
     };
     let context = alice(OperationName::OpenProposal, Some(mutation(OPENED)))?;
+    // A note's create named a View is checked as a View (core M1.6): it has no title.
     assert_eq!(
         refused_open(&world, &context, vec![with_kind(ItemKind::View)?]).await?,
         (
-            ErrorCode::NotImplemented,
-            Some("/changes/0/item_kind".to_owned())
+            ErrorCode::InvalidInput,
+            Some("/changes/0/properties/title".to_owned())
         )
     );
     assert_eq!(
@@ -480,6 +484,238 @@ async fn a_proposed_view_is_not_implemented_and_a_proposed_source_is_refused() -
     // A note named explicitly is a note.
     let proposal = open(&world, OPENED, vec![with_kind(ItemKind::Note)?]).await?;
     assert_eq!(proposal.status, ProposalStatus::Open);
+    Ok(())
+}
+
+/// A View over the plan note at `revision(fill)`: an excerpt of it and its source line.
+fn plan_view_body(fill: char) -> Built<String> {
+    let block = json!({
+        "schema_version": 1,
+        "mode": "pinned",
+        "grammar": "json_render",
+        "bindings": [{
+            "name": "plan",
+            "source": {
+                "item_id": ItemId(Uuid::from_u128(NOTE)),
+                "path": "notes/plan.md",
+                "revision": revision(fill)?,
+                "selection": { "kind": "all" }
+            },
+            "units": {},
+            "transforms": []
+        }],
+        "spec": {
+            "root": "root",
+            "elements": {
+                "root": { "type": "Stack", "props": {}, "children": ["excerpt", "sources"] },
+                "excerpt": { "type": "SourceExcerpt", "props": { "binding": "plan" }, "children": [] },
+                "sources": { "type": "SourceList", "props": { "bindings": ["plan"] }, "children": [] }
+            }
+        }
+    });
+    Ok(format!(
+        "The plan, as written.\n\n```json okf-jawn-view\n{}\n```\n",
+        serde_json::to_string_pretty(&block)?
+    ))
+}
+
+/// A `create` of a View at `views/plan.md` holding `body`.
+fn view_create(body: String) -> Built<Change> {
+    Ok(Change::Create {
+        path: path("views/plan.md")?,
+        type_name: "Dashboard".to_owned(),
+        body,
+        properties: serde_json::from_value(json!({ "title": "The plan" }))?,
+        item_kind: Some(ItemKind::View),
+    })
+}
+
+/// The proposal world with the plan note held at `b` too.
+fn view_proposal_world() -> Built<ProposalWorld> {
+    let world = proposal_world()?;
+    world
+        .world
+        .versions
+        .put_document(&revision('b')?, plan(&revision('b')?)?)?;
+    Ok(world)
+}
+
+#[tokio::test]
+async fn a_proposed_view_that_validates_is_opened_with_its_view_created() -> TestResult {
+    let world = view_proposal_world()?;
+    let proposal = open(&world, OPENED, vec![view_create(plan_view_body('b')?)?]).await?;
+    assert_eq!(proposal.status, ProposalStatus::Open);
+    let candidates = world.versions.candidates()?;
+    assert!(matches!(
+        some(candidates.first(), "the candidate")?.edits.as_slice(),
+        [TreeEdit::CreateItem {
+            kind: ItemKind::View,
+            ..
+        }]
+    ));
+    // A binding citing an item its revision does not hold stores nothing.
+    let without = proposal_world()?;
+    let context = alice(OperationName::OpenProposal, Some(mutation(OPENED)))?;
+    assert_eq!(
+        refused_open(&without, &context, vec![view_create(plan_view_body('b')?)?]).await?,
+        (ErrorCode::NotFound, Some("/changes/0/body".to_owned()))
+    );
+    nothing_stored(&without)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_edit_of_a_view_is_checked_as_a_view() -> TestResult {
+    let world = proposal_world()?;
+    let at = revision('a')?;
+    let mut view = note(
+        PROPOSED_VIEW,
+        &at,
+        "views/plan.md",
+        &plan_view_body('a')?,
+        json!({ "type": "Dashboard", "title": "The plan" }),
+    )?;
+    view.summary.kind = ItemKind::View;
+    world.world.versions.put_document(&at, view)?;
+    let context = alice(OperationName::OpenProposal, Some(mutation(OPENED)))?;
+    let edit = Change::Edit {
+        item_id: ItemId(Uuid::from_u128(PROPOSED_VIEW)),
+        body: "# Not a View\n".to_owned(),
+        properties: serde_json::from_value(json!({ "type": "Dashboard", "title": "The plan" }))?,
+    };
+    assert_eq!(
+        refused_open(&world, &context, vec![edit]).await?,
+        (ErrorCode::InvalidInput, Some("/changes/0/body".to_owned()))
+    );
+    nothing_stored(&world)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn accepting_checks_a_proposed_view_again_before_the_confirmation_is_used() -> TestResult {
+    let world = view_proposal_world()?;
+    let proposal = open(&world, OPENED, vec![view_create(plan_view_body('b')?)?]).await?;
+    let confirmation = confirm(&world, &proposal, 600).await?;
+    // The View cites the plan at `b`, which a purge removed after the proposal was opened.
+    world.world.records.put_mapping(
+        revision('b')?,
+        RevisionMapping {
+            purge_id: PurgeId(Uuid::from_u128(9)),
+            replacement: None,
+        },
+    )?;
+    let refused = err_of(
+        world
+            .service
+            .accept_proposal(
+                &accepting(ACCEPTING)?,
+                accept_request(&proposal, &confirmation, 'a')?,
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Conflict);
+    assert_eq!(refused.field, None);
+    assert!(
+        refused.message.contains("/changes/0/body"),
+        "{}",
+        refused.message
+    );
+    // Nothing was used or promoted: the confirmation is unconsumed, the proposal still open.
+    assert_eq!(
+        some(world.confirmations.issued()?.first(), "the confirmation")?.2,
+        None
+    );
+    assert!(world.versions.promotions()?.is_empty());
+    assert_eq!(status(&world, proposal.id)?, ProposalStatus::Open);
+    Ok(())
+}
+
+/// E6 revalidates content, while the port error vocabulary preserves storage failures as such.
+/// A one-shot read failure must neither consume confirmation nor force proposal reconciliation;
+/// retrying the same acceptance after storage recovers can use that confirmation successfully.
+async fn proposed_view_read_failure_keeps_its_code(code: ErrorCode) -> TestResult {
+    let world = view_proposal_world()?;
+    let proposal = open(&world, OPENED, vec![view_create(plan_view_body('b')?)?]).await?;
+    let confirmation = confirm(&world, &proposal, 600).await?;
+    // For this create-View proposal, acceptance's next show is the binding's cited note at b.
+    world.world.versions.fail_next_show(code.clone())?;
+    let refused = err_of(
+        world
+            .service
+            .accept_proposal(
+                &accepting(ACCEPTING)?,
+                accept_request(&proposal, &confirmation, 'a')?,
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, code);
+    assert_eq!(refused.field.as_deref(), Some("/changes/0/body"));
+    assert_eq!(refused.message, "/bindings/0/source: the store failed");
+    assert_eq!(
+        some(world.confirmations.issued()?.first(), "the confirmation")?.2,
+        None
+    );
+    assert!(world.versions.promotions()?.is_empty());
+    assert_eq!(status(&world, proposal.id)?, ProposalStatus::Open);
+
+    let accepted = world
+        .service
+        .accept_proposal(
+            &resumed(accepting(ACCEPTING)?),
+            accept_request(&proposal, &confirmation, 'a')?,
+        )
+        .await?;
+    assert_eq!(accepted.revision, revision('d')?);
+    assert_eq!(world.versions.promotions()?.len(), 1);
+    assert_eq!(status(&world, proposal.id)?, ProposalStatus::Accepted);
+    let issued = world.confirmations.issued()?;
+    assert_eq!(issued.len(), 1);
+    assert_eq!(
+        some(issued.first(), "the same confirmation")?.2,
+        Some(mutation(ACCEPTING))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn accepting_a_proposed_view_preserves_an_unavailable_citation_read() -> TestResult {
+    proposed_view_read_failure_keeps_its_code(ErrorCode::Unavailable).await
+}
+
+#[tokio::test]
+async fn accepting_a_proposed_view_preserves_an_internal_citation_read() -> TestResult {
+    proposed_view_read_failure_keeps_its_code(ErrorCode::Internal).await
+}
+
+#[tokio::test]
+async fn a_resumed_acceptance_whose_promotion_landed_is_not_refused_by_the_view_check() -> TestResult
+{
+    let world = view_proposal_world()?;
+    let proposal = open(&world, OPENED, vec![view_create(plan_view_body('b')?)?]).await?;
+    let confirmation = confirm(&world, &proposal, 600).await?;
+    let first = world
+        .service
+        .accept_proposal(
+            &accepting(ACCEPTING)?,
+            accept_request(&proposal, &confirmation, 'a')?,
+        )
+        .await?;
+    world.world.records.put_mapping(
+        revision('b')?,
+        RevisionMapping {
+            purge_id: PurgeId(Uuid::from_u128(9)),
+            replacement: None,
+        },
+    )?;
+    let again = world
+        .service
+        .accept_proposal(
+            &resumed(accepting(ACCEPTING)?),
+            accept_request(&proposal, &confirmation, 'a')?,
+        )
+        .await?;
+    assert_eq!(again.revision, first.revision);
+    assert_eq!(world.versions.promotions()?.len(), 1);
     Ok(())
 }
 

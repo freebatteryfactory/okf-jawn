@@ -673,8 +673,8 @@ async fn create_item_commits_a_note_on_its_base_and_returns_it_as_committed() ->
 }
 
 #[tokio::test]
-async fn create_item_refuses_a_source_a_view_and_a_supplied_header_before_any_commit() -> TestResult
-{
+async fn create_item_refuses_a_source_an_invalid_view_and_a_supplied_header_before_any_commit()
+-> TestResult {
     let world = World::new()?;
     let caller = alice(OperationName::CreateItem, Some(mutation(1)))?;
     let source = err_of(
@@ -691,7 +691,9 @@ async fn create_item_refuses_a_source_a_view_and_a_supplied_header_before_any_co
             .create_item(&caller, create_request(ItemKind::View, json!({}))?)
             .await,
     )?;
-    assert_eq!(view.code, ErrorCode::NotImplemented);
+    // A View is checked before it is written: `# New` holds no View block (core M1.6).
+    assert_eq!(view.code, ErrorCode::InvalidInput);
+    assert_eq!(view.field.as_deref(), Some("/body"));
     let header = err_of(
         world
             .service

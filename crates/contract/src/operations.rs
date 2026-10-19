@@ -147,7 +147,9 @@ pub const LOCAL_OWNER_ONLY: &[OperationName] = &[
 
 /// Operations allowed while their workspace is archived, in table order: every operation that
 /// is not a mutation, and the mutations named here by decision (a repeated archive, unarchive,
-/// export, backup, purge, cancelling a job and rebuilding the index).
+/// export, backup, purge, cancelling a job, rebuilding the index, and issuing a connector that
+/// lists the workspace: owner decision 2026-10-17, since issuing one changes no content and an
+/// archived workspace stays readable).
 ///
 /// It is an allow-list: an operation added later is refused in an archived workspace until
 /// someone decides otherwise. A refused operation answers `conflict` with
@@ -203,6 +205,7 @@ pub const ALLOWED_WHILE_ARCHIVED: &[OperationName] = &[
     OperationName::ListEvents,
     OperationName::ListTenantEvents,
     OperationName::GetSession,
+    OperationName::CreateConnector,
     OperationName::ListConnectors,
     OperationName::GetHealth,
     OperationName::GetReadiness,

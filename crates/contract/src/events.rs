@@ -131,9 +131,14 @@ pub struct Event {
     /// Who caused it; present on security events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<EventActor>,
-    /// The refused operation of a `permission_denied` event.
+    /// The refused operation of a `permission_denied` event; absent when a byte transport was
+    /// refused (`transport`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<crate::metadata::OperationName>,
+    /// The refused byte transport of a `permission_denied` event (a download, or an upload's
+    /// bytes, which are not operations); `operation` is then absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<crate::transport::TransportName>,
     /// Affected proposal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal_id: Option<crate::identity::ProposalId>,

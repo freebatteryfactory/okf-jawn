@@ -330,15 +330,15 @@ test('a ci gate names a job of the workflow by its check name, and that job runs
   }
  }
  // What clean-checkout-rerun says of the caches is what the workflow configures: the cargo cache
- // falls back to any cargo cache of the runner OS, the Bun cache has no fallback.
+ // falls back to a cargo cache of the runner OS and architecture, the Bun cache has no fallback.
  const cleanCheckout=gates.find(gate=>gate.id==='clean-checkout-rerun');
  const caches=Bun.YAML.parse(await read('.github/workflows/ci.yml')).jobs.foundation.steps.filter(step=>step.uses?.startsWith('actions/cache@')).map(step=>step.with);
  const cargoCache=caches.find(cache=>/^target$/m.test(cache.path)),bunCache=caches.find(cache=>cache.path.includes('~/.bun/install/cache'));
- assert.equal(cargoCache.key,"cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}");
- assert.equal(cargoCache['restore-keys'].trim(),'cargo-${{ runner.os }}-');
+ assert.equal(cargoCache.key,"cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}");
+ assert.equal(cargoCache['restore-keys'].trim(),'cargo-${{ runner.os }}-${{ runner.arch }}-');
  assert.equal(bunCache.key,"bun-${{ runner.os }}-${{ hashFiles('.bun-version', 'bun.lock') }}");
  assert.equal(bunCache['restore-keys'],undefined);
- assert.match(cleanCheckout.covers,/restored from a cache keyed on rust-toolchain\.toml and Cargo\.lock, with a fallback to the newest cargo cache of the same runner OS when none has that key, so `target` can come from another lockfile state/);
+ assert.match(cleanCheckout.covers,/restored from a cache keyed on rust-toolchain\.toml and Cargo\.lock, with a fallback to the newest cargo cache of the same runner OS and architecture when none has that key, so `target` can come from another lockfile state/);
  assert.match(cleanCheckout.covers,/Bun's install cache is keyed on \.bun-version and bun\.lock and has no fallback\./);
  assert.doesNotMatch(cleanCheckout.covers,/caches keyed on the lockfiles/);
  // "and the checkout" in deterministic-foundation is held by a workflow step that is no dev.mjs

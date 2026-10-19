@@ -36,6 +36,11 @@
 //! taking the destination (`Staged::occupied`); a move onto any other item's or file's key is
 //! refused as taken.
 //!
+//! A move with `keep_alias` first records the item's path in its frontmatter `aliases`
+//! (`record_alias`), after the move's refusals and before its first hop, so a rename by letter
+//! case records the item's own path, never the private one, and a move to the path the item holds
+//! records nothing.
+//!
 //! okf-core 0.2.7's `move_concept` appends `.md` to a moved concept's relative links to files
 //! that are not Markdown, on every move (`![p](pics/p.png)` becomes `![p](pics/p.png.md)`):
 //! `Link::resolve` gives an id for any relative target inside the bundle, and the outgoing-link
@@ -73,21 +78,22 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use git2::Repository;
+use okf_core::yaml::Value as Yaml;
 use okf_core::{
     Bundle, ConceptId, Document, Link, LinkKind, LinkRewriteAction, MoveOptions, RefactorError,
     compute_relative_path, rebase_relative_path, rewrite_markdown_links,
 };
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::TextOrigin;
-use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath};
+use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath, collision_key_of};
 use okf_jawn_contract::item::{ItemStatus, TypeDefinition};
 use okf_jawn_core::items::{ApplicationHeader, refuse_header_change, refuse_header_in_type};
+use okf_jawn_core::portable::ALIASES_KEY;
 use okf_jawn_core::storage::{SourceCard, TreeEdit};
 
 use super::item::{
     CORRECTIONS_DIR, Holder, INDEX_FILE, ItemFile, LOG_FILE, RULES_FILE, SOURCES_DIR, SUPPLIED_DIR,
-    TYPES_FILE, bare_header, check_item_path, collision_key, is_item_path, is_reserved, new_item,
-    respelled,
+    TYPES_FILE, bare_header, check_item_path, is_item_path, is_reserved, new_item, respelled,
 };
 use super::repo::{commit_of, internal, materialize, materialize_at};
 use crate::data::io_error;
@@ -254,7 +260,7 @@ impl Staged {
     /// `path`. Every other file, folder and item counts.
     fn occupied(&self, path: &WorkspacePath, own: Option<&str>) -> Result<bool, ApiError> {
         let key = path.collision_key();
-        let own = own.filter(|own| collision_key(own) == key);
+        let own = own.filter(|own| collision_key_of(own) == key);
         if own.is_none() && self.root.join(path.as_str()).exists() {
             return Ok(true);
         }
@@ -267,13 +273,13 @@ impl Staged {
             if own == Some(existing.as_str()) {
                 return false;
             }
-            let existing = collision_key(existing);
+            let existing = collision_key_of(existing);
             // Anything below `path` is under a folder at its key, which is an entry itself.
             existing == key || (!folder && folders.contains(&existing.as_str()))
         }) || self
             .items
             .values()
-            .any(|existing| own != Some(existing.as_str()) && collision_key(existing) == key))
+            .any(|existing| own != Some(existing.as_str()) && collision_key_of(existing) == key))
     }
 }
 
@@ -336,7 +342,8 @@ fn apply_one(repository: &Repository, staged: &mut Staged, edit: TreeEdit) -> Re
         TreeEdit::MoveItem {
             item_id,
             destination,
-        } => move_item(staged, item_id, &destination),
+            keep_alias,
+        } => move_item(staged, item_id, &destination, keep_alias),
         TreeEdit::SetStatus {
             item_id,
             status,
@@ -721,6 +728,7 @@ fn move_item(
     staged: &mut Staged,
     item: ItemId,
     destination: &WorkspacePath,
+    keep_alias: bool,
 ) -> Result<(), ApiError> {
     check_item_path(destination, "/destination")?;
     staged.refuse_respelled_folder(destination, false, "/destination")?;
@@ -734,7 +742,10 @@ fn move_item(
             destination.as_str()
         )));
     }
-    if collision_key(&source) != destination.collision_key() {
+    if keep_alias {
+        record_alias(staged, item, &source)?;
+    }
+    if collision_key_of(&source) != destination.collision_key() {
         return relink(staged, &source, destination.as_str(), Some("/destination"));
     }
     // A rename that changes only letter case goes by a private path (the module header). The
@@ -764,6 +775,45 @@ fn move_item(
     )?;
     let landed = staged.root.join(destination.as_str());
     std::fs::write(&landed, bytes).map_err(|error| io_error("write", &landed, &error))
+}
+
+/// Record `source`, the item's path before the move it is about to take, in its frontmatter
+/// `aliases` (`TreeEdit::MoveItem`'s `keep_alias`): an absent value becomes a list of it, a
+/// string a list of the string and it, and a list of strings gains it unless it holds it. Any
+/// other value refuses the move with `InvalidInput` naming the item, and is not written over.
+fn record_alias(staged: &mut Staged, item: ItemId, source: &str) -> Result<(), ApiError> {
+    let (path, mut file) = staged.read(item)?;
+    let old = Yaml::String(source.to_owned());
+    let aliases = match file.document.frontmatter.get(ALIASES_KEY) {
+        None => vec![old],
+        Some(Yaml::String(text)) if text == source => vec![old],
+        Some(Yaml::String(text)) => vec![Yaml::String(text.clone()), old],
+        Some(Yaml::Sequence(listed))
+            if listed.iter().all(|alias| matches!(alias, Yaml::String(_))) =>
+        {
+            let mut listed = listed.clone();
+            if !listed
+                .iter()
+                .any(|alias| matches!(alias, Yaml::String(text) if text == source))
+            {
+                listed.push(old);
+            }
+            listed
+        }
+        Some(_) => {
+            return Err(ApiError::new(
+                ErrorCode::InvalidInput,
+                format!(
+                    "{path} holds `{ALIASES_KEY}` that is not a list of paths, so its old path is \
+                     not recorded over it; make it a list, or leave it out"
+                ),
+            ));
+        }
+    };
+    file.document
+        .frontmatter
+        .set(ALIASES_KEY, Yaml::Sequence(aliases));
+    staged.write(&path, &file)
 }
 
 /// Move the item file at `current` to a private path beside it, with every link that points at
@@ -1111,6 +1161,17 @@ pub(crate) fn correction_file(item: ItemId, digest: &Digest) -> String {
     format!("{}/{}.json", corrections_folder(item), digest.as_str())
 }
 
+/// Whether the tree path `path` is one of the item's companion files, which `RestoreItem` sets
+/// back with it (`restore_items`): its source appearance, its accepted supplied text, or a file
+/// anywhere in its corrections folder.
+pub(crate) fn is_companion(path: &str, item: ItemId) -> bool {
+    path == appearance_file(item)
+        || path == supplied_file(item)
+        || path
+            .strip_prefix(&corrections_folder(item))
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
 /// The tree path of the folder holding every correction of one item.
 fn corrections_folder(item: ItemId) -> String {
     format!("{CORRECTIONS_DIR}/{}", item.0)
@@ -1195,7 +1256,7 @@ fn spelled_in(directory: &Path, segment: &str, folders: bool) -> Result<Option<S
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(io_error("read", directory, &error)),
     };
-    let key = collision_key(segment);
+    let key = collision_key_of(segment);
     let mut other = None;
     for entry in entries {
         let entry = entry.map_err(|error| io_error("read", directory, &error))?;
@@ -1212,7 +1273,7 @@ fn spelled_in(directory: &Path, segment: &str, folders: bool) -> Result<Option<S
         if name == segment {
             return Ok(Some(name));
         }
-        if collision_key(&name) == key {
+        if collision_key_of(&name) == key {
             other = Some(name);
         }
     }

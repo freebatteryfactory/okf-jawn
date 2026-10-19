@@ -615,6 +615,7 @@ async fn seed_review(seeded: &Seeded) -> TestResult {
         connector_id: None,
         actor: None,
         operation: None,
+        transport: None,
         proposal_id: None,
         count: None,
     };
@@ -693,6 +694,7 @@ async fn seed_installation(seeded: &Seeded) -> TestResult {
         connector_id: None,
         actor: None,
         operation: None,
+        transport: None,
         proposal_id: None,
         count: None,
     };
@@ -963,7 +965,10 @@ async fn assert_notes(storage: &Storage, scope: &StorageScope, head: &Revision) 
         "the link to the schedule in the other folder"
     );
     let rules = some(versions.rules(scope, head).await?, "the naming rules")?;
-    assert_eq!(serde_json::to_value(rules)?, naming_rules());
+    let parsed = rules
+        .parsed
+        .map_err(|error| format!("the archive's naming rules do not read: {error:?}"))?;
+    assert_eq!(serde_json::to_value(parsed)?, naming_rules());
     Ok(())
 }
 

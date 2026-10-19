@@ -884,6 +884,212 @@ async fn an_expected_head_the_repository_never_held_conflicts() -> TestResult {
     Ok(())
 }
 
+/// A revision of 64 hex characters, which `Revision` accepts and a SHA-1 repository can never
+/// hold.
+fn sha256_revision() -> Fallible<Revision> {
+    Ok(Revision::try_from("ab".repeat(32))?)
+}
+
+/// Assert `error` is the answer to a revision that names no commit here: `NotFound`, never
+/// `Unavailable` (sweep-1 review N5), and no field (the caller names it).
+fn assert_no_such_revision(error: &ApiError, what: &str) {
+    assert_eq!(error.code, ErrorCode::NotFound, "{what}: {}", error.message);
+    assert_eq!(
+        error.message, "No revision with that identity here",
+        "{what}"
+    );
+    assert_eq!(error.field, None, "{what}");
+}
+
+/// Sweep-1 review N5: every read that names a revision of 64 hex characters (`commit_of`)
+/// answers that no such revision is here, as for a 40-character one the repository never held,
+/// never `Unavailable`, which a caller would retry.
+#[tokio::test]
+async fn a_64_hex_revision_a_read_names_is_not_found() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let head = versions
+        .commit(
+            &scope,
+            changes(2, &initial, vec![note(uuid!(10)?, "a.md", "A.\n")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let long = sha256_revision()?;
+    let page = || Page {
+        cursor: None,
+        limit: 10,
+    };
+    let at = path("a.md")?;
+    let item = uuid!(10)?;
+    let diff = |from: &Revision, to: &Revision| okf_jawn_core::storage::DiffQuery {
+        from: from.clone(),
+        to: to.clone(),
+        item_id: None,
+    };
+    let checks: Vec<(&str, Result<(), ApiError>)> = vec![
+        (
+            "list",
+            versions.list(&scope, &long, None, page()).await.map(drop),
+        ),
+        (
+            "item_at_path",
+            versions.item_at_path(&scope, &long, &at).await.map(drop),
+        ),
+        ("show", versions.show(&scope, &long, item).await.map(drop)),
+        (
+            "read_file",
+            versions.read_file(&scope, &long, &at).await.map(drop),
+        ),
+        ("rules", versions.rules(&scope, &long).await.map(drop)),
+        ("types", versions.types(&scope, &long).await.map(drop)),
+        (
+            "correction",
+            versions
+                .correction(
+                    &scope,
+                    &long,
+                    item,
+                    &okf_jawn_contract::identity::Digest::try_from("c".repeat(64))?,
+                )
+                .await
+                .map(drop),
+        ),
+        (
+            "diff from",
+            versions.diff(&scope, diff(&long, &head)).await.map(drop),
+        ),
+        (
+            "diff to",
+            versions.diff(&scope, diff(&head, &long)).await.map(drop),
+        ),
+        (
+            "blame",
+            versions
+                .blame(
+                    &scope,
+                    okf_jawn_core::storage::BlameQuery {
+                        revision: long.clone(),
+                        item_id: item,
+                        lines: okf_jawn_contract::common::TextRange { start: 1, end: 1 },
+                    },
+                )
+                .await
+                .map(drop),
+        ),
+        (
+            "body_start",
+            versions.body_start(&scope, &long, item).await.map(drop),
+        ),
+        (
+            "find_commit since",
+            versions
+                .find_commit(&scope, uuid!(20)?, Some(&long))
+                .await
+                .map(drop),
+        ),
+        (
+            "write_history",
+            versions
+                .write_history(&scope, &long, uuid!(21)?)
+                .await
+                .map(drop),
+        ),
+    ];
+    for (what, result) in checks {
+        assert_no_such_revision(&err_of(result)?, what);
+    }
+    Ok(())
+}
+
+/// Sweep-1 review N5: a write whose expected head, candidate base or promoted candidate is a
+/// revision of 64 hex characters (`oid_of`, the held head among them) answers that no such
+/// revision is here and writes nothing.
+#[tokio::test]
+async fn a_64_hex_revision_a_write_names_is_not_found() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let long = sha256_revision()?;
+    let committed = versions
+        .commit(
+            &scope,
+            changes(20, &long, vec![note(uuid!(10)?, "a.md", "A.")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await;
+    assert_no_such_revision(&err_of(committed)?, "the expected head of a commit");
+    let candidate = versions
+        .create_candidate(
+            &scope,
+            uuid!(50)?,
+            CandidateChanges {
+                mutation_id: uuid!(21)?,
+                base: long.clone(),
+                author: person("agent"),
+                message: "Propose".to_owned(),
+                edits: vec![note(uuid!(11)?, "b.md", "B.")?],
+            },
+            Arc::new(Counting::default()),
+        )
+        .await;
+    assert_no_such_revision(&err_of(candidate)?, "the base of a candidate");
+    let promotion = |expected_head: &Revision, candidate: &Revision| -> Fallible<Promotion> {
+        Ok(Promotion {
+            mutation_id: uuid!(22)?,
+            proposal_id: uuid!(50)?,
+            expected_head: expected_head.clone(),
+            candidate: candidate.clone(),
+            approver: person("ana"),
+            message: "Accept".to_owned(),
+        })
+    };
+    for (what, expected_head, promoted) in [
+        ("the expected head of a promotion", &long, &initial),
+        ("the candidate of a promotion", &initial, &long),
+    ] {
+        let refused = versions
+            .promote_candidate(&scope, promotion(expected_head, promoted)?)
+            .await;
+        assert_no_such_revision(&err_of(refused)?, what);
+    }
+    assert_eq!(versions.head(&scope).await?, initial, "nothing was written");
+    Ok(())
+}
+
+/// Sweep-1 review N5: a continuation whose tip is a revision of 64 hex characters (core's cursor
+/// carries the tip it hands back as the log's tip and the listing's revision) answers that no
+/// such revision is here.
+#[tokio::test]
+async fn a_cursor_whose_tip_is_a_64_hex_revision_is_not_found() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, _) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let long = sha256_revision()?;
+    let page = || Page {
+        cursor: Some("1".to_owned()),
+        limit: 1,
+    };
+    for item_id in [None, Some(uuid!(10)?)] {
+        let continued = versions
+            .log(
+                &scope,
+                LogQuery {
+                    tip: long.clone(),
+                    item_id,
+                    page: page(),
+                },
+            )
+            .await;
+        assert_no_such_revision(&err_of(continued)?, "a log continued from the tip");
+    }
+    let listed = versions.list(&scope, &long, None, page()).await;
+    assert_no_such_revision(&err_of(listed)?, "a listing continued at the tip");
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_refusal_never_names_the_server_staging_directory() -> TestResult {
     let directory = tempfile::tempdir()?;
@@ -900,6 +1106,69 @@ async fn a_refusal_never_names_the_server_staging_directory() -> TestResult {
     )?;
     assert_eq!(error.code, ErrorCode::InvalidInput);
     assert_eq!(error.message, "notes/x.md is not conformant");
+    Ok(())
+}
+
+/// Assert that `message` holds no part of the absolute path of the data directory `data`: not
+/// the path in either separator, and none of its components (its drive letter included) as a
+/// segment of the message.
+fn assert_names_no_machine_path(message: &str, data: &Path) {
+    let root = data.to_string_lossy();
+    let forward = root.replace('\\', "/");
+    for whole in [root.as_ref(), forward.as_str()] {
+        assert!(!message.contains(whole), "{whole:?} is in {message:?}");
+    }
+    // A component is looked for as a whole segment of the message, not as a substring: a short
+    // one (`T`, `4f` in a macOS temp root) can occur by chance inside a workspace id or in
+    // libgit2's words.
+    let segments: Vec<&str> = message
+        .split(['/', '\\', ' ', '\'', '"', '`', '(', ')', ',', ';'])
+        .collect();
+    for part in forward.split('/').filter(|part| !part.is_empty()) {
+        assert!(
+            !segments.contains(&part),
+            "{part:?} is a segment of {message:?}"
+        );
+    }
+}
+
+/// Git errors name no machine path (sweep 2a, ruling 10): a commit whose reference move libgit2
+/// refuses (a lock file another writer left on `refs/heads/main`) is the version store's
+/// `Unavailable`, with libgit2's class and code, and names the locked file relative to the data
+/// directory, never by its absolute path, a user name or a drive letter.
+#[tokio::test]
+async fn a_git_failure_names_its_path_relative_to_the_data_directory() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let repository = repository_path(directory.path(), &scope);
+    std::fs::write(repository.join("refs").join("heads").join("main.lock"), b"")?;
+    let error = err_of(
+        storage
+            .versions()
+            .commit(
+                &scope,
+                changes(20, &initial, vec![note(uuid!(10)?, "a.md", "A.")?])?,
+                Arc::new(Counting::default()),
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Unavailable, "{}", error.message);
+    // libgit2's class and code of the failure: `Os` (the lock file is a filesystem fault),
+    // `Locked`.
+    assert!(
+        error
+            .message
+            .starts_with("the version store failed (Os, Locked): "),
+        "{}",
+        error.message
+    );
+    let relative = format!(
+        "repositories/local/{}.git/refs/heads/main.lock",
+        scope.workspace_id.0
+    );
+    assert!(error.message.contains(&relative), "{}", error.message);
+    assert_names_no_machine_path(&error.message, directory.path());
+    assert_eq!(storage.versions().head(&scope).await?, initial);
     Ok(())
 }
 
@@ -930,6 +1199,7 @@ async fn a_move_or_folder_onto_a_reserved_name_is_refused_naming_the_path() -> T
                     vec![TreeEdit::MoveItem {
                         item_id: uuid!(10)?,
                         destination: path("notes/Index.md")?,
+                        keep_alias: false,
                     }],
                 )?,
                 Arc::new(Counting::default()),
@@ -1071,6 +1341,7 @@ async fn items_are_shown_listed_moved_with_their_links_and_archived() -> TestRes
                     TreeEdit::MoveItem {
                         item_id: uuid!(11)?,
                         destination: path("plans/b.md")?,
+                        keep_alias: false,
                     },
                     TreeEdit::SetStatus {
                         item_id: uuid!(10)?,

@@ -132,6 +132,7 @@ impl PurgeWorld {
             confirmations: unused.clone(),
             sandbox: base.sandbox.clone(),
             readiness: base.readiness.clone(),
+            backups: unused.clone(),
         };
         Ok(Self {
             service: ApplicationService::new(ports, config())?,

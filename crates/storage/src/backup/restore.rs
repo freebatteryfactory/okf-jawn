@@ -31,10 +31,16 @@
 //!   (`replacement_restores`). It refuses, in this order: an archive of another tenant; a
 //!   workspace any recorded purge names, finished or not; and a workspace that exists, unless
 //!   that record names this same archive file and its head is still the archive's, which is the
-//!   same restore run again after a stop in a later workspace: it is accepted as it is.
+//!   same restore run again after a stop in a later workspace: it is accepted as it is. A
+//!   replacement whose rows fail at the copy (a constraint across the set's archives, an
+//!   encoding the check did not read) leaves the installation's rows, the workspaces restored
+//!   before it in full, and of its own workspace the objects (recorded as pending puts) and the
+//!   history, but no row; a run again with a good set completes over them
+//!   (`StorageBackups::restore_replacement`).
 //!
-//! Known gap: a View's bindings name its workspace, and the on-disk form of a View document
-//! is not decided yet (core-cli M1.6), so an import does not rewrite them.
+//! A View's file names no workspace: its bindings bind to the workspace that holds it (core
+//! `views::layout`, core M1.6 ruling E1), so an import has nothing to rewrite in it, at the head
+//! or at any revision of its history, and the restore commit keeps the archive head's tree.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -53,7 +59,8 @@ use crate::blobs::file_reader;
 use crate::data::io_error;
 use crate::db::{conflict, internal, sql};
 use crate::git::repo::{
-    HEAD_REF, git, head, message_with_trailer, respelled_in_archive, sync_directories, trailer_of,
+    HEAD_REF, git, git_message, head, message_with_trailer, respelled_in_archive, sync_directories,
+    trailer_of,
 };
 use crate::pins::Pinned;
 use crate::purge::references::{self, Rows};
@@ -405,7 +412,7 @@ fn refuse_unpackable(scratch: &Repository, tips: &[Oid]) -> Result<(), ApiError>
         if error.code() == git2::ErrorCode::NotFound {
             invalid(&format!(
                 "the history does not hold an object a commit needs: {}",
-                error.message()
+                git_message(&error)
             ))
         } else {
             git(&error)
