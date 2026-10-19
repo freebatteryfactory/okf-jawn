@@ -160,7 +160,7 @@ async fn job_mutation_is_the_immutable_origin_of_the_known_job() -> TestResult {
     Ok(())
 }
 
-/// The internal origin lookup has get_job's tenant/workspace boundary. Knowing a JobId
+/// The internal origin lookup has `get_job`'s tenant/workspace boundary. Knowing a `JobId`
 /// supplies no authority to read its origin in another scope (SPEC section 11).
 #[tokio::test]
 async fn job_mutation_refuses_an_unknown_job_or_a_wrong_tenant_or_workspace() -> TestResult {

@@ -253,7 +253,7 @@ fn accepted(
     number: u128,
     route: &str,
     candidate: char,
-    changes: serde_json::Value,
+    changes: &serde_json::Value,
 ) -> Built<()> {
     accepted_from(scan, number, route, '0', candidate, changes)
 }
@@ -265,7 +265,7 @@ fn accepted_from(
     route: &str,
     base: char,
     candidate: char,
-    changes: serde_json::Value,
+    changes: &serde_json::Value,
 ) -> Built<()> {
     let held = serde_json::from_value(json!({
         "id": ProposalId(Uuid::from_u128(number)),
@@ -533,7 +533,7 @@ async fn attention_unreviewed_content_an_agents_accepted_proposal_wrote() -> Tes
         800,
         "mcp_delegation",
         'e',
-        json!([
+        &json!([
             { "kind": "edit", "item_id": edited.summary.id, "body": "text", "properties": {} },
             { "kind": "create", "path": "p/created.md", "type_name": "Note", "body": "text",
               "properties": {} },
@@ -547,7 +547,7 @@ async fn attention_unreviewed_content_an_agents_accepted_proposal_wrote() -> Tes
         801,
         "local_owner",
         'e',
-        json!([{ "kind": "edit", "item_id": by_person.summary.id, "body": "text",
+        &json!([{ "kind": "edit", "item_id": by_person.summary.id, "body": "text",
                  "properties": {} }]),
     )?;
     // A candidate the store no longer holds (revision `f` is unknown to it).
@@ -556,7 +556,7 @@ async fn attention_unreviewed_content_an_agents_accepted_proposal_wrote() -> Tes
         802,
         "mcp_delegation",
         'f',
-        json!([
+        &json!([
             { "kind": "edit", "item_id": by_person.summary.id, "body": "text",
               "properties": {} },
             { "kind": "create", "path": "p/by-person.md", "type_name": "Note", "body": "text",
@@ -717,7 +717,7 @@ async fn attention_agent_proposal_excludes_matching_content_at_its_exact_base() 
         "mcp_delegation",
         'a',
         'e',
-        json!([{ "kind": "edit", "item_id": item(87),
+        &json!([{ "kind": "edit", "item_id": item(87),
         "body": "text", "properties": {} }]),
     )?;
     let response = attention_at(
@@ -750,9 +750,9 @@ async fn attention_every_page_of_the_accepted_proposals_is_read() -> TestResult 
         .put_document(&revision('e')?, document.clone())?;
     let edit = json!([{ "kind": "edit", "item_id": document.summary.id, "body": "text",
                         "properties": {} }]);
-    accepted(&scan, 820, "mcp_delegation", 'e', edit.clone())?;
+    accepted(&scan, 820, "mcp_delegation", 'e', &edit)?;
     for number in 821..=1020 {
-        accepted(&scan, number, "local_owner", 'e', edit.clone())?;
+        accepted(&scan, number, "local_owner", 'e', &edit)?;
     }
     let row = only(&every_row(&scan).await?, &AttentionKind::Unreviewed)?;
     assert!(row.message.contains("agent-820"), "{}", row.message);
@@ -774,7 +774,7 @@ async fn attention_a_candidate_that_cannot_be_read_fails_the_request() -> TestRe
         810,
         "mcp_delegation",
         'e',
-        json!([{ "kind": "edit", "item_id": document.summary.id, "body": "text",
+        &json!([{ "kind": "edit", "item_id": document.summary.id, "body": "text",
                  "properties": {} }]),
     )?;
     // The scan shows the one item of the head, then the candidate.
@@ -841,12 +841,8 @@ fn partial(not_converted: Vec<PageRange>) -> ConversionOutcome {
     }
 }
 
-/// `Unprocessed` for a partial, failed or unsupported source, supplied text or not; its pages
-/// as the selection when they are one range. `ExtractionWarnings` for a completed source with
-/// warnings only.
-#[tokio::test]
-async fn attention_unprocessed_and_extraction_warnings_follow_the_converters_verdict() -> TestResult
-{
+/// The same ten literal conversion outcomes, scanned together for the verdict assertions.
+async fn conversion_verdict_rows() -> Built<Vec<AttentionItem>> {
     let scan = scan_world()?;
     let warned = vec![ExtractionWarning::UnlocatedItems { items: 2 }];
     let mut supplied_failed = extraction(
@@ -930,7 +926,16 @@ async fn attention_unprocessed_and_extraction_warnings_follow_the_converters_ver
         object = if object == 'a' { 'b' } else { 'a' };
         put(&scan, &card(number, location, extraction, object)?)?;
     }
-    let rows = every_row(&scan).await?;
+    every_row(&scan).await
+}
+
+/// `Unprocessed` for a partial, failed or unsupported source, supplied text or not; its pages
+/// as the selection when they are one range. `ExtractionWarnings` for a completed source with
+/// warnings only.
+#[tokio::test]
+async fn attention_unprocessed_and_extraction_warnings_follow_the_converters_verdict() -> TestResult
+{
+    let rows = conversion_verdict_rows().await?;
     assert_eq!(
         named(&rows, &AttentionKind::Unprocessed),
         [110, 111, 112, 113, 117, 118, 119]
@@ -1317,7 +1322,7 @@ async fn attention_newer_source_names_the_pinned_view_without_refreshing_or_mate
     Ok(())
 }
 
-/// Literal exclusions from AttentionKind::NewerSource and R4: unchanged, live and archived
+/// Literal exclusions from `AttentionKind::NewerSource` and R4: unchanged, live and archived
 /// Views are not pinned Views with newer visible inputs. Worlds share no mutable state.
 #[tokio::test]
 async fn attention_newer_source_leaves_unchanged_live_and_archived_views_out() -> TestResult {
