@@ -1,10 +1,12 @@
 //! A folder as a whole against real Git repositories, on the filesystem the tests run on: the
 //! store's `TreeEdit::MoveFolder` (every link resolving after, the files that are not items, a
-//! rename by letter case, the refusals that need the tree, what the check is told), and
-//! `move_folder` through `ApplicationService` composed over the same data directory and driven
-//! through core's dispatch, as `purge_ledger_service.rs` drives it: a folder of items with links
-//! in and out, a rename that changes only letter case, a conflict from a change under the
-//! folder and none from a change elsewhere.
+//! rename by letter case, the refusals that need the tree, what the check is told) and
+//! `TreeEdit::DeleteFolder` (every item with its companion files, the other files, the
+//! refusals), and `move_folder` and `delete_folder` through `ApplicationService` composed over
+//! the same data directory and driven through core's dispatch, as `purge_ledger_service.rs`
+//! drives it: a folder of items with links in and out, a rename that changes only letter case,
+//! a conflict from a change under the folder and none from a change elsewhere, and a delete
+//! whose items Rewind brings back with their history.
 //!
 //! Windows and macOS hold `Notes/` and `notes/` as one folder; Linux and Git hold two. Every
 //! assertion reads the committed tree straight from Git, so each holds on both kinds of
@@ -39,7 +41,7 @@ use okf_jawn_core::jobs::{JobQueue, JobScope};
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
     CandidateCheck, CommitChanges, Committed, FOLDER_OTHER_FILES, LocalSource, NewWorkspace,
-    Provenance, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
+    Provenance, SourceCard, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
 };
 use okf_jawn_storage::Storage;
 use serde_json::{Value, json};
@@ -1196,6 +1198,291 @@ async fn move_folder_through_the_service_commits_past_a_change_elsewhere() -> Te
         space.body(&revision, 11).await?,
         "# Late\n\nTo [a](../archive/a.md)."
     );
+    Ok(())
+}
+
+/// A source card at `at` whose extraction digest is `a`×64, with an appearance the store keeps
+/// under `.okf/sources/`.
+fn card(item: u32, at: &str) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::WriteSourceCard(Box::new(SourceCard {
+        item_id: uuid!(item)?,
+        path: path(at)?,
+        title: "scan.pdf".to_owned(),
+        type_name: "Source".to_owned(),
+        body: "Converted.".to_owned(),
+        properties: BTreeMap::new(),
+        appearance: serde_json::from_value(json!({
+            "object": "d".repeat(64),
+            "names": [{
+                "filename": "scan.pdf",
+                "folder": "sources",
+                "observed_at": "2026-10-09T12:00:00.000Z",
+                "supplied_by": "ana"
+            }],
+            "media_type": "application/pdf",
+            "size": "10",
+            "metadata": {},
+            "extraction": {
+                "outcome": { "status": "unsupported" },
+                "digest": "a".repeat(64),
+                "text_origin": "none",
+                "corrected": false,
+                "warnings": []
+            }
+        }))?,
+    })))
+}
+
+/// F3: every item under the folder goes, each with its companion files (a card's appearance
+/// its accepted supplied text and its corrections), then every other file and the folder;
+/// what is outside stays; the
+/// files that are not items are counted in one warning; the base still holds everything.
+#[tokio::test]
+async fn delete_folder_removes_everything_under_it_with_the_companions() -> TestResult {
+    let space = Workspace::new().await?;
+    space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "notes/a.md", "A.")?,
+                card(11, "notes/sub/scan.md")?,
+                TreeEdit::CorrectDigest {
+                    item_id: uuid!(11)?,
+                    digest: serde_json::from_value(json!("a".repeat(64)))?,
+                    corrected_markdown: "Corrected.".to_owned(),
+                    adopts: None,
+                },
+                TreeEdit::SupplyExtraction {
+                    item_id: uuid!(11)?,
+                    based_on: Some(serde_json::from_value(json!("a".repeat(64)))?),
+                    pages: Vec::new(),
+                    markdown: "Accepted supplied text.".to_owned(),
+                    proposal_id: uuid!(14)?,
+                    supplier: person(),
+                },
+                note(12, "elsewhere/e.md", "E to [a](../notes/a.md).")?,
+                note(13, "notes-old/k.md", "Kept.")?,
+            ],
+        )
+        .await?;
+    let base = space.raw(3, &[("notes/p.png", PICTURE)])?;
+    let card_files: Vec<String> = space
+        .files(&base)?
+        .into_iter()
+        .filter(|file| file.contains(&uuid_text(11)))
+        .collect();
+    assert_eq!(
+        card_files,
+        vec![
+            format!(".okf/corrections/{}/{}.json", uuid_text(11), "a".repeat(64)),
+            format!(".okf/sources/{}.json", uuid_text(11)),
+            format!(".okf/supplied/{}.json", uuid_text(11)),
+        ],
+        "all three companion kinds are present before deletion"
+    );
+    let deleted = space
+        .commit(
+            4,
+            &base,
+            vec![TreeEdit::DeleteFolder {
+                folder: path("notes")?,
+            }],
+        )
+        .await?;
+    let files = space.files(&deleted.revision)?;
+    assert!(
+        files
+            .iter()
+            .all(|file| !file.starts_with("notes/") && !file.contains(&uuid_text(11))),
+        "{files:?}"
+    );
+    assert!(files.contains(&"elsewhere/e.md".to_owned()), "{files:?}");
+    assert!(files.contains(&"notes-old/k.md".to_owned()), "{files:?}");
+    assert_eq!(
+        other_files(&deleted.warnings),
+        vec![(
+            "1 file that is not an item was deleted with the folder notes".to_owned(),
+            Some("notes".to_owned())
+        )]
+    );
+    for file in card_files {
+        assert!(space.file(&base, &file)?.is_some(), "the base keeps {file}");
+    }
+    assert_eq!(space.body(&base, 10).await?, "A.");
+    Ok(())
+}
+
+/// F3, F7 at the store: a reserved folder or one spelled another way is `InvalidInput` on
+/// `/folder`; a folder the tree does not hold, or a file, `NotFound` on `/folder`; each
+/// before anything is written.
+#[tokio::test]
+async fn delete_folder_refuses_what_the_tree_does_not_allow_and_writes_nothing() -> TestResult {
+    let space = Workspace::new().await?;
+    space
+        .commit(
+            2,
+            &space.initial,
+            vec![note(10, "Notes/a.md", "A.")?, note(11, "top.md", "Top.")?],
+        )
+        .await?;
+    let head = space.head().await?;
+    let cases = [
+        (".okf", ErrorCode::InvalidInput),
+        ("Notes/INDEX.md", ErrorCode::InvalidInput),
+        ("notes", ErrorCode::InvalidInput),
+        ("missing", ErrorCode::NotFound),
+        ("top.md", ErrorCode::NotFound),
+    ];
+    for (number, (folder, code)) in (20..).zip(cases) {
+        let refused = space
+            .refused(
+                number,
+                &head,
+                vec![TreeEdit::DeleteFolder {
+                    folder: path(folder)?,
+                }],
+            )
+            .await?;
+        assert_eq!(refused.code, code, "{folder}: {}", refused.message);
+        assert_eq!(refused.field.as_deref(), Some("/folder"), "{folder}");
+    }
+    Ok(())
+}
+
+/// F3 through the service: one commit, the items counted (the archived one too), a draft of a
+/// deleted item kept as `delete_item` keeps one, Rewind bringing each item back with its
+/// history, and a folder that does not exist `not_found` on `/folder`.
+#[tokio::test]
+async fn delete_folder_through_the_service_and_rewind_brings_the_items_back() -> TestResult {
+    let service = Service::new().await?;
+    let space = &service.workspace;
+    let created = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "notes/a.md", "# A\n\nKept in history.")?,
+                note(11, "notes/sub/b.md", "# B")?,
+            ],
+        )
+        .await?
+        .revision;
+    let base = space
+        .commit(
+            3,
+            &created,
+            vec![TreeEdit::SetStatus {
+                item_id: uuid!(11)?,
+                status: None,
+                archived: Some(true),
+            }],
+        )
+        .await?
+        .revision;
+    let workspace = space.scope.workspace_id;
+    service
+        .call(
+            "save_draft",
+            json!({
+                "workspace_id": workspace, "item_id": uuid_text(10), "base_revision": base,
+                "body": "A draft.", "properties": { "type": "Note", "title": "Note 10" },
+                "idempotency_key": uuid_text(50),
+            }),
+        )
+        .await?;
+    let response = service
+        .call(
+            "delete_folder",
+            json!({
+                "workspace_id": workspace, "base_revision": base, "folder": "notes",
+                "idempotency_key": uuid_text(51),
+            }),
+        )
+        .await?;
+    assert_eq!(response.get("items"), Some(&json!(2)), "{response}");
+    let deleted: Revision =
+        serde_json::from_value(some(response.get("revision"), "the revision")?.clone())?;
+    assert_eq!(space.parents(&deleted)?, vec![base.clone()]);
+    assert!(
+        space
+            .files(&deleted)?
+            .iter()
+            .all(|file| !file.starts_with("notes/")),
+        "nothing under notes/"
+    );
+    let drafts = service
+        .call(
+            "list_drafts",
+            json!({ "workspace_id": workspace, "page": { "limit": 20 } }),
+        )
+        .await?;
+    assert_eq!(
+        drafts.pointer("/items/0/draft/item_id"),
+        Some(&json!(uuid_text(10))),
+        "{drafts}"
+    );
+    assert_eq!(
+        drafts.pointer("/items/0/item"),
+        None,
+        "the item is gone: {drafts}"
+    );
+    let mut head = deleted;
+    for (number, item) in [(52, 10), (53, 11)] {
+        let restored = service
+            .call(
+                "restore_items",
+                json!({
+                    "workspace_id": workspace, "base_revision": head, "target": base,
+                    "item_id": uuid_text(item), "message": "Bring it back",
+                    "idempotency_key": uuid_text(number),
+                }),
+            )
+            .await?;
+        head = serde_json::from_value(some(restored.get("revision"), "the revision")?.clone())?;
+    }
+    assert_eq!(space.path_of(&head, 10).await?, "notes/a.md");
+    assert_eq!(space.body(&head, 10).await?, "# A\n\nKept in history.");
+    let back = space
+        .storage
+        .versions()
+        .show(&space.scope, &head, uuid!(11)?)
+        .await?
+        .summary;
+    assert_eq!(back.path.as_str(), "notes/sub/b.md");
+    assert!(back.archived, "it comes back as it was, archived");
+    let history = service
+        .call(
+            "log_items",
+            json!({
+                "workspace_id": workspace, "item_id": uuid_text(10),
+                "at": { "kind": "latest" }, "page": { "limit": 20 },
+            }),
+        )
+        .await?;
+    let revisions: Vec<Value> = some(history.get("commits"), "the commits")?
+        .as_array()
+        .map(|commits| {
+            commits
+                .iter()
+                .filter_map(|commit| commit.get("revision").cloned())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(revisions.contains(&json!(created)), "{history}");
+    let missing = err_of(
+        service
+            .call(
+                "delete_folder",
+                json!({
+                    "workspace_id": workspace, "base_revision": head, "folder": "gone",
+                    "idempotency_key": uuid_text(54),
+                }),
+            )
+            .await,
+    )?;
+    assert_eq!(missing.code, ErrorCode::NotFound, "{}", missing.message);
+    assert_eq!(missing.field.as_deref(), Some("/folder"));
     Ok(())
 }
 

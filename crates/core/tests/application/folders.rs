@@ -1,8 +1,9 @@
-//! Folders as a whole over the fakes: `move_folder` is one commit of one `TreeEdit::MoveFolder`
-//! that counts the folder's items at the base, archived ones included; the paths alone are
-//! refused before any port; and "a folder changed since `base_revision` conflicts": the edit
-//! is committed on the base, and when the head moved, on the head only when the store's
-//! comparison shows nothing under the folder or the destination changed.
+//! Folders as a whole over the fakes: `move_folder` and `delete_folder` are each one commit of
+//! one edit (`TreeEdit::MoveFolder`, `TreeEdit::DeleteFolder`) that counts the folder's items
+//! at the base, archived ones included; the paths alone are refused before any port; and "a
+//! folder changed since `base_revision` conflicts": the edit is committed on the base, and when
+//! the head moved, on the head only when the store's comparison shows nothing under the folder
+//! (or a move's destination) changed.
 //!
 //! The fake applies no folder edit and rewrites no link, so what the store does under the
 //! folder (every link resolving after, a case-only rename, the refusals that need the tree) is
@@ -13,7 +14,7 @@ use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::events::{EventKind, ReceiptAudience};
 use okf_jawn_contract::history::{FileChange, FileChangeKind};
 use okf_jawn_contract::identity::{IdempotencyKey, PurgeId, Revision};
-use okf_jawn_contract::item::{FolderResult, MoveFolderRequest};
+use okf_jawn_contract::item::{DeleteFolderRequest, FolderResult, MoveFolderRequest};
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_core::jobs::RevisionMapping;
 use okf_jawn_core::ports::Application;
@@ -502,5 +503,123 @@ async fn move_folder_retried_after_its_commit_answers_the_first_attempt() -> Tes
             "{head_moved}: one receipt"
         );
     }
+    Ok(())
+}
+fn delete_request(folder: &str) -> Built<DeleteFolderRequest> {
+    Ok(DeleteFolderRequest {
+        workspace_id: scope()?.workspace_id,
+        base_revision: revision('a')?,
+        folder: path(folder)?,
+        idempotency_key: key(),
+    })
+}
+
+/// Delete a folder as Alice under mutation `number`, as `moved` moves one.
+async fn deleted(
+    world: &World,
+    number: u128,
+    request: DeleteFolderRequest,
+) -> Result<FolderResult, ApiError> {
+    let context = alice(OperationName::DeleteFolder, Some(mutation(number)))
+        .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+    world.service.delete_folder(&context, request).await
+}
+
+/// F3, F6: one commit of one edit on the base; the items under `notes/` are counted, the
+/// archived one included; nothing is compared while the head is the base; a receipt is kept.
+#[tokio::test]
+async fn delete_folder_commits_one_edit_on_its_base_and_counts_the_items_archived_ones_too()
+-> TestResult {
+    let world = folder_world()?;
+    world.versions.queue_revision(revision('b')?)?;
+    let result = deleted(&world, 1, delete_request("notes")?).await?;
+    assert_eq!(result.revision, revision('b')?);
+    assert_eq!(
+        result.items, 2,
+        "notes/a.md and the archived notes/sub/b.md"
+    );
+    let commits = world.versions.commits()?;
+    let [commit] = commits.as_slice() else {
+        return Err(format!("not one commit: {}", commits.len()).into());
+    };
+    assert_eq!(commit.expected_head, revision('a')?);
+    assert_eq!(commit.message, "Delete folder notes");
+    assert!(
+        matches!(
+            commit.edits.as_slice(),
+            [TreeEdit::DeleteFolder { folder }] if folder.as_str() == "notes"
+        ),
+        "{:?}",
+        commit.edits
+    );
+    assert!(world.versions.diff_queries()?.is_empty());
+    assert_eq!(world.search.indexed()?, vec![revision('b')?]);
+    let receipts = world.records.receipts()?;
+    let [(under, receipt)] = receipts.as_slice() else {
+        return Err(format!("not one receipt: {}", receipts.len()).into());
+    };
+    assert_eq!(*under, Some(mutation(1)));
+    assert_eq!(receipt.id, result.receipt_id);
+    assert_eq!(receipt.operation_id, OperationName::DeleteFolder);
+    Ok(())
+}
+
+/// F7: a reserved folder (`.okf/` and below, a reserved name in any letter case) is refused on
+/// `/folder` before any port is read.
+#[tokio::test]
+async fn delete_folder_refuses_a_reserved_folder_before_any_port() -> TestResult {
+    for folder in [".okf", ".Okf/corrections", "notes/Log.md", "INDEX.MD"] {
+        let world = folder_world()?;
+        let refused = err_of(deleted(&world, 1, delete_request(folder)?).await)?;
+        assert_eq!(
+            refused.code,
+            ErrorCode::InvalidInput,
+            "{folder}: {refused:?}"
+        );
+        assert_eq!(refused.field.as_deref(), Some("/folder"), "{folder}");
+        assert_eq!(world.versions.trees(), 0, "{folder}: nothing read");
+        assert!(world.versions.commits()?.is_empty(), "{folder}");
+    }
+    Ok(())
+}
+
+/// F4: the head moved; a change under the folder conflicts, and a change anywhere else (a
+/// delete has no destination, so `archive/` is elsewhere too) is committed on the head.
+#[tokio::test]
+async fn delete_folder_conflicts_on_a_change_under_it_and_commits_past_one_elsewhere() -> TestResult
+{
+    let world = moved_head(vec![change(
+        FileChangeKind::Modified,
+        Some("notes/sub/b.md"),
+        Some("notes/sub/b.md"),
+    )])?;
+    let refused = err_of(deleted(&world, 1, delete_request("notes")?).await)?;
+    assert_stale(&world, &refused, &revision('c')?, "under the folder")?;
+    let world = moved_head(vec![
+        change(FileChangeKind::Added, None, Some("archive/new.md")),
+        change(FileChangeKind::Added, None, Some("notes-old/new.md")),
+    ])?;
+    let result = deleted(&world, 1, delete_request("notes")?).await?;
+    assert_eq!(result.revision, revision('d')?);
+    let commits = world.versions.commits()?;
+    assert_eq!(
+        commits.first().map(|commit| &commit.expected_head),
+        Some(&revision('c')?)
+    );
+    Ok(())
+}
+
+/// A retry after a failure past the commit answers the first attempt, compares nothing again
+/// and writes no second commit.
+#[tokio::test]
+async fn delete_folder_retried_after_its_commit_answers_the_first_attempt() -> TestResult {
+    let world = moved_head(Vec::new())?;
+    world.search.fail_next();
+    err_of(deleted(&world, 1, delete_request("notes")?).await)?;
+    let retried = deleted(&world, 1, delete_request("notes")?).await?;
+    assert_eq!(retried.revision, revision('d')?);
+    assert_eq!(retried.items, 2);
+    assert_eq!(world.versions.commits()?.len(), 1);
+    assert_eq!(world.versions.diff_queries()?.len(), 1);
     Ok(())
 }

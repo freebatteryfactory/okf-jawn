@@ -5,8 +5,8 @@
 //! `ApplicationConfig`; startup wires dependencies and does not hold application behavior. The
 //! `ports::Application` implementation for `ApplicationService` is organized as cohesive child
 //! modules of this one: `items` (folders, items and types), `folders` (a folder as a whole: its
-//! move), `drafts`, `reads` (`read_item` and sandbox capabilities), `sources` (citations and
-//! object reads), `history` (Timeline, Changes,
+//! move and delete), `drafts`, `reads` (`read_item` and sandbox capabilities), `sources`
+//! (citations and object reads), `history` (Timeline, Changes,
 //! Who, Snapshot and Rewind), `navigation` (search, links and the graph), `proposals`
 //! (proposals, their acceptance and discussion), `reviews` (confirmations and reviews),
 //! `conventions` (the naming rules: reading and saving them, a rename preview and its apply),
@@ -89,6 +89,9 @@ macro_rules! route {
     };
     (move_folder) => {
         folders::move_folder
+    };
+    (delete_folder) => {
+        folders::delete_folder
     };
     (create_folder) => {
         items::create_folder

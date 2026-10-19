@@ -139,40 +139,25 @@ async fn an_operation_of_a_later_part_answers_not_implemented() -> TestResult {
 
 /// The rows contract batch 2 added and no part has built yet answer `NotImplemented`, naming
 /// themselves, through the production service: core's `route!` sends an operation it does not
-/// name to `pending`. The proposals, upload slots and move-folder behavior have their own tests.
+/// name to `pending`. The proposals, upload slots and folder behavior have their own tests.
 #[tokio::test]
 async fn the_rows_of_contract_batch_2_answer_not_implemented() -> TestResult {
     let world = World::new()?;
     let workspace = scope()?.workspace_id;
     let upload = json!("77777777-7777-4777-8777-777777777777");
     let key = json!("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
-    let base = json!("a".repeat(40));
-    let refused = [
-        err_of(
-            world
-                .service
-                .discard_upload(
-                    &alice(OperationName::DiscardUpload, None)?,
-                    serde_json::from_value(json!({
-                        "workspace_id": workspace, "upload_id": upload, "idempotency_key": key
-                    }))?,
-                )
-                .await,
-        )?,
-        err_of(
-            world
-                .service
-                .delete_folder(
-                    &alice(OperationName::DeleteFolder, None)?,
-                    serde_json::from_value(json!({
-                        "workspace_id": workspace, "base_revision": base, "folder": "a",
-                        "idempotency_key": key
-                    }))?,
-                )
-                .await,
-        )?,
-    ];
-    let names = ["discard_upload", "delete_folder"];
+    let refused = [err_of(
+        world
+            .service
+            .discard_upload(
+                &alice(OperationName::DiscardUpload, None)?,
+                serde_json::from_value(json!({
+                    "workspace_id": workspace, "upload_id": upload, "idempotency_key": key
+                }))?,
+            )
+            .await,
+    )?];
+    let names = ["discard_upload"];
     for (error, name) in refused.iter().zip(names) {
         assert_eq!(error.code, ErrorCode::NotImplemented, "{name}");
         assert!(error.message.contains(name), "{name}: {}", error.message);

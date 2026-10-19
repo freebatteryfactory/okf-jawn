@@ -237,6 +237,23 @@ pub enum TreeEdit {
         /// Its new path.
         destination: WorkspacePath,
     },
+    /// Remove a folder with every item and file under it, archived items included; history and
+    /// retained objects stay.
+    ///
+    /// Every item under the folder is removed as `DeleteItem` removes one, with every companion
+    /// file it owns; then every other file under it, and the folder. A draft is keyed by its
+    /// item, so a deleted item's draft is kept as `DeleteItem` keeps it.
+    ///
+    /// Refused, writing nothing: a reserved folder (`.okf`, `index.md`, `log.md` as any segment,
+    /// in any letter case) or one the tree spells another way, `InvalidInput` on `/folder`; a
+    /// folder the tree does not hold, `NotFound` on `/folder`. When files that are not items
+    /// went with it (the folder indexes the store regenerates are not counted), the commit's
+    /// warnings end with one `FOLDER_OTHER_FILES` warning saying how many
+    /// (`folder_files_deleted`).
+    DeleteFolder {
+        /// The folder to remove.
+        folder: WorkspacePath,
+    },
     /// Create or replace one user-defined type definition.
     SetType {
         /// Definition to store under its own name.
@@ -409,7 +426,8 @@ pub struct Committed {
     /// `true` when that commit already existed and this call wrote nothing.
     pub replayed: bool,
     /// Findings the candidate check returned when the commit was written, followed by what the
-    /// edits themselves report (`FOLDER_OTHER_FILES` of a `TreeEdit::MoveFolder`). A replay answers the warnings the store kept with that
+    /// edits themselves report (`FOLDER_OTHER_FILES` of a `TreeEdit::MoveFolder` or a
+    /// `TreeEdit::DeleteFolder`). A replay answers the warnings the store kept with that
     /// commit, so a retry answers what its first attempt did; for a commit the store kept no
     /// warnings for it answers the one warning `replay_warnings_unavailable` instead. Warnings
     /// kept under the same mutation for another attempt's commit are not this commit's, and are
@@ -1056,8 +1074,9 @@ pub trait Backups: Send + Sync {
 /// it (`VersionStore::commit`); see `replay_warnings_unavailable`.
 pub const REPLAY_WARNINGS_UNAVAILABLE: &str = "replay_warnings_unavailable";
 
-/// The code of the one warning a folder move answers when files that are not items moved with
-/// the folder (`TreeEdit::MoveFolder`); see `folder_other_files`.
+/// The code of the one warning a folder move or delete answers when files that are not items
+/// went with the folder (`TreeEdit::MoveFolder`, `TreeEdit::DeleteFolder`); see
+/// `folder_other_files` and `folder_files_deleted`.
 pub const FOLDER_OTHER_FILES: &str = "folder_other_files";
 
 impl ChangeContext {
@@ -1221,15 +1240,31 @@ pub fn replay_warnings_unavailable(why: &str) -> Warning {
 /// `count` is not zero.
 #[must_use]
 pub fn folder_other_files(at: &WorkspacePath, count: usize) -> Warning {
-    let files = if count == 1 { "file" } else { "files" };
     Warning {
         code: FOLDER_OTHER_FILES.to_owned(),
         message: format!(
-            "{count} {files} that {are} not items moved with the folder to {}",
-            at.as_str(),
-            are = if count == 1 { "is" } else { "are" },
+            "{} moved with the folder to {}",
+            not_items(count),
+            at.as_str()
         ),
         location: Some(at.as_str().to_owned()),
+    }
+}
+
+/// The one warning that `count` files that are not items were deleted with the folder `folder`
+/// (`TreeEdit::DeleteFolder`), naming it; added to the commit's warnings only when `count` is
+/// not zero. The revisions before the delete still hold them.
+#[must_use]
+pub fn folder_files_deleted(folder: &WorkspacePath, count: usize) -> Warning {
+    let verb = if count == 1 { "was" } else { "were" };
+    Warning {
+        code: FOLDER_OTHER_FILES.to_owned(),
+        message: format!(
+            "{} {verb} deleted with the folder {}",
+            not_items(count),
+            folder.as_str()
+        ),
+        location: Some(folder.as_str().to_owned()),
     }
 }
 
@@ -1325,6 +1360,16 @@ pub fn derive_drain_mutation_id(purge_mutation: MutationId, job: JobId) -> Mutat
     hasher.update(purge_mutation.0.as_bytes());
     hasher.update(job.0.as_bytes());
     MutationId(version_8(hasher.finalize().into()))
+}
+
+/// `count` files that are not items, in words: "1 file that is not an item", "3 files that are
+/// not items".
+fn not_items(count: usize) -> String {
+    if count == 1 {
+        "1 file that is not an item".to_owned()
+    } else {
+        format!("{count} files that are not items")
+    }
 }
 
 /// A version-8 UUID from SHA-256 of a label, a mutation identity and a count.

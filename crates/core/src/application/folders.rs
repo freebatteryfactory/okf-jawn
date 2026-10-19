@@ -1,33 +1,35 @@
-//! A folder as a whole (contract ruling 9): `move_folder`, one commit of one
-//! `TreeEdit::MoveFolder` that the store applies to every item and file under the folder.
+//! A folder as a whole (contract ruling 9): `move_folder` and `delete_folder`, each one commit
+//! of one edit (`TreeEdit::MoveFolder`, `TreeEdit::DeleteFolder`) that the store applies to
+//! every item and file under the folder.
 //!
 //! What core decides around the store's edit:
 //!
 //! - The paths alone are refused before any port is read. A reserved folder (`.okf`,
 //!   `index.md` or `log.md` as any segment, in any letter case: `conventions::reserved`) is
 //!   `InvalidInput` on `/folder`, so `.okf/` and everything below it can be neither moved nor
-//!   deleted. The root cannot be named at all: a `WorkspacePath` is never empty. A reserved
-//!   destination, the folder itself, or a path inside it (compared by collision key) is
-//!   `InvalidInput` on `/destination`. A destination that differs from the folder only in
+//!   deleted. The root cannot be named at all: a `WorkspacePath` is never empty. For a move, a
+//!   reserved destination, the folder itself, or a path inside it (compared by collision key)
+//!   is `InvalidInput` on `/destination`; a destination that differs from the folder only in
 //!   letter case or normalization renames it, which the store does in two hops. What needs the
 //!   tree (a folder the tree does not hold, a destination already taken) is the store's to
 //!   refuse.
 //! - The base is checked against the revision map, then the folder's items are read at it
 //!   (`VersionStore::tree`, archived items and items below a folder whose name starts with `.`
-//!   included) and counted for `FolderResult::items`. Their paths at the base and under the
-//!   destination are the files the write touches, so the edit check reports their lint; the
-//!   store tells the check which other files its moves rewrote (`CandidateCheck::check`).
+//!   included) and counted for `FolderResult::items`. Their paths at the base, and for a move
+//!   under the destination, are the files the write touches, so the edit check reports their
+//!   lint; the store tells the check which other files its moves rewrote
+//!   (`CandidateCheck::check`).
 //! - "A folder changed since `base_revision` conflicts" (`folder_commit`). The store refuses
 //!   any moved head, so the edit is committed on the base first. When the store answers that
 //!   the head moved (`ErrorDetail::StaleBase`), the store's comparison of the base with that
 //!   head (`VersionStore::diff`) is read; when no file at or under the folder, nor at or under
-//!   the destination, changed between them (at either end of a change, by collision key), the
-//!   same edit is committed on that head. Otherwise the answer is `Conflict` with `StaleBase`
-//!   naming that head, on `/base_revision`, and so is a comparison the store cannot make
-//!   because it no longer holds the base. A change elsewhere in the workspace never blocks a
-//!   folder operation. The comparison is read as listing every changed file, which the store's
-//!   does (its warnings name no file it left out). The items counted at the base are the items
-//!   under the folder at that head too, since nothing under it changed between them.
+//!   the destination of a move, changed between them (at either end of a change, by collision
+//!   key), the same edit is committed on that head. Otherwise the answer is `Conflict` with
+//!   `StaleBase` naming that head, on `/base_revision`, and so is a comparison the store cannot
+//!   make because it no longer holds the base. A change elsewhere in the workspace never blocks
+//!   a folder operation. The comparison is read as listing every changed file, which the
+//!   store's does (its warnings name no file it left out). The items counted at the base are
+//!   the items under the folder at that head too, since nothing under it changed between them.
 //! - The comparison and the commit on the head are not atomic: another write can land between
 //!   them. The store's own head check closes that window: it refuses the commit (`StaleBase`
 //!   naming the newer head, answered on `/base_revision`), so nothing lands on a head that was
@@ -37,13 +39,15 @@
 //!   replay of it, with the warnings it kept, and nothing is compared again. The count is read
 //!   at the base again, which has not changed.
 //!
-//! Drafts are keyed by item (`drafts`), so a moved item's draft stays with it: the operation
-//! does not touch the draft store. It is not offered to proposals (contract ruling 9).
+//! Drafts are keyed by item (`drafts`), so a moved item's draft stays with it, and a deleted
+//! item's draft is kept as `delete_item` keeps one: neither operation touches the draft store.
+//! A delete removes the folder from the tree only; history and retained objects stay, so a
+//! Rewind of an item brings it back. Neither is offered to proposals (contract ruling 9).
 
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::history::FileChange;
 use okf_jawn_contract::identity::{Revision, WorkspacePath, collision_key_of};
-use okf_jawn_contract::item::{FolderResult, MoveFolderRequest};
+use okf_jawn_contract::item::{DeleteFolderRequest, FolderResult, MoveFolderRequest};
 
 use super::ApplicationService;
 use super::shared::{
@@ -126,6 +130,41 @@ pub(super) async fn move_folder(
     };
     let committed = folder_commit(service, context, &base_revision, &write).await?;
     finish(service, context, &scope, committed, held.len()).await
+}
+
+/// Remove a folder with everything under it in one commit, and count its items; history and
+/// retained objects stay.
+///
+/// # Errors
+/// Returns `InvalidInput` on `/folder` for a reserved folder; the purge check's refusal of the
+/// base; `Conflict` with `StaleBase` on `/base_revision` when the folder changed since the
+/// base; the store's refusal of the edit (`NotFound` on `/folder` for a folder it does not
+/// hold); or any port error.
+pub(super) async fn delete_folder(
+    service: &ApplicationService,
+    context: &OperationContext,
+    request: DeleteFolderRequest,
+) -> Result<FolderResult, ApiError> {
+    let DeleteFolderRequest {
+        base_revision,
+        folder,
+        ..
+    } = request;
+    refuse_reserved(&folder, "/folder")?;
+    let scope = workspace_scope(context)?;
+    check_named(service, &scope, &base_revision).await?;
+    let held = items_under(service, &scope, &base_revision, &folder).await?;
+    let items = held.len();
+    let write = FolderWrite {
+        under: vec![&folder],
+        message: format!("Delete folder {}", folder.as_str()),
+        edit: TreeEdit::DeleteFolder {
+            folder: folder.clone(),
+        },
+        touched: held,
+    };
+    let committed = folder_commit(service, context, &base_revision, &write).await?;
+    finish(service, context, &scope, committed, items).await
 }
 
 /// Commit one folder write as the module header says: on the base, or, when the head moved and

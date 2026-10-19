@@ -53,6 +53,12 @@
 //! move reads the staged tree again, so moving a folder of `k` concepts in a tree of `n` files
 //! reads about `k × n` files: a known cost, kept so that every move is the one `MoveItem` makes.
 //!
+//! A folder delete (`TreeEdit::DeleteFolder`, `delete_folder`) removes every item under the
+//! folder as `DeleteItem` removes one, with its companion files (`delete_item`), then every
+//! other file and the folder; the links that pointed into it are left as written, as a
+//! `DeleteItem` leaves them. Its refusals of the folder are a move's (`existing_folder`), and so
+//! is its warning about the files that are not items (`folder_files_deleted`).
+//!
 //! A move with `keep_alias` first records the item's path in its frontmatter `aliases`
 //! (`record_alias`), after the move's refusals and before its first hop, so a rename by letter
 //! case records the item's own path, never the private one, and a move to the path the item holds
@@ -107,7 +113,7 @@ use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath, colli
 use okf_jawn_contract::item::{ItemStatus, TypeDefinition};
 use okf_jawn_core::items::{ApplicationHeader, refuse_header_change, refuse_header_in_type};
 use okf_jawn_core::portable::ALIASES_KEY;
-use okf_jawn_core::storage::{SourceCard, TreeEdit, folder_other_files};
+use okf_jawn_core::storage::{SourceCard, TreeEdit, folder_files_deleted, folder_other_files};
 
 use super::item::{
     CORRECTIONS_DIR, Holder, INDEX_FILE, ItemFile, LOG_FILE, RULES_FILE, SOURCES_DIR, SUPPLIED_DIR,
@@ -147,7 +153,7 @@ impl Staged {
 
     /// What the edits report about themselves, in the order they were applied, for the
     /// commit's warnings after the check's (`Committed::warnings`): one `FOLDER_OTHER_FILES`
-    /// warning for each folder move that moved files that are not items.
+    /// warning for each folder move or delete that moved or removed files that are not items.
     pub(crate) fn notes(&self) -> &[Warning] {
         &self.notes
     }
@@ -381,19 +387,13 @@ fn apply_one(repository: &Repository, staged: &mut Staged, edit: TreeEdit) -> Re
             status,
             archived,
         } => set_status(staged, item_id, status, archived),
-        TreeEdit::DeleteItem { item_id } => {
-            let path = staged.path_of(item_id)?;
-            remove(&staged.root.join(&path))?;
-            staged.items.remove(&item_id);
-            remove(&appearance_path(&staged.root, item_id))?;
-            remove(&supplied_path(&staged.root, item_id))?;
-            remove_folder(&staged.root.join(corrections_folder(item_id)))
-        }
+        TreeEdit::DeleteItem { item_id } => delete_item(staged, item_id),
         TreeEdit::CreateFolder { folder } => create_folder(staged, &folder),
         TreeEdit::MoveFolder {
             folder,
             destination,
         } => move_folder(staged, &folder, &destination),
+        TreeEdit::DeleteFolder { folder } => delete_folder(staged, &folder),
         TreeEdit::SetType { definition } => set_type(&staged.root, definition),
         TreeEdit::SetRules { rules } => {
             let text = yaml_serde::to_string(&rules)
@@ -540,7 +540,7 @@ fn move_folder(
     let taken = if recase {
         entries_under(&staged.root)?
             .iter()
-            .any(|(path, _)| path != folder.as_str() && collision_key(path) == to)
+            .any(|(path, _)| path != folder.as_str() && collision_key_of(path) == to)
     } else {
         staged.occupied(destination, None)?
     };
@@ -592,6 +592,41 @@ fn existing_folder(staged: &Staged, folder: &WorkspacePath) -> Result<(), ApiErr
     }
 }
 
+/// Remove an item and every companion file it owns (`TreeEdit::DeleteItem`): its source
+/// appearance, its supplied text and its corrections folder.
+fn delete_item(staged: &mut Staged, item: ItemId) -> Result<(), ApiError> {
+    let path = staged.path_of(item)?;
+    remove(&staged.root.join(&path))?;
+    staged.items.remove(&item);
+    remove(&appearance_path(&staged.root, item))?;
+    remove(&supplied_path(&staged.root, item))?;
+    remove_folder(&staged.root.join(corrections_folder(item)))
+}
+
+/// Remove a folder with everything under it (`TreeEdit::DeleteFolder`), after the folder's
+/// refusals (`existing_folder`): every item under it as `DeleteItem` removes one, with its
+/// companions (`delete_item`), then every other file under it and the folder. History and
+/// retained objects stay, because nothing here touches Git or the object store.
+fn delete_folder(staged: &mut Staged, folder: &WorkspacePath) -> Result<(), ApiError> {
+    existing_folder(staged, folder)?;
+    let others = other_files(staged, folder)?;
+    let prefix = format!("{}/", folder.as_str());
+    let items: Vec<ItemId> = staged
+        .items
+        .iter()
+        .filter(|(_, path)| path.starts_with(&prefix))
+        .map(|(item, _)| *item)
+        .collect();
+    for item in items {
+        delete_item(staged, item)?;
+    }
+    remove_folder(&staged.root.join(folder.as_str()))?;
+    if others > 0 {
+        staged.notes.push(folder_files_deleted(folder, others));
+    }
+    Ok(())
+}
+
 /// How many files under `folder` are not items, the folder indexes the store regenerates (each
 /// `index.md`) left out.
 fn other_files(staged: &Staged, folder: &WorkspacePath) -> Result<usize, ApiError> {
@@ -616,7 +651,7 @@ fn other_files(staged: &Staged, folder: &WorkspacePath) -> Result<usize, ApiErro
 fn park_folder(staged: &mut Staged, folder: &WorkspacePath) -> Result<WorkspacePath, ApiError> {
     let linked: Vec<String> = linked(&load(&staged.root)?)
         .iter()
-        .map(|id| collision_key(&id.to_string()))
+        .map(|id| collision_key_of(&id.to_string()))
         .collect();
     let parent = folder.as_str().rsplit_once('/').map(|(parent, _)| parent);
     let directory = parent.map_or_else(|| staged.root.clone(), |parent| staged.root.join(parent));
