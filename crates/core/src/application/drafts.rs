@@ -16,9 +16,13 @@
 //! one final newline, see `as_a_read_shows`), so the body a client sends back from `get_item` is
 //! never refused for those bytes alone. Whatever the request's body was, the draft of a source
 //! card holds the item's own body at the draft's base, byte for byte, so a Snapshot never commits
-//! the client's spelling. A source's text is changed by `correct_digest`. A View has no
-//! draft until its layout and validation land (construction plan M1.6). `commit_items` applies
-//! the same two rules (`refuse_unsupported_draft`) to drafts that predate them.
+//! the client's spelling. A source's text is changed by `correct_digest`. A View's draft is a
+//! View: its body and properties are checked as every saved-View write checks them
+//! (`views::check_view_write`: the file reads as a View, it validates with every chart drawable,
+//! and every binding's citation checks) before the draft is written, a refusal on `/body` or
+//! `/properties/title`. `commit_items` applies the same two rules (`refuse_unsupported_draft`)
+//! again to every draft it commits, so a draft that predates them, or whose cited revision a
+//! purge invalidated since it was saved, is refused there.
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{ItemId, Revision};
@@ -29,11 +33,19 @@ use okf_jawn_contract::item::{
 
 use super::ApplicationService;
 use super::shared::{check_named, invalid, mutation_id, workspace_scope};
+use super::views::{ViewFields, check_view_write};
 use crate::context::OperationContext;
 use crate::drafts::DraftWrite;
 use crate::items::refuse_header_change;
 use crate::portable::draft_digest;
 use crate::storage::StorageScope;
+
+/// Where a View's draft reports a fault: its body and its title property.
+const DRAFT_FIELDS: ViewFields<'static> = ViewFields {
+    title: "/properties/title",
+    body: "/body",
+    item: None,
+};
 
 /// Save or replace the caller's draft of one item.
 ///
@@ -41,8 +53,9 @@ use crate::storage::StorageScope;
 /// Returns the typed `NotFound` of an invalidated base revision, `NotFound` when the item does
 /// not exist at the head, `NotFound` on `/base_revision` when a first save names a revision at
 /// which the item does not exist, `InvalidInput` on `/properties/okf_jawn` for a changed
-/// application header, `NotImplemented` on `/item_id` for a View, `InvalidInput` on `/body` for a
-/// source card whose body differs from the one at the draft's base, or any port error.
+/// application header, a View's refusal on `/body` or `/properties/title`
+/// (`views::check_view_write`), `InvalidInput` on `/body` for a source card whose body differs
+/// from the one at the draft's base, or any port error.
 pub(super) async fn save_draft(
     service: &ApplicationService,
     context: &OperationContext,
@@ -56,9 +69,16 @@ pub(super) async fn save_draft(
     let head = ports.versions.head(&scope).await?;
     let current = ports.versions.show(&scope, &head, request.item_id).await?;
     refuse_header_change(&current.properties, &request.properties, "/properties")?;
-    // A View has no draft: refused before anything is read for it or written.
+    // A View's draft is checked as a View before anything is written for it.
     if current.summary.kind == ItemKind::View {
-        return Err(view_has_no_draft(request.item_id));
+        check_view_write(
+            service,
+            &scope,
+            &request.properties,
+            &request.body,
+            DRAFT_FIELDS,
+        )
+        .await?;
     }
     let existing = ports.drafts.get(&scope, request.item_id, editor).await?;
     let base_revision = match existing {
@@ -112,24 +132,6 @@ pub(super) async fn save_draft(
         .await
 }
 
-/// The refusal of a draft of a View.
-///
-/// `NotImplemented`, as `create_item` answers for a View: the request is well formed and the
-/// operation exists, but this build has no validation for a View document yet (the contract's
-/// rule: "declared but this build does not implement it"), so the caller's input is not what
-/// is wrong and `InvalidInput` would tell it to change something it cannot. Not a success.
-fn view_has_no_draft(item: ItemId) -> ApiError {
-    ApiError::new(
-        ErrorCode::NotImplemented,
-        format!(
-            "item {} is a View; a draft of a View is not implemented in this build, because \
-             a saved View is validated before it is written",
-            item.0
-        ),
-    )
-    .with_field("/item_id")
-}
-
 /// Refuse a draft body that differs from the body a source card has at the draft's base.
 ///
 /// Both texts are compared as a read shows them (`as_a_read_shows`). A card's text is generated
@@ -168,12 +170,13 @@ fn as_a_read_shows(body: &str) -> String {
 }
 
 /// The two draft rules for a draft that already exists, as a Snapshot is about to commit it:
-/// a View has no draft, and a source card's draft keeps the body the card has at the draft's
+/// a View's draft is a valid View, checked again now (its citations may have been invalidated
+/// since it was saved), and a source card's draft keeps the body the card has at the draft's
 /// base. Drafts saved before the rules (restored from an archive, for instance) meet them here.
 ///
 /// # Errors
-/// The refusals of `save_draft` (same code and field), or any port error reading the item at
-/// the draft's base.
+/// The refusals of `save_draft` (same code and field; a View's message names its item), or any
+/// port error reading the item at the draft's base.
 pub(super) async fn refuse_unsupported_draft(
     service: &ApplicationService,
     scope: &StorageScope,
@@ -187,7 +190,19 @@ pub(super) async fn refuse_unsupported_draft(
         .await?;
     match at_base.summary.kind {
         ItemKind::Note => Ok(()),
-        ItemKind::View => Err(view_has_no_draft(item)),
+        ItemKind::View => {
+            check_view_write(
+                service,
+                scope,
+                &held.properties,
+                &held.body,
+                ViewFields {
+                    item: Some(item),
+                    ..DRAFT_FIELDS
+                },
+            )
+            .await
+        }
         ItemKind::Source => refuse_source_text_change(item, &at_base.body, &held.body),
     }
 }
