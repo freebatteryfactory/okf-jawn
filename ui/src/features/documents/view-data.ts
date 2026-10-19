@@ -50,3 +50,9 @@ export function explorerViewData(client?: Client): ViewData {
     getObject: (request) => answer(() => getObject({ ...using, body: request })),
   };
 }
+
+/**
+ * The reads over the application's configured client, as one value: the views components read a
+ * View again whenever their provider changes, so every Explorer page gives them this one.
+ */
+export const workspaceViewData: ViewData = explorerViewData();

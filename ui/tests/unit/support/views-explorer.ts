@@ -1,8 +1,9 @@
 /**
  * Contract-valid answers for Views in the Explorer, over the workspace of `workspace.tsx`: one
  * saved View item, the source it cites at a pinned revision, the retained dataset behind its
- * table, and the View operations (`get_view`, `resolve_view`, `present_view`) and the object read
- * (`get_object`) added to the mock's contract map.
+ * table, a proposal's change that creates the View, and the View operations (`get_view`,
+ * `resolve_view`, `present_view`) and the object read (`get_object`) added to the mock's contract
+ * map.
  *
  * The View's file is written the way the contract stores one (`ItemKind::View`): its title in the
  * `title` property, its description as Markdown, then the one ```` ```json okf-jawn-view ```` block
@@ -10,6 +11,8 @@
  * test (`crypto.subtle`), and served as the bytes the digest names; the views side checks it.
  */
 import type {
+  Change,
+  FileChange,
   ItemDocument,
   ItemSummary,
   PresentResponse,
@@ -112,6 +115,44 @@ export function viewFileOf(view: ViewDocument = viewOf(), itemId: string = VIEW)
   return {
     properties: { type: 'chart-view', title: view.title, okf_jawn: { id: itemId } },
     body: `${view.description}\n\n\`\`\`json okf-jawn-view\n${JSON.stringify(block, null, 2)}\n\`\`\`\n`,
+  };
+}
+
+/** Where a proposal would create the View. */
+export const PROPOSED_PATH = 'views/revenue.md';
+
+/** A proposal's change that creates a View of `file` (by default the file of `viewOf()`). */
+export function createViewChange(
+  file: { properties: Record<string, unknown>; body: string } = viewFileOf(),
+): Change {
+  // A new item has no server-owned header yet: the service writes it.
+  const { okf_jawn: _header, ...properties } = file.properties;
+  return {
+    kind: 'create',
+    item_kind: 'view',
+    path: PROPOSED_PATH,
+    type_name: 'chart-view',
+    properties,
+    body: file.body,
+  };
+}
+
+/** A comparison that adds the View's file, as `diff_items` answers it for a create. */
+export function addedViewChange(body: string): FileChange {
+  const lines = body.split('\n').filter((line, index, all) => index < all.length - 1 || line);
+  return {
+    new_path: PROPOSED_PATH,
+    kind: 'added',
+    binary: false,
+    patch: [
+      `diff --git a/${PROPOSED_PATH} b/${PROPOSED_PATH}`,
+      'new file mode 100644',
+      '--- /dev/null',
+      `+++ b/${PROPOSED_PATH}`,
+      `@@ -0,0 +1,${lines.length} @@`,
+      ...lines.map((line) => `+${line}`),
+      '',
+    ].join('\n'),
   };
 }
 

@@ -3,6 +3,10 @@
  * they change against the version it was made on, through the one diff reader), its discussion,
  * and Approve and Decline.
  *
+ * A proposal that would store a View shows each such View drawn as proposed, after what it changes
+ * and before Approve (`documents/ProposedView.tsx`). What is drawn there, or said of a file that
+ * does not read as a View, never holds Approve back: the service checks the View again at accept.
+ *
  * The status is the service's (ruling R10): read again when the workspace's events say the
  * proposal changed, and after the person's own Approve or Decline, whatever its outcome. A read
  * that fails then replaces nothing on screen: the proposal last read stays, with the failure
@@ -30,6 +34,7 @@ import { pageHeading, takeHeld, useWatchedPart } from '../../lib/focus';
 import { Instant } from '../../lib/instant';
 import { keyed } from '../../lib/keys';
 import { short } from '../documents/describe';
+import { ProposedViews } from '../documents/ProposedView';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
 import { allowed, archivedWords, Missing } from '../explorer/rights';
@@ -155,6 +160,8 @@ function ProposalBody({ workspaceId, proposal }: { workspaceId: string; proposal
         )}
       </ul>
       <ProposedChanges workspaceId={workspaceId} proposal={proposal} level={3} />
+      {/* Each View it would store, drawn as proposed, after what it changes and before Approve. */}
+      <ProposedViews workspaceId={workspaceId} proposal={proposal} />
     </>
   );
 }

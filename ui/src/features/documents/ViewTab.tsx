@@ -23,10 +23,7 @@ import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
 import { SavedView } from '../views/SavedView';
 import { describeSelection, short } from './describe';
-import { explorerViewData } from './view-data';
-
-/** The one provider of every View tab: the views components read again when it changes. */
-const viewData = explorerViewData();
+import { workspaceViewData } from './view-data';
 
 export interface ViewTabProps {
   workspaceId: string;
@@ -44,7 +41,7 @@ export function ViewTab({ workspaceId, itemId, revision }: ViewTabProps) {
         workspaceId={workspaceId}
         itemId={itemId}
         at={{ kind: 'revision', revision }}
-        data={viewData}
+        data={workspaceViewData}
       />
       <CitedSources workspaceId={workspaceId} itemId={itemId} revision={revision} />
     </section>
