@@ -387,7 +387,11 @@ test('the deployment example declares and describes every image the compose file
  const required=[...(await read('deploy/compose.yaml')).matchAll(/\$\{([A-Z_]+):\?/g)].map(match=>match[1]);
  const images=[...(await read('deploy/Dockerfile')).matchAll(/^ARG ([A-Z_]+)$/gm)].map(match=>match[1]);
  assert.ok(required.length>0&&images.length>0);
- for(const name of new Set([...required,...images]))assert.match(example,new RegExp(`^${name}=`,'m'),`deploy/.env.example does not declare ${name}`);
+ for(const name of new Set([...required,...images])){
+  // Local mode trusts no proxy by default; hosted Compose requires an explicit ingress list.
+  const prefix=name==='OKF_TRUSTED_PROXIES'?'# ':'';
+  assert.match(example,new RegExp(`^${prefix}${name}=`,'m'),`deploy/.env.example does not declare ${name}`);
+ }
  const described=name=>example.split(/\r?\n/).find(line=>line.startsWith(`# ${name}:`))??'';
  for(const name of images)assert.ok(described(name).length>0,`${name} has no description`);
  assert.match(described('BUN_IMAGE'),/\.bun-version/,'BUN_IMAGE must be described the way compose.yaml and the Dockerfile require it');
