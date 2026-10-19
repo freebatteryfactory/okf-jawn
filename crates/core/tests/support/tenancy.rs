@@ -1210,6 +1210,18 @@ impl RecordStore for FakeJobs {
                 .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such job"))
         })
     }
+    /// "Read the immutable creating mutation of a known job identity within its scope."
+    /// Scripted rows without a creating request are not origins this fixture can supply.
+    fn job_mutation<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, MutationId> {
+        Box::pin(async move {
+            lock_api(&self.jobs)?
+                .iter()
+                .find(|held| held.job.id == job && held.scope == *scope)
+                .and_then(|held| held.created.as_ref())
+                .map(|created| created.mutation_id)
+                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such job origin"))
+        })
+    }
     /// "List durable jobs of one scope, newest first, with bounded pagination." Paged as storage
     /// pages them: after the position a decimal cursor names (a job's place in the fake's one
     /// sequence, from 1, as storage's row), with the last listed job's position as the cursor

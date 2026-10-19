@@ -45,7 +45,7 @@ use std::time::Duration;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::EventKind;
-use okf_jawn_contract::identity::Timestamp;
+use okf_jawn_contract::identity::{Digest, ItemId, Timestamp};
 use okf_jawn_contract::proposal::ProposalStatus;
 use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::review::{
@@ -61,7 +61,7 @@ use crate::confirmations::{ConfirmationConsume, ConfirmationCreate};
 use crate::context::{Attempt, OperationContext};
 use crate::events::{EventScope, NewEvent};
 use crate::portable::{coverage_at, imported_verification, item_content_digest};
-use crate::storage::derive_review_id;
+use crate::storage::{StorageScope, derive_review_id};
 
 /// How long a confirmation can be consumed after it is issued: ten minutes. Long enough for a
 /// person to read what the confirmation shows and press the button; short enough that a
@@ -254,20 +254,34 @@ pub(super) async fn list_reviews(
         .show(&scope, &revision, request.item_id)
         .await?;
     let shown = item_content_digest(&document)?;
+    Ok(ListReviewsResponse {
+        items: reviews_at(service, &scope, request.item_id, &shown).await?,
+        imported: imported_verification(&document.properties),
+    })
+}
+
+/// Recorded review coverage at the shown content, shared by review listing and Attention.
+/// Purge remapping and invalidation are applied before testing current coverage.
+///
+/// # Errors
+/// Returns any record-store or revision-remapping error.
+pub(super) async fn reviews_at(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    item: ItemId,
+    shown: &Digest,
+) -> Result<Vec<Review>, ApiError> {
     let mut items = Vec::new();
-    for mut review in ports.records.list_reviews(&scope, request.item_id).await? {
-        let (source, invalidated_by) = remapped(service, &scope, review.source).await?;
+    for mut review in service.ports().records.list_reviews(scope, item).await? {
+        let (source, invalidated_by) = remapped(service, scope, review.source).await?;
         review.source = source;
         if invalidated_by.is_some() {
             review.coverage = ReviewCoverage::Invalidated;
         }
-        review.coverage = coverage_at(&review, &shown);
+        review.coverage = coverage_at(&review, shown);
         items.push(review);
     }
-    Ok(ListReviewsResponse {
-        items,
-        imported: imported_verification(&document.properties),
-    })
+    Ok(items)
 }
 
 /// The browser session a confirmation is bound to.

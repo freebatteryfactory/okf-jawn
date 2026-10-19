@@ -37,6 +37,9 @@ import {
   useAttention,
   warningsOf,
 } from './attention';
+import { useAttentionOpen } from './freshness';
+import { InstructionFindings } from './InstructionFindings';
+import { PreviousCheck } from './PreviousCheck';
 
 export interface AttentionPageProps {
   workspaceId: string;
@@ -58,6 +61,7 @@ export function AttentionPage({ workspaceId, head }: AttentionPageProps) {
   const listRef = useRef<HTMLUListElement | null>(null);
   const moreRef = useRef<HTMLButtonElement | null>(null);
   const attention = useAttention(workspaceId, head);
+  useAttentionOpen(workspaceId, head);
   const pages = attention.data?.pages;
   const warnings = warningsOf(pages);
   const inspected = pages?.at(0)?.revision ?? head;
@@ -67,6 +71,8 @@ export function AttentionPage({ workspaceId, head }: AttentionPageProps) {
     listRef.current?.querySelectorAll<HTMLElement>(':scope > li').item(index) ?? null;
 
   const nothingListed = attention.data === undefined;
+  const previous =
+    !nothingListed && (attention.isRefetching || attention.isRefetchError || attention.isStale);
   const listFailure = useRetry({
     request: `${workspaceId} ${head}`,
     failed: attention.isError && nothingListed,
@@ -123,8 +129,9 @@ export function AttentionPage({ workspaceId, head }: AttentionPageProps) {
         </button>{' '}
         {attention.dataUpdatedAt > 0 && (
           <span className="meta">
-            Checked at <Instant value={new Date(attention.dataUpdatedAt).toISOString()} />, for
-            revision <code title={inspected}>{short(inspected)}</code>.
+            {previous ? 'Previous check at' : 'Checked at'}{' '}
+            <Instant value={new Date(attention.dataUpdatedAt).toISOString()} />, for revision{' '}
+            <code title={inspected}>{short(inspected)}</code>.
           </span>
         )}
       </p>
@@ -137,9 +144,10 @@ export function AttentionPage({ workspaceId, head }: AttentionPageProps) {
           workspaceId={workspaceId}
         />
       )}
+      {previous && <PreviousCheck failed={attention.isError} empty={warnings.length === 0} />}
       {pages !== undefined && warnings.length === 0 && (
         <p>
-          <strong>No warnings found.</strong> {NOT_A_CERTIFICATE}
+          {!previous && <strong>No warnings found.</strong>} {NOT_A_CERTIFICATE}
         </p>
       )}
       {rows.length > 0 && (
@@ -225,6 +233,7 @@ function WarningRow({
         )}
       </p>
       <p>{warning.message}</p>
+      {warning.instruction_like && <InstructionFindings evidence={warning.instruction_like} />}
       {warning.kind === 'uploads_waiting' ? (
         <p>
           <Link to="/w/$workspaceId/import" params={{ workspaceId }} hash={HELD_UPLOADS}>

@@ -85,7 +85,9 @@ use okf_core::{
 };
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::TextOrigin;
-use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath, collision_key_of};
+use okf_jawn_contract::identity::{
+    Digest, ItemId, ProposalId, Revision, WorkspacePath, collision_key_of,
+};
 use okf_jawn_contract::item::{ItemStatus, TypeDefinition};
 use okf_jawn_core::items::{ApplicationHeader, refuse_header_change, refuse_header_in_type};
 use okf_jawn_core::portable::ALIASES_KEY;
@@ -464,9 +466,9 @@ fn supply(
     let extraction = file.header.extraction.as_mut().ok_or_else(|| {
         ApiError::new(ErrorCode::InvalidInput, "only a source has extracted text")
     })?;
-    extraction.text_origin = TextOrigin::SuppliedByAgent;
-    extraction.supplied = None;
     if !extraction.corrected {
+        extraction.text_origin = TextOrigin::SuppliedByAgent;
+        extraction.supplied = None;
         file.document.body = markdown;
     }
     write_text(&supplied_path(&staged.root, item_id), &record.to_string())?;
@@ -495,7 +497,13 @@ fn correct(
         )
     })?;
     if extraction.digest.as_ref() == Some(digest) {
-        extraction.corrected = true;
+        extraction.corrected = adopts.is_none();
+        extraction.text_origin = if adopts.is_some() {
+            TextOrigin::SuppliedByAgent
+        } else {
+            TextOrigin::Converter
+        };
+        extraction.supplied = None;
         file.document.body = corrected_markdown;
     }
     write_text(
@@ -1125,7 +1133,11 @@ fn write_card(staged: &mut Staged, card: &SourceCard) -> Result<(), ApiError> {
                 .get("corrected_markdown")
                 .and_then(serde_json::Value::as_str)
             {
-                extraction.corrected = true;
+                let adopts = correction_adopts(&record)?;
+                extraction.corrected = adopts.is_none();
+                if adopts.is_some() {
+                    extraction.text_origin = TextOrigin::SuppliedByAgent;
+                }
                 text.clone_into(&mut body);
             }
         }
@@ -1144,6 +1156,22 @@ fn write_card(staged: &mut Staged, card: &SourceCard) -> Result<(), ApiError> {
         .map_err(|error| internal(format!("a source appearance did not serialize: {error}")))?;
     write_text(&appearance_path(&staged.root, card.item_id), &appearance)?;
     staged.write(card.path.as_str(), &file)
+}
+
+/// The proposal a stored correction adopts, absent for a human-authored correction.
+pub(crate) fn correction_adopts(
+    record: &serde_json::Value,
+) -> Result<Option<ProposalId>, ApiError> {
+    match record.get("adopts") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => serde_json::from_value(value.clone())
+            .map(Some)
+            .map_err(|error| {
+                internal(format!(
+                    "a correction's adopted proposal does not parse: {error}"
+                ))
+            }),
+    }
 }
 
 /// Where a card's source appearance is kept.

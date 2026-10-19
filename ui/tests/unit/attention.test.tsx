@@ -19,10 +19,20 @@ import {
   ADVISORY,
   ATTENTION_AUTO_PAGES,
   ATTENTION_PAGE,
+  attentionOptions,
   NOT_A_CERTIFICATE,
 } from '../../src/features/attention/attention';
-import { fail, fromNewerService, type Handler, type Json, mockApi, ok } from './support/api';
-import { ATTENTION } from './support/imports';
+import {
+  fail,
+  fromNewerService,
+  type Handler,
+  type Json,
+  mockApi,
+  notImplemented,
+  ok,
+  type Reply,
+} from './support/api';
+import { ATTENTION, mockEvents, pageShown } from './support/imports';
 import {
   explorerHandlers,
   HEAD,
@@ -44,6 +54,7 @@ configure({ asyncUtilTimeout: 10_000 });
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -78,7 +89,7 @@ const answer = (items: AttentionItem[], next: string | null = null, revision = H
   ok({ items, next_cursor: next, revision });
 
 function setup(attention: Handler | null) {
-  return mockApi(explorerHandlers(attention === null ? {} : { [ATTENTION]: attention }));
+  return mockApi(explorerHandlers({ [ATTENTION]: attention ?? (() => notImplemented(ATTENTION)) }));
 }
 
 async function openAttention() {
@@ -330,7 +341,9 @@ describe('a check that fails after the list was read', () => {
     fails = true;
     fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
     await screen.findByText('Listing the warnings again: Something went wrong in the service.');
-    expect(screen.getByText('No warnings found.')).toBeDefined();
+    expect(screen.queryByText('No warnings found.')).toBeNull();
+    expect(screen.getByText('Previous check found no warnings.')).toBeDefined();
+    expect(screen.getByText(/Showing the previous check/)).toBeDefined();
   });
 });
 
@@ -371,7 +384,7 @@ describe('a long list', () => {
     ).toBeDefined();
   });
 
-  it('does not ask again for a revision it has listed, however long the page is open and whatever opens later', async () => {
+  it('does not scan on idle time or new observers, then rechecks explicitly when the person returns', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const api = setup(paged);
     renderAt(`/w/${WS}`);
@@ -381,13 +394,15 @@ describe('a long list', () => {
     // An item is opened: its tab and its reader read the same list.
     fireEvent.click(await screen.findByRole('treeitem', { name: /Annual report/ }));
     await screen.findByRole('tab', { name: 'Annual report' });
+    expect(api.callsTo(ATTENTION)).toHaveLength(ATTENTION_AUTO_PAGES);
     // The person comes back to the window.
     act(() => {
       window.dispatchEvent(new Event('focus'));
       document.dispatchEvent(new Event('visibilitychange'));
     });
     await act(() => vi.advanceTimersByTimeAsync(5_000));
-    expect(api.callsTo(ATTENTION)).toHaveLength(ATTENTION_AUTO_PAGES);
+    // A return is a lifecycle check, including at the same head; its retained five pages refresh.
+    expect(api.callsTo(ATTENTION)).toHaveLength(ATTENTION_AUTO_PAGES * 2);
     vi.useRealTimers();
   });
 
@@ -554,6 +569,92 @@ describe('the mark on an item', () => {
     const row = await screen.findByRole('treeitem', { name: /^Meeting notes/ });
     expect(row.getAttribute('aria-label')).toBe('Meeting notes, type meeting-note');
     expect(screen.getByRole('link', { name: 'Attention' })).toBeDefined();
-    expect(screen.queryByText('Attention:')).toBeNull();
+    expect(screen.getByText('Attention:')).toBeDefined();
+    expect(
+      screen.getByText("Checking this item's warnings: Something went wrong in the service."),
+    ).toBeDefined();
   });
+});
+
+describe('Attention marks after losing contact', { timeout: 30_000 }, () => {
+  for (const transition of ['hidden', 'disconnected'] as const) {
+    it(`does not present retained marks as current while ${transition} or awaiting recovery`, async () => {
+      // v1 freshness: retained findings remain readable as previous evidence, but their
+      // tree/tab marks cannot look like a current check after live contact is lost.
+      const reopening = Promise.withResolvers<void>();
+      const recovery = Promise.withResolvers<Reply>();
+      let holdRecovery = false;
+      const api = setup(() => (holdRecovery ? recovery.promise : answer(THREE)));
+      const events = mockEvents();
+      const view = renderAt(`/w/${WS}/i/${NOTE}`);
+      const key = attentionOptions(WS, HEAD).queryKey;
+      try {
+        await screen.findByText('Text of Meeting notes');
+        await waitFor(() => expect(events.streams).toHaveLength(1));
+        await waitFor(() => expect(view.queryClient.isFetching()).toBe(0));
+        const row = () => screen.getByRole('treeitem', { name: /^Meeting notes/ });
+        const tabDescription = () => {
+          const tab = screen.getByRole('tab', { name: 'Meeting notes' });
+          return document.getElementById(tab.getAttribute('aria-describedby') ?? '')?.textContent;
+        };
+        // Literal oracles are the neighboring current-mark test's exact real consumer labels.
+        expect(row().getAttribute('aria-label')).toBe(
+          'Meeting notes, type meeting-note, 2 warnings (advisory)',
+        );
+        expect(tabDescription()).toBe(' (2 warnings, advisory)');
+        const requests = api.callsTo(ATTENTION).length;
+        holdRecovery = true;
+        events.state.hold = reopening.promise;
+        if (transition === 'hidden') act(() => pageShown(false));
+        else act(() => events.streams.at(0)?.end());
+        await waitFor(() => expect(view.queryClient.getQueryState(key)?.isInvalidated).toBe(true));
+        expect(view.queryClient.getQueryState(key)?.fetchStatus).toBe('idle');
+        expect(api.callsTo(ATTENTION)).toHaveLength(requests);
+        expect(view.queryClient.getQueryData(key)?.pages).toEqual([
+          { revision: HEAD, items: THREE, next_cursor: null },
+        ]);
+        await screen.findByText(
+          'Awaiting a check with the current service. Showing previous findings.',
+        );
+        expect(screen.getByText('Attention:').closest('[role="note"]')?.textContent).toContain(
+          'Previous check: 2 advisory warnings',
+        );
+        expect(row().getAttribute('aria-label')).toBe('Meeting notes, type meeting-note');
+        expect(row().textContent).not.toContain('2 warnings');
+        expect(tabDescription()).toBe('');
+
+        if (transition === 'hidden') act(() => pageShown(true));
+        events.state.hold = null;
+        await act(async () => {
+          reopening.resolve();
+          await reopening.promise;
+        });
+        await waitFor(() => expect(events.streams).toHaveLength(2));
+        await waitFor(() => expect(api.callsTo(ATTENTION)).toHaveLength(requests + 1));
+        // A new live stream alone does not certify the retained answer while its check waits.
+        expect(row().getAttribute('aria-label')).toBe('Meeting notes, type meeting-note');
+        expect(tabDescription()).toBe('');
+        expect(view.queryClient.getQueryData(key)?.pages.at(0)?.items).toEqual(THREE);
+        await act(async () => {
+          recovery.resolve(answer(THREE.slice(0, 1)));
+          await recovery.promise;
+        });
+        await waitFor(() =>
+          expect(row().getAttribute('aria-label')).toBe(
+            'Meeting notes, type meeting-note, 1 warning (advisory)',
+          ),
+        );
+        expect(tabDescription()).toBe(' (1 warning, advisory)');
+        expect(view.queryClient.getQueryState(key)?.isInvalidated).toBe(false);
+        expect(screen.queryByText(/Showing previous findings/)).toBeNull();
+        expect(api.callsTo(ATTENTION)).toHaveLength(requests + 1);
+        expect(api.violations).toEqual([]);
+      } finally {
+        view.unmount();
+        reopening.resolve();
+        recovery.resolve(answer(THREE));
+        vi.restoreAllMocks();
+      }
+    });
+  }
 });

@@ -3477,6 +3477,7 @@ dependencies = [
  "sha2 0.10.9",
  "time",
  "tokio",
+ "unicode-normalization",
  "uuid",
 ]
 
@@ -3566,6 +3567,7 @@ dependencies = [
  "okf-core",
  "okf-jawn-contract",
  "okf-jawn-core",
+ "okf-jawn-ingest",
  "rusqlite",
  "rusqlite_migration",
  "serde",
