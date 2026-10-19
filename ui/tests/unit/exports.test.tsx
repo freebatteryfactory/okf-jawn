@@ -574,4 +574,83 @@ describe('"Export this workspace" at the version the person chooses (B3)', () =>
     ]);
     expect(sent[1]?.idempotency_key).not.toBe(sent[0]?.idempotency_key);
   });
+
+  // What is asked is the whole request: the version and the choice of history, not the workspace.
+  const unavailable = () => fail(503, 'unavailable', 'the gateway lost the answer');
+  const historyBox = () =>
+    within(section()).getByRole('checkbox', { name: 'Include the workspace’s history' });
+
+  it('neither shows nor retries a failed export once the history choice changes', async () => {
+    const { api, service } = await openJobsWithHistory();
+    service.script.push(unavailable);
+    fireEvent.click(exportButton());
+    await within(section()).findByText(/temporarily unavailable/);
+    within(section()).getByRole('button', { name: 'Try again' }).focus();
+    fireEvent.click(historyBox());
+    expect(within(section()).queryByText(/temporarily unavailable/)).toBeNull();
+    expect(within(section()).queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(document.activeElement).not.toBe(document.body);
+    fireEvent.click(exportButton());
+    await within(section()).findByText(/^The export was accepted/);
+    const sent = api.callsTo(EXPORT_WORKSPACE);
+    expect(sent.map((body) => body.include_history)).toEqual([false, true]);
+    expect(sent[1]?.idempotency_key).not.toBe(sent[0]?.idempotency_key);
+  });
+
+  it('does not say of another version an export still out for the one before', async () => {
+    const { api, service } = await openJobsWithHistory();
+    let release: () => void = () => {};
+    service.script.push(
+      (_made, usual) =>
+        new Promise<Reply>((resolve) => {
+          release = () => resolve(usual);
+        }),
+    );
+    fireEvent.click(exportButton());
+    await within(section()).findByRole('button', { name: 'Starting the export…' });
+    fireEvent.click(choice('A version from its history'));
+    const list = await within(section()).findByRole<HTMLSelectElement>('combobox', {
+      name: 'Version',
+    });
+    fireEvent.change(list, { target: { value: OLDER } });
+    expect(exportButton().textContent).toBe('Export the workspace');
+    expect(exportButton().getAttribute('aria-disabled')).toBe('false');
+    await act(async () => {
+      release();
+      await new Promise((settled) => setTimeout(settled, 50));
+    });
+    expect(within(section()).queryByText(/accepted/)).toBeNull();
+    fireEvent.click(exportButton());
+    await within(section()).findByText(/job bbbbbbbb/);
+    expect(api.callsTo(EXPORT_WORKSPACE).map((body) => body.at)).toEqual([
+      { kind: 'latest' },
+      { kind: 'revision', revision: OLDER },
+    ]);
+  });
+
+  it('asks again under the key a request had, when the choice comes back to it unanswered', async () => {
+    const { api, service } = await openJobsWithHistory();
+    service.script.push(unavailable, unavailable);
+    fireEvent.click(exportButton());
+    await within(section()).findByText(/temporarily unavailable/);
+    fireEvent.click(choice('A version from its history'));
+    const list = await within(section()).findByRole<HTMLSelectElement>('combobox', {
+      name: 'Version',
+    });
+    fireEvent.change(list, { target: { value: OLDER } });
+    fireEvent.click(exportButton());
+    await within(section()).findByText(/temporarily unavailable/);
+    fireEvent.click(choice('As it is now'));
+    fireEvent.click(exportButton());
+    await within(section()).findByText(/^The export was accepted/);
+    const sent = api.callsTo(EXPORT_WORKSPACE);
+    expect(sent.map((body) => body.at)).toEqual([
+      { kind: 'latest' },
+      { kind: 'revision', revision: OLDER },
+      { kind: 'latest' },
+    ]);
+    expect(sent[2]?.idempotency_key).toBe(sent[0]?.idempotency_key);
+    expect(sent[1]?.idempotency_key).not.toBe(sent[0]?.idempotency_key);
+    expect(service.jobs()).toHaveLength(2);
+  });
 });

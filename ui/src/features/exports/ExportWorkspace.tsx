@@ -18,8 +18,10 @@
  * headings stay "Jobs" over the list. The button is always there while offered (`aria-disabled`
  * while the request is out, or while the chosen version is not yet listed), so it keeps keyboard
  * focus. What came of a press is said in the group (`ExportSaid`); the job is listed below as every
- * job is, and once it has finished its row offers the download. A press is repeated under its key
- * while it asks the same version and the same choice of history (`exportAttempt`).
+ * job is, and once it has finished its row offers the download. What is asked is the whole
+ * request, the version and the choice of history: a press made for another (a failure, a press still
+ * out, an accepted export) is not said or retried while this one is chosen, and each keeps its
+ * own key, so coming back to one never answered asks again under it (`useExportStart`).
  */
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import { useId, useRef, useState } from 'react';
@@ -59,11 +61,6 @@ export function ExportWorkspace({ workspaceId, head, rights }: ExportWorkspacePr
   const [picked, setPicked] = useState<Revision | null>(null);
   const can = allowedOperation(rights, 'export_workspace', 'write');
   const stopped = can === 'archived';
-  const start = useExportStart<WorkspaceExport>({
-    request: workspaceId,
-    start: (attempt) => startWorkspaceExport(client, workspaceId, attempt),
-    loaded: () => buttonRef.current,
-  });
   // The versions of the head shown, asked only once a version of the history is wanted.
   const log = useInfiniteQuery({
     ...logOptions(workspaceId, head, null),
@@ -85,6 +82,12 @@ export function ExportWorkspace({ workspaceId, head, rights }: ExportWorkspacePr
       : chosen === null
         ? null
         : { kind: 'revision', revision: chosen.revision };
+  const start = useExportStart<WorkspaceExport>({
+    // The whole request: another version or choice of history is another request.
+    request: JSON.stringify([workspaceId, at, includeHistory]),
+    start: (attempt) => startWorkspaceExport(client, workspaceId, attempt),
+    loaded: () => buttonRef.current,
+  });
 
   if (can === 'no-permission') {
     return <Missing action="Exporting this workspace" permission="write" />;
