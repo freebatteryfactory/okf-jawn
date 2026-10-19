@@ -164,4 +164,41 @@ describe('Attention rule freshness', { timeout: 30_000 }, () => {
     expect(screen.queryByText(versionMessage(RULE_V1))).toBeNull();
     expect(api.violations).toEqual([]);
   });
+
+  for (const transition of ['hidden', 'unmounted'] as const) {
+    it(`does not resume a queued refresh after the lifecycle becomes ${transition}`, async () => {
+      const { api, events } = attentionService(() => answerWith(RULE_V1));
+      const view = attentionView();
+      await screen.findAllByText(versionMessage(RULE_V1));
+      await waitFor(() => expect(events.streams).toHaveLength(1));
+      await waitFor(() => expect(view.client.isFetching()).toBe(0));
+      const before = api.callsTo(ATTENTION).length;
+      const queries = view.client.getQueryCache().getAll();
+      expect(queries).toHaveLength(1);
+      expect(queries.at(0)?.state.isInvalidated).toBe(false);
+
+      // askAgain awaits cancellation before invalidating. Hold that exact boundary, so a
+      // focus refresh is pending when the lifecycle changes; no sleep races a timer here.
+      const cancellation = Promise.withResolvers<void>();
+      const cancel = vi.spyOn(view.client, 'cancelQueries');
+      cancel.mockImplementationOnce(() => cancellation.promise);
+      act(() => window.dispatchEvent(new Event('focus')));
+      await waitFor(() => expect(cancel).toHaveBeenCalledTimes(1));
+      if (transition === 'hidden') act(() => pageShown(false));
+      else view.unmount();
+      expect(events.streams.at(0)?.closed).toBe(true);
+      await act(async () => {
+        cancellation.resolve();
+        await cancellation.promise;
+      });
+
+      expect(api.callsTo(ATTENTION)).toHaveLength(before);
+      if (transition === 'unmounted') {
+        // With no active observer an obsolete invalidation may not issue a network request,
+        // but must still not mark this previous workspace's settled cache uncertain.
+        expect(queries.at(0)?.state.isInvalidated).toBe(false);
+      }
+      expect(api.violations).toEqual([]);
+    });
+  }
 });
