@@ -302,15 +302,14 @@ fn view_body(note: ItemId, revision: &Revision) -> Fallible<String> {
     ))
 }
 
-#[tokio::test]
-async fn backup_a_view_restored_into_another_workspace_validates_and_opens_there() -> TestResult {
-    let home = tempfile::tempdir()?;
-    let origin = Storage::open(home.path())?;
-    let (source, blank) = create(&origin, 1, "Origin").await?;
+/// In `origin`, a workspace holding the note at the revision answered first, then a View citing
+/// it, committed at the revision answered second.
+async fn seeded(origin: &Storage) -> Fallible<(StorageScope, Revision, Revision)> {
+    let (source, blank) = create(origin, 1, "Origin").await?;
     let note = item(10);
     let view = item(11);
     let noted = create_item(
-        &origin,
+        origin,
         &source,
         2,
         &blank,
@@ -326,7 +325,7 @@ async fn backup_a_view_restored_into_another_workspace_validates_and_opens_there
     )
     .await?;
     let archived = create_item(
-        &origin,
+        origin,
         &source,
         3,
         &noted,
@@ -341,21 +340,18 @@ async fn backup_a_view_restored_into_another_workspace_validates_and_opens_there
         },
     )
     .await?;
-    let before = service(&origin)?
-        .get_item(
-            &reading(&source, OperationName::GetItem)?,
-            GetItemRequest {
-                workspace_id: source.workspace_id,
-                item_id: view,
-                at: At::Latest,
-            },
-        )
-        .await?;
+    Ok((source, noted, archived))
+}
 
-    // The archive, imported into a blank workspace of another installation (SPEC section 12).
+/// `source`'s archive imported into a blank workspace of a second installation, with that
+/// installation's directory, storage and workspace.
+async fn imported(
+    origin: &Storage,
+    source: &StorageScope,
+) -> Fallible<(tempfile::TempDir, Storage, StorageScope)> {
     let archive = origin
         .backups()
-        .write_workspace_archive(&source, mutation(4))
+        .write_workspace_archive(source, mutation(4))
         .await?
         .object;
     let bytes = std::fs::read(
@@ -369,7 +365,6 @@ async fn backup_a_view_restored_into_another_workspace_validates_and_opens_there
     let away = tempfile::tempdir()?;
     let copy = Storage::open(away.path())?;
     let (target, _) = create(&copy, 5, "Copy").await?;
-    assert_ne!(target.workspace_id, source.workspace_id);
     let uploaded = copy
         .blobs()
         .put(
@@ -387,7 +382,29 @@ async fn backup_a_view_restored_into_another_workspace_validates_and_opens_there
             vec!["ana".to_owned()],
         )
         .await?;
+    Ok((away, copy, target))
+}
 
+#[tokio::test]
+async fn backup_a_view_restored_into_another_workspace_validates_and_opens_there() -> TestResult {
+    let home = tempfile::tempdir()?;
+    let origin = Storage::open(home.path())?;
+    let (source, noted, archived) = seeded(&origin).await?;
+    let view = item(11);
+    let before = service(&origin)?
+        .get_item(
+            &reading(&source, OperationName::GetItem)?,
+            GetItemRequest {
+                workspace_id: source.workspace_id,
+                item_id: view,
+                at: At::Latest,
+            },
+        )
+        .await?;
+
+    // The archive, imported into a blank workspace of another installation (SPEC section 12).
+    let (_away, copy, target) = imported(&origin, &source).await?;
+    assert_ne!(target.workspace_id, source.workspace_id);
     let copied = service(&copy)?;
     let opened = copied
         .get_view(
@@ -418,7 +435,7 @@ async fn backup_a_view_restored_into_another_workspace_validates_and_opens_there
         .await?;
     let resolved_binding = some(resolved.resolved_bindings.first(), "the resolved binding")?;
     assert_eq!(resolved_binding.source.workspace_id, target.workspace_id);
-    assert!(resolved.charts.is_empty());
+    assert_eq!(resolved.charts, Vec::new());
     // At the archive's own head, before the restore commit, the View opens there too.
     let historical = copied
         .get_view(
