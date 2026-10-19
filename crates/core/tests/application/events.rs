@@ -293,6 +293,7 @@ async fn append(tenancy: &Tenancy, kind: EventKind) -> TestResult {
             connector_id: None,
             actor: None,
             operation: None,
+            transport: None,
             proposal_id: None,
             count: None,
         }
@@ -601,6 +602,7 @@ async fn record_sign_in_appends_signed_in_to_the_tenants_log() -> TestResult {
             client_id: Some("browser".to_owned()),
         }),
         operation: None,
+        transport: None,
         proposal_id: None,
         count: None,
     };

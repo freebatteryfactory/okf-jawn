@@ -47,6 +47,8 @@ pub struct NewEvent {
     pub actor: Option<EventActor>,
     /// The refused operation of a `permission_denied` event.
     pub operation: Option<OperationName>,
+    /// The refused byte transport of a `permission_denied` event; `operation` is then absent.
+    pub transport: Option<okf_jawn_contract::transport::TransportName>,
     /// Affected proposal.
     pub proposal_id: Option<ProposalId>,
     /// How many occurrences this one event stands for; `None` means one (a `sign_in_refused`
@@ -100,6 +102,19 @@ impl NewEvent {
         }
     }
 
+    /// A `permission_denied` event for a refused byte transport: `principal` was refused
+    /// `transport`, which is not an operation (`Event::transport`).
+    #[must_use]
+    pub fn transport_denied(
+        principal: &Principal,
+        transport: okf_jawn_contract::transport::TransportName,
+    ) -> Self {
+        Self {
+            transport: Some(transport),
+            ..Self::security(EventKind::PermissionDenied, principal)
+        }
+    }
+
     /// A `signed_in` event: `principal` began a browser session (tenant-level).
     #[must_use]
     pub fn signed_in(principal: &Principal) -> Self {
@@ -138,6 +153,7 @@ impl NewEvent {
                 client_id: principal.client_id.clone(),
             }),
             operation: None,
+            transport: None,
             proposal_id: None,
             count: None,
         }

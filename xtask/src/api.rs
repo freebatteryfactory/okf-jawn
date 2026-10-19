@@ -928,8 +928,9 @@ mod tests {
             }
         }
         // Ten operations start a job, five are human-session only, three are the local owner's,
-        // and the archive allow-list holds fifty.
-        assert_eq!(seen, [10, 5, 3, 50]);
+        // and the archive allow-list holds fifty-one (`create_connector` by the owner's decision
+        // of 2026-10-17).
+        assert_eq!(seen, [10, 5, 3, 51]);
         Ok(())
     }
 
