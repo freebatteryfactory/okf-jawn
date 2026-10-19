@@ -25,7 +25,7 @@ import type { NamingRules, Permission, Workspace } from '../../src/api/generated
 import { WEBMCP_SETTING_KEY } from '../../src/features/settings/webmcp-setting';
 import { type ModelContextTool, registerPageTools } from '../../src/webmcp/register';
 import { type Handler, mockApi, ok, type Reply, rulesAnswer } from './support/api';
-import { changeOf, DIFF, diffOf, OLDER } from './support/history';
+import { changeOf, DIFF, diffOf, LOG, OLDER, VERSIONS } from './support/history';
 import { PROPOSE, proposalOf } from './support/proposals';
 import {
   blockStorage,
@@ -398,6 +398,41 @@ describe('What each page tool does', { timeout: 30_000 }, () => {
       'not valid',
     );
     expect(router.state.location.pathname).toBe(`/w/${WS}/i/${SOURCE}`);
+    expect(api.violations).toEqual([]);
+  });
+
+  it('open_comparison lands on the rendering the Timeline shows for the same pair', async () => {
+    const versions = { [LOG]: () => ok({ commits: VERSIONS, next_cursor: null }) };
+    /** What the one diff reader drew of each changed file. */
+    const drawn = (region: HTMLElement) =>
+      [...region.querySelectorAll('.changed-file')].map((file) => file.outerHTML);
+    // The Timeline: "Draft the budget" (OLD) against the version before it (OLDER).
+    const timelineApi = setup(versions);
+    renderAt(`/w/${WS}/timeline`);
+    const entry = (await screen.findByText('Draft the budget')).closest('li');
+    if (entry === null) throw new Error('no Timeline entry for “Draft the budget”');
+    fireEvent.click(within(entry).getByRole('button', { name: 'Show its changes' }));
+    const timeline = await within(entry).findByRole('region', { name: 'Its changes' });
+    const asked = timelineApi.callsTo(DIFF);
+    expect(asked).toEqual([{ workspace_id: WS, from: OLDER, to: OLD }]);
+    const timelineFiles = drawn(timeline);
+    expect(timelineFiles).toHaveLength(1);
+    cleanup();
+    // A new page: the tool's comparison of the same pair asks the same and draws the same.
+    const api = setup(versions);
+    const context = installModelContext();
+    turnOn();
+    renderAt(`/w/${WS}`);
+    await screen.findByRole('tree', { name: 'Folders' });
+    await waitFor(() => expect(context.live()).toHaveLength(5));
+    await context.run('open_comparison', { from: OLDER, to: OLD });
+    const page = await screen.findByRole('region', { name: 'Comparison' });
+    const compared = await within(page).findByRole('region', { name: 'What changed' });
+    expect(api.callsTo(DIFF)).toEqual(asked);
+    expect(drawn(compared)).toEqual(timelineFiles);
+    expect(compared.querySelector('.meta')?.textContent).toBe(
+      timeline.querySelector('.meta')?.textContent,
+    );
     expect(api.violations).toEqual([]);
   });
 

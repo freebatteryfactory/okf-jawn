@@ -1,19 +1,23 @@
 /**
- * A comparison at its own address (`/w/<id>/compare?from=…&to=…&item=…`): the Changes between two
- * exact versions of the workspace, or of one of its items, as the service answers them
- * (`diff_items`), through the one Changes view shared with MCP Apps (`Changes.tsx`). The page
- * tool `open_comparison` opens it (`webmcp/tools.ts`, SPEC section 9: "open a
- * comparison/source"); like every page of the workspace it is shown in place of the documents, and
- * its address can be kept and opened again.
+ * A comparison at its own address (`/w/<id>/compare?from=…&to=…&item=…`), where the page tool
+ * `open_comparison` lands (`webmcp/tools.ts`; SPEC section 9: "open a comparison/source"). The
+ * Explorer had no address for two arbitrary versions; this page is a thin, addressable shell over
+ * M3's one diff reader (ruling R3) and draws nothing of its own: the comparison is asked through
+ * `history.ts` (`diffOptions`, over the generated `diffItemsOptions`), the same query the Timeline
+ * asks, and shown by `Changes.tsx`, which draws each file through `changed-files.tsx`. Like every
+ * page of the workspace it is shown in place of the documents, and its address can be kept.
  *
- * Both versions are named by the address as exact revisions; neither is "the latest". An address
- * that does not name two valid revisions says so and asks nothing. A comparison that fails is a
- * failure notice with its retry, never "nothing changed".
+ * Both versions are named by the address as exact revisions, never "the latest", and both are
+ * shown "as of" their revision. An address that does not name two revisions is refused in the
+ * words the workspace route uses for a link that is not valid, and asks nothing. A comparison the
+ * service refuses is shown as the Timeline and Rewind show theirs: a failure notice with the
+ * failure's own words and its retry, never "nothing changed".
  */
 import { useQuery } from '@tanstack/react-query';
 import { useId } from 'react';
 import type { Revision } from '../../api/generated/types.gen';
 import { zItemId, zRevision } from '../../api/generated/zod.gen';
+import { short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
 import { Changes } from './Changes';
@@ -64,7 +68,12 @@ export function ComparisonPage({ workspaceId, comparison }: ComparisonPageProps)
         Comparison
       </h2>
       {comparison === null ? (
-        <p>This address does not name two versions to compare. Nothing was requested.</p>
+        <div role="alert" className="failure-notice">
+          <p>
+            <strong>This link is not valid.</strong>
+          </p>
+          <p>The address does not name two versions to compare. Nothing was requested.</p>
+        </div>
       ) : (
         <ComparedChanges
           key={`${comparison.from} ${comparison.to} ${comparison.item ?? ''}`}
@@ -95,9 +104,10 @@ function ComparedChanges({
   return (
     <>
       <p className="meta">
-        {item === null
-          ? 'What changed in the whole workspace between the two versions.'
-          : 'What changed in one item between the two versions.'}
+        {item === null ? 'The workspace' : 'One item'} as of revision{' '}
+        <code title={from}>{short(from)}</code>, compared with{' '}
+        {item === null ? 'the workspace' : 'the item'} as of revision{' '}
+        <code title={to}>{short(to)}</code>.
       </p>
       {diff.isPending && !failure.retrying && <p role="status">Comparing the two versions…</p>}
       {failure.shown && (
