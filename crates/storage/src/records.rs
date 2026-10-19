@@ -698,6 +698,7 @@ fn insert_job(
         artifact: None,
         restore: None,
         backup: None,
+        clean_up: None,
         created_at: Some(seam::now()?),
         started_at: None,
         finished_at: None,

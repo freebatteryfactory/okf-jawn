@@ -1184,6 +1184,7 @@ impl RecordStore for FakeJobs {
                 artifact: None,
                 restore: None,
                 backup: None,
+                clean_up: None,
                 created_at: Some(instant().map_err(internal)?),
                 started_at: None,
                 finished_at: None,

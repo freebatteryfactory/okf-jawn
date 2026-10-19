@@ -546,6 +546,25 @@ export type ChartStatus = {
 };
 
 /**
+ * What a clean-up did; counts only.
+ */
+export type CleanUpReport = {
+    /**
+     * Stored objects its last pass kept because something still references, pends or pins
+     * them, as a decimal string.
+     */
+    objects_kept: string;
+    /**
+     * Stored objects removed, over every pass of the job, as a decimal string.
+     */
+    objects_removed: string;
+    /**
+     * Received bytes of discarded upload slots removed (files a stopped discard left).
+     */
+    upload_files_removed: number;
+};
+
+/**
  * How proposed naming collisions are handled.
  */
 export type CollisionPolicy = 'reject' | 'suffix' | 'keep_existing';
@@ -2540,6 +2559,10 @@ export type Job = {
      */
     backup?: BackupReport | null;
     /**
+     * What a completed clean-up removed and kept.
+     */
+    clean_up?: CleanUpReport | null;
+    /**
      * When the job was accepted; absent on a job accepted before this field existed.
      */
     created_at?: Timestamp | null;
@@ -2609,7 +2632,7 @@ export type JobId = string;
 /**
  * What a durable job does; fixed when the job is accepted.
  */
-export type JobKind = 'import' | 'redigest' | 'export_workspace' | 'backup_workspace' | 'restore_workspace' | 'rebuild_index' | 'export_view' | 'backup_installation' | 'purge_workspace' | 'purge_item';
+export type JobKind = 'import' | 'redigest' | 'export_workspace' | 'backup_workspace' | 'restore_workspace' | 'rebuild_index' | 'export_view' | 'backup_installation' | 'purge_workspace' | 'purge_item' | 'clean_up';
 
 /**
  * Job progress retained independently of diagnostic traces.
@@ -3812,7 +3835,9 @@ export type PurgeReport = {
      */
     exports_removed: number;
     /**
-     * Objects kept because a surviving item still references them, as a decimal string.
+     * Stored objects kept because a surviving record, retained history, pending put or running
+     * write still references, pends or pins them, as a decimal string. Includes objects the
+     * target never referenced.
      */
     objects_kept_shared: string;
     /**
@@ -3824,7 +3849,8 @@ export type PurgeReport = {
      */
     proposals_removed: number;
     /**
-     * Revisions that no longer exist or were rewritten.
+     * Revisions the purge's records name for the workspace, including earlier item-purge
+     * mappings. Every revision of a purged workspace is invalidated, whether counted or not.
      */
     revisions_invalidated: number;
     /**

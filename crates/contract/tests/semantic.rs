@@ -67,9 +67,15 @@ const JOB_KINDS: &[&str] = &[
     "backup_installation",
     "purge_workspace",
     "purge_item",
+    "clean_up",
 ];
 /// Job kinds that run at the tenant level, in `JOB_KINDS` order.
-const TENANT_JOB_KINDS: &[&str] = &["backup_installation", "purge_workspace", "purge_item"];
+const TENANT_JOB_KINDS: &[&str] = &[
+    "backup_installation",
+    "purge_workspace",
+    "purge_item",
+    "clean_up",
+];
 const ITEM: &str = "22222222-2222-4222-8222-222222222222";
 const OTHER_ITEM: &str = "33333333-3333-4333-8333-333333333333";
 
@@ -352,10 +358,23 @@ fn every_operation_that_starts_a_job_has_a_kind() {
         .filter(|operation| operation.success_status == 202 && operation.id != "retry_job")
         .map(|operation| operation.id)
         .collect();
+    assert_eq!(starters.len(), 10, "202 operations: {starters:?}");
+    // Clean-up is the one additional kind: existing discard_upload still answers 200 Upload.
+    assert_eq!(JOB_KINDS.len(), starters.len() + 1);
+    let other_starters: Vec<_> = operations()
+        .iter()
+        .filter(|operation| operation.rules.starts_job.is_some() && operation.success_status != 202)
+        .map(|operation| {
+            (
+                operation.id,
+                operation.success_status,
+                operation.rules.starts_job,
+            )
+        })
+        .collect();
     assert_eq!(
-        starters.len(),
-        JOB_KINDS.len(),
-        "202 operations: {starters:?}"
+        other_starters,
+        [("discard_upload", 200, Some(JobKind::CleanUp))]
     );
 }
 
@@ -910,7 +929,12 @@ fn job_kinds_name_the_operation_that_starts_them() -> Result<(), Box<dyn Error>>
     assert_eq!(workspace, workspace_creators);
     assert_eq!(
         tenant,
-        ["backup_installation", "purge_workspace", "purge_item"]
+        [
+            "backup_installation",
+            "purge_workspace",
+            "purge_item",
+            "discard_upload"
+        ]
     );
     assert_eq!(JobKind::Import.started_by(), OperationName::StartImport);
     Ok(())

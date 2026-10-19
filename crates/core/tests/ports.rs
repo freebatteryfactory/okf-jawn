@@ -1189,6 +1189,7 @@ fn a_commit_is_built_from_a_claimed_job_alone() -> TestResult {
             artifact: None,
             restore: None,
             backup: None,
+            clean_up: None,
             created_at: None,
             started_at: None,
             finished_at: None,

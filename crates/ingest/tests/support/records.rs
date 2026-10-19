@@ -215,6 +215,7 @@ impl FakeRecords {
             artifact: None,
             restore: None,
             backup: None,
+            clean_up: None,
             created_at: None,
             started_at: None,
             finished_at: None,
