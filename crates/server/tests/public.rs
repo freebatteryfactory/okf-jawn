@@ -69,6 +69,10 @@ fn app(hosted: bool) -> Result<Router, Box<dyn std::error::Error>> {
             credentials,
             events: ports.events.clone(),
             cookies: Arc::new(CrateCookies),
+            refusals: Arc::new(okf_jawn_server::allowance::SecurityEvents::new(
+                ports.events.clone(),
+                Arc::new(okf_jawn_server::grants::SystemClock),
+            )),
         },
         vec![format!("http://{HOST}")],
     );

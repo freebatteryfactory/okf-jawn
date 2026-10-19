@@ -16,8 +16,10 @@ use okf_jawn_core::credentials::{
 };
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_server::BoundApplication;
+use okf_jawn_server::allowance::SecurityEvents;
 use okf_jawn_server::app::{ServiceParts, service};
 use okf_jawn_server::cookies::CrateCookies;
+use okf_jawn_server::grants::SystemClock;
 use okf_jawn_server::identity::{
     BearerAuth, ConnectIdentity, ConnectVerifier, Identity, IdentityPorts, Verifying,
 };
@@ -53,6 +55,8 @@ pub struct LocalApp {
     pub credentials: Arc<FakeCredentials>,
     /// Dispatch's fixture ports.
     pub ports: FixturePorts,
+    /// The security-event allowance over the fixture log, where refused sign-ins are recorded.
+    pub refusals: Arc<SecurityEvents>,
 }
 
 /// The installation owner's subject.
@@ -271,10 +275,16 @@ impl LocalApp {
             vec![Permission::Read],
             false,
         )?;
+        let ports = FixturePorts::new(table);
+        let refusals = Arc::new(SecurityEvents::new(
+            ports.events.clone(),
+            Arc::new(SystemClock),
+        ));
         Ok(Self {
             counting: Arc::new(CountingApplication::new()),
             credentials,
-            ports: FixturePorts::new(table),
+            ports,
+            refusals,
         })
     }
 
@@ -298,6 +308,7 @@ impl LocalApp {
                 credentials: self.credentials.clone(),
                 events: self.ports.events.clone(),
                 cookies: Arc::new(CrateCookies),
+                refusals: self.refusals.clone(),
             },
             vec![ORIGIN.to_owned()],
         )

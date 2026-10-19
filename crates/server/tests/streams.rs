@@ -175,6 +175,7 @@ impl Stream {
                 credentials: base.credentials.clone(),
                 events: base.ports.events.clone(),
                 cookies: Arc::new(CrateCookies),
+                refusals: base.refusals.clone(),
             },
             vec![ORIGIN.to_owned()],
             clock,

@@ -155,6 +155,8 @@ async fn respond(
 okf_jawn_contract::for_each_operation!(bind_routes);
 
 #[cfg(feature = "runtime")]
+pub mod allowance;
+#[cfg(feature = "runtime")]
 pub mod app;
 #[cfg(feature = "runtime")]
 pub mod assets;

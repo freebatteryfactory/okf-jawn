@@ -50,6 +50,10 @@ fn local_service(credentials: Arc<FakeCredentials>) -> Result<Router, Box<dyn st
             credentials,
             events: ports.events.clone(),
             cookies: Arc::new(CrateCookies),
+            refusals: Arc::new(okf_jawn_server::allowance::SecurityEvents::new(
+                ports.events.clone(),
+                Arc::new(okf_jawn_server::grants::SystemClock),
+            )),
         },
         vec![format!("http://{HOST}")],
     );
