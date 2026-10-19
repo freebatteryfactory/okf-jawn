@@ -47,11 +47,11 @@
 //!   (`UploadStore::list` in `waiting`, every page), with their count and total retained bytes.
 //!   Action `list_uploads`.
 //!
-//! Not built, said rather than hidden: `InstructionLike`, because no detector of
-//! instruction-like text is selected (it would be advisory only); `NewerSource` and
-//! `Invalidated`, which concern Views and come with them (core M1.6 and M1b); and
-//! `UnparseableHeader`, whose producer (ingest M2a's import of an OKF file whose header does not
-//! parse) is not on main.
+//! Remaining producers, said rather than hidden: `InstructionLike` has an owner-approved
+//! deterministic v1 detector, whose implementation, typed findings and consumers are a
+//! separate follow-up. This slice does not implement it. `NewerSource`, `Invalidated` and
+//! `UnparseableHeader` also remain separate producer-backed work; this handler does not emit
+//! those kinds.
 //!
 //! Order and pages: the rows are ordered by kind in the order `AttentionKind` declares them,
 //! then by the item's path, then by its identity (a row about no item has an empty path and
@@ -179,9 +179,11 @@ pub(super) async fn get_attention(
     let mut rows = scan(service, &scope, &revision).await?;
     rows.sort_by(|left, right| order(&left.key).cmp(&order(&right.key)));
     let limit = usize::from(page.limit.max(1));
-    let mut remaining = rows
-        .into_iter()
-        .filter(|row| after.as_ref().is_none_or(|after| order(&row.key) > order(after)));
+    let mut remaining = rows.into_iter().filter(|row| {
+        after
+            .as_ref()
+            .is_none_or(|after| order(&row.key) > order(after))
+    });
     let listed: Vec<Row> = remaining.by_ref().take(limit).collect();
     let next = match (remaining.next(), listed.last()) {
         (Some(_), Some(last)) => Some(
@@ -344,7 +346,10 @@ async fn broken_links(
                 limit: SCAN_PAGE,
             },
         };
-        let page = indexed(service, scope, revision, || index.links(scope, query.clone())).await?;
+        let page = indexed(service, scope, revision, || {
+            index.links(scope, query.clone())
+        })
+        .await?;
         for link in page.links {
             if link.to.is_none()
                 && leads_nowhere(service, scope, revision, &document.summary.path, &link).await?
@@ -427,7 +432,12 @@ async fn leads_nowhere(
         let Ok(file) = WorkspacePath::try_from(reading.segments().join("/")) else {
             continue;
         };
-        match service.ports().versions.read_file(scope, revision, &file).await {
+        match service
+            .ports()
+            .versions
+            .read_file(scope, revision, &file)
+            .await
+        {
             Ok(_) => return Ok(false),
             Err(error) if error.code == ErrorCode::NotFound => {}
             Err(error) => return Err(error),
@@ -473,7 +483,9 @@ async fn stale(
         AttentionKind::Stale,
         document,
         None,
-        format!("Due for a check: it is to be checked again after {written}, which had passed on {today}, the day of this revision"),
+        format!(
+            "Due for a check: it is to be checked again after {written}, which had passed on {today}, the day of this revision"
+        ),
         OperationName::GetItem,
     )))
 }
@@ -593,7 +605,8 @@ async fn agent_content(
                     | Change::Archive { .. }
                     | Change::SupplyExtraction { .. } => continue,
                 };
-                let Some(document) = gone(ports.versions.show(scope, candidate, item).await)? else {
+                let Some(document) = gone(ports.versions.show(scope, candidate, item).await)?
+                else {
                     continue;
                 };
                 written
@@ -635,8 +648,7 @@ fn extraction(document: &ItemDocument) -> Option<Row> {
             OperationName::RedigestItem,
         ));
     }
-    if extraction.outcome.status() == ExtractionStatus::Completed
-        && !extraction.warnings.is_empty()
+    if extraction.outcome.status() == ExtractionStatus::Completed && !extraction.warnings.is_empty()
     {
         let found: Vec<String> = extraction.warnings.iter().map(warning_words).collect();
         return Some(row(

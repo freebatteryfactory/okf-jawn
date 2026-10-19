@@ -750,6 +750,12 @@ async fn imports_a_resume_after_consumption_before_the_pending_commit_returns_it
         .await?;
     let job = some(listed.items.first(), "the durable import job")?;
     assert_eq!(listed.items.len(), 1);
+    // The worker claims its lease before consuming; it has not made a pending-card commit.
+    some(records.claim_job(job.id).await?, "the worker's claim")?;
+    assert_eq!(
+        records.get_job(&jobs, job.id).await?.state,
+        JobState::Running
+    );
     world
         .storage
         .uploads()
@@ -758,6 +764,7 @@ async fn imports_a_resume_after_consumption_before_the_pending_commit_returns_it
     assert_eq!(world.storage.versions().head(&scope).await?, base);
     let resumed: Job = serde_json::from_value(world.call("start_import", request).await?)?;
     assert_eq!(resumed.id, job.id);
+    assert_eq!(resumed.state, JobState::Running);
     assert_eq!(job_count(&world, &jobs).await?, 1);
     assert_eq!(
         world.deliveries()?,
