@@ -15,6 +15,11 @@ export interface ResolvedPresentation {
   >;
   /** Why a binding's dataset was refused (malformed, not the converter's, stale): that chart's alert. */
   datasetErrors?: ReadonlyMap<string, string>;
+  /**
+   * Why the server could not produce a binding's dataset: the message of its `dataset_unavailable`
+   * warning, exactly as sent, for the table that reads it (a table has no chart status to say so).
+   */
+  datasetWarnings?: ReadonlyMap<string, string>;
   /** Why a binding's source could not be read: that source excerpt's alert, never the View's. */
   sourceErrors?: ReadonlyMap<string, string>;
   /**
@@ -23,6 +28,11 @@ export interface ResolvedPresentation {
    * `vega_lite` chart. That chart's alert alone.
    */
   chartErrors?: ReadonlyMap<string, string>;
+  /**
+   * The bindings each chart reads, as the server's `ready` status names them; the key as in
+   * `chartErrors`. A chart is given every one of them.
+   */
+  chartBindings?: ReadonlyMap<string, readonly string[]>;
 }
 export const BindingsContext = createContext<ResolvedPresentation | null>(null);
 export function useBindings(): ResolvedPresentation {

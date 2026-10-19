@@ -3146,7 +3146,9 @@ test('the present fixture retains exactly the committed dataset, and the expecta
   assert.equal(PRESENT_DATASET.present, 'tests/fixtures/views/present-response.json');
   const retained = (bindings) => bindings.filter((binding) => binding.materialized !== undefined).map((binding) => [binding.name, binding.materialized]);
   assert.deepEqual(retained(present.resolved_bindings), [[PRESENT_DATASET.binding, digest]]);
-  assert.deepEqual(retained(present.view.bindings), [[PRESENT_DATASET.binding, digest]]);
+  // Core refuses materialized data in the authored View; it belongs to resolved bindings.
+  assert.deepEqual(retained(present.view.bindings), []);
+  assert.deepEqual(present.view.bindings.map((binding) => binding.name), ['venue', 'metrics']);
   // One flipped byte is another object: the fixture would no longer retain it.
   const corrupted = Buffer.from(bytes);
   corrupted[corrupted.length - 2] ^= 1;

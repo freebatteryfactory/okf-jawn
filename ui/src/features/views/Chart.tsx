@@ -1,4 +1,8 @@
-/** Render a validated Vega-Lite spec with an explicit loader boundary and table fallback. */
+/**
+ * Render a validated Vega-Lite spec with an explicit loader boundary and table fallback. The chart
+ * is given every dataset it reads, each under its binding's name (Vega-Lite's named `datasets`),
+ * so a layered chart over two bindings draws both; each has its own table.
+ */
 import { useEffect, useRef, useState } from 'react';
 import { loader } from 'vega';
 import embed from 'vega-embed';
@@ -6,13 +10,19 @@ import { expressionInterpreter } from 'vega-interpreter';
 import type { TopLevelSpec } from 'vega-lite';
 import { DataTable } from './DataTable';
 
-export interface ChartProps {
-  spec: TopLevelSpec;
+/** One dataset a chart reads: the binding's name and its resolved rows. */
+export interface ChartDataset {
+  name: string;
   rows: ReadonlyArray<Readonly<Record<string, string | number | boolean | null>>>;
-  bindingName: string;
 }
 
-export function Chart({ spec, rows, bindingName }: ChartProps) {
+export interface ChartProps {
+  spec: TopLevelSpec;
+  /** Every dataset the chart reads. */
+  datasets: ReadonlyArray<ChartDataset>;
+}
+
+export function Chart({ spec, datasets }: ChartProps) {
   const container = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -29,7 +39,12 @@ export function Chart({ spec, rows, bindingName }: ChartProps) {
     };
     embed(
       element,
-      { ...spec, datasets: { [bindingName]: rows.map((row) => ({ ...row })) } },
+      {
+        ...spec,
+        datasets: Object.fromEntries(
+          datasets.map(({ name, rows }) => [name, rows.map((row) => ({ ...row }))]),
+        ),
+      },
       {
         mode: 'vega-lite',
         actions: false,
@@ -49,14 +64,16 @@ export function Chart({ spec, rows, bindingName }: ChartProps) {
       disposed = true;
       finalize?.();
     };
-  }, [spec, rows, bindingName]);
+  }, [spec, datasets]);
   return (
     <section>
       <div ref={container} />
       {error && <p role="alert">{error}</p>}
       <details>
         <summary>Source data</summary>
-        <DataTable rows={rows} caption={bindingName} />
+        {datasets.map(({ name, rows }) => (
+          <DataTable key={name} rows={rows} caption={name} />
+        ))}
       </details>
     </section>
   );
