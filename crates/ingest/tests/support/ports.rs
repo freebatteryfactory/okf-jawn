@@ -33,9 +33,9 @@ use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
     Backups, BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges,
-    Committed, DiffQuery, FolderListing, LocalSource, LogQuery, ObjectInfo, ObjectRead, Page,
-    Promotion, Purger, SourceCard, StorageScope, TreeEdit, VersionStore, WrittenArchive,
-    replay_warnings_unavailable,
+    Committed, CommittedFiles, DiffQuery, FilePage, FolderListing, LocalSource, LogQuery,
+    ObjectInfo, ObjectRead, Page, Promotion, Purger, SourceCard, StorageScope, TreeEdit,
+    VersionStore, WrittenArchive, replay_warnings_unavailable,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadRecord, UploadStore};
 
@@ -951,6 +951,14 @@ impl VersionStore for FakeVersions {
         _mutation_id: MutationId,
     ) -> PortFuture<'a, ObjectInfo> {
         unused("write_history")
+    }
+    fn committed_files<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _revision: &'a Revision,
+        _page: FilePage,
+    ) -> PortFuture<'a, CommittedFiles> {
+        unused("committed_files")
     }
 }
 

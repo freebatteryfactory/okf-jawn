@@ -30,9 +30,9 @@ use okf_jawn_contract::item::{ItemDocument, ItemSummary, TypeDefinition};
 use okf_jawn_core::items::refuse_header_change;
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
-    BlameQuery, CandidateChanges, CandidateCheck, CommitChanges, Committed, DiffQuery,
-    FolderListing, LogQuery, ObjectInfo, Page, Promotion, StorageScope, TreeEdit, VersionStore,
-    replay_warnings_unavailable,
+    BlameQuery, CandidateChanges, CandidateCheck, CommitChanges, Committed, CommittedFiles,
+    DiffQuery, FilePage, FolderListing, LogQuery, ObjectInfo, Page, Promotion, StorageScope,
+    TreeEdit, VersionStore, replay_warnings_unavailable,
 };
 use serde_json::Value;
 
@@ -450,6 +450,14 @@ impl VersionStore for CandidateVersions {
         mutation_id: MutationId,
     ) -> PortFuture<'a, ObjectInfo> {
         self.inner.write_history(scope, revision, mutation_id)
+    }
+    fn committed_files<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+        page: FilePage,
+    ) -> PortFuture<'a, CommittedFiles> {
+        self.inner.committed_files(scope, revision, page)
     }
 }
 

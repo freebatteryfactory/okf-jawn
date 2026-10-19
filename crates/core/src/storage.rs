@@ -387,6 +387,56 @@ pub struct FolderListing {
     pub next_cursor: Option<String>,
 }
 
+/// Where a page of `VersionStore::committed_files` starts and how much it may hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilePage {
+    /// The path of the last file of the previous page (`CommittedFiles::next_after`); `None`
+    /// starts at the first file.
+    pub after: Option<String>,
+    /// At most this many files; a store answers at least one and at most 500.
+    pub limit: u16,
+    /// The page ends with the first file that takes the bytes of its files past this, so a
+    /// page holds at least one file however large that file is.
+    pub max_bytes: u64,
+}
+
+/// One page of the committed files of a revision (`VersionStore::committed_files`).
+#[derive(Debug, Clone)]
+pub struct CommittedFiles {
+    /// Files in byte order of their paths, each once.
+    pub files: Vec<CommittedFile>,
+    /// The path to pass as `FilePage::after` for the next page; `None` on the last page.
+    pub next_after: Option<String>,
+}
+
+/// One committed file: its path as the tree spells it, its exact bytes, and the item it holds.
+#[derive(Debug, Clone)]
+pub struct CommittedFile {
+    /// The `/`-separated path in the revision's tree.
+    pub path: String,
+    /// The stored bytes, exactly.
+    pub bytes: Vec<u8>,
+    /// The item the file holds; `None` for a file that holds none (a folder `index.md`,
+    /// `log.md`, anything under `.okf/`, a Markdown file without an application header).
+    pub item: Option<CommittedItem>,
+}
+
+/// What a portable export needs of one item file, as `show` answers it at the same revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedItem {
+    /// The item's identity (`ApplicationHeader::item_id`).
+    pub item_id: ItemId,
+    /// Its rendering role (`ApplicationHeader::kind`).
+    pub kind: ItemKind,
+    /// `ItemDocument::content_digest` at this revision: `portable::content_digest` of the
+    /// file's body and properties.
+    pub content_digest: Digest,
+    /// The original a source card names (`ApplicationHeader::source`).
+    pub source: Option<SourceHeader>,
+    /// The conversion record its extraction names (`Extraction::digest`).
+    pub record: Option<Digest>,
+}
+
 /// History of a workspace or of one item, newest first.
 #[derive(Debug, Clone)]
 pub struct LogQuery {
@@ -675,6 +725,26 @@ pub trait VersionStore: Send + Sync {
         revision: &'a Revision,
         mutation_id: MutationId,
     ) -> PortFuture<'a, ObjectInfo>;
+    /// Every file of `revision`'s tree, a page at a time, in byte order of path: what a
+    /// portable export writes (`JobSpec::ExportWorkspace`).
+    ///
+    /// Every file is answered once with its exact bytes: item files, folder `index.md` files,
+    /// `log.md` and everything under `.okf/`. An item file also carries what `show` would
+    /// answer of it at this revision (`CommittedItem`); which files hold an item is decided as
+    /// `list` decides it. A page holds at most `page.limit` files (clamped to 1..=500) and ends
+    /// with the first file that takes its bytes past `page.max_bytes`; `next_after` names the
+    /// last file answered while more remain.
+    ///
+    /// Reads no draft and no other reference. `NotFound` for a revision this repository does
+    /// not hold or that is not on the accepted line (a proposal candidate, or one a purge
+    /// rewrote away), as `write_history` refuses one. A tree entry that is not a regular file
+    /// (a link, a submodule) is `Internal`: no store edit writes one.
+    fn committed_files<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+        page: FilePage,
+    ) -> PortFuture<'a, CommittedFiles>;
 }
 
 /// A new blank workspace.
