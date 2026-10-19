@@ -102,6 +102,7 @@ impl World {
             mutations: Arc::new(storage.mutations()),
             catalog: Arc::new(storage.catalog()),
             blobs: Arc::new(storage.blobs()),
+            backups: Arc::new(storage.backups()),
             versions: Arc::new(storage.versions()),
             records: Arc::new(storage.records()),
             queue: queue.clone(),
