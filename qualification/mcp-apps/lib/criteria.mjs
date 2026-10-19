@@ -60,7 +60,7 @@ const BUNDLE_RULES = Object.freeze({
 
 const VIEW_RULES = Object.freeze({
   text: (view) =>
-    `In the App frame of the reference host, ${view.tool} shows the ${view.view} view's own text for the committed fixture and none of another view's, and no waiting, disconnected or unparsed-result message.`,
+    `In the App frame of the reference host, ${view.tool} shows the ${view.view} view's own text for the committed fixture and none of another view's, and no waiting, disconnected or unparsed-result message. Where revisions are abbreviated, visible code titles retain the exact full fixture identities.`,
   no_alert: () =>
     'The App frame holds no element with role="alert". Only the App frame is read: an alert in the host page or in the sandbox proxy frame is not seen by this rule.',
   accessibility: () => 'axe analysed the App frame and found no serious or critical violation in it.',
@@ -172,6 +172,7 @@ export function viewCriteria(view, expected, observation) {
     judged(id('text'), [
       ...(frame === null ? [`${unseen}: no frame two levels below the host page showed a document`] : []),
       ...(verdict.missing.length ? [`missing ${JSON.stringify(verdict.missing)}`] : []),
+      ...(verdict.missing_revisions.length ? [`missing full revision identities ${JSON.stringify(verdict.missing_revisions)}`] : []),
       ...(verdict.foreign.length ? [`shows text of another state ${JSON.stringify(verdict.foreign)}`] : []),
       ...(verdict.blocking.length ? [`shows ${JSON.stringify(verdict.blocking)}`] : []),
     ]),
@@ -222,6 +223,7 @@ export function viewCriteria(view, expected, observation) {
       screenshot: observation.screenshot ?? null,
       app_frame_depth: observation.app_frame_depth ?? null,
       feature_text: (frame?.text ?? '').slice(0, 400),
+      revisions: frame?.revisions ?? [],
       alerts: verdict.alerts,
       expected_alerts: verdict.expected_alerts,
       ...(dataset ? { present_dataset: dataset.record } : {}),

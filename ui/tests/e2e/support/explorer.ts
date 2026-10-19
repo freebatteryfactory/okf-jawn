@@ -159,6 +159,9 @@ export function answers(overrides: Answers = {}): Answers {
     // The person has no drafts, and the workspace defines no types, unless a spec says so.
     '/api/items/list-drafts': () => ok({ revision: HEAD, items: [], next_cursor: null }),
     '/api/types/list-types': () => ok({ items: [] }),
+    // No review is recorded and no item links to another, unless a spec says so.
+    '/api/reviews/list-reviews': () => ok({ items: [], imported: [] }),
+    '/api/search/get-links': () => ok({ revision: HEAD, links: [], next_cursor: null }),
     '/api/search/search-items': () =>
       ok({
         revision: HEAD,
