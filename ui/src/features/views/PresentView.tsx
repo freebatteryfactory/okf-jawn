@@ -207,9 +207,19 @@ function reason(cause: unknown, fallback: string): string {
   return cause instanceof Error ? cause.message : fallback;
 }
 
+/**
+ * What one resolution produced, for the response and the reads it was made with. It is shown only
+ * while both are still the ones given: while the next response, or the same one through other
+ * reads, is resolving, nothing read for the previous one is drawn under the new title and as-of
+ * time, and a previous failure does not stand for the next response.
+ */
+type Resolved = { response: PresentViewProps['response']; data: ViewData } & (
+  | { bindings: ResolvedPresentation }
+  | { failure: string }
+);
+
 export function PresentView({ response, data }: PresentViewProps) {
-  const [bindings, setBindings] = useState<ResolvedPresentation | null>(null);
-  const [failure, setFailure] = useState<string | null>(null);
+  const [resolved, setResolved] = useState<Resolved | null>(null);
   useEffect(() => {
     let active = true;
     const load = async () => {
@@ -251,29 +261,42 @@ export function PresentView({ response, data }: PresentViewProps) {
           datasetWarnings.set(binding, warning.message);
       }
       if (active)
-        setBindings({
-          sources,
-          bindings: definitions,
-          tables,
-          charts,
-          datasetErrors,
-          datasetWarnings,
-          sourceErrors,
-          chartErrors,
-          chartBindings,
+        setResolved({
+          response,
+          data,
+          bindings: {
+            sources,
+            bindings: definitions,
+            tables,
+            charts,
+            datasetErrors,
+            datasetWarnings,
+            sourceErrors,
+            chartErrors,
+            chartBindings,
+          },
         });
     };
     // Each binding and chart is caught on its own; this is for what nobody foresaw, so that the
     // View never waits on "Resolving…" forever.
     load().catch((cause) => {
-      if (active) setFailure(reason(cause, 'The presentation could not be resolved.'));
+      if (active)
+        setResolved({
+          response,
+          data,
+          failure: reason(cause, 'The presentation could not be resolved.'),
+        });
     });
     return () => {
       active = false;
     };
   }, [response, data]);
-  if (failure !== null) return <p role="alert">{failure}</p>;
-  if (!bindings) return <p role="status">Resolving the presentation's exact source references…</p>;
+  const current =
+    resolved !== null && resolved.response === response && resolved.data === data ? resolved : null;
+  if (current === null)
+    return <p role="status">Resolving the presentation's exact source references…</p>;
+  if ('failure' in current) return <p role="alert">{current.failure}</p>;
+  const { bindings } = current;
   const view = response.view;
   // Either grammar: the View's own title and description, its drawing, then what it was read from.
   return (

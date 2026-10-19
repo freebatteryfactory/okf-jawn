@@ -1337,3 +1337,171 @@ describe('a chart draws every binding its ready status names', () => {
     expect(screen.getByRole('table', { name: 'targets' })).toBeTruthy();
   });
 });
+
+describe('PresentView shows only what was read for the response and the reads it is given', () => {
+  const workspace = 'aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff';
+  const citeOf = (item: string, revision: string) => ({
+    item_id: item,
+    path: `fixtures/${item.slice(0, 4)}.json`,
+    revision,
+    selection: { kind: 'all' as const },
+    workspace_id: workspace,
+  });
+  const cited = {
+    a: citeOf('11111111-2222-4333-8444-555555555555', 'a'.repeat(40)),
+    b: citeOf('33333333-2222-4333-8444-555555555555', 'b'.repeat(40)),
+  };
+  /** The converter's Dataset of one source: one row whose category names the source. */
+  const bytesOf = (name: keyof typeof cited) =>
+    new TextEncoder().encode(
+      JSON.stringify({
+        schema_version: 1,
+        source: cited[name],
+        text_origin: 'converter',
+        columns: [
+          { name: 'category', kind: 'string' },
+          { name: 'value', kind: 'integer' },
+        ],
+        rows: [[`row of ${name.toUpperCase()}`, 1]],
+      }),
+    );
+  async function digestOf(bytes: BufferSource) {
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+    return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  }
+  /** A View of one source excerpt and one table over the source named, at its own as-of time. */
+  function viewOf(name: keyof typeof cited, digest: string) {
+    return {
+      view: {
+        schema_version: 1,
+        title: `Board ${name.toUpperCase()}`,
+        description: `The View of ${name.toUpperCase()}`,
+        mode: 'pinned',
+        grammar: 'json_render',
+        bindings: [],
+        spec: {
+          root: 'root',
+          elements: {
+            root: { type: 'Stack', props: {}, children: ['excerpt', 'table'] },
+            excerpt: { type: 'SourceExcerpt', props: { binding: 'metrics' }, children: [] },
+            table: { type: 'DataTable', props: { binding: 'metrics' }, children: [] },
+          },
+        },
+      },
+      resolved_bindings: [
+        { name: 'metrics', source: cited[name], units: {}, transforms: [], materialized: digest },
+      ],
+      charts: [],
+      as_of: name === 'a' ? '2026-10-08T14:03:07.250Z' : '2026-10-09T09:00:00.000Z',
+      warnings: [],
+      receipt_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    } as z.infer<typeof zPresentResponse>;
+  }
+  /**
+   * A ViewData serving both sources. A read of a source in `held` waits until `release` is called,
+   * so a test can look at the page while it is pending.
+   */
+  function serving(digests: Record<keyof typeof cited, string>, held: Set<string> = new Set()) {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((done) => {
+      release = done;
+    });
+    const nameOf = (item: string) => (item === cited.b.item_id ? 'b' : 'a');
+    const data: ViewData = {
+      readItem: async (request) => {
+        const name = nameOf(request.item_id);
+        if (held.has(name)) await gate;
+        return {
+          markdown: `Words of source ${name.toUpperCase()}.`,
+          media: [],
+          outline: [],
+          receipt_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+          source: cited[name],
+          truncated: false,
+          view: 'text',
+          warnings: [],
+        };
+      },
+      getObject: async (request) => {
+        const name = request.object === digests.b ? 'b' : 'a';
+        if (held.has(name)) await gate;
+        const bytes = bytesOf(name);
+        let binary = '';
+        for (const byte of bytes) binary += String.fromCharCode(byte);
+        return {
+          data_base64: btoa(binary),
+          has_more: false,
+          media_type: 'application/json',
+          offset: '0',
+          sha256: request.object,
+          total_size: String(bytes.byteLength),
+        };
+      },
+    };
+    return { data, release };
+  }
+  async function digests() {
+    return { a: await digestOf(bytesOf('a')), b: await digestOf(bytesOf('b')) };
+  }
+  /** Nothing read for A is on the page. */
+  function expectNothingOfA() {
+    expect(screen.queryByText('Words of source A.')).toBeNull();
+    expect(screen.queryByText('row of A')).toBeNull();
+  }
+
+  it("never shows A's sources and table under B's title and as-of time while B's reads are pending", async () => {
+    const both = await digests();
+    const { data, release } = serving(both, new Set(['b']));
+    const view = render(<PresentView response={viewOf('a', both.a)} data={data} />);
+    expect(await screen.findByText('Words of source A.')).toBeTruthy();
+    expect(screen.getByText('row of A')).toBeTruthy();
+
+    view.rerender(<PresentView response={viewOf('b', both.b)} data={data} />);
+    // B's reads are held: what was read for A is gone at once, and nothing of B's is claimed.
+    expectNothingOfA();
+    expect(screen.getByRole('status').textContent).toMatch(/Resolving/);
+    expect(screen.queryByRole('heading', { name: 'Board B' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Board A' })).toBeNull();
+
+    release();
+    expect(await screen.findByText('Words of source B.')).toBeTruthy();
+    expect(screen.getByText('row of B')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Board B' })).toBeTruthy();
+    expectNothingOfA();
+  });
+
+  it('shows the next response once its reads answer, after a failure of the previous one', async () => {
+    const both = await digests();
+    const { data } = serving(both);
+    const broken = {
+      ...viewOf('a', both.a),
+      get resolved_bindings(): never {
+        throw new Error('the response could not be walked');
+      },
+    } as unknown as z.infer<typeof zPresentResponse>;
+    const view = render(<PresentView response={broken} data={data} />);
+    expect((await screen.findByRole('alert')).textContent).toBe('the response could not be walked');
+
+    view.rerender(<PresentView response={viewOf('b', both.b)} data={data} />);
+    expect(await screen.findByText('Words of source B.')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Board B' })).toBeTruthy();
+    expect(screen.queryByText('the response could not be walked')).toBeNull();
+  });
+
+  it('reads the same response again through new reads, showing nothing of the old reads meanwhile', async () => {
+    const both = await digests();
+    const first = serving(both);
+    const response = viewOf('a', both.a);
+    const view = render(<PresentView response={response} data={first.data} />);
+    expect(await screen.findByText('Words of source A.')).toBeTruthy();
+
+    const second = serving(both, new Set(['a']));
+    view.rerender(<PresentView response={response} data={second.data} />);
+    expectNothingOfA();
+    expect(screen.getByRole('status').textContent).toMatch(/Resolving/);
+
+    second.release();
+    expect(await screen.findByText('Words of source A.')).toBeTruthy();
+    expect(screen.getByText('row of A')).toBeTruthy();
+  });
+});
