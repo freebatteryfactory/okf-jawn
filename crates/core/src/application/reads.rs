@@ -18,7 +18,7 @@
 //!   byte position. A continuation reads that same revision whatever `latest` is now.
 //! - The citation is exact: the selection asked for when the whole of it was returned, else
 //!   the lines actually returned, with the digest and the server's locations
-//!   (`sources::computed_locations`). A line selection is cited as the lines it resolved to, so
+//!   (`reading::computed_locations`). A line selection is cited as the lines it resolved to, so
 //!   one clamped to the end of the text names only lines the text has, and every block of a
 //!   continued read, the last included, cites its own lines. Every read records a receipt
 //!   holding the same citation the response returns.
@@ -48,10 +48,10 @@ use uuid::Uuid;
 
 use super::ApplicationService;
 use super::shared::{check_named, invalid, record_receipt, resolve, workspace_scope};
-use super::sources::{computed_locations, record_of, served_media_type};
+use super::sources::{record_of, served_media_type};
 use crate::context::OperationContext;
 use crate::conversion::{ConversionRecord, RetainedAsset};
-use crate::reading::{LineIndex, location_page, markdown_outline, section_lines};
+use crate::reading::{LineIndex, computed_locations, location_page, section_lines, shown_outline};
 use crate::sandbox::{SandboxMint, token_hash};
 use crate::storage::StorageScope;
 
@@ -312,23 +312,6 @@ async fn load(
         converter_text,
         outline,
     })
-}
-
-/// Whether the document's shown text is the converter's, and the outline of that text: the
-/// record's for converter text, pulldown-cmark's otherwise.
-pub(super) fn shown_outline(
-    document: &ItemDocument,
-    record: Option<&ConversionRecord>,
-) -> (bool, Vec<OutlineEntry>) {
-    let converter_text = record.is_some()
-        && document.source.as_ref().is_some_and(|source| {
-            source.extraction.text_origin == TextOrigin::Converter && !source.extraction.corrected
-        });
-    let outline = match (record, converter_text) {
-        (Some(record), true) => record.outline.clone(),
-        _ => markdown_outline(&document.body),
-    };
-    (converter_text, outline)
 }
 
 /// The lines a selection covers in the material's text.

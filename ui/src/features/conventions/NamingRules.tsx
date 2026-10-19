@@ -1044,7 +1044,7 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
           <p>
             {preview.plan.considered === 0
               ? 'There is no item to rename'
-              : `${count(renames.length, 'item', 'items')} would be renamed, and ${count(preview.plan.unchanged, 'keeps its name', 'keep their names')}, of the ${count(preview.plan.considered, 'item', 'items')} considered`}{' '}
+              : `${count(renames.length, 'item', 'items')} would be renamed, ${count(preview.plan.unchanged, 'keeps its name', 'keep their names')}, and ${count(preview.plan.refused, 'item is refused', 'items are refused')}, of the ${count(preview.plan.considered, 'item', 'items')} considered`}{' '}
             in{' '}
             {preview.folder === ''
               ? 'the whole workspace'

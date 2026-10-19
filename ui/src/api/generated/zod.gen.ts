@@ -2696,6 +2696,7 @@ export const zRenamePlan = z.object({
     considered: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
     duplicate_observations: z.array(zDuplicateObservation),
     entries: z.array(zRenameEntry),
+    refused: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
     rules_digest: zDigest,
     unchanged: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
     warnings: z.array(zWarning)
@@ -3588,7 +3589,7 @@ export const zUploadContentPath = z.object({
 });
 
 /**
- * Stream authenticated original bytes into a preallocated upload, enforcing byte limits and digest verification.
+ * Stream authenticated original bytes into a preallocated upload, enforcing byte limits. complete_upload verifies the expected length and digest.
  */
 export const zUploadContentResponse = zUpload;
 

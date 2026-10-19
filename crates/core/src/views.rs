@@ -1,4 +1,8 @@
-//! The producer of a View binding's materialized dataset (Stage 1b design sections 4 and 9.5).
+//! Persistent Views (SPEC section 10). This module is the producer of a View binding's
+//! materialized dataset (Stage 1b design sections 4 and 9.5); its child modules hold the file a
+//! View is stored in (`layout`), the presentation schemas a View is checked against (`schemas`),
+//! the validator (`validate`) and the resolution of a View's bindings for a present, a resolve
+//! or an export (`resolve`).
 //!
 //! A binding cites one item revision and digest with a selection. Its dataset is read from the
 //! one `ConvertedTable` of that digest's `ConversionRecord` the selection covers: a line range
@@ -594,3 +598,14 @@ fn unavailable(message: &str) -> BindingFailure {
         message: message.to_owned(),
     }
 }
+
+/// One JSON Pointer reference token (RFC 6901): `~` as `~0`, `/` as `~1`.
+#[must_use]
+pub fn pointer_token(key: &str) -> String {
+    key.replace('~', "~0").replace('/', "~1")
+}
+
+pub mod layout;
+pub mod resolve;
+pub mod schemas;
+pub mod validate;

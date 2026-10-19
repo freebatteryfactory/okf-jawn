@@ -2,9 +2,7 @@
 
 use std::time::Duration;
 
-use okf_jawn_contract::conventions::GetRulesRequest;
 use okf_jawn_contract::error::ErrorCode;
-use okf_jawn_contract::identity::At;
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_core::application::ApplicationConfig;
 use okf_jawn_core::ports::Application;
@@ -118,31 +116,11 @@ fn an_ipv6_sandbox_host_must_be_an_ipv6_address() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn an_operation_of_a_later_part_answers_not_implemented() -> TestResult {
-    let world = World::new()?;
-    let context = alice(OperationName::GetRules, None)?;
-    let refused = err_of(
-        world
-            .service
-            .get_rules(
-                &context,
-                GetRulesRequest {
-                    workspace_id: scope()?.workspace_id,
-                    at: At::Latest,
-                },
-            )
-            .await,
-    )?;
-    assert_eq!(refused.code, ErrorCode::NotImplemented);
-    assert!(refused.message.contains("get_rules"), "{}", refused.message);
-    Ok(())
-}
-
 /// The rows contract batch 2 added and no part has built yet answer `NotImplemented`, naming
 /// themselves, through the production service: core's `route!` sends an operation it does not
 /// name to `pending`. (`list_comments` is built with the proposals, and `get_upload` and
-/// `list_uploads` with the upload slots.)
+/// `list_uploads` with the upload slots.) This also retains the pending-route guard now that
+/// both `get_rules` and `get_catalog` have their own implemented behavior tests.
 #[tokio::test]
 async fn the_rows_of_contract_batch_2_answer_not_implemented() -> TestResult {
     let world = World::new()?;

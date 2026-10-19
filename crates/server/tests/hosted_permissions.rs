@@ -127,6 +127,7 @@ fn application(
         confirmations: Arc::new(storage.confirmations()),
         sandbox: Arc::new(storage.sandbox()),
         readiness: Arc::new(storage.readiness()),
+        backups: Arc::new(storage.backups()),
     };
     ApplicationService::new(
         ports,

@@ -20,7 +20,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use okf_jawn_contract::common::Warning;
-use okf_jawn_contract::conventions::NamingRules;
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::history::{BlameResponse, DiffResponse, LogResponse};
 use okf_jawn_contract::identity::{
@@ -31,8 +30,8 @@ use okf_jawn_core::items::refuse_header_change;
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
     BlameQuery, CandidateChanges, CandidateCheck, CommitChanges, Committed, DiffQuery,
-    FolderListing, LogQuery, ObjectInfo, Page, Promotion, StorageScope, TreeEdit, VersionStore,
-    replay_warnings_unavailable,
+    FolderListing, LogQuery, ObjectInfo, Page, Promotion, RulesFile, StorageScope, TreeEdit,
+    VersionStore, WorkspaceTree, replay_warnings_unavailable,
 };
 use serde_json::Value;
 
@@ -227,11 +226,18 @@ impl VersionStore for CandidateVersions {
     ) -> PortFuture<'a, Vec<u8>> {
         self.inner.read_file(scope, revision, path)
     }
+    fn tree<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+    ) -> PortFuture<'a, WorkspaceTree> {
+        self.inner.tree(scope, revision)
+    }
     fn rules<'a>(
         &'a self,
         scope: &'a StorageScope,
         revision: &'a Revision,
-    ) -> PortFuture<'a, Option<NamingRules>> {
+    ) -> PortFuture<'a, Option<RulesFile>> {
         self.inner.rules(scope, revision)
     }
     fn types<'a>(
