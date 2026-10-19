@@ -1862,7 +1862,8 @@ fn rejected(at: &str, candidate: &WorkspacePath) -> Outcome {
         at,
         COLLISION_REJECTED,
         &format!(
-            "{} is contested, and the rule gives a contested name to nobody: decide which \n             item keeps it",
+            "{} is contested, and the rule gives a contested name to nobody: decide which \
+             item keeps it",
             candidate.as_str()
         ),
     ))

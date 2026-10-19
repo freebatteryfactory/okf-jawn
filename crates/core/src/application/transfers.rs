@@ -27,8 +27,9 @@
 //!   No receipt is written.
 //! - Artifact downloads reject routes forbidden for the whole endpoint before looking up a
 //!   record. Tenant downloads also require Admin before that lookup, because every tenant
-//!   artifact is an installation backup. Workspace downloads then find the scoped record and
-//!   require its kind's route and permission. Workspace artifacts open through `BlobStore`;
+//!   artifact is an installation backup. Workspace downloads require Read, or a human's fresh
+//!   Admin grant, before finding the scoped record; then require its kind's route and permission.
+//!   A Read lookup never supplies the Admin authorization of a backup. Workspace artifacts open through `BlobStore`;
 //!   installation backups open through `Backups`. Neither transport accepts a range.
 //!
 //! Every `Forbidden` a transfer answers, its own or a port's, is recorded as a `permission_denied`
@@ -138,7 +139,7 @@ impl Transfers for ApplicationService {
     }
 }
 
-/// Refuse connectors first, then find and authorize a workspace artifact by its kind.
+/// Refuse connectors and callers without artifact access before reading a workspace record.
 async fn download_artifact(
     service: &ApplicationService,
     principal: &Principal,
@@ -151,6 +152,7 @@ async fn download_artifact(
             "Artifact bytes are not sent to a connected AI",
         ));
     }
+    let checked = workspace_artifact_access(service, principal, workspace).await?;
     let scope = StorageScope {
         tenant_id: principal.tenant_id.clone(),
         workspace_id: workspace,
@@ -165,19 +167,40 @@ async fn download_artifact(
         return Err(foreign_artifact());
     }
     artifact_route(principal, record.kind)?;
-    workspace_grant(
-        service,
-        principal,
-        workspace,
-        record.kind.download_permission(),
-    )
-    .await?;
+    let required = record.kind.download_permission();
+    if required != checked {
+        workspace_grant(service, principal, workspace, required).await?;
+    }
     let read = service
         .ports()
         .blobs
         .open(&scope, &record.object.digest, 0, u64::MAX)
         .await?;
     Ok(cut(record.media_type, 0, read.object.size, read))
+}
+
+/// Authorize the union of workspace artifact permissions without consulting artifact metadata.
+/// Keep only the permission actually checked: an adapter may cache Read grants, whereas Admin
+/// must be requested freshly even if a Read answer happens to contain it.
+async fn workspace_artifact_access(
+    service: &ApplicationService,
+    principal: &Principal,
+    workspace: WorkspaceId,
+) -> Result<Permission, ApiError> {
+    match workspace_grant(service, principal, workspace, Permission::Read).await {
+        Ok(_) => Ok(Permission::Read),
+        Err(error)
+            if error.code == ErrorCode::Forbidden
+                && matches!(
+                    principal.route,
+                    AccessRoute::BrowserSession | AccessRoute::LocalOwner
+                ) =>
+        {
+            workspace_grant(service, principal, workspace, Permission::Admin).await?;
+            Ok(Permission::Admin)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Installation backups are tenant artifacts, available only to a human tenant administrator.

@@ -875,6 +875,70 @@ async fn forbidden_workspace_artifact_probes_do_not_reveal_existence() -> TestRe
     Ok(())
 }
 
+/// With no workspace grant, SPEC section 11's authenticated identity grants no artifact
+/// authority. Each kind and both literal existence states must answer the same Forbidden,
+/// with one denial event and no object opened; expected answers come from that capability rule.
+async fn no_workspace_artifact_access(route: AccessRoute) -> TestResult {
+    for kind in [
+        ArtifactKind::Export,
+        ArtifactKind::ViewExport,
+        ArtifactKind::WorkspaceBackup,
+    ] {
+        for exists in [false, true] {
+            let tenancy = world(&[])?;
+            let held = artifact(74, workspace_scope()?, kind, ARCHIVE.len())?;
+            if exists {
+                hold(&tenancy, &held)?;
+            }
+            let refused = err_of(
+                workspace_artifact(&tenancy, route.clone(), scope()?.workspace_id, held.id)
+                    .await
+                    .map(drop),
+            )?;
+            assert_eq!(
+                refused.code,
+                ErrorCode::Forbidden,
+                "{route:?}, {kind:?}, exists={exists}"
+            );
+            assert!(
+                tenancy.world.blobs.opens()?.is_empty(),
+                "{route:?}, {kind:?}, exists={exists}: no artifact opened"
+            );
+            assert!(
+                tenancy.backups.opens()?.is_empty(),
+                "{route:?}, {kind:?}, exists={exists}: no archive opened"
+            );
+            assert_eq!(
+                tenancy.log.appended()?,
+                refusal(
+                    route.clone(),
+                    TransportName::DownloadArtifact,
+                    workspace_log()?
+                ),
+                "{route:?}, {kind:?}, exists={exists}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn unauthorized_workspace_artifact_probes_on_browser_session_do_not_reveal_existence()
+-> TestResult {
+    no_workspace_artifact_access(BrowserSession).await
+}
+
+#[tokio::test]
+async fn unauthorized_workspace_artifact_probes_on_local_owner_do_not_reveal_existence()
+-> TestResult {
+    no_workspace_artifact_access(LocalOwner).await
+}
+
+#[tokio::test]
+async fn unauthorized_workspace_artifact_probes_on_service_do_not_reveal_existence() -> TestResult {
+    no_workspace_artifact_access(Service).await
+}
+
 /// The tenant endpoint serves installation backups only, restricted to human sessions.
 #[tokio::test]
 async fn forbidden_tenant_artifact_probes_do_not_reveal_existence() -> TestResult {
@@ -998,14 +1062,24 @@ async fn download_artifact_serves_each_workspace_kind_by_its_own_permission_and_
                     whole("application/zip", ARCHIVE)?,
                     "{kind:?} on {route:?}"
                 );
-                assert_eq!(tenancy.access.lookups()?, vec![permission], "{kind:?}");
+                let expected_lookups = match kind {
+                    ArtifactKind::WorkspaceBackup => vec![Permission::Read, Permission::Admin],
+                    _ => vec![Permission::Read],
+                };
+                assert_eq!(tenancy.access.lookups()?, expected_lookups, "{kind:?}");
                 assert!(tenancy.log.appended()?.is_empty(), "{kind:?} on {route:?}");
             } else {
                 let refused = err_of(outcome.map(drop))?;
                 assert_eq!(refused.code, ErrorCode::Forbidden, "{kind:?} on {route:?}");
-                assert!(
-                    tenancy.access.lookups()?.is_empty(),
-                    "{kind:?} on {route:?}: refused by its route before any lookup"
+                let expected_lookups = if route == McpDelegation {
+                    Vec::new()
+                } else {
+                    vec![Permission::Read]
+                };
+                assert_eq!(
+                    tenancy.access.lookups()?,
+                    expected_lookups,
+                    "{kind:?} on {route:?}: connectors are refused before lookup; service access first needs Read"
                 );
                 assert!(
                     tenancy.world.blobs.opens()?.is_empty(),
@@ -1186,9 +1260,10 @@ async fn an_artifact_is_found_only_through_its_own_scope() -> TestResult {
         let refused = err_of(outcome.map(drop))?;
         assert_eq!(refused.code, ErrorCode::NotFound, "{what}");
     }
-    assert!(
-        tenancy.access.lookups()?.is_empty(),
-        "no grant was looked up"
+    assert_eq!(
+        tenancy.access.lookups()?,
+        vec![Permission::Read, Permission::Read],
+        "workspace access is required before either scoped artifact lookup"
     );
     assert_eq!(
         tenancy.access.tenant_lookups()?,

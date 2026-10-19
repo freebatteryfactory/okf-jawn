@@ -1,5 +1,5 @@
 {
-  "git_sha": "9859c61d771571aaa2fcc2ce43bb64838fe9a799",
+  "git_sha": "6cc587e62230b2383d5b711441aeda5a3f230375",
   "inputs": [
     ".bun-version",
     ".cargo/config.toml",
@@ -23,7 +23,7 @@
     "ui/tsconfig.json",
     "ui/vite.config.ts"
   ],
-  "produced_at": "2026-10-19T16:02:29.957Z",
+  "produced_at": "2026-10-19T18:37:15.212Z",
   "component": "mcp-apps-protocol-qualification",
   "gate": "mcp-apps-protocol-qualification",
   "result": "PASS",
@@ -212,7 +212,7 @@
   ],
   "not_judged": [],
   "harness_error_detail": [],
-  "finished_at": "2026-10-19T16:03:04.480Z",
+  "finished_at": "2026-10-19T18:39:38.242Z",
   "scope": {
     "summary": "This run renders the real MCP App bundle in a real MCP Apps host, against a fixture MCP server. It qualifies the App side and the protocol libraries; it does not test the product server.",
     "real": [
@@ -279,8 +279,8 @@
     },
     "http": {
       "status": "listening",
-      "endpoint": "http://127.0.0.1:18769/mcp",
-      "requested": "http://127.0.0.1:18769/mcp"
+      "endpoint": "http://127.0.0.1:18768/mcp",
+      "requested": "http://127.0.0.1:18768/mcp"
     }
   },
   "harness_binary": {
@@ -289,7 +289,7 @@
     "sha256": "04781e884949fa074ea0d77ac46bb6d7856fd07ef2c0d3ee67dae3358b9852bc",
     "args": [
       "--http",
-      "127.0.0.1:18769"
+      "127.0.0.1:18768"
     ]
   },
   "harness_process": {
@@ -853,7 +853,7 @@
     "opened_at": null,
     "closed_at": null,
     "public_url": null,
-    "local_port": 18769,
+    "local_port": 18768,
     "note": "OKF_MCP_APPS_NGROK is not 1"
   },
   "host_render": {
