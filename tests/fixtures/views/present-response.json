@@ -63,8 +63,7 @@
           "workspace_id": "aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff"
         },
         "transforms": [],
-        "units": {},
-        "materialized": "aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c"
+        "units": {}
       }
     ],
     "spec": {

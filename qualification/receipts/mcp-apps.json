@@ -1,5 +1,5 @@
 {
-  "git_sha": "67ecd2ab421bde5ef170baae45956c1b6d6fc0ac",
+  "git_sha": "13537fc755580faa2ee107700b8ff8c341ba2c84",
   "inputs": [
     ".bun-version",
     ".cargo/config.toml",
@@ -23,7 +23,7 @@
     "ui/tsconfig.json",
     "ui/vite.config.ts"
   ],
-  "produced_at": "2026-10-19T19:52:11.268Z",
+  "produced_at": "2026-10-19T22:26:16.129Z",
   "component": "mcp-apps-protocol-qualification",
   "gate": "mcp-apps-protocol-qualification",
   "result": "PASS",
@@ -212,7 +212,7 @@
   ],
   "not_judged": [],
   "harness_error_detail": [],
-  "finished_at": "2026-10-19T19:54:11.785Z",
+  "finished_at": "2026-10-19T22:27:54.115Z",
   "scope": {
     "summary": "This run renders the real MCP App bundle in a real MCP Apps host, against a fixture MCP server. It qualifies the App side and the protocol libraries; it does not test the product server.",
     "real": [
@@ -286,7 +286,7 @@
   "harness_binary": {
     "path": "<abs>/release/okf-qualify-mcp-apps.exe",
     "bytes": 5330432,
-    "sha256": "43f1065d4191242e6dff34c0cbff78178acb16b19f6a167d4c1af31ce7a180d5",
+    "sha256": "21544e58ee654c846c0c1012e9a98dfcf34839740a98075eb70247c4c75d8ddd",
     "args": [
       "--http",
       "127.0.0.1:18765"
@@ -311,7 +311,7 @@
     ]
   },
   "bundle_sizes": {
-    "app": 1616519
+    "app": 1623046
   },
   "app_bundle": {
     "node_env": "development",
@@ -336,7 +336,7 @@
     "resource_count": 1,
     "resources": [
       {
-        "byteLength": 1616519,
+        "byteLength": 1623046,
         "metaUi": {
           "csp": {
             "connectDomains": [],
@@ -348,7 +348,7 @@
         "name": "app",
         "path": "ui/dist-apps/app.html",
         "readable": true,
-        "sha256": "349fcf9cd28094cc01dd9430f15af371a01b8705f0f060a36b5bad3cf9a49552",
+        "sha256": "ccee539a343c4b496f4174f545551eb8ffbad49cbb8bc4a9f8430eb0b485fc19",
         "uri": "ui://okf-jawn/app.html"
       }
     ],
@@ -451,7 +451,7 @@
       {
         "uri": "ui://okf-jawn/app.html",
         "mime_type": "text/html;profile=mcp-app",
-        "text_sha256": "349fcf9cd28094cc01dd9430f15af371a01b8705f0f060a36b5bad3cf9a49552",
+        "text_sha256": "ccee539a343c4b496f4174f545551eb8ffbad49cbb8bc4a9f8430eb0b485fc19",
         "csp": {
           "connectDomains": [],
           "resourceDomains": []
@@ -545,14 +545,14 @@
       "repository": "https://github.com/modelcontextprotocol/ext-apps",
       "requested_tag": "v2.0.3",
       "commit": "82221c0c8ce7661efa6771c9d461511b1650495f",
-      "commit_resolved_at": "2026-10-19T00:58:11.291Z",
+      "commit_resolved_at": "2026-10-19T21:09:00.049Z",
       "files_verified": 14,
       "files_expected": 14,
       "package": {
         "name": "@modelcontextprotocol/ext-apps-basic-host",
         "version": "2.0.3"
       },
-      "lockfile_sha256": "27f97aef6f62fc3cdeed9f0ea02b6a7a2fb20367ee3b1554b09adf3e6c07de4e"
+      "lockfile_sha256": "592e3ffa095cf377368e49841c3bd18b20b6c513b13c48b4f8679e27704f5bbb"
     },
     "browser": {
       "name": "chromium",
@@ -712,7 +712,7 @@
         "url": "http://127.0.0.1:8080/?server=okf-qualify-mcp-apps&tool=render_present&call=true&theme=hide",
         "screenshot": ".artifacts/qualification/mcp-apps/basic-host-render_present.png",
         "app_frame_depth": 2,
-        "feature_text": "Six-component catalog\nfixtures/qualification-source.md\n0123456789abcdef0123456789abcdef01234567\nQualification source\n\nContract-valid ReadItemResponse fixture for the MCP Apps harness.\n\nmetrics\ncategory\tvalue\nIngested\t412\nConverted\t397\nIndexed\t389\nReviewed\t127\nPublished\t61\nMetrics chart\nConverted\nIndexed\nIngested\nPublished\nReviewed\ncategory\n0\n50\n100\n150\n200\n250\n300\n350\n400\n450\nvalue\nSource data\nfix",
+        "feature_text": "Six-component catalog view\n\nViewDocument wrapping the approved six-component json-render Spec for Phase 0 round-trip.\n\nSix-component catalog\nfixtures/qualification-source.md\n0123456789abcdef0123456789abcdef01234567\nQualification source\n\nContract-valid ReadItemResponse fixture for the MCP Apps harness.\n\nmetrics\ncategory\tvalue\nIngested\t412\nConverted\t397\nIndexed\t389\nReviewed\t127\nPublished\t61\nMetrics ",
         "revisions": [],
         "alerts": [],
         "expected_alerts": [],

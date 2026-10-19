@@ -13,7 +13,8 @@
 //! `MAX_VIEW_BINDINGS` bindings; binding names of 1 to 120 characters, each once; every binding
 //! in the View's own workspace (`ViewDocument::require_own_workspace`); no `materialized` (the
 //! server produces it); each binding transform a Vega-Lite `Transform` that loads nothing and
-//! reads only bindings (ruling E3); a `vega_lite` View has no named charts. For `json_render`:
+//! reads only bindings (ruling E3), with no cycle among binding transforms; a `vega_lite`
+//! View has no named charts. For `json_render`:
 //! the catalog schema, each component's props against its own schema first; a static
 //! composition, so no `state`, `repeat` or `visible` (ruling E2); a root that names an element;
 //! children and slots that name elements, a container's slots exactly `{"default": children}`,
@@ -198,15 +199,18 @@ fn binding_names(view: &ViewDocument) -> Result<BTreeSet<&str>, ApiError> {
 }
 
 /// Check every binding's transforms (ruling E3): each a Vega-Lite `Transform` that loads nothing
-/// and looks up only bindings. Answers, per binding name, the names its transforms look up.
+/// and looks up only bindings. Validate all edges before refusing a dependency cycle, retaining
+/// the existing schema/load/unknown-name precedence. Answers the names each binding looks up.
 fn transforms(
     view: &ViewDocument,
     names: &BTreeSet<&str>,
 ) -> Result<BTreeMap<String, BTreeSet<String>>, ApiError> {
     let validator = schemas::vega_lite_transform()?;
     let mut looked_up = BTreeMap::new();
+    let mut dependencies = BTreeMap::new();
     for (index, binding) in view.bindings.iter().enumerate() {
         let mut reads = BTreeSet::new();
+        let mut edges = Vec::new();
         for (position, transform) in binding.transforms.iter().enumerate() {
             let at = format!("/bindings/{index}/transforms/{position}");
             if let Err(error) = validator.validate(transform) {
@@ -226,12 +230,60 @@ fn transforms(
                         format!("the transform looks up `{name}`, which no binding declares"),
                     ));
                 }
+                edges.push((name.clone(), pointer));
                 reads.insert(name);
             }
         }
+        dependencies.insert(binding.name.clone(), edges);
         looked_up.insert(binding.name.clone(), reads);
     }
+    acyclic_transforms(view, &dependencies)?;
     Ok(looked_up)
+}
+
+/// Visit input bindings and transform edges in their validated order. Only an edge into the
+/// active path closes a cycle: a completed dependency may be shared by any number of bindings.
+/// The caller's existing `MAX_VIEW_BINDINGS` check bounds the active path to 50 entries.
+fn acyclic_transforms(
+    view: &ViewDocument,
+    dependencies: &BTreeMap<String, Vec<(String, String)>>,
+) -> Result<(), ApiError> {
+    let mut completed = BTreeSet::new();
+    for binding in &view.bindings {
+        let root = binding.name.as_str();
+        if completed.contains(root) {
+            continue;
+        }
+        let mut active = BTreeSet::from([root]);
+        let mut path = vec![(root, 0_usize)];
+        while let Some((name, next)) = path.last_mut() {
+            let parent = *name;
+            let edge = dependencies.get(parent).and_then(|edges| edges.get(*next));
+            *next = next.saturating_add(1);
+            match edge {
+                None => {
+                    active.remove(parent);
+                    completed.insert(parent);
+                    path.pop();
+                }
+                Some((target, pointer)) => {
+                    if active.contains(target.as_str()) {
+                        return Err(fault(
+                            pointer,
+                            format!(
+                                "makes a cycle in binding transforms: `{parent}` looks up `{target}`"
+                            ),
+                        ));
+                    }
+                    if !completed.contains(target.as_str()) {
+                        active.insert(target.as_str());
+                        path.push((target.as_str(), 0));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The static verdict of one Vega-Lite chart at `at`.
