@@ -160,6 +160,8 @@ pub mod app;
 pub mod assets;
 #[cfg(feature = "runtime")]
 pub mod authkit;
+#[cfg(feature = "runtime")]
+pub mod commands;
 pub mod config;
 #[cfg(feature = "runtime")]
 pub mod connect;
@@ -177,6 +179,8 @@ pub mod launch;
 pub mod local;
 #[cfg(feature = "runtime")]
 pub mod mcp;
+#[cfg(feature = "runtime")]
+pub mod offline;
 #[cfg(feature = "runtime")]
 pub mod outbound;
 pub mod public;
