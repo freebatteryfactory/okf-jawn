@@ -230,6 +230,40 @@ async fn a_backup_refuses_an_output_inside_the_data_directory() -> TestResult {
     Ok(())
 }
 
+/// Server M2 design 6.1 step 4: a backup must remain outside the original data directory.
+/// A missing sibling followed by `..` must not hide that the output ultimately lies inside it.
+/// The expected refusal and untouched records are literals from that acceptance rule.
+#[tokio::test]
+async fn a_backup_refuses_an_inside_output_reached_through_a_missing_sibling() -> TestResult {
+    let scratch = Scratch::new("inside-through-parent")?;
+    let data = scratch.join("data");
+    seed(&data, "local", 1).await?;
+    let records = data.join(okf_jawn_storage::data::RECORDS_FILE);
+    let before = std::fs::read(&records)?;
+    let missing = scratch.join("missing");
+    let output = missing.join("..").join("data").join("backup");
+    assert!(!missing.exists());
+    assert!(!data.join("backup").exists());
+
+    let refused = err_of(backup(AuthKind::Local, &data, &backup_args(&output, None)).await)?;
+    assert_eq!(refused.code, ErrorCode::InvalidInput);
+    assert_eq!(refused.field.as_deref(), Some("--output"));
+    assert!(
+        !missing.exists(),
+        "a refusal must not create the missing sibling"
+    );
+    assert!(
+        !data.join("backup").exists(),
+        "a refusal must not write an internal backup"
+    );
+    assert_eq!(
+        std::fs::read(&records)?,
+        before,
+        "a refusal must leave records unchanged"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_tenant_is_named_only_in_a_hosted_backup() -> TestResult {
     let scratch = Scratch::new("tenant")?;
