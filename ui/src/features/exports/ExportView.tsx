@@ -72,6 +72,7 @@ export function ExportViewButton({ workspaceId, itemId, revision, rights }: Expo
       <ExportSaid
         start={start}
         what="The export of this View"
+        where="The Jobs page shows how it stands now."
         context="Starting the export of this View"
         workspaceId={workspaceId}
       />

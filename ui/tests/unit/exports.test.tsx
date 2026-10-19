@@ -114,7 +114,7 @@ describe('"Export this workspace" on the Jobs page', () => {
     await screen.findByText(/This workspace has no jobs yet\./);
     fireEvent.click(exportButton());
     await within(section()).findByText(
-      'The export was accepted as Export of the workspace, job aaaaaaaa. It has not finished: its state is “waiting to start”. Its row is in the list below.',
+      'The export was accepted as Export of the workspace, job aaaaaaaa: “waiting to start” when the service answered. Its row in the list below shows how it stands now.',
     );
     const [sent] = api.callsTo(EXPORT_WORKSPACE);
     expect(sent).toEqual({
@@ -143,7 +143,7 @@ describe('"Export this workspace" on the Jobs page', () => {
   it('starts one job for each press, each under a new key', async () => {
     const { api, service } = await openJobs();
     fireEvent.click(await screen.findByRole('button', { name: 'Export the workspace' }));
-    await within(section()).findByText(/job aaaaaaaa\. It has not finished/);
+    await within(section()).findByText(/job aaaaaaaa: “waiting to start”/);
     fireEvent.click(exportButton());
     await screen.findByText('Export of the workspace, job bbbbbbbb', {
       selector: `li[data-job="${SECOND}"] p`,
@@ -288,7 +288,7 @@ describe('"Export visual" for a View', () => {
     const { api, queryClient } = await renderExportView(writer);
     fireEvent.click(await screen.findByRole('button', { name: 'Export visual' }));
     await screen.findByText(
-      'The export of this View was accepted as Export of a View, job aaaaaaaa. It has not finished: its state is “waiting to start”.',
+      'The export of this View was accepted as Export of a View, job aaaaaaaa: “waiting to start” when the service answered. The Jobs page shows how it stands now.',
     );
     expect(api.callsTo(EXPORT_VIEW)).toEqual([
       {
@@ -336,9 +336,9 @@ describe('"Export visual" for a View', () => {
   it('starts a new job for a press after an accepted one', async () => {
     const { api, service } = await renderExportView(writer);
     fireEvent.click(await screen.findByRole('button', { name: 'Export visual' }));
-    await screen.findByText(/job aaaaaaaa\. It has not finished/);
+    await screen.findByText(/job aaaaaaaa: “waiting to start”/);
     fireEvent.click(screen.getByRole('button', { name: 'Export visual' }));
-    await screen.findByText(/job bbbbbbbb\. It has not finished/);
+    await screen.findByText(/job bbbbbbbb: “waiting to start”/);
     const keys = api.callsTo(EXPORT_VIEW).map((body) => body.idempotency_key);
     expect(keys).toHaveLength(2);
     expect(new Set(keys).size).toBe(2);

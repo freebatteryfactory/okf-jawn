@@ -2,9 +2,10 @@
  * What both export controls share: one press is one request, repeated under its key while it asks
  * the same thing (`exportAttempt`), and what came of it, said in place.
  *
- * The answer is a job, and is said as one: accepted as that job, in the state the service
- * reported, never as an export that has finished. A polite status says it, and says "Starting the
- * export…" while the request is out. A refusal is shown in the words of its code with the service's
+ * The answer is a job, and is said as one: accepted as that job, in the state the service reported
+ * when it answered, never as an export that has finished. The words stay true as the job moves on
+ * (they say when that state was reported, and where the job is followed), so they are not asked
+ * again. A polite status says them, and says "Starting the export…" while the request is out. A refusal is shown in the words of its code with the service's
  * own beside them (`FailureNotice`); the notice's "Try again", where the failure allows one, repeats
  * the request under the key it had (`useRetry`), so a request whose answer was lost does not start
  * a second export. Keyboard focus that was in the notice when it leaves goes to what the caller
@@ -16,7 +17,6 @@ import type { Job } from '../../api/generated/types.gen';
 import { FailureNotice } from '../errors/FailureNotice';
 import { type FailureRetry, useRetry } from '../errors/retry';
 import { jobName, jobStateSaid } from '../jobs/job-words';
-import { unfinished } from '../jobs/jobs';
 import { type ExportAttempt, exportAttempt } from './exports';
 
 export interface ExportStart<T> {
@@ -74,12 +74,9 @@ export function useExportStart<T>({
   };
 }
 
-/** What an accepted export is said to be: the job it was accepted as, and how that stands. */
+/** What an accepted export is said to be: the job it was accepted as, and how that stood then. */
 export function acceptedWords(what: string, job: Job): string {
-  const state = jobStateSaid(job.state);
-  return unfinished(job)
-    ? `${what} was accepted as ${jobName(job)}. It has not finished: its state is “${state}”.`
-    : `${what} was accepted as ${jobName(job)}. Its state is “${state}”.`;
+  return `${what} was accepted as ${jobName(job)}: “${jobStateSaid(job.state)}” when the service answered.`;
 }
 
 export interface ExportSaidProps<T> {

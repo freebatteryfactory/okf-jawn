@@ -91,7 +91,7 @@ export function ExportWorkspace({ workspaceId, rights }: ExportWorkspaceProps) {
         <ExportSaid
           start={start}
           what="The export"
-          where="Its row is in the list below."
+          where="Its row in the list below shows how it stands now."
           context="Starting the export"
           workspaceId={workspaceId}
         />
