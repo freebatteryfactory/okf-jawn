@@ -14,6 +14,8 @@
  * message is not quoted; a fault this page found by itself (a body no `ApiError`, a View the
  * generated schema does not read) has words of its own and is never called the service being
  * unreachable. When a retry opens the View, keyboard focus goes to the View in the notice's place.
+ *
+ * The host's link to a cited source (`sourceLink`) is handed to the View as it is.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { z } from 'zod';
@@ -24,6 +26,7 @@ import { zApiError, zAt, zResolveViewResponse } from '../../api/generated/zod.ge
 import { FailureNotice } from '../errors/FailureNotice';
 import type { FailureMessage } from '../errors/failure';
 import { useRetry } from '../errors/retry';
+import type { SourceLink } from './Bindings';
 import type { ViewData } from './data';
 import { PresentView } from './PresentView';
 
@@ -36,6 +39,8 @@ export interface SavedViewProps {
   data: ViewData;
   /** The generated client; the application's configured client when omitted. */
   client?: Client;
+  /** The host's link to a cited source at the revision read; none, and sources are named as text. */
+  sourceLink?: SourceLink | undefined;
 }
 
 /** What a resolve answered, for the item it was asked about: an answer for other ids is never shown. */
@@ -70,7 +75,7 @@ function refusal(error: unknown): Answer {
   };
 }
 
-export function SavedView({ workspaceId, itemId, at, data, client }: SavedViewProps) {
+export function SavedView({ workspaceId, itemId, at, data, client, sourceLink }: SavedViewProps) {
   const [reopened, setReopened] = useState<Reopened | null>(null);
   const selector = JSON.stringify(at);
   const key = JSON.stringify([workspaceId, itemId, selector]);
@@ -129,7 +134,7 @@ export function SavedView({ workspaceId, itemId, at, data, client }: SavedViewPr
   return (
     // Focusable from script only: where keyboard focus goes when a retry opened the View.
     <div ref={place} tabIndex={-1}>
-      <PresentView response={shown.response} data={data} />
+      <PresentView response={shown.response} data={data} sourceLink={sourceLink} />
     </div>
   );
 }

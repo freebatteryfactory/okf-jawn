@@ -6,7 +6,11 @@ import { describe, expect, it } from 'vitest';
 import type { z } from 'zod';
 import type { GetObjectRequest, ReadItemRequest } from '../../src/api/generated/types.gen';
 import type { zPresentResponse } from '../../src/api/generated/zod.gen';
-import { BindingsContext, type ResolvedPresentation } from '../../src/features/views/Bindings';
+import {
+  BindingsContext,
+  type ResolvedPresentation,
+  type SourceLink,
+} from '../../src/features/views/Bindings';
 import type { ViewData } from '../../src/features/views/data';
 import { Layout, materializeSlots, prepareSpec } from '../../src/features/views/Layout';
 import { PresentView } from '../../src/features/views/PresentView';
@@ -1192,10 +1196,12 @@ describe('a chart draws every binding its ready status names', () => {
       chart = layered,
       transforms = {},
       names = ['metrics', 'targets'],
+      sourceLink,
     }: {
       chart?: unknown;
       transforms?: Record<string, unknown[]>;
       names?: ReadonlyArray<keyof typeof cited>;
+      sourceLink?: SourceLink;
     } = {},
   ) {
     const served = new Map<string, Uint8Array>();
@@ -1273,7 +1279,8 @@ describe('a chart draws every binding its ready status names', () => {
         };
       },
     };
-    return render(<PresentView response={response} data={data} />).container;
+    return render(<PresentView response={response} data={data} sourceLink={sourceLink} />)
+      .container;
   }
 
   it('draws a layered chart over two bindings with both, and tables both', {
@@ -1408,6 +1415,28 @@ describe('a chart draws every binding its ready status names', () => {
     const chart = screen.getByRole('heading', { name: 'Both bindings' }).closest('section');
     if (chart === null) throw new Error('the chart has no section');
     expect(within(chart).getByRole('alert')).toBe(alert);
+  });
+
+  it("links the sources a vega_lite View's chart cites through its host, at their revisions", {
+    timeout: 30_000,
+  }, async () => {
+    const sourceLink: SourceLink = (source, label) => (
+      <a href={`#open/${source.item_id}@${source.revision}`}>{label}</a>
+    );
+    const container = await board('vega_lite', { sourceLink });
+    await expect.poll(drawn(container), { timeout: 15_000 }).toEqual([2, 3]);
+    // The chart's citation lines, under it; "Sources read" links the same sources apart.
+    const region = screen.getByRole('region', { name: "Where this View's data comes from" });
+    const cites = screen
+      .getAllByRole('link')
+      .filter((link) => !region.contains(link))
+      .map((link) => [link.textContent, link.getAttribute('href')]);
+    expect(cites).toEqual(
+      (['metrics', 'targets'] as const).map((name) => [
+        `${cited[name].path} @ ${revision}`,
+        `#open/${cited[name].item_id}@${revision}`,
+      ]),
+    );
   });
 
   it('draws a vega_lite View layered over two bindings with both, and tables both', {
