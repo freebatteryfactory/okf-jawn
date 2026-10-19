@@ -1,5 +1,5 @@
 {
-  "git_sha": "396c6ecaed4de2c10a91a714c3b201436f6ed179",
+  "git_sha": "9859c61d771571aaa2fcc2ce43bb64838fe9a799",
   "inputs": [
     ".bun-version",
     ".cargo/config.toml",
@@ -23,11 +23,11 @@
     "ui/tsconfig.json",
     "ui/vite.config.ts"
   ],
-  "produced_at": "2026-10-19T15:45:45.308Z",
+  "produced_at": "2026-10-19T16:02:29.957Z",
   "component": "mcp-apps-protocol-qualification",
   "gate": "mcp-apps-protocol-qualification",
-  "result": "INCOMPLETE",
-  "harness_error": "Chromium did not start: launch: Executable doesn't exist at ~/AppData/Local/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-win64/chrome-headless-shell.exe",
+  "result": "PASS",
+  "harness_error": null,
   "criteria": [
     {
       "id": "bundle/single_app_resource",
@@ -117,146 +117,102 @@
     {
       "id": "render_source/text",
       "required": true,
-      "result": "not_judged",
-      "detail": "not reached: Chromium did not start"
+      "result": "pass"
     },
     {
       "id": "render_source/no_alert",
       "required": true,
-      "result": "not_judged",
-      "detail": "not reached: Chromium did not start"
+      "result": "pass"
     },
     {
       "id": "render_source/accessibility",
       "required": true,
-      "result": "not_judged",
-      "detail": "not reached: Chromium did not start"
+      "result": "pass"
     },
     {
       "id": "render_changes/text",
       "required": true,
-      "result": "not_judged",
-      "detail": "not reached: Chromium did not start"
+      "result": "pass"
     },
     {
       "id": "render_changes/no_alert",
       "required": true,
-      "result": "not_judged",
-      "detail": "not reached: Chromium did not start"
+      "result": "pass"
     },
     {
       "id": "render_changes/accessibility",
       "required": true,
-      "result": "not_judged",
-      "detail": "not reached: Chromium did not start"
+      "result": "pass"
     },
     {
       "id": "render_timeline/text",
       "required": true,
-      "result": "not_judged",
-      "detail": "not reached: Chromium did not start"
+      "result": "pass"
     },
     {
       "id": "render_timeline/no_alert",
       "required": true,
-      "result": "not_judged",
-      "detail": "not reached: Chromium did not start"
+      "result": "pass"
     },
     {
       "id": "render_timeline/accessibility",
       "required": true,
-      "result": "not_judged",
-      "detail": "not reached: Chromium did not start"
+      "result": "pass"
     },
     {
       "id": "render_present/text",
       "required": true,
-      "result": "not_judged",
-      "detail": "not reached: Chromium did not start"
+      "result": "pass"
     },
     {
       "id": "render_present/no_alert",
       "required": true,
-      "result": "not_judged",
-      "detail": "not reached: Chromium did not start"
+      "result": "pass"
     },
     {
       "id": "render_present/accessibility",
       "required": true,
-      "result": "not_judged",
-      "detail": "not reached: Chromium did not start"
+      "result": "pass"
     },
     {
       "id": "render_present/chart_marks",
       "required": true,
-      "result": "not_judged",
-      "detail": "not reached: Chromium did not start"
+      "result": "pass"
     },
     {
       "id": "render_present/table_rows",
       "required": true,
-      "result": "not_judged",
-      "detail": "not reached: Chromium did not start"
+      "result": "pass"
     },
     {
       "id": "render_present/chart_source_table",
       "required": true,
-      "result": "not_judged",
-      "detail": "not reached: Chromium did not start"
+      "result": "pass"
     },
     {
       "id": "render_present/show_calls",
       "required": true,
-      "result": "not_judged",
-      "detail": "not reached: Chromium did not start"
+      "result": "pass"
     },
     {
       "id": "render_present/read_object_calls",
       "required": true,
-      "result": "not_judged",
-      "detail": "not reached: Chromium did not start"
+      "result": "pass"
     },
     {
       "id": "render_present/no_refused_call",
       "required": true,
-      "result": "not_judged",
-      "detail": "not reached: Chromium did not start"
+      "result": "pass"
     },
     {
       "id": "render_present/dataset_exercised",
       "required": true,
-      "result": "not_judged",
-      "detail": "not reached: Chromium did not start"
+      "result": "pass"
     }
   ],
-  "not_judged": [
-    "render_source/text",
-    "render_source/no_alert",
-    "render_source/accessibility",
-    "render_changes/text",
-    "render_changes/no_alert",
-    "render_changes/accessibility",
-    "render_timeline/text",
-    "render_timeline/no_alert",
-    "render_timeline/accessibility",
-    "render_present/text",
-    "render_present/no_alert",
-    "render_present/accessibility",
-    "render_present/chart_marks",
-    "render_present/table_rows",
-    "render_present/chart_source_table",
-    "render_present/show_calls",
-    "render_present/read_object_calls",
-    "render_present/no_refused_call",
-    "render_present/dataset_exercised"
-  ],
-  "harness_error_detail": [
-    {
-      "what": "Chromium did not start",
-      "detail": "launch: Executable doesn't exist at ~/AppData/Local/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-win64/chrome-headless-shell.exe\n╔════════════════════════════════════════════════════════════╗\n║ Looks like Playwright was just installed or updated.       ║\n║ Please run the following command to download new browsers: ║\n║                                                            ║\n║     npx playwright install                                 ║\n║                                                            ║\n║ <3 Playwright Team                                         ║\n╚════════════════════════════════════════════════════════════╝"
-    }
-  ],
-  "finished_at": "2026-10-19T15:50:13.838Z",
+  "not_judged": [],
+  "harness_error_detail": [],
+  "finished_at": "2026-10-19T16:03:04.480Z",
   "scope": {
     "summary": "This run renders the real MCP App bundle in a real MCP Apps host, against a fixture MCP server. It qualifies the App side and the protocol libraries; it does not test the product server.",
     "real": [
@@ -343,7 +299,7 @@
       "signal": null,
       "error": null
     },
-    "stderr_tail": "how\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"show\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"0\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"64\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"128\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"192\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"256\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"320\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"384\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"448\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":false,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"512\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"ok\":false,\"tool\":\"read_object\"}\nokf-qualify-mcp-apps tool-call {\"ok\":false,\"tool\":\"read_object\"}\n"
+    "stderr_tail": "r_present\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"render_present\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"show\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"show\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"0\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"64\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"128\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"192\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"256\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"320\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"384\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"448\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":false,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"512\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\n"
   },
   "mime_check": {
     "sdk_constant": "text/html;profile=mcp-app",
@@ -583,9 +539,9 @@
     }
   },
   "basic_host": {
-    "status": "not_run",
+    "status": "passed",
     "source": {
-      "status": "fetched",
+      "status": "cached",
       "repository": "https://github.com/modelcontextprotocol/ext-apps",
       "requested_tag": "v2.0.3",
       "commit": "82221c0c8ce7661efa6771c9d461511b1650495f",
@@ -598,15 +554,297 @@
       },
       "lockfile_sha256": "c3c6af27f70c56a7e1a29119fdfdf5447ddb37332fcb5e1bf89ed0e64fa5ede6"
     },
-    "browser": null,
-    "views": [],
+    "browser": {
+      "name": "chromium",
+      "version": "153.0.8010.12"
+    },
+    "views": [
+      {
+        "tool": "render_source",
+        "view": "source",
+        "status": "passed",
+        "url": "http://127.0.0.1:8080/?server=okf-qualify-mcp-apps&tool=render_source&call=true&theme=hide",
+        "screenshot": ".artifacts/qualification/mcp-apps/basic-host-render_source.png",
+        "app_frame_depth": 2,
+        "feature_text": "fixtures/qualification-source.md\n0123456789abcdef0123456789abcdef01234567\nQualification source\n\nContract-valid ReadItemResponse fixture for the MCP Apps harness.",
+        "alerts": [],
+        "expected_alerts": [],
+        "axe": {
+          "app_frame_analysed": true,
+          "app_frame": [],
+          "host_blocking": [],
+          "host_tolerated": [
+            {
+              "id": "color-contrast",
+              "impact": "serious",
+              "nodes": [
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(2) > ._collapsibleHeader_199dp_231 > ._collapsibleSize_199dp_242"
+                ],
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(4) > ._collapsibleHeader_199dp_231 > ._collapsibleSize_199dp_242"
+                ],
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(4) > ._collapsiblePreview_199dp_253"
+                ]
+              ]
+            },
+            {
+              "id": "frame-title",
+              "impact": "serious",
+              "nodes": [
+                [
+                  "iframe"
+                ],
+                [
+                  "iframe",
+                  "iframe"
+                ]
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "tool": "render_changes",
+        "view": "changes",
+        "status": "passed",
+        "url": "http://127.0.0.1:8080/?server=okf-qualify-mcp-apps&tool=render_changes&call=true&theme=hide",
+        "screenshot": ".artifacts/qualification/mcp-apps/basic-host-render_changes.png",
+        "app_frame_depth": 2,
+        "feature_text": "Changes\n\n0123456789abcdef0123456789abcdef01234567 → 89abcdef0123456789abcdef0123456789abcdef\n\nfixtures/qualification-source.md\n@@ -1,3 +1,4 @@\n # Qualification source\n+\n+Harness fixture line.\n",
+        "alerts": [],
+        "expected_alerts": [],
+        "axe": {
+          "app_frame_analysed": true,
+          "app_frame": [],
+          "host_blocking": [],
+          "host_tolerated": [
+            {
+              "id": "color-contrast",
+              "impact": "serious",
+              "nodes": [
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(2) > ._collapsibleHeader_199dp_231 > ._collapsibleSize_199dp_242"
+                ],
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(4) > ._collapsibleHeader_199dp_231 > ._collapsibleSize_199dp_242"
+                ],
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(4) > ._collapsiblePreview_199dp_253"
+                ]
+              ]
+            },
+            {
+              "id": "frame-title",
+              "impact": "serious",
+              "nodes": [
+                [
+                  "iframe"
+                ],
+                [
+                  "iframe",
+                  "iframe"
+                ]
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "tool": "render_timeline",
+        "view": "timeline",
+        "status": "passed",
+        "url": "http://127.0.0.1:8080/?server=okf-qualify-mcp-apps&tool=render_timeline&call=true&theme=hide",
+        "screenshot": ".artifacts/qualification/mcp-apps/basic-host-render_timeline.png",
+        "app_frame_depth": 2,
+        "feature_text": "Timeline\nQualification timeline fixture\n\nokf-qualify-mcp-apps · 2026-10-05T12:00:00.000Z\n\n89abcdef0123456789abcdef0123456789abcdef",
+        "alerts": [],
+        "expected_alerts": [],
+        "axe": {
+          "app_frame_analysed": true,
+          "app_frame": [],
+          "host_blocking": [],
+          "host_tolerated": [
+            {
+              "id": "color-contrast",
+              "impact": "serious",
+              "nodes": [
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(2) > ._collapsibleHeader_199dp_231 > ._collapsibleSize_199dp_242"
+                ],
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(4) > ._collapsibleHeader_199dp_231 > ._collapsibleSize_199dp_242"
+                ],
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(4) > ._collapsiblePreview_199dp_253"
+                ]
+              ]
+            },
+            {
+              "id": "frame-title",
+              "impact": "serious",
+              "nodes": [
+                [
+                  "iframe"
+                ],
+                [
+                  "iframe",
+                  "iframe"
+                ]
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "tool": "render_present",
+        "view": "present",
+        "status": "passed",
+        "url": "http://127.0.0.1:8080/?server=okf-qualify-mcp-apps&tool=render_present&call=true&theme=hide",
+        "screenshot": ".artifacts/qualification/mcp-apps/basic-host-render_present.png",
+        "app_frame_depth": 2,
+        "feature_text": "Six-component catalog\nfixtures/qualification-source.md\n0123456789abcdef0123456789abcdef01234567\nQualification source\n\nContract-valid ReadItemResponse fixture for the MCP Apps harness.\n\nmetrics\ncategory\tvalue\nIngested\t412\nConverted\t397\nIndexed\t389\nReviewed\t127\nPublished\t61\nMetrics chart\nConverted\nIndexed\nIngested\nPublished\nReviewed\ncategory\n0\n50\n100\n150\n200\n250\n300\n350\n400\n450\nvalue\nSource data\nfix",
+        "alerts": [],
+        "expected_alerts": [],
+        "present_dataset": {
+          "status": "exercised",
+          "expected_binding": "metrics",
+          "expected_digest": "aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c",
+          "expected_bytes": 576,
+          "expected_rows": 5,
+          "expected_chart_marks": 5,
+          "table_captions": [
+            "metrics",
+            "metrics"
+          ],
+          "read_object_digests": [
+            "aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c"
+          ],
+          "read_object_calls": 9,
+          "read_object_offsets": [
+            "0",
+            "64",
+            "128",
+            "192",
+            "256",
+            "320",
+            "384",
+            "448",
+            "512"
+          ],
+          "read_object_bytes": [
+            64,
+            64,
+            64,
+            64,
+            64,
+            64,
+            64,
+            64,
+            64
+          ],
+          "read_object_total_sizes": [
+            "576"
+          ],
+          "read_object_resolutions": 1,
+          "show_calls": 2,
+          "chart_svgs": 1,
+          "chart_marks": 5,
+          "table_rows": 5,
+          "chart_table_rows": 5,
+          "alerts": [],
+          "problems": []
+        },
+        "axe": {
+          "app_frame_analysed": true,
+          "app_frame": [],
+          "host_blocking": [],
+          "host_tolerated": [
+            {
+              "id": "color-contrast",
+              "impact": "serious",
+              "nodes": [
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(2) > ._collapsibleHeader_199dp_231 > ._collapsibleSize_199dp_242"
+                ],
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(4) > ._collapsibleHeader_199dp_231 > ._collapsibleSize_199dp_242"
+                ],
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(4) > ._collapsiblePreview_199dp_253"
+                ]
+              ]
+            },
+            {
+              "id": "frame-title",
+              "impact": "serious",
+              "nodes": [
+                [
+                  "iframe"
+                ],
+                [
+                  "iframe",
+                  "iframe"
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    ],
     "axe_tolerated_upstream_host_rules": [
       "color-contrast",
       "frame-title"
     ],
     "present_dataset": {
-      "status": "not_observed",
-      "reason": "no view reached the point where its dataset rendering is observed"
+      "status": "exercised",
+      "expected_binding": "metrics",
+      "expected_digest": "aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c",
+      "expected_bytes": 576,
+      "expected_rows": 5,
+      "expected_chart_marks": 5,
+      "table_captions": [
+        "metrics",
+        "metrics"
+      ],
+      "read_object_digests": [
+        "aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c"
+      ],
+      "read_object_calls": 9,
+      "read_object_offsets": [
+        "0",
+        "64",
+        "128",
+        "192",
+        "256",
+        "320",
+        "384",
+        "448",
+        "512"
+      ],
+      "read_object_bytes": [
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64
+      ],
+      "read_object_total_sizes": [
+        "576"
+      ],
+      "read_object_resolutions": 1,
+      "show_calls": 2,
+      "chart_svgs": 1,
+      "chart_marks": 5,
+      "table_rows": 5,
+      "chart_table_rows": 5,
+      "alerts": [],
+      "problems": []
     },
     "note": "The ext-apps basic-host example is a reference host; this is not a claude.ai or ChatGPT claim."
   },
@@ -620,7 +858,7 @@
   },
   "host_render": {
     "status": "not_run",
-    "meaning": "No files under .artifacts/qualification/mcp-apps/hosts/. Host render for claude.ai / ChatGPT remains not_run until screenshots or notes are placed there. This receipt does not invent PASS.",
+    "meaning": "hosts/ directory exists but is empty. Place screenshots or notes from claude.ai / ChatGPT before claiming an observed host render.",
     "gate": "mcp-apps-web-hosts"
   },
   "static_bundle_smoke": {
