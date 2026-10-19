@@ -1079,26 +1079,6 @@ pub const REPLAY_WARNINGS_UNAVAILABLE: &str = "replay_warnings_unavailable";
 /// `folder_other_files` and `folder_files_deleted`.
 pub const FOLDER_OTHER_FILES: &str = "folder_other_files";
 
-/// The item owning a versioned companion path: its source appearance, accepted supplied text,
-/// or any file under its corrections folder. IDs use the canonical spelling written by the
-/// store; a differently spelled or unrelated path belongs to no item.
-///
-/// Folder conflict checks and item-filtered history share this ownership rule so a change to
-/// an item outside its visible folder is still a change to that item.
-#[must_use]
-pub fn item_companion_owner(path: &str) -> Option<ItemId> {
-    let text = if let Some(file) = path
-        .strip_prefix(".okf/sources/")
-        .or_else(|| path.strip_prefix(".okf/supplied/"))
-    {
-        file.strip_suffix(".json")?
-    } else {
-        path.strip_prefix(".okf/corrections/")?.split_once('/')?.0
-    };
-    let id = uuid::Uuid::parse_str(text).ok()?;
-    (id.to_string() == text).then_some(ItemId(id))
-}
-
 impl ChangeContext {
     /// The context of `change`, with `new_item_kind` filled from it: the role its `item_kind`
     /// names, a note when it names none (`Change::created_kind`). A change that creates no item
@@ -1237,6 +1217,26 @@ impl Provenance {
             client_id: principal.client_id.clone(),
         }
     }
+}
+
+/// The item owning a versioned companion path: its source appearance, accepted supplied text,
+/// or any file under its corrections folder. IDs use the canonical spelling written by the
+/// store; a differently spelled or unrelated path belongs to no item.
+///
+/// Folder conflict checks and item-filtered history share this ownership rule so a change to
+/// an item outside its visible folder is still a change to that item.
+#[must_use]
+pub fn item_companion_owner(path: &str) -> Option<ItemId> {
+    let text = if let Some(file) = path
+        .strip_prefix(".okf/sources/")
+        .or_else(|| path.strip_prefix(".okf/supplied/"))
+    {
+        file.strip_suffix(".json")?
+    } else {
+        path.strip_prefix(".okf/corrections/")?.split_once('/')?.0
+    };
+    let id = uuid::Uuid::parse_str(text).ok()?;
+    (id.to_string() == text).then_some(ItemId(id))
 }
 
 /// The one warning a replayed commit answers in place of warnings the store does not hold for
