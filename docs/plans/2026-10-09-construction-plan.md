@@ -750,14 +750,14 @@ from the lanes or the composed server.
 
 ### Owner (product behaviour)
 
-- **O1. `ingest-locates-unlocated-items`: does the product bound the distance?** ingest asks before
+- **O1. `ingest-locates-unlocated-items`: does the product bound the distance? Decided 2026-10-17: no bound, the default below; the gate text says so.** ingest asks before
   it builds the gate. Recommended default: no bound. Every location found through the text layer
   is recorded as `inferred`, and SPEC section 5 says the interface never presents an inferred
   location with the certainty of a direct one. The contract carries no distance, so a bound could
   only drop locations. Revisit if acceptance finds a wrong placement that readers rely on.
   Recording the decision changes the gate text pinned at `tests/foundation/records.test.mjs:261`,
   which ends "open until this gate is built", in the same change.
-- **O2. Charts over approved agent-supplied text, or human-corrected text.** These are refused
+- **O2. Charts over approved agent-supplied text, or human-corrected text. Decided 2026-10-17: keep refusing, the default below.** These are refused
   today: `views::materialize` returns `DatasetUnavailable` (R5). Recommended default: keep
   refusing. The refusal is that chart's own alert, and it says why: the source's shown text is
   not the converter's, and whether it was corrected or supplied by an agent. A dataset is read
@@ -772,7 +772,7 @@ from the lanes or the composed server.
   - macOS: a supervisor watchdog. It samples the child's memory every 50 to 100 ms through a
     crate with a safe API, kills the child at the cap, and records the window as
     `Failure(MemoryLimit)` / `not_converted` pages. [inferred: macOS enforces no address-space
-    limit] **Owner to confirm that the watchdog counts as the hard cap on macOS.**
+    limit] **Decided 2026-10-17: the watchdog counts as the hard cap on macOS.**
 - **O4. How a construction gate is recorded as closed.** The status vocabulary is closed
   (`tests/foundation/records.test.mjs:272`), and statuses are never typed. Recommended default: no
   status change during construction; the evidence is the lane log and the merge commit's
@@ -872,7 +872,7 @@ Findings that were judged not load-bearing at merge, each with its home. They ar
 
 - **Asset retention (ingest M2, its main body).** Done in #21.
 - **Archives written before a schema change restore (a standing rule; the fixtures landed with records schema 3).** `crates/storage/tests/fixtures/archives/records-schema-2/` holds a workspace archive and an installation archive written by the build before the change, and `crates/storage/tests/archive_fixtures.rs` restores them on every build, by replacement and by import. Every later change to the records schema, the archive format or a stored shape first writes its own fixtures with the kept writer (`write_archive_fixtures`, run as its doc says, before the change) and keeps every earlier set restoring.
-- **Restored View bindings (core M1.6, with the View file layout).** An archive imported into a workspace with another id keeps the archive's tree. So once Views are stored in Git, the import's restore commit must rewrite each View's `bindings[].source.workspace_id` to the target and nothing else, or `require_own_workspace` rejects them. This ships in the same change that lands the View layout. Its test: a View restored into another id validates and opens with `get_view`.
+- **Restored View bindings (core M1.6, with the View file layout). Closed by the layout (core M1.6 rulings, E1; contract batch 3):** a View's file names no workspace (a saved View binds only to its own), so an archive imported into a workspace with another id needs no rewrite and the restore commit stays "same tree, no content change". The test remains: a View restored into another id validates and opens with `get_view` (core M1.6 phase 2).
 - **The purge job drains first (core M1.4, with the purge operation).** The `Purger` caller duty requires cancelling and draining the target workspace's jobs before the first call. The purge job's handler in ingest, which is the purger's caller, must therefore:
   - list the workspace's queued and running jobs;
   - cancel each, under a mutation id derived per job;

@@ -1,8 +1,10 @@
 //! Test-only response fixture for checking bindings; never linked into production.
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::identity::Timestamp;
 use okf_jawn_core::context::OperationContext;
 use okf_jawn_core::ports::{Application, PortFuture};
+use okf_jawn_core::storage::StorageScope;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -18,6 +20,13 @@ macro_rules! fixture_operations {
                     serde_json::from_value(value).map_err(|error| ApiError::new(ErrorCode::Internal,error.to_string()))
                 })
             })*
+
+            /// Every workspace is live: no binding test archives one; the archive rule is core
+            /// dispatch's, tested in core.
+            fn archived_at<'a>(&'a self, _scope: &'a StorageScope)
+                -> PortFuture<'a, Option<Timestamp>> {
+                Box::pin(async { Ok(None) })
+            }
         }
     };
 }

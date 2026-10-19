@@ -22,9 +22,29 @@ afterEach(() => {
 const SOMEONE = '88888888-8888-4888-8888-888888888888';
 
 const LINKED: Link[] = [
-  { from: NOTE, to: OTHER, to_path: 'notes/plan.md', label: 'the plan', line: 4 },
-  { from: NOTE, to_path: 'notes/gone.md', label: 'old minutes', line: 7 },
-  { from: SOMEONE, to: NOTE, to_path: 'notes/meeting.md', label: 'see the meeting', line: 12 },
+  {
+    from: NOTE,
+    from_path: 'notes/meeting.md',
+    to: OTHER,
+    to_path: 'notes/plan.md',
+    label: 'the plan',
+    line: 4,
+  },
+  {
+    from: NOTE,
+    from_path: 'notes/meeting.md',
+    to_path: 'notes/gone.md',
+    label: 'old minutes',
+    line: 7,
+  },
+  {
+    from: SOMEONE,
+    from_path: 'elsewhere/someone.md',
+    to: NOTE,
+    to_path: 'notes/meeting.md',
+    label: 'see the meeting',
+    line: 12,
+  },
 ];
 
 function setup(links: Handler) {

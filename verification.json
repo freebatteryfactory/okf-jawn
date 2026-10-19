@@ -52,6 +52,24 @@
         "path": "server → jsonwebtoken (rust_crypto) → rsa"
       },
       {
+        "id": "RUSTSEC-2026-0367",
+        "crate": "zip",
+        "label": "extraction keeps SUID and SGID bits; no archive is extracted to disk",
+        "path": "storage, ingest; calamine and docling (zip ^8.6)"
+      },
+      {
+        "id": "RUSTSEC-2026-0368",
+        "crate": "zip",
+        "label": "extraction writes symlinks outside the destination; no archive is extracted to disk",
+        "path": "storage, ingest; calamine and docling (zip ^8.6)"
+      },
+      {
+        "id": "RUSTSEC-2026-0369",
+        "crate": "zip",
+        "label": "extraction applies permissions through symlinks; no archive is extracted to disk",
+        "path": "storage, ingest; calamine and docling (zip ^8.6)"
+      },
+      {
         "id": "GHSA-vfj7-8cjw-p6xm",
         "package": "braces@3.0.3",
         "label": "build-time tooling",
@@ -253,7 +271,7 @@
           "status": "blocked_on_lanes",
           "owner": "ingest",
           "receipt": "cargo test -p okf-jawn-ingest --features runtime (the cap mechanism); bun qualification/docling/run.mjs, recorded in qualification/receipts/docling.json (the window size and cap values)",
-          "meaning": "Production ingest worker hard memory bound; not DOCLING_RS_MAX_MEMORY_MB on DocumentConverter. Conversion runs in a child process with a memory cap, in page windows of 4 pages (owner, 2026-10-07), enforced with the strongest facility each platform has: a job-object memory limit on Windows, RLIMIT_DATA or RLIMIT_AS on Linux as the measurement supports (ONNX Runtime reserves address space), and on macOS a supervisor watchdog that kills the child at the cap (the owner to confirm it counts as the hard cap there). Conversion is never refused on a platform. Two parts: (a) the cap mechanism, proven by the ingest tests with a small test child that allocates past the cap and must be killed and reported as Failure(MemoryLimit) with its pages not converted; it needs no models, so CI runs it; (b) the window size and the cap, set from a measurement of whole-document against windowed conversion, including a PDF whose tables cross pages and recording what each cap limits (virtual, private or committed memory), recorded as criteria of the Docling qualification; until then window_pages = 4"
+          "meaning": "Production ingest worker hard memory bound; not DOCLING_RS_MAX_MEMORY_MB on DocumentConverter. Conversion runs in a child process with a memory cap, in page windows of 4 pages (owner, 2026-10-07), enforced with the strongest facility each platform has: a job-object memory limit on Windows, RLIMIT_DATA or RLIMIT_AS on Linux as the measurement supports (ONNX Runtime reserves address space), and on macOS a supervisor watchdog that kills the child at the cap (the owner decided on 2026-10-17, O3, that it counts as the hard cap there). Conversion is never refused on a platform. Two parts: (a) the cap mechanism, proven by the ingest tests with a small test child that allocates past the cap and must be killed and reported as Failure(MemoryLimit) with its pages not converted; it needs no models, so CI runs it; (b) the window size and the cap, set from a measurement of whole-document against windowed conversion, including a PDF whose tables cross pages and recording what each cap limits (virtual, private or committed memory), recorded as criteria of the Docling qualification; until then window_pages = 4"
         },
         {
           "id": "job-crash-against-record-store",
@@ -267,7 +285,7 @@
           "status": "blocked_on_lanes",
           "owner": "ingest",
           "receipt": "cargo test -p okf-jawn-ingest --features runtime -- locates_unlocated_items",
-          "meaning": "An item the converter leaves without a location (a PDF caption: the library drops its box) is located through the page text layer by the rule of qualification/docling/src/locate.rs: docling::pdf_text_layer_pages, the one text-layer item with exactly its text on the page of its parent or of its nearest located earlier sibling, with a box that has area and lies inside the page. An item the rule does not find is recorded as unlocated; it is never given a guessed box, and every location records which source gave it. The rule does not guarantee that the box it finds is the item's own: that file states the two known wrong placements (LOCATE_LIMITS), and the harness records each item's distance to the item whose page was searched without applying a threshold. Whether the product bounds that distance is the owner's decision, open until this gate is built"
+          "meaning": "An item the converter leaves without a location (a PDF caption: the library drops its box) is located through the page text layer by the rule of qualification/docling/src/locate.rs: docling::pdf_text_layer_pages, the one text-layer item with exactly its text on the page of its parent or of its nearest located earlier sibling, with a box that has area and lies inside the page. An item the rule does not find is recorded as unlocated; it is never given a guessed box, and every location records which source gave it. The rule does not guarantee that the box it finds is the item's own: that file states the two known wrong placements (LOCATE_LIMITS), and the harness records each item's distance to the item whose page was searched without applying a threshold. The owner decided on 2026-10-17 (O1) that the product applies no bound: every location found through the text layer is recorded as inferred"
         },
         {
           "id": "ingest-flags-undecodable-text",
@@ -287,7 +305,7 @@
           "id": "view-server-validation",
           "status": "blocked_on_lanes",
           "owner": "core-cli",
-          "receipt": "cargo test -p okf-jawn-core -- views::",
+          "receipt": "cargo test -p okf-jawn-core -- views:: --skip reviews::",
           "meaning": "views::validate against catalog.schema.json and vega-lite.schema.json plus referential checks, and a binding outside the View's workspace is rejected (`ViewDocument::bindings_outside`); present and saved-view writes call it first"
         },
         {

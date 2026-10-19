@@ -7,8 +7,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::identity::Timestamp;
 use okf_jawn_core::context::OperationContext;
 use okf_jawn_core::ports::{Application, PortFuture};
+use okf_jawn_core::storage::StorageScope;
 use serde_json::Value;
 use tokio::sync::Notify;
 
@@ -26,6 +28,13 @@ macro_rules! counting_operations {
                         .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))
                 })
             })*
+
+            /// It keeps no workspaces: every workspace it is asked about is live, so dispatch
+            /// runs every mutation's handler. A test of the archive rule composes `Archiving`.
+            fn archived_at<'a>(&'a self, _scope: &'a StorageScope)
+                -> PortFuture<'a, Option<Timestamp>> {
+                Box::pin(async { Ok(None) })
+            }
         }
     };
 }

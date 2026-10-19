@@ -47,6 +47,16 @@ macro_rules! harness_operations {
                 -> PortFuture<'a, $response> {
                 Box::pin(handler!($id)(self, context, request))
             })*
+
+            /// Every workspace is live: these tests archive none. The answer is not the
+            /// catalog's because authorization is held open (`OpenAccess`): the catalog would
+            /// answer `NotFound` for the purged target where the local access adapter refuses
+            /// first, and these tests replay requests that name it. The archive rule is core
+            /// dispatch's, tested in core against `ApplicationService`'s catalog answer.
+            fn archived_at<'a>(&'a self, _scope: &'a StorageScope)
+                -> PortFuture<'a, Option<Timestamp>> {
+                Box::pin(async { Ok(None) })
+            }
         }
     };
 }

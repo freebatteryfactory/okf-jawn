@@ -11,7 +11,7 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::WorkspaceId;
 use okf_jawn_contract::import::JobKind;
 use okf_jawn_contract::metadata::OperationName;
-use okf_jawn_contract::operations::{DRAFT_BEARING, HUMAN_SESSION_ONLY};
+use okf_jawn_contract::operations::{DRAFT_BEARING, HUMAN_SESSION_ONLY, LOCAL_OWNER_ONLY};
 
 use crate::context::{TenantGrant, WorkspaceGrant};
 use crate::ports::PortFuture;
@@ -116,6 +116,29 @@ pub fn check_human_route(principal: &Principal, operation: OperationName) -> Res
         return Err(ApiError::new(
             ErrorCode::Forbidden,
             "Backup, restore and purge are available only in a human browser session",
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse, on every route but the local owner's, an operation of `LOCAL_OWNER_ONLY`: issuing,
+/// listing and revoking local connector credentials (contract ruling 22).
+///
+/// SPEC section 11: local MCP clients use connector credentials that the owner issues and
+/// revokes; hosted agents use WorkOS Connect. The route decides, not the grants: a hosted
+/// browser session, a service identity or a connector holding tenant `admin` is refused.
+/// Dispatch runs this beside `check_human_route`, before any grant is looked up.
+///
+/// # Errors
+/// Returns `Forbidden` when `operation` is listed and the route is not `LocalOwner`.
+pub fn check_local_owner_route(
+    principal: &Principal,
+    operation: OperationName,
+) -> Result<(), ApiError> {
+    if LOCAL_OWNER_ONLY.contains(&operation) && principal.route != AccessRoute::LocalOwner {
+        return Err(ApiError::new(
+            ErrorCode::Forbidden,
+            "Connector credentials are issued, listed and revoked only by the local owner",
         ));
     }
     Ok(())
