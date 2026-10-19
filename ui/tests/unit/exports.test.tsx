@@ -16,6 +16,7 @@ import {
   RouterProvider,
 } from '@tanstack/react-router';
 import { act, cleanup, configure, fireEvent, render, screen, within } from '@testing-library/react';
+import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getJobOptions } from '../../src/api/generated/@tanstack/react-query.gen';
 import type { Job, JobKind, Workspace } from '../../src/api/generated/types.gen';
@@ -25,7 +26,15 @@ import { ExportViewButton } from '../../src/features/exports/ExportView';
 import { fail, type Json, mockApi, ok, type Reply } from './support/api';
 import { EXPORT_VIEW, EXPORT_WORKSPACE } from './support/exports';
 import { accepted, JOBS, jobOf } from './support/imports';
-import { explorerHandlers, NOTE, OLD, renderAt, WS, writableWorkspace } from './support/workspace';
+import {
+  explorerHandlers,
+  HEAD,
+  NOTE,
+  OLD,
+  renderAt,
+  WS,
+  writableWorkspace,
+} from './support/workspace';
 
 const OPEN = '/api/workspaces/open-workspace';
 const ARCHIVED_AT = '2026-01-02T08:00:00.000Z';
@@ -370,5 +379,115 @@ describe('"Export visual" for a View', () => {
     fireEvent.click(button);
     await screen.findByText(/^The export of this View was accepted/);
     expect(api.callsTo(EXPORT_VIEW)).toHaveLength(1);
+  });
+});
+
+/**
+ * "Export visual" for one View whose tab moves to another revision, as a tab keyed by its item
+ * does (`DocumentPanes`): the control stays mounted and is given the new revision.
+ */
+async function renderMovingView() {
+  const service = exportService();
+  const api = mockApi(service.handlers);
+  const queryClient = createQueryClient();
+  let moveTo: (revision: string) => void = () => {};
+  function MovingTab() {
+    const [revision, setRevision] = useState(OLD);
+    moveTo = setRevision;
+    return <ExportViewButton workspaceId={WS} itemId={NOTE} revision={revision} rights={writer} />;
+  }
+  const router = createRouter({
+    routeTree: createRootRoute({ component: MovingTab }),
+    history: createMemoryHistory({ initialEntries: ['/'] }),
+  });
+  render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
+  await screen.findByRole('button', { name: 'Export visual' });
+  return { api, service, move: (revision: string) => act(() => moveTo(revision)) };
+}
+
+const viewButton = () =>
+  screen.getByRole('button', { name: /^(Export visual|Starting the export…)$/ });
+const unavailable = () => fail(503, 'unavailable', 'the gateway lost the answer');
+const revisionsSent = (api: { callsTo: (path: string) => Json[] }) =>
+  api.callsTo(EXPORT_VIEW).map((body) => (body.at as { revision: string }).revision);
+
+describe('"Export visual" is about the revision its tab reads now', () => {
+  it('neither shows nor retries a failure at the revision before, and keeps keyboard focus', async () => {
+    const { api, service, move } = await renderMovingView();
+    service.script.push(unavailable);
+    fireEvent.click(viewButton());
+    await screen.findByText(
+      'Starting the export of this View: The service is temporarily unavailable.',
+    );
+    screen.getByRole('button', { name: 'Try again' }).focus();
+    move(HEAD);
+    expect(screen.queryByText(/temporarily unavailable/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    // Focus that was in the notice is on the control the notice belonged to, never on the body.
+    expect(document.activeElement).toBe(viewButton());
+    expect(descriptionOf(viewButton())).toContain(`as of revision ${HEAD.slice(0, 10)}`);
+    fireEvent.click(viewButton());
+    await screen.findByText(/^The export of this View was accepted/);
+    expect(revisionsSent(api)).toEqual([OLD, HEAD]);
+    const keys = api.callsTo(EXPORT_VIEW).map((body) => body.idempotency_key);
+    expect(keys[1]).not.toBe(keys[0]);
+  });
+
+  it('does not say of the next revision an export held at the one before, answered after it moved', async () => {
+    const { api, service, move } = await renderMovingView();
+    let release: () => void = () => {};
+    service.script.push(
+      (_made, usual) =>
+        new Promise<Reply>((resolve) => {
+          release = () => resolve(usual);
+        }),
+    );
+    fireEvent.click(viewButton());
+    await screen.findByRole('button', { name: 'Starting the export…' });
+    move(HEAD);
+    expect(viewButton().textContent).toBe('Export visual');
+    expect(viewButton().getAttribute('aria-disabled')).toBe('false');
+    expect(screen.queryByText('Starting the export…')).toBeNull();
+    await act(async () => {
+      release();
+      await new Promise((settled) => setTimeout(settled, 50));
+    });
+    expect(screen.queryByText(/accepted/)).toBeNull();
+    expect(screen.queryByRole('link', { name: 'All jobs of this workspace' })).toBeNull();
+    // The export at the revision before still became a job: the Jobs page lists it.
+    expect(service.jobs().map((job) => job.id)).toEqual([FIRST]);
+    fireEvent.click(viewButton());
+    await screen.findByText(/job bbbbbbbb: “waiting to start”/);
+    expect(revisionsSent(api)).toEqual([OLD, HEAD]);
+  });
+
+  it('does not say an export accepted at the revision before is the next one’s', async () => {
+    const { move } = await renderMovingView();
+    fireEvent.click(viewButton());
+    await screen.findByText(/job aaaaaaaa: “waiting to start”/);
+    move(HEAD);
+    expect(screen.queryByText(/accepted/)).toBeNull();
+    expect(screen.queryByRole('link', { name: 'All jobs of this workspace' })).toBeNull();
+  });
+
+  it('asks again under the key a revision had, when the tab comes back to it unanswered', async () => {
+    const { api, service, move } = await renderMovingView();
+    service.script.push(unavailable, unavailable);
+    fireEvent.click(viewButton());
+    await screen.findByText(/temporarily unavailable/);
+    move(HEAD);
+    fireEvent.click(viewButton());
+    await screen.findByText(/temporarily unavailable/);
+    move(OLD);
+    fireEvent.click(viewButton());
+    await screen.findByText(/^The export of this View was accepted/);
+    expect(revisionsSent(api)).toEqual([OLD, HEAD, OLD]);
+    const keys = api.callsTo(EXPORT_VIEW).map((body) => body.idempotency_key);
+    expect(keys[2]).toBe(keys[0]);
+    expect(keys[1]).not.toBe(keys[0]);
   });
 });

@@ -10,6 +10,13 @@
  * the request under the key it had (`useRetry`), so a request whose answer was lost does not start
  * a second export. Keyboard focus that was in the notice when it leaves goes to what the caller
  * names (`loaded`: its button).
+ *
+ * Everything said is about what is asked now (`request`): a control that stays on the page while
+ * it is given another thing to export (a View's tab moved to another revision) says nothing of a
+ * press made for the one before, whether it is still out, failed or was answered, and its "Try
+ * again" never repeats that press. That press goes on (its job, if it makes one, is listed on the
+ * Jobs page as every job is), and a press here is not held back by it. Each request keeps its own
+ * last attempt, so coming back to one that was never answered asks again under the key it had.
  */
 import { useMutation } from '@tanstack/react-query';
 import { useRef } from 'react';
@@ -18,6 +25,12 @@ import { FailureNotice } from '../errors/FailureNotice';
 import { type FailureRetry, useRetry } from '../errors/retry';
 import { jobName, jobStateSaid } from '../jobs/job-words';
 import { type ExportAttempt, exportAttempt } from './exports';
+
+/** One press as sent: the attempt, and the request it was made for. */
+interface Asked<T> {
+  request: string;
+  attempt: ExportAttempt<T>;
+}
 
 export interface ExportStart<T> {
   /** Start the export of `values`; nothing is sent while a request is out. */
@@ -44,32 +57,37 @@ export function useExportStart<T>({
   start,
   loaded,
 }: ExportStartOptions<T>): ExportStart<T> {
-  const last = useRef<ExportAttempt<T> | null>(null);
+  // The last attempt of each request, until a job answers it.
+  const attempts = useRef(new Map<string, ExportAttempt<T>>());
   const send = useMutation({
-    mutationFn: start,
-    // Answered: the next press is a new export.
-    onSuccess: () => {
-      last.current = null;
+    mutationFn: ({ attempt }: Asked<T>) => start(attempt),
+    // Answered: the next press for that request is a new export.
+    onSuccess: (_job, asked) => {
+      if (attempts.current.get(asked.request) === asked.attempt)
+        attempts.current.delete(asked.request);
     },
   });
+  // The last press is shown only while it is a press for what is asked now.
+  const asked = send.variables;
+  const mine = asked !== undefined && asked.request === request;
   const begin = (values: T) => {
-    if (send.isPending) return;
-    const attempt = exportAttempt(last.current, values);
-    last.current = attempt;
-    send.mutate(attempt);
+    if (mine && send.isPending) return;
+    const attempt = exportAttempt(attempts.current.get(request) ?? null, values);
+    attempts.current.set(request, attempt);
+    send.mutate({ request, attempt });
   };
   const failure = useRetry({
     request,
-    failed: send.isError,
-    error: send.error,
-    // The failed request again, under its key.
-    run: () => (last.current === null ? Promise.resolve() : send.mutateAsync(last.current)),
+    failed: mine && send.isError,
+    error: mine ? send.error : null,
+    // The failed request again, under its key; never a press made for another request.
+    run: () => (mine ? send.mutateAsync(asked) : Promise.resolve()),
     loaded,
   });
   return {
     begin,
-    pending: send.isPending,
-    started: send.isSuccess ? send.data : null,
+    pending: mine && send.isPending,
+    started: mine && send.isSuccess ? send.data : null,
     failure,
   };
 }
