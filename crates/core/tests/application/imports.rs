@@ -225,6 +225,26 @@ async fn imports_an_accepted_import_records_its_job_with_the_resolved_specificat
     Ok(())
 }
 
+/// Ruling R1 resolves absent settings from the deployment. Those settings must satisfy the
+/// contract's literal 36..=144 DPI bounds before any service can accept imports with them.
+#[test]
+fn imports_deployment_conversion_defaults_are_checked_before_acceptance() -> TestResult {
+    let bad = ApplicationConfig {
+        conversion_defaults: ConversionSettings {
+            page_image_dpi: 145,
+            ..ConversionSettings::default()
+        },
+        ..config()
+    };
+    let refused = err_of(bad.check())?;
+    assert_refused(
+        &refused,
+        ErrorCode::InvalidInput,
+        "/settings/page_image_dpi",
+    );
+    Ok(())
+}
+
 /// Ruling R1's settings: absent ones are the deployment's, resolved into the job at acceptance;
 /// supplied ones are kept as given, and checked.
 #[tokio::test]
@@ -337,6 +357,46 @@ async fn imports_a_destination_spelled_otherwise_than_a_folder_of_the_base_is_re
         start(&imports, number, import(vec![upload], written)?).await?;
     }
     assert_eq!(imports.tenancy.jobs.created()?.len(), 3);
+    Ok(())
+}
+
+/// SPEC section 3's item/folder distinction: an existing item cannot become an import
+/// destination, whatever its case or depth, and refusing it creates no job. A real folder
+/// ending in .md and a mere string-prefix neighbour are valid destinations.
+#[tokio::test]
+async fn imports_a_destination_or_ancestor_that_is_an_item_is_refused_before_job_creation()
+-> TestResult {
+    let imports = imports()?;
+    let versions = &imports.tenancy.world.versions;
+    let base = revision('a')?;
+    for (id, location) in [
+        (40, "archive.md"),
+        (41, "notes/report.md"),
+        (42, "notes/folder.md/kept.md"),
+    ] {
+        versions.put_document(&base, note(id, &base, location, "text", json!({}))?)?;
+    }
+    versions.page_listings(1)?;
+    let upload = held(&imports.tenancy, 1, true, None)?;
+    for (number, written, occupied) in [
+        (130, "archive.md", "archive.md"),
+        (131, "ARCHIVE.md/nested", "archive.md"),
+        (132, "notes/report.md", "notes/report.md"),
+        (133, "notes/REPORT.md/new/deep", "notes/report.md"),
+    ] {
+        let refused = err_of(start(&imports, number, import(vec![upload], written)?).await)?;
+        assert_refused(&refused, ErrorCode::InvalidInput, "/destination");
+        assert!(
+            refused.message.contains(occupied),
+            "{written}: {}",
+            refused.message
+        );
+        assert_nothing_queued(&imports.tenancy)?;
+    }
+    for (number, written) in [(134, "notes/folder.md/new"), (135, "archive.md-new")] {
+        start(&imports, number, import(vec![upload], written)?).await?;
+    }
+    assert_eq!(imports.tenancy.jobs.created()?.len(), 2);
     Ok(())
 }
 
@@ -465,8 +525,9 @@ async fn imports_a_repeat_answers_the_first_job_and_a_failed_wake_up_fails_the_r
     Ok(())
 }
 
-/// A resumed attempt whose own job took the uploads (its pending commit landed after the base) is
-/// answered that job; without that commit, and for any other mutation, a taken upload refuses.
+/// SPEC section 5: "a retried request returns the job it already created", even after that
+/// job consumed its uploads but before it wrote the pending-card commit. A foreign mutation
+/// cannot use that job as ownership proof and must create no orphan job.
 #[tokio::test]
 async fn imports_a_resumed_attempt_whose_own_job_took_the_uploads_is_answered_that_job()
 -> TestResult {
@@ -478,16 +539,18 @@ async fn imports_a_resumed_attempt_whose_own_job_took_the_uploads_is_answered_th
     // The job takes both, as its handler's `consume_batch` does.
     held(tenancy, 1, true, Some(job.id))?;
     held(tenancy, 2, true, Some(job.id))?;
-    let again = || -> Built<OperationContext> {
-        Ok(resumed(alice(OperationName::StartImport, 100)?))
-    };
-    let refused = err_of(
-        imports
-            .service
-            .start_import(&again()?, import(vec![first, second], "")?)
-            .await,
-    )?;
-    assert_refused(&refused, ErrorCode::Conflict, "/upload_ids/0");
+    let again =
+        || -> Built<OperationContext> { Ok(resumed(alice(OperationName::StartImport, 100)?)) };
+    let before_commit = imports
+        .service
+        .start_import(&again()?, import(vec![first, second], "")?)
+        .await?;
+    assert_eq!(before_commit.id, job.id);
+    assert_eq!(
+        tenancy.jobs.created()?.len(),
+        1,
+        "no second job before the commit"
+    );
     // The job's pending cards land after the base, under the job's first commit identity.
     let versions = &tenancy.world.versions;
     versions.queue_revision(revision('b')?)?;
@@ -524,6 +587,41 @@ async fn imports_a_resumed_attempt_whose_own_job_took_the_uploads_is_answered_th
             .await,
     )?;
     assert_refused(&refused, ErrorCode::Conflict, "/upload_ids/0");
+    assert_eq!(
+        tenancy.jobs.created()?.len(),
+        1,
+        "foreign retries create no orphan"
+    );
+    Ok(())
+}
+
+/// Every upload is checked, including after one is recognized as this resumed request's.
+/// A partially inconsistent/removed later slot is never hidden by an early successful return.
+#[tokio::test]
+async fn imports_a_resumed_own_consumption_does_not_skip_later_upload_checks() -> TestResult {
+    let imports = imports()?;
+    let tenancy = &imports.tenancy;
+    let first = held(tenancy, 1, true, None)?;
+    let second = held(tenancy, 2, true, None)?;
+    let job = start(&imports, 140, import(vec![first, second], "")?).await?;
+    held(tenancy, 1, true, Some(job.id))?;
+    held(tenancy, 2, false, None)?;
+    let refused = err_of(
+        imports
+            .service
+            .start_import(
+                &resumed(alice(OperationName::StartImport, 140)?),
+                import(vec![first, second], "")?,
+            )
+            .await,
+    )?;
+    assert_refused(&refused, ErrorCode::InvalidInput, "/upload_ids/1");
+    assert_eq!(tenancy.jobs.created()?.len(), 1);
+    assert_eq!(
+        tenancy.queue.woken()?.len(),
+        1,
+        "no new wake-up for the refusal"
+    );
     Ok(())
 }
 
@@ -542,7 +640,10 @@ fn partial_card(imports: &Imports) -> Built<()> {
             PageRange { start: 8, end: 8 },
         ],
         partly_extracted: Vec::new(),
-        not_converted: vec![PageRange { start: 3, end: 4 }, PageRange { start: 7, end: 7 }],
+        not_converted: vec![
+            PageRange { start: 3, end: 4 },
+            PageRange { start: 7, end: 7 },
+        ],
     };
     let outcome = ConversionOutcome::Partial {
         coverage: Some(coverage),
@@ -690,10 +791,11 @@ async fn imports_a_redigest_of_the_unconverted_pages_needs_some_and_the_records_
 async fn imports_a_redigest_needs_a_source_at_a_revision_of_the_workspace() -> TestResult {
     let imports = imports()?;
     let base = revision('a')?;
-    imports.tenancy.world.versions.put_document(
-        &base,
-        note(31, &base, "notes/plan.md", "text", json!({}))?,
-    )?;
+    imports
+        .tenancy
+        .world
+        .versions
+        .put_document(&base, note(31, &base, "notes/plan.md", "text", json!({}))?)?;
     let mut of_a_note = redigest(false)?;
     of_a_note.item_id = ItemId(Uuid::from_u128(31));
     let refused = err_of(convert_again(&imports, 230, of_a_note).await)?;
@@ -765,7 +867,11 @@ fn corrections(imports: &Imports) -> Built<Vec<(Digest, String, Option<ProposalI
 async fn imports_a_correction_is_one_commit_on_the_base_with_a_receipt() -> TestResult {
     let imports = imports()?;
     partial_card(&imports)?;
-    imports.tenancy.world.versions.queue_revision(revision('b')?)?;
+    imports
+        .tenancy
+        .world
+        .versions
+        .queue_revision(revision('b')?)?;
     let result = correct(&imports, 300, correction("# Fixed\n", None)?).await?;
     assert_eq!(result.revision, revision('b')?);
     let commits = imports.tenancy.world.versions.commits()?;
@@ -784,10 +890,9 @@ async fn imports_a_correction_is_one_commit_on_the_base_with_a_receipt() -> Test
     );
     let receipts = imports.tenancy.world.records.receipts()?;
     assert!(
-        receipts
-            .iter()
-            .any(|(under, receipt)| *under == Some(mutation(300))
-                && receipt.id == result.receipt_id),
+        receipts.iter().any(
+            |(under, receipt)| *under == Some(mutation(300)) && receipt.id == result.receipt_id
+        ),
         "the receipt under the mutation"
     );
     assert_eq!(
@@ -805,7 +910,11 @@ async fn imports_a_correction_is_one_commit_on_the_base_with_a_receipt() -> Test
         (again.revision, again.receipt_id),
         (result.revision, result.receipt_id)
     );
-    assert_eq!(imports.tenancy.world.versions.commits()?.len(), 1, "no second commit");
+    assert_eq!(
+        imports.tenancy.world.versions.commits()?.len(),
+        1,
+        "no second commit"
+    );
     Ok(())
 }
 
@@ -818,10 +927,11 @@ async fn imports_a_correction_names_the_items_digest_at_the_base() -> TestResult
     let refused = err_of(correct(&imports, 310, other).await)?;
     assert_refused(&refused, ErrorCode::InvalidInput, "/digest");
     let base = revision('a')?;
-    imports.tenancy.world.versions.put_document(
-        &base,
-        note(31, &base, "notes/plan.md", "text", json!({}))?,
-    )?;
+    imports
+        .tenancy
+        .world
+        .versions
+        .put_document(&base, note(31, &base, "notes/plan.md", "text", json!({}))?)?;
     let mut of_a_note = correction("text", None)?;
     of_a_note.item_id = ItemId(Uuid::from_u128(31));
     let refused = err_of(correct(&imports, 311, of_a_note).await)?;
@@ -893,8 +1003,20 @@ async fn imports_keeping_supplied_text_needs_an_accepted_supply_of_this_item_wit
     let imports = imports()?;
     partial_card(&imports)?;
     let text = "# The agent's text\n";
-    let kept = proposal(&imports, 400, "accepted", "supply_extraction", supplied(card_id(), text))?;
-    let open = proposal(&imports, 401, "open", "supply_extraction", supplied(card_id(), text))?;
+    let kept = proposal(
+        &imports,
+        400,
+        "accepted",
+        "supply_extraction",
+        supplied(card_id(), text),
+    )?;
+    let open = proposal(
+        &imports,
+        401,
+        "open",
+        "supply_extraction",
+        supplied(card_id(), text),
+    )?;
     let elsewhere = proposal(
         &imports,
         402,
@@ -922,7 +1044,11 @@ async fn imports_keeping_supplied_text_needs_an_accepted_supply_of_this_item_wit
     let refused = err_of(correct(&imports, 414, correction(text, Some(unknown))?).await)?;
     assert_refused(&refused, ErrorCode::NotFound, "/adopts");
     assert_eq!(imports.tenancy.world.versions.commits()?.len(), 0);
-    imports.tenancy.world.versions.queue_revision(revision('b')?)?;
+    imports
+        .tenancy
+        .world
+        .versions
+        .queue_revision(revision('b')?)?;
     correct(&imports, 415, correction(text, Some(kept))?).await?;
     assert_eq!(
         corrections(&imports)?,

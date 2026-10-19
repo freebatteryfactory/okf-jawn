@@ -5,21 +5,20 @@
 //!   with the specification resolved at acceptance (read back through a claim, as the worker
 //!   reads it); a destination spelled otherwise than a folder of the real tree refused, an
 //!   incomplete upload refused, and an upload the job took refused for a second import.
-//! - A correction committed through `correct_digest` and kept across later conversions of the
-//!   card: the card replaced with another digest keeps the correction beside it, and replaced
-//!   with the corrected digest again shows it.
+//! - A correction committed through `correct_digest` and kept across the real ingest redigest
+//!   handler, plus direct store-level card replacements that restore an older corrected digest.
 //! - Attention over a small real workspace with one of each kind built, read whole and in pages.
 //!
 //! Stand-ins, said here rather than hidden: authorization is held open (`OpenAccess`), as in
-//! `uploads_job_control_service.rs`; source cards are written, and replaced as a redigest
-//! replaces them, by a `TreeEdit::WriteSourceCard` commit through the real store, as ingest's
-//! handlers write them (storage's tests cannot depend on ingest), and no conversion runs; the
-//! job is claimed through the store as ingest's runtime claims it, and its uploads consumed as
-//! its handler consumes them (`UploadStore::consume_batch`); the queue records each delivery.
+//! `uploads_job_control_service.rs`. The real import/redigest journey injects a deterministic
+//! converter (no native conversion is qualified here); it runs ingest's real handler/runtime
+//! over durable jobs, Git and object storage. Other setup cards are direct store writes. The
+//! queue records deliveries, with an injected delivery failure for the acceptance-resume window.
 #![cfg(feature = "runtime")]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,7 +27,7 @@ use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
 use okf_jawn_contract::attention::{AttentionItem, AttentionKind, GetAttentionResponse};
 use okf_jawn_contract::common::{MutationResult, TextRange};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
-use okf_jawn_contract::extraction::ConversionSettings;
+use okf_jawn_contract::extraction::{ConversionSettings, ConverterIdentity, OcrPolicy};
 use okf_jawn_contract::identity::{
     Digest, ItemId, JobId, MutationId, Revision, TenantId, UploadId, WorkspaceId, WorkspacePath,
 };
@@ -37,18 +36,21 @@ use okf_jawn_contract::item::CreatedItem;
 use okf_jawn_contract::read::Selection;
 use okf_jawn_core::access::AccessControl;
 use okf_jawn_core::application::{ApplicationConfig, ApplicationService, Ports};
+use okf_jawn_core::conformance::OkfConformance;
 use okf_jawn_core::context::{TenantGrant, WorkspaceGrant};
 use okf_jawn_core::conversion::{
-    Conversion, ConversionInput, Converter, ConverterLimits, PageCount,
+    Conversion, ConversionInput, ConversionStatus, ConvertedDocument, Converter, ConverterLimits,
+    PageCount,
 };
 use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
 use okf_jawn_core::jobs::{JobQueue, JobScope, JobSpec, RecordStore};
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
-    CommitChanges, LocalSource, Page, Provenance, SourceCard, StorageScope, TreeEdit,
-    VersionStore,
+    CommitChanges, LocalSource, Page, Provenance, SourceCard, StorageScope, TreeEdit, VersionStore,
 };
 use okf_jawn_core::uploads::UploadStore;
+use okf_jawn_ingest::handler::{DRAIN_BOUND, HandlerLimits, HandlerPorts, IngestHandler};
+use okf_jawn_ingest::runtime::run_one;
 use okf_jawn_storage::Storage;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -65,14 +67,20 @@ struct World {
 /// Grants every permission on every workspace and on the tenant.
 struct OpenAccess;
 
-/// `JobQueue` that records every delivery: no worker runs in these tests.
+/// `JobQueue` that records every delivery; a test explicitly runs a delivered job.
 #[derive(Default)]
 struct RecordingQueue {
     deliveries: Mutex<Vec<(JobScope, JobId)>>,
+    fail_next: AtomicBool,
 }
 
-/// No conversion runs in these tests.
+/// Reject conversion in tests that only exercise acceptance or raw store writes.
 struct NoConverter;
+
+/// A stated converter double with literal output; the job runtime and stores remain real.
+struct FixedConverter {
+    markdown: &'static str,
+}
 
 const EVERY: [Permission; 6] = [
     Permission::Read,
@@ -165,6 +173,48 @@ impl World {
             .map_err(|_| poisoned())?
             .clone())
     }
+
+    /// Execute one actual durable ingest job with a stated converter double, then read its result.
+    async fn run_job(
+        &self,
+        scope: &StorageScope,
+        id: JobId,
+        markdown: &'static str,
+    ) -> Fallible<Job> {
+        let handler = IngestHandler::new(HandlerPorts {
+            records: Arc::new(self.storage.records()),
+            versions: Arc::new(self.storage.versions()),
+            search: Arc::new(self.storage.search()),
+            events: Arc::new(self.storage.events()),
+            backups: Arc::new(self.storage.backups()),
+            purger: Arc::new(self.storage.purger()),
+            uploads: Arc::new(self.storage.uploads()),
+            blobs: Arc::new(self.storage.blobs()),
+            converter: Arc::new(FixedConverter { markdown }),
+            check: Arc::new(OkfConformance),
+            limits: HandlerLimits {
+                heartbeat: Duration::from_secs(1),
+                window_timeout: Duration::from_secs(120),
+                drain: DRAIN_BOUND,
+            },
+        });
+        assert!(
+            run_one(
+                &self.storage.records(),
+                &self.storage.events(),
+                &handler,
+                id
+            )
+            .await?
+        );
+        let job = self
+            .storage
+            .records()
+            .get_job(&JobScope::Workspace(scope.clone()), id)
+            .await?;
+        assert_eq!(job.state, JobState::Succeeded, "{:?}", job.error);
+        Ok(job)
+    }
 }
 
 impl AccessControl for OpenAccess {
@@ -214,7 +264,66 @@ impl JobQueue for RecordingQueue {
             .lock()
             .map(|mut deliveries| deliveries.push((scope, job)))
             .map_err(|_| poisoned());
-        Box::pin(async move { delivered })
+        let fail = self.fail_next.swap(false, Ordering::SeqCst);
+        Box::pin(async move {
+            delivered?;
+            if fail {
+                Err(ApiError::new(
+                    ErrorCode::Unavailable,
+                    "the wake-up was delivered but its acknowledgment failed",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
+impl Converter for FixedConverter {
+    fn page_count<'a>(
+        &'a self,
+        _source: &'a LocalSource,
+        _file_name: &'a str,
+    ) -> PortFuture<'a, PageCount> {
+        Box::pin(async { Ok(PageCount::Whole) })
+    }
+
+    fn convert(&self, input: ConversionInput) -> PortFuture<'_, Conversion> {
+        Box::pin(async move {
+            let structured = input.output_directory.join("conversion.json");
+            std::fs::write(&structured, b"{\"fixture\":\"deterministic converter\"}")
+                .map_err(internal)?;
+            Ok(Conversion {
+                source_digest: input.source.object.digest,
+                converter: ConverterIdentity {
+                    name: "deterministic-test-converter".to_owned(),
+                    version: "1".to_owned(),
+                    packages: Vec::new(),
+                    settings: input.settings,
+                    models: Vec::new(),
+                    page_window: None,
+                },
+                status: ConversionStatus::Success,
+                document: Some(ConvertedDocument {
+                    markdown: self.markdown.to_owned(),
+                    structured,
+                    outline: Vec::new(),
+                    assets: Vec::new(),
+                    locations: Vec::new(),
+                    tables: Vec::new(),
+                    warnings: Vec::new(),
+                }),
+                coverage: None,
+                issues: Vec::new(),
+            })
+        })
+    }
+
+    fn limits(&self) -> ConverterLimits {
+        ConverterLimits {
+            window_pages: 1,
+            memory_limit_bytes: 1024 * 1024,
+        }
     }
 }
 
@@ -341,7 +450,12 @@ async fn upload(
 }
 
 /// An upload of the ten bytes, completed through `complete_upload`.
-async fn complete(world: &World, scope: &StorageScope, n: u32, filename: &str) -> Fallible<UploadId> {
+async fn complete(
+    world: &World,
+    scope: &StorageScope,
+    n: u32,
+    filename: &str,
+) -> Fallible<UploadId> {
     let opened = upload(world, scope, n, filename, BYTES).await?;
     world
         .call(
@@ -501,15 +615,48 @@ async fn imports_an_import_through_the_service_is_accepted_and_its_job_created()
             )
             .await?,
     )?;
-    let base = folder.revision;
-    let respelled = err_of(
+    let (_, base) = note(
+        &world,
+        &scope,
+        &folder.revision,
+        15,
+        "archive.md",
+        "Archive\n",
+        json!({}),
+    )
+    .await?;
+    // SPEC section 3: an item cannot be a destination folder or an ancestor of one.
+    let item_ancestor = err_of(
         world
-            .call("start_import", start_import(&scope, &base, &[first], "reports/2026", 6))
+            .call(
+                "start_import",
+                start_import(&scope, &base, &[first], "ARCHIVE.md/child", 16),
+            )
             .await,
     )?;
-    assert_eq!(respelled.code, ErrorCode::InvalidInput, "{}", respelled.message);
+    assert_eq!(item_ancestor.code, ErrorCode::InvalidInput);
+    assert_eq!(item_ancestor.field.as_deref(), Some("/destination"));
+    assert!(item_ancestor.message.contains("archive.md"));
+    let respelled = err_of(
+        world
+            .call(
+                "start_import",
+                start_import(&scope, &base, &[first], "reports/2026", 6),
+            )
+            .await,
+    )?;
+    assert_eq!(
+        respelled.code,
+        ErrorCode::InvalidInput,
+        "{}",
+        respelled.message
+    );
     assert_eq!(respelled.field.as_deref(), Some("/destination"));
-    assert!(respelled.message.contains("Reports"), "{}", respelled.message);
+    assert!(
+        respelled.message.contains("Reports"),
+        "{}",
+        respelled.message
+    );
     let incomplete = err_of(
         world
             .call(
@@ -522,7 +669,11 @@ async fn imports_an_import_through_the_service_is_accepted_and_its_job_created()
     assert_eq!(incomplete.field.as_deref(), Some("/upload_ids/1"));
     let jobs = JobScope::Workspace(scope.clone());
     let records = world.storage.records();
-    assert_eq!(job_count(&world, &jobs).await?, 0, "a refused import queues nothing");
+    assert_eq!(
+        job_count(&world, &jobs).await?,
+        0,
+        "a refused import queues nothing"
+    );
     let request = start_import(&scope, &base, &[first, second], "Reports/2026", 8);
     let response = world.call("start_import", request.clone()).await?;
     let job: Job = serde_json::from_value(response.clone())?;
@@ -551,12 +702,157 @@ async fn imports_an_import_through_the_service_is_accepted_and_its_job_created()
         .await?;
     let taken = err_of(
         world
-            .call("start_import", start_import(&scope, &base, &[second], "", 9))
+            .call(
+                "start_import",
+                start_import(&scope, &base, &[second], "", 9),
+            )
             .await,
     )?;
     assert_eq!(taken.code, ErrorCode::Conflict, "{}", taken.message);
     assert_eq!(taken.field.as_deref(), Some("/upload_ids/0"));
-    assert!(taken.message.contains(&job.id.0.to_string()), "{}", taken.message);
+    assert!(
+        taken.message.contains(&job.id.0.to_string()),
+        "{}",
+        taken.message
+    );
+    assert_eq!(
+        job_count(&world, &jobs).await?,
+        1,
+        "a foreign import creates no orphan job"
+    );
+    Ok(())
+}
+
+/// SPEC section 5's replay guarantee across the real ledger/records/upload stores: the
+/// wake-up was delivered, its acknowledgment failed, and that job consumed its upload before
+/// any pending-card commit. A retry returns the same durable job, not a conflict or an orphan.
+#[tokio::test]
+async fn imports_a_resume_after_consumption_before_the_pending_commit_returns_its_job() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let world = World::new(directory.path())?;
+    let (scope, base) = world.workspace().await?;
+    let upload = complete(&world, &scope, 2, "report.pdf").await?;
+    let request = start_import(&scope, &base, &[upload], "", 10);
+    world.queue.fail_next.store(true, Ordering::SeqCst);
+    let interrupted = err_of(world.call("start_import", request.clone()).await)?;
+    assert_eq!(interrupted.code, ErrorCode::Unavailable);
+    let jobs = JobScope::Workspace(scope.clone());
+    let records = world.storage.records();
+    let listed = records
+        .list_jobs(
+            &jobs,
+            Page {
+                cursor: None,
+                limit: 10,
+            },
+        )
+        .await?;
+    let job = some(listed.items.first(), "the durable import job")?;
+    assert_eq!(listed.items.len(), 1);
+    world
+        .storage
+        .uploads()
+        .consume_batch(&scope, &[upload], job.id)
+        .await?;
+    assert_eq!(world.storage.versions().head(&scope).await?, base);
+    let resumed: Job = serde_json::from_value(world.call("start_import", request).await?)?;
+    assert_eq!(resumed.id, job.id);
+    assert_eq!(job_count(&world, &jobs).await?, 1);
+    assert_eq!(
+        world.deliveries()?,
+        vec![(jobs.clone(), job.id), (jobs, job.id)]
+    );
+    assert_eq!(
+        world
+            .storage
+            .uploads()
+            .get(&scope, upload)
+            .await?
+            .consumed_by,
+        Some(job.id)
+    );
+    Ok(())
+}
+
+/// SPEC section 5: "Re-extraction must not erase corrections." Actual import and redigest
+/// jobs run through ingest over the real stores; only conversion output is injected. The
+/// expected texts are literals supplied by this test, never computed by the handler.
+#[tokio::test]
+async fn imports_a_correction_survives_the_actual_redigest_job() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let world = World::new(directory.path())?;
+    let (scope, base) = world.workspace().await?;
+    let upload = complete(&world, &scope, 2, "scan.pdf").await?;
+    let accepted: Job = serde_json::from_value(
+        world
+            .call(
+                "start_import",
+                start_import(&scope, &base, &[upload], "sources", 10),
+            )
+            .await?,
+    )?;
+    let imported = world
+        .run_job(&scope, accepted.id, "Converted text.\n")
+        .await?;
+    let item = *some(imported.item_ids.first(), "the imported source")?;
+    let imported_at = some(imported.revision.as_ref(), "the import revision")?;
+    let versions = world.storage.versions();
+    let source = versions.show(&scope, imported_at, item).await?;
+    assert_eq!(source.body, "Converted text.\n");
+    let original_digest = some(
+        some(source.source.as_ref(), "the source appearance")?
+            .extraction
+            .digest
+            .as_ref(),
+        "the initial conversion digest",
+    )?
+    .clone();
+    let corrected: MutationResult = serde_json::from_value(world.call("correct_digest", json!({
+        "workspace_id": scope.workspace_id, "item_id": item, "base_revision": imported_at,
+        "digest": original_digest, "corrected_markdown": "# Fixed\n", "idempotency_key": key(11)
+    })).await?)?;
+    assert_eq!(
+        versions.show(&scope, &corrected.revision, item).await?.body,
+        "# Fixed\n"
+    );
+    let accepted_redigest: Job = serde_json::from_value(world.call("redigest_item", json!({
+        "workspace_id": scope.workspace_id, "item_id": item, "base_revision": corrected.revision,
+        "settings": ConversionSettings { ocr: OcrPolicy::Skip, ..ConversionSettings::default() },
+        "unconverted_only": false, "idempotency_key": key(12)
+    })).await?)?;
+    let redigested = world
+        .run_job(&scope, accepted_redigest.id, "New conversion.\n")
+        .await?;
+    assert_eq!(redigested.item_ids, [item]);
+    let after = some(redigested.revision.as_ref(), "the redigest revision")?;
+    assert_ne!(after, &corrected.revision);
+    let replacement = versions.show(&scope, after, item).await?;
+    assert_eq!(replacement.body, "New conversion.\n");
+    assert_ne!(
+        some(replacement.source.as_ref(), "the replacement appearance")?
+            .extraction
+            .digest
+            .as_ref(),
+        Some(&original_digest)
+    );
+    assert_eq!(
+        versions
+            .correction(&scope, after, item, &original_digest)
+            .await?
+            .as_deref(),
+        Some("# Fixed\n"),
+        "the real redigest commit retains the human correction of the earlier digest"
+    );
+    assert_eq!(
+        world
+            .storage
+            .uploads()
+            .get(&scope, upload)
+            .await?
+            .consumed_by,
+        Some(accepted.id)
+    );
     Ok(())
 }
 
@@ -572,7 +868,13 @@ async fn imports_a_correction_is_committed_and_kept_across_later_conversions() -
         &scope,
         &initial,
         1,
-        card(item, location, 'd', completed('1', json!([])), "Converted text.\n")?,
+        card(
+            item,
+            location,
+            'd',
+            completed('1', json!([])),
+            "Converted text.\n",
+        )?,
     )
     .await?;
     let correction = |base: &Revision, of: char, n: u32| -> Fallible<Value> {
@@ -582,7 +884,11 @@ async fn imports_a_correction_is_committed_and_kept_across_later_conversions() -
             "idempotency_key": key(n)
         }))
     };
-    let wrong = err_of(world.call("correct_digest", correction(&converted, '2', 10)?).await)?;
+    let wrong = err_of(
+        world
+            .call("correct_digest", correction(&converted, '2', 10)?)
+            .await,
+    )?;
     assert_eq!(wrong.code, ErrorCode::InvalidInput, "{}", wrong.message);
     assert_eq!(wrong.field.as_deref(), Some("/digest"));
     let corrected: MutationResult = serde_json::from_value(
@@ -600,9 +906,17 @@ async fn imports_a_correction_is_committed_and_kept_across_later_conversions() -
     );
     let shown = versions.show(&scope, &corrected.revision, item).await?;
     assert_eq!(shown.body, "# Fixed\n");
-    assert!(some(shown.source.as_ref(), "the appearance")?.extraction.corrected);
+    assert!(
+        some(shown.source.as_ref(), "the appearance")?
+            .extraction
+            .corrected
+    );
     // A correction on the base the head has moved from is a conflict on the base.
-    let stale = err_of(world.call("correct_digest", correction(&converted, '1', 12)?).await)?;
+    let stale = err_of(
+        world
+            .call("correct_digest", correction(&converted, '1', 12)?)
+            .await,
+    )?;
     assert_eq!(stale.code, ErrorCode::Conflict, "{}", stale.message);
     assert_eq!(stale.field.as_deref(), Some("/base_revision"));
     assert!(
@@ -616,7 +930,13 @@ async fn imports_a_correction_is_committed_and_kept_across_later_conversions() -
         &scope,
         &corrected.revision,
         2,
-        card(item, location, 'd', completed('2', json!([])), "New conversion.\n")?,
+        card(
+            item,
+            location,
+            'd',
+            completed('2', json!([])),
+            "New conversion.\n",
+        )?,
     )
     .await?;
     assert_eq!(
@@ -629,19 +949,33 @@ async fn imports_a_correction_is_committed_and_kept_across_later_conversions() -
     );
     let replaced = versions.show(&scope, &other, item).await?;
     assert_eq!(replaced.body, "New conversion.\n");
-    assert!(!some(replaced.source.as_ref(), "the appearance")?.extraction.corrected);
+    assert!(
+        !some(replaced.source.as_ref(), "the appearance")?
+            .extraction
+            .corrected
+    );
     // Converted again to the corrected digest, the card shows the correction once more.
     let again = write_card(
         &world,
         &scope,
         &other,
         3,
-        card(item, location, 'd', completed('1', json!([])), "Converted text.\n")?,
+        card(
+            item,
+            location,
+            'd',
+            completed('1', json!([])),
+            "Converted text.\n",
+        )?,
     )
     .await?;
     let restored = versions.show(&scope, &again, item).await?;
     assert_eq!(restored.body, "# Fixed\n");
-    assert!(some(restored.source.as_ref(), "the appearance")?.extraction.corrected);
+    assert!(
+        some(restored.source.as_ref(), "the appearance")?
+            .extraction
+            .corrected
+    );
     // A redigest of the card is accepted on its base whatever the head is now (ruling R3).
     let job: Job = serde_json::from_value(
         world
@@ -724,8 +1058,26 @@ async fn attention_over_a_small_real_workspace_shows_one_of_each_kind_built() ->
     let warned = ItemId(Uuid::from_u128(83));
     let mut head = head;
     for (n, card) in [
-        (10, card(first, "sources/a-pdf.md", 'd', completed('1', json!([])), "A.\n")?),
-        (11, card(second, "sources/b-pdf.md", 'd', completed('2', json!([])), "B.\n")?),
+        (
+            10,
+            card(
+                first,
+                "sources/a-pdf.md",
+                'd',
+                completed('1', json!([])),
+                "A.\n",
+            )?,
+        ),
+        (
+            11,
+            card(
+                second,
+                "sources/b-pdf.md",
+                'd',
+                completed('2', json!([])),
+                "B.\n",
+            )?,
+        ),
         (
             12,
             card(
@@ -802,7 +1154,10 @@ async fn attention_over_a_small_real_workspace_shows_one_of_each_kind_built() ->
     };
     assert_eq!(ids(&AttentionKind::Stale), vec![Some(stale)]);
     assert_eq!(ids(&AttentionKind::Unreviewed), vec![Some(generated)]);
-    assert_eq!(ids(&AttentionKind::Duplicate), vec![Some(first), Some(second)]);
+    assert_eq!(
+        ids(&AttentionKind::Duplicate),
+        vec![Some(first), Some(second)]
+    );
     assert_eq!(ids(&AttentionKind::MissingDescription), vec![Some(bare)]);
     assert_eq!(ids(&AttentionKind::Unprocessed), vec![Some(scan)]);
     assert_eq!(ids(&AttentionKind::ExtractionWarnings), vec![Some(warned)]);
