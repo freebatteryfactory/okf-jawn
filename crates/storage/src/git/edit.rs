@@ -466,9 +466,9 @@ fn supply(
     let extraction = file.header.extraction.as_mut().ok_or_else(|| {
         ApiError::new(ErrorCode::InvalidInput, "only a source has extracted text")
     })?;
-    extraction.text_origin = TextOrigin::SuppliedByAgent;
-    extraction.supplied = None;
     if !extraction.corrected {
+        extraction.text_origin = TextOrigin::SuppliedByAgent;
+        extraction.supplied = None;
         file.document.body = markdown;
     }
     write_text(&supplied_path(&staged.root, item_id), &record.to_string())?;
@@ -498,9 +498,12 @@ fn correct(
     })?;
     if extraction.digest.as_ref() == Some(digest) {
         extraction.corrected = adopts.is_none();
-        if adopts.is_some() {
-            extraction.text_origin = TextOrigin::SuppliedByAgent;
-        }
+        extraction.text_origin = if adopts.is_some() {
+            TextOrigin::SuppliedByAgent
+        } else {
+            TextOrigin::Converter
+        };
+        extraction.supplied = None;
         file.document.body = corrected_markdown;
     }
     write_text(

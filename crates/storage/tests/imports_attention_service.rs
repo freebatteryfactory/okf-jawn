@@ -1213,6 +1213,10 @@ async fn accept_supply(
     supplied: (&str, &str, &str),
 ) -> Fallible<(ProposalId, Revision)> {
     let (subject, client, text) = supplied;
+    let source = world.storage.versions().show(scope, base, item).await?;
+    let based_on = &some(source.source.as_ref(), "the source receiving supplied text")?
+        .extraction
+        .digest;
     let agent = Principal {
         subject: subject.to_owned(),
         tenant_id: tenant()?,
@@ -1224,7 +1228,8 @@ async fn accept_supply(
         world.call_as(&agent, None, "open_proposal", json!({
             "workspace_id": scope.workspace_id, "base_revision": base,
             "title": "Supply this unprocessed source", "description": "Distinct accepted agent text",
-            "changes": [{ "kind": "supply_extraction", "item_id": item, "markdown": text }],
+            "changes": [{ "kind": "supply_extraction", "item_id": item,
+                "based_on": based_on, "markdown": text }],
             "idempotency_key": key(number)
         })).await?,
     )?;
@@ -2560,6 +2565,229 @@ async fn attention_over_a_small_real_workspace_shows_one_of_each_kind_built() ->
         .map(|row| Ok((serde_json::to_value(&row.kind)?.to_string(), row.item_id)))
         .collect::<Result<_, serde_json::Error>>()?;
     assert_eq!(paged, expected);
+    Ok(())
+}
+
+/// R2 and SPEC section 5: a new human correction replaces the adopted-agent origin of
+/// the currently shown text, without rewriting the retained adopted revision.
+#[tokio::test]
+async fn imports_human_correction_after_adoption_has_human_origin_and_survives_redigest()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let world = World::new(directory.path())?;
+    let (scope, initial) = world.workspace().await?;
+    complete(&world, &scope, 2, "scan.pdf").await?;
+    let item = ItemId(Uuid::from_u128(121));
+    let mut unsupported = card(
+        item,
+        "sources/human-after-adoption.md",
+        'd',
+        json!({ "outcome": { "status": "unsupported" }, "text_origin": "none",
+            "corrected": false, "warnings": [] }),
+        "",
+    )?;
+    unsupported.appearance.object = sha256(BYTES)?;
+    let base = write_card(&world, &scope, &initial, 1, unsupported).await?;
+    let (proposal, supplied) = accept_supply(
+        &world,
+        &scope,
+        item,
+        &base,
+        10,
+        ("test-agent", "test-client", "Agent supplied text.\n"),
+    )
+    .await?;
+    let queued: Job = serde_json::from_value(
+        world
+            .call(
+                "redigest_item",
+                json!({
+                    "workspace_id": scope.workspace_id, "item_id": item, "base_revision": supplied,
+                    "settings": ConversionSettings::default(), "unconverted_only": false,
+                    "idempotency_key": key(13)
+                }),
+            )
+            .await?,
+    )?;
+    let converted = world
+        .run_job(&scope, queued.id, "Converter text.\n")
+        .await?;
+    let converted_at = some(converted.revision.as_ref(), "the completed conversion")?;
+    let shown = world
+        .storage
+        .versions()
+        .show(&scope, converted_at, item)
+        .await?;
+    let extraction = &some(shown.source.as_ref(), "converted source")?.extraction;
+    let digest = some(extraction.digest.as_ref(), "converted digest")?;
+    let kept: MutationResult = serde_json::from_value(world.call("correct_digest", json!({
+        "workspace_id": scope.workspace_id, "item_id": item, "base_revision": converted_at,
+        "digest": digest, "adopts": proposal, "corrected_markdown": "Agent supplied text.\n",
+        "idempotency_key": key(14)
+    })).await?)?;
+    assert_human_correction_replaces_adoption(&world, &scope, item, &kept.revision).await?;
+    Ok(())
+}
+
+/// Expected origin and content are literal SPEC section 5 outcomes. The second conversion
+/// uses identical settings/output so its digest remains the corrected digest, not a new one.
+async fn assert_human_correction_replaces_adoption(
+    world: &World,
+    scope: &StorageScope,
+    item: ItemId,
+    kept_at: &Revision,
+) -> Fallible<()> {
+    let versions = world.storage.versions();
+    let adopted = versions.show(scope, kept_at, item).await?;
+    assert_eq!(adopted.body, "Agent supplied text.");
+    let adopted_extraction = &some(adopted.source.as_ref(), "adopted source")?.extraction;
+    assert_eq!(
+        serde_json::to_value(&adopted_extraction.text_origin)?,
+        json!("supplied_by_agent")
+    );
+    assert!(!adopted_extraction.corrected);
+    assert!(adopted_extraction.supplied.is_some());
+    let digest = some(adopted_extraction.digest.as_ref(), "the adopted digest")?;
+    let corrected: MutationResult = serde_json::from_value(
+        world
+            .call(
+                "correct_digest",
+                json!({
+                    "workspace_id": scope.workspace_id, "item_id": item, "base_revision": kept_at,
+                    "digest": digest, "corrected_markdown": "Human replacement.\n",
+                    "idempotency_key": key(15)
+                }),
+            )
+            .await?,
+    )?;
+    let human = versions.show(scope, &corrected.revision, item).await?;
+    assert_eq!(human.body, "Human replacement.");
+    let extraction = &some(human.source.as_ref(), "human-corrected source")?.extraction;
+    assert_eq!(
+        serde_json::to_value(&extraction.text_origin)?,
+        json!("converter")
+    );
+    assert!(extraction.corrected);
+    assert_eq!(extraction.supplied, None);
+    assert_eq!(extraction.digest.as_ref(), Some(digest));
+    assert_eq!(extraction.outcome, adopted_extraction.outcome);
+    let attention = attention_at(world, scope, &corrected.revision).await?;
+    let attention: GetAttentionResponse = serde_json::from_value(attention)?;
+    assert!(named(&attention.items, &AttentionKind::Unreviewed).is_empty());
+    let queued: Job = serde_json::from_value(world.call("redigest_item", json!({
+        "workspace_id": scope.workspace_id, "item_id": item, "base_revision": corrected.revision,
+        "settings": ConversionSettings::default(), "unconverted_only": false,
+        "idempotency_key": key(16)
+    })).await?)?;
+    let redigested = world.run_job(scope, queued.id, "Converter text.\n").await?;
+    let after = some(redigested.revision.as_ref(), "the repeated conversion")?;
+    let replaced = versions.show(scope, after, item).await?;
+    assert_eq!(replaced.body, "Human replacement.");
+    assert_eq!(
+        some(replaced.source.as_ref(), "redigested source")?.extraction,
+        *extraction
+    );
+    assert_eq!(
+        versions
+            .correction(scope, after, item, digest)
+            .await?
+            .as_deref(),
+        Some("Human replacement.\n")
+    );
+    let historical = versions.show(scope, kept_at, item).await?;
+    assert_eq!(historical.body, "Agent supplied text.");
+    assert_eq!(
+        some(historical.source.as_ref(), "historical adoption")?.extraction,
+        *adopted_extraction
+    );
+    Ok(())
+}
+
+/// R2/SPEC section 5: accepting supplied text for a still-partial source retains a human
+/// correction already shown. Retaining the new companion must not relabel that human body.
+#[tokio::test]
+async fn imports_accepting_supply_after_human_correction_preserves_shown_human_origin() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let world = World::new(directory.path())?;
+    let (scope, initial) = world.workspace().await?;
+    complete(&world, &scope, 2, "scan.pdf").await?;
+    let item = ItemId(Uuid::from_u128(122));
+    // Stated partial-source fixture; no real native conversion is claimed by this setup.
+    let mut partial = card(
+        item,
+        "sources/corrected-partial.md",
+        'd',
+        json!({ "outcome": { "status": "partial", "issues": [] },
+            "digest": "1".repeat(64), "text_origin": "converter",
+            "corrected": false, "warnings": [] }),
+        "Partial converter text.\n",
+    )?;
+    partial.appearance.object = sha256(BYTES)?;
+    let base = write_card(&world, &scope, &initial, 1, partial).await?;
+    let corrected: MutationResult = serde_json::from_value(
+        world
+            .call(
+                "correct_digest",
+                json!({
+                    "workspace_id": scope.workspace_id, "item_id": item, "base_revision": base,
+                    "digest": digest('1')?, "corrected_markdown": "Human corrected partial text.\n",
+                    "idempotency_key": key(5)
+                }),
+            )
+            .await?,
+    )?;
+    let versions = world.storage.versions();
+    let human = versions.show(&scope, &corrected.revision, item).await?;
+    assert_eq!(human.body, "Human corrected partial text.");
+    let human_extraction = &some(human.source.as_ref(), "human-corrected source")?.extraction;
+    assert!(human_extraction.corrected);
+    assert_eq!(
+        serde_json::to_value(&human_extraction.text_origin)?,
+        json!("converter")
+    );
+    assert_eq!(human_extraction.supplied, None);
+    let (proposal, accepted) = accept_supply(
+        &world,
+        &scope,
+        item,
+        &corrected.revision,
+        10,
+        ("later-agent", "later-client", "New agent supplied text.\n"),
+    )
+    .await?;
+    let shown = versions.show(&scope, &accepted, item).await?;
+    assert_eq!(shown.body, "Human corrected partial text.");
+    let extraction = &some(shown.source.as_ref(), "source after accepted supply")?.extraction;
+    assert_eq!(
+        serde_json::to_value(&extraction.text_origin)?,
+        json!("converter")
+    );
+    assert!(extraction.corrected);
+    assert_eq!(extraction.supplied, None);
+    assert_eq!(extraction.digest.as_ref(), Some(&digest('1')?));
+    assert_eq!(extraction.outcome, human_extraction.outcome);
+    let companion = WorkspacePath::try_from(format!(".okf/supplied/{}.json", item.0))?;
+    let retained: Value =
+        serde_json::from_slice(&versions.read_file(&scope, &accepted, &companion).await?)?;
+    assert_eq!(retained.get("proposal_id"), Some(&json!(proposal)));
+    assert_eq!(
+        retained.get("markdown"),
+        Some(&json!("New agent supplied text.\n"))
+    );
+    assert_eq!(
+        retained.pointer("/supplier/subject"),
+        Some(&json!("later-agent"))
+    );
+    let response: GetAttentionResponse =
+        serde_json::from_value(attention_at(&world, &scope, &accepted).await?)?;
+    assert!(named(&response.items, &AttentionKind::Unreviewed).is_empty());
+    let historical = versions.show(&scope, &corrected.revision, item).await?;
+    assert_eq!(historical.body, "Human corrected partial text.");
+    assert_eq!(
+        some(historical.source.as_ref(), "historical human source")?.extraction,
+        *human_extraction
+    );
     Ok(())
 }
 
