@@ -15,26 +15,40 @@
 //!   limit; the store cuts a body past that limit or the slot's announced size while it streams
 //!   (`too_large`, nothing appended) and refuses a complete slot (`conflict`). The digest is
 //!   verified by `complete_upload`, not here. The answer is the slot's wire form.
-//! - The three downloads are not built yet: each answers `NotImplemented`, naming it.
+//! - `download_object` takes `get_object`'s steps in its order: the cited revision against the
+//!   revision map a purge wrote (`check_named`), then the object among that revision's objects
+//!   and its media type (`served_media_type`, through `reading::authorize_object`: a digest
+//!   authorizes nothing, and a backup artifact's object belongs to no revision), then
+//!   `BlobStore::open`. It needs `read`, and `mcp_delegation` is refused before any grant is
+//!   looked up: originals are not sent to a connected AI (Stage 1b design, the rule that refuses
+//!   exports there), and no setting turns that on. A range that starts at or past the object's
+//!   end, or ends before it starts, is `invalid_input` (the contract's statuses are a closed set:
+//!   no 416); an end past the last byte is cut to it; without a range the whole object is sent.
+//!   No receipt is written.
+//! - The two artifact downloads are not built yet: each answers `NotImplemented`, naming it.
 //!
 //! Every `Forbidden` a transfer answers, its own or a port's, is recorded as a `permission_denied`
 //! event naming the transport and no operation (`NewEvent::transport_denied`), in the asked
 //! workspace's log. The refusal is the answer, so a failed append does not change it (dispatch's
-//! rule); any other error is returned without an event.
+//! rule); any other error is returned without an event. A download's body yields at most its
+//! `length` bytes: the stream the store opened is cut to it.
 
-use okf_jawn_contract::access::{Permission, Principal};
+use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::{ArtifactId, Digest, ItemId, Revision, UploadId, WorkspaceId};
 use okf_jawn_contract::import::Upload;
 use okf_jawn_contract::transport::TransportName;
+use tokio::io::AsyncReadExt as _;
 
 use super::ApplicationService;
+use super::shared::check_named;
+use super::sources::served_media_type;
 use super::workspaces::archived_at;
 use crate::access::{authorize_workspace, check_route};
 use crate::context::WorkspaceGrant;
 use crate::events::{EventScope, NewEvent};
 use crate::ports::PortFuture;
-use crate::storage::{ByteReader, StorageScope};
+use crate::storage::{ByteReader, ObjectRead, StorageScope};
 use crate::transfers::{ByteRange, Download, TransferCaller, Transfers};
 
 impl Transfers for ApplicationService {
@@ -55,14 +69,27 @@ impl Transfers for ApplicationService {
 
     fn download_object<'a>(
         &'a self,
-        _caller: &'a TransferCaller,
-        _workspace: WorkspaceId,
-        _item: ItemId,
-        _revision: Revision,
-        _digest: Digest,
-        _range: Option<ByteRange>,
+        caller: &'a TransferCaller,
+        workspace: WorkspaceId,
+        item: ItemId,
+        revision: Revision,
+        digest: Digest,
+        range: Option<ByteRange>,
     ) -> PortFuture<'a, Download> {
-        Box::pin(async { Err(pending(TransportName::DownloadObject)) })
+        Box::pin(async move {
+            let principal = &caller.principal;
+            let outcome =
+                download_object(self, principal, workspace, item, &revision, &digest, range).await;
+            let log = workspace_log(principal, workspace);
+            recorded(
+                self,
+                &log,
+                principal,
+                TransportName::DownloadObject,
+                outcome,
+            )
+            .await
+        })
     }
 
     fn download_artifact<'a>(
@@ -120,6 +147,62 @@ async fn upload_content(
     Ok(record.to_wire(workspace))
 }
 
+/// The object `digest` of `item` at `revision`, whole or as `range`, as
+/// `Transfers::download_object`.
+///
+/// # Errors
+/// Returns `Forbidden` on `mcp_delegation` or without `read`, `Internal` for a grant of another
+/// scope, the typed `NotFound` of an invalidated revision, `NotFound` for an object that is none
+/// of the revision's, `InvalidInput` for a range that is no interval of the object, or any port
+/// error.
+async fn download_object(
+    service: &ApplicationService,
+    principal: &Principal,
+    workspace: WorkspaceId,
+    item: ItemId,
+    revision: &Revision,
+    digest: &Digest,
+    range: Option<ByteRange>,
+) -> Result<Download, ApiError> {
+    if principal.route == AccessRoute::McpDelegation {
+        return Err(ApiError::new(
+            ErrorCode::Forbidden,
+            "An object's bytes are not sent to a connected AI",
+        ));
+    }
+    let scope = workspace_grant(service, principal, workspace, Permission::Read)
+        .await?
+        .scope;
+    check_named(service, &scope, revision).await?;
+    let media_type = served_media_type(service, &scope, item, revision, digest).await?;
+    let (start, asked) = match range {
+        None => (0, u64::MAX),
+        Some(ByteRange {
+            start,
+            end: Some(end),
+        }) => {
+            if end < start {
+                return Err(not_an_interval("the range ends before it starts"));
+            }
+            (start, end.saturating_sub(start).saturating_add(1))
+        }
+        Some(ByteRange { start, end: None }) => (start, u64::MAX),
+    };
+    let read = service
+        .ports()
+        .blobs
+        .open(&scope, digest, start, asked)
+        .await?;
+    let size = read.object.size;
+    if range.is_some() && start >= size {
+        return Err(not_an_interval(
+            "the range starts at or past the end of the object",
+        ));
+    }
+    let length = asked.min(size.saturating_sub(start));
+    Ok(cut(media_type, start, length, read))
+}
+
 /// The caller's grant on `workspace` with `permission`, by dispatch's rules for a workspace
 /// target: the route first, before any lookup; then the adapter's raw grant, used only when it
 /// is for the workspace and the tenant asked; then the delegation ceiling and the permission.
@@ -172,6 +255,22 @@ fn workspace_log(principal: &Principal, workspace: WorkspaceId) -> EventScope {
         tenant_id: principal.tenant_id.clone(),
         workspace_id: workspace,
     })
+}
+
+/// The download of `read` from `offset`, its body cut to `length` bytes.
+fn cut(media_type: String, offset: u64, length: u64, read: ObjectRead) -> Download {
+    Download {
+        media_type,
+        total_size: read.object.size,
+        offset,
+        length,
+        body: Box::pin(read.body.take(length)),
+    }
+}
+
+/// A range that is no interval of the object.
+fn not_an_interval(message: &str) -> ApiError {
+    ApiError::new(ErrorCode::InvalidInput, message)
 }
 
 /// An adapter's grant for a workspace or tenant that was not asked.
