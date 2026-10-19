@@ -1,24 +1,24 @@
-/** Resolve a saved presentation through host tools and preserve exact source bindings. */
+/** Resolve a presentation through the host's `ViewData` and preserve exact source bindings. */
 import { useEffect, useState } from 'react';
 import { compile, type TopLevelSpec } from 'vega-lite';
-import { z } from 'zod';
+import type { z } from 'zod';
 import {
   zDataset,
   type zDatasetValue,
-  zGetObjectResponse,
   type zPresentResponse,
-  zReadItemResponse,
+  type zReadItemResponse,
   type zViewBinding,
 } from '../../api/generated/zod.gen';
 import type { ResolvedPresentation } from './Bindings';
 import { BindingsContext } from './Bindings';
 import { Chart } from './Chart';
+import { readDataset, readSource, type ViewData } from './data';
 import { Layout } from './Layout';
 
 export interface PresentViewProps {
   response: z.infer<typeof zPresentResponse>;
-  /** Host tool call; the Apps bridge applies omitUndefined once at the wire boundary. */
-  callTool: (name: string, input: Record<string, unknown>) => Promise<unknown>;
+  /** The host's reads of the sources and datasets the View cites. */
+  data: ViewData;
 }
 type Row = Readonly<Record<string, string | number | boolean | null>>;
 
@@ -138,42 +138,6 @@ export function parseDataset(
     );
   return datasetRecords(parsed.data);
 }
-const toolResult = z.object({
-  isError: z.boolean().optional(),
-  content: z.array(z.looseObject({ type: z.string(), text: z.string().optional() })).optional(),
-  structuredContent: z.unknown().optional(),
-});
-const refusalLimit = 512;
-
-/** The tool's own refusal text, bounded; cut on a code point boundary, ending with an ellipsis. */
-function refusalMessage(output: z.infer<typeof toolResult>, fallback: string): string {
-  const text = (output.content ?? [])
-    .flatMap((part) => (part.type === 'text' && part.text ? [part.text] : []))
-    .join('\n')
-    .trim();
-  if (text.length === 0) return fallback;
-  if (text.length <= refusalLimit) return text;
-  let end = refusalLimit - 1;
-  const last = text.charCodeAt(end - 1);
-  if (last >= 0xd800 && last <= 0xdbff) end -= 1; // do not leave half a surrogate pair
-  return `${text.slice(0, end)}…`;
-}
-
-/**
- * One host tool call whose refusal is surfaced as the tool's own bounded message. `isError` is
- * checked before `structuredContent` is parsed, because a refusal carries no structured content.
- */
-async function callChecked(
-  callTool: PresentViewProps['callTool'],
-  name: string,
-  input: Record<string, unknown>,
-  fallback: string,
-) {
-  const output = toolResult.parse(await callTool(name, input));
-  if (output.isError === true) throw new Error(refusalMessage(output, fallback));
-  return output;
-}
-
 /** Runtime-validate a Vega-Lite grammar value (SPEC §10); never cast untrusted specs. */
 export function parseVegaLiteSpec(value: unknown): TopLevelSpec {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -182,48 +146,6 @@ export function parseVegaLiteSpec(value: unknown): TopLevelSpec {
   const candidate = value as TopLevelSpec;
   compile(candidate);
   return candidate;
-}
-
-async function dataset(
-  binding: z.infer<typeof zPresentResponse>['resolved_bindings'][number],
-  callTool: PresentViewProps['callTool'],
-) {
-  if (!binding.materialized) return undefined;
-  const chunks: Uint8Array[] = [];
-  let offset = 0n;
-  let more = true;
-  while (more) {
-    const output = await callChecked(
-      callTool,
-      'read_object',
-      {
-        source: binding.source,
-        object: binding.materialized,
-        offset: offset.toString(),
-        length: 1048576,
-      },
-      'The host refused to read the dataset.',
-    );
-    const part = zGetObjectResponse.parse(output.structuredContent);
-    if (part.sha256 !== binding.materialized || BigInt(part.offset) !== offset)
-      throw new Error('Dataset identity or range changed');
-    const bytes = Uint8Array.from(atob(part.data_base64), (character) => character.charCodeAt(0));
-    offset += BigInt(bytes.byteLength);
-    if (offset > 4194304n) throw new Error('Dataset exceeds the inline display budget');
-    if (bytes.length === 0 && part.has_more) throw new Error('Dataset read made no progress');
-    chunks.push(bytes);
-    more = part.has_more;
-  }
-  const merged = new Uint8Array(Number(offset));
-  let cursor = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, cursor);
-    cursor += chunk.byteLength;
-  }
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', merged));
-  const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
-  if (hex !== binding.materialized) throw new Error('Dataset digest verification failed');
-  return new TextDecoder('utf-8', { fatal: true }).decode(merged);
 }
 
 const failureLabel = {
@@ -270,7 +192,7 @@ function reason(cause: unknown, fallback: string): string {
   return cause instanceof Error ? cause.message : fallback;
 }
 
-export function PresentView({ response, callTool }: PresentViewProps) {
+export function PresentView({ response, data }: PresentViewProps) {
   const [bindings, setBindings] = useState<ResolvedPresentation | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   useEffect(() => {
@@ -287,29 +209,12 @@ export function PresentView({ response, callTool }: PresentViewProps) {
       for (const binding of response.resolved_bindings) {
         definitions.set(binding.name, binding);
         try {
-          const output = await callChecked(
-            callTool,
-            'show',
-            {
-              workspace_id: binding.source.workspace_id,
-              item_id: binding.source.item_id,
-              at: { kind: 'revision', revision: binding.source.revision },
-              view: 'text',
-              selection: binding.source.selection,
-              max_bytes: 65536,
-              max_images: 0,
-            },
-            'The host refused to read the source.',
-          );
-          const source = zReadItemResponse.parse(output.structuredContent);
-          if (source.source.revision !== binding.source.revision)
-            throw new Error('Returned source revision differs from the binding');
-          sources.set(binding.name, source);
+          sources.set(binding.name, await readSource(data, binding));
         } catch (cause) {
           sourceErrors.set(binding.name, reason(cause, 'The source could not be read'));
         }
         try {
-          const text = await dataset(binding, callTool);
+          const text = await readDataset(data, binding);
           if (text !== undefined) tables.set(binding.name, parseDataset(text, binding.source));
         } catch (cause) {
           datasetErrors.set(binding.name, reason(cause, 'The dataset could not be read'));
@@ -334,7 +239,7 @@ export function PresentView({ response, callTool }: PresentViewProps) {
     return () => {
       active = false;
     };
-  }, [response, callTool]);
+  }, [response, data]);
   if (failure !== null) return <p role="alert">{failure}</p>;
   if (!bindings) return <p role="status">Resolving the presentation's exact source references…</p>;
   const view = response.view;

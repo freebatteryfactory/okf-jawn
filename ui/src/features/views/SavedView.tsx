@@ -9,13 +9,14 @@ import type { z } from 'zod';
 import { resolveView } from '../../api/generated';
 import type { Client } from '../../api/generated/client';
 import { zResolveViewResponse } from '../../api/generated/zod.gen';
-import { PresentView, type PresentViewProps } from './PresentView';
+import type { ViewData } from './data';
+import { PresentView } from './PresentView';
 
 export interface SavedViewProps {
   workspaceId: string;
   itemId: string;
-  /** Host tool call for the sources and datasets the View cites. */
-  callTool: PresentViewProps['callTool'];
+  /** The host's reads of the sources and datasets the View cites. */
+  data: ViewData;
   /** The generated client; the application's configured client when omitted. */
   client?: Client;
 }
@@ -27,7 +28,7 @@ type Answer =
 type Reopened = Answer & { key: string };
 const noMessage = 'The server refused to open the View.';
 
-export function SavedView({ workspaceId, itemId, callTool, client }: SavedViewProps) {
+export function SavedView({ workspaceId, itemId, data, client }: SavedViewProps) {
   const [reopened, setReopened] = useState<Reopened | null>(null);
   const key = JSON.stringify([workspaceId, itemId]);
   useEffect(() => {
@@ -73,5 +74,5 @@ export function SavedView({ workspaceId, itemId, callTool, client }: SavedViewPr
   if (reopened === null || reopened.key !== key)
     return <p role="status">Reopening the saved View…</p>;
   if (reopened.state === 'refused') return <p role="alert">{reopened.message}</p>;
-  return <PresentView response={reopened.response} callTool={callTool} />;
+  return <PresentView response={reopened.response} data={data} />;
 }

@@ -25,6 +25,7 @@ import { BindingsContext, type ResolvedPresentation } from '../../src/features/v
 import { Layout, prepareSpec } from '../../src/features/views/Layout';
 import { datasetRecords, PresentView, parseDataset } from '../../src/features/views/PresentView';
 import { SavedView } from '../../src/features/views/SavedView';
+import { serverToolData } from '../../src/mcp-apps/view-data';
 
 /** The source the committed dataset cites, as the generated schema reads it. */
 const fixtureSource = zDataset.parse(metricsDatasetFixture).source;
@@ -246,10 +247,10 @@ describe('the Dataset the views read', () => {
         },
       ],
     });
-    const callTool = async () => ({
+    const data = serverToolData(async () => ({
       structuredContent: zReadItemResponse.parse(sourceReadItemFixture),
-    });
-    render(<PresentView response={refused} callTool={callTool} />);
+    }));
+    render(<PresentView response={refused} data={data} />);
     await waitFor(() =>
       expect(screen.getByRole('alert').textContent).toBe(`Dataset unavailable: ${message}`),
     );
@@ -304,7 +305,7 @@ async function presentMany(datasets: Record<string, unknown>) {
     },
   ];
   const response = zPresentResponse.parse(fixture);
-  const callTool = async (name: string, input: Record<string, unknown>) => {
+  const data = serverToolData(async ({ name, arguments: input }) => {
     if (name === 'show')
       return { structuredContent: zReadItemResponse.parse(sourceReadItemFixture) };
     const binary = served.get(String(input.object)) ?? '';
@@ -318,8 +319,8 @@ async function presentMany(datasets: Record<string, unknown>) {
         total_size: String(binary.length),
       },
     };
-  };
-  return render(<PresentView response={response} callTool={callTool} />);
+  });
+  return render(<PresentView response={response} data={data} />);
 }
 
 /** PresentView resolving one dataset behind `metrics`. */
@@ -518,7 +519,10 @@ describe('a dataset read from another source than its binding cites is stale', (
 
 describe('a saved View reopens with the server as the source of truth', () => {
   const saved = zPresentResponse.parse(presentResponseFixture);
-  const noTools = async () => ({ isError: true, content: [{ type: 'text', text: 'no host' }] });
+  const noTools = serverToolData(async () => ({
+    isError: true,
+    content: [{ type: 'text', text: 'no host' }],
+  }));
 
   /** The generated client, with only its transport replaced: what resolve-view answers, and what it was asked. */
   function server(status: number, body: unknown) {
@@ -547,7 +551,7 @@ describe('a saved View reopens with the server as the source of truth', () => {
 
   it('asks the server to resolve the pinned View, never to refresh it', async () => {
     const { client, asked } = server(200, { ...saved, resolved_bindings: [] });
-    render(<SavedView {...ids} callTool={noTools} client={client} />);
+    render(<SavedView {...ids} data={noTools} client={client} />);
     expect(await screen.findByRole('heading', { name: 'Six-component catalog' })).toBeTruthy();
     expect(asked).toHaveLength(1);
     expect(asked[0]?.url).toBe('http://okf.test/api/views/resolve-view');
@@ -571,7 +575,7 @@ describe('a saved View reopens with the server as the source of truth', () => {
       ],
     };
     const { client } = server(200, diagnosed);
-    render(<SavedView {...ids} callTool={noTools} client={client} />);
+    render(<SavedView {...ids} data={noTools} client={client} />);
     expect(await screen.findByRole('heading', { name: 'Six-component catalog' })).toBeTruthy();
     const chart = screen.getByRole('heading', { name: 'Metrics chart' }).closest('section');
     expect(chart?.querySelector('[role="alert"]')?.textContent).toBe(
@@ -584,13 +588,13 @@ describe('a saved View reopens with the server as the source of truth', () => {
       code: 'not_found',
       message: 'no saved View at that item',
     });
-    render(<SavedView {...ids} callTool={noTools} client={client} />);
+    render(<SavedView {...ids} data={noTools} client={client} />);
     expect((await screen.findByRole('alert')).textContent).toBe('no saved View at that item');
   });
 
   it('refuses a body the generated schema does not read, rather than drawing it', async () => {
     const { client } = server(200, { view: 'not a view' });
-    render(<SavedView {...ids} callTool={noTools} client={client} />);
+    render(<SavedView {...ids} data={noTools} client={client} />);
     expect((await screen.findByRole('alert')).textContent).toBe(
       'The server returned a View this client cannot read.',
     );
@@ -599,7 +603,10 @@ describe('a saved View reopens with the server as the source of truth', () => {
 
 describe('a saved View follows the ids it was asked for', () => {
   const saved = zPresentResponse.parse(presentResponseFixture);
-  const noTools = async () => ({ isError: true, content: [{ type: 'text', text: 'no host' }] });
+  const noTools = serverToolData(async () => ({
+    isError: true,
+    content: [{ type: 'text', text: 'no host' }],
+  }));
   const first = {
     workspaceId: 'aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff',
     itemId: '11111111-2222-4333-8444-555555555555',
@@ -637,19 +644,19 @@ describe('a saved View follows the ids it was asked for', () => {
 
   it('stops showing the previous View at once when the ids change, while the new one is pending', async () => {
     const { client, release } = gated();
-    const view = render(<SavedView {...first} callTool={noTools} client={client} />);
+    const view = render(<SavedView {...first} data={noTools} client={client} />);
     (await released(release, first.itemId))('Board of the first');
     expect(await screen.findByRole('heading', { name: 'Board of the first' })).toBeTruthy();
-    view.rerender(<SavedView {...second} callTool={noTools} client={client} />);
+    view.rerender(<SavedView {...second} data={noTools} client={client} />);
     expect(screen.queryByRole('heading', { name: 'Board of the first' })).toBeNull();
     expect(screen.getByRole('status').textContent).toMatch(/Reopening/);
   });
 
   it('never renders a late answer for ids that are no longer asked for', async () => {
     const { client, release } = gated();
-    const view = render(<SavedView {...first} callTool={noTools} client={client} />);
+    const view = render(<SavedView {...first} data={noTools} client={client} />);
     const lateFirst = await released(release, first.itemId);
-    view.rerender(<SavedView {...second} callTool={noTools} client={client} />);
+    view.rerender(<SavedView {...second} data={noTools} client={client} />);
     (await released(release, second.itemId))('Board of the second');
     expect(await screen.findByRole('heading', { name: 'Board of the second' })).toBeTruthy();
     lateFirst('Board of the first');
@@ -671,7 +678,7 @@ describe('a saved View follows the ids it was asked for', () => {
           { preconnect: () => {} },
         ),
       });
-      const view = render(<SavedView {...first} callTool={noTools} client={client} />);
+      const view = render(<SavedView {...first} data={noTools} client={client} />);
       expect((await screen.findByRole('alert')).textContent).toBe(
         'The server refused to open the View.',
       );
