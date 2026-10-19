@@ -509,5 +509,64 @@ async fn a_markdown_file_without_a_header_carries_no_item_and_a_link_is_a_store_
     Ok(())
 }
 
+/// M2a design section6.2: properties read by core's portable YAML conversion must survive
+/// the actual item writer and storage reader. The expected map is a literal, independent
+/// of both conversions; the server adds only its own application header.
+#[tokio::test]
+async fn portable_json_properties_survive_a_real_item_write_and_read() -> TestResult {
+    let seeded = seeded().await?;
+    let supplied = okf_core::yaml::Value::parse(concat!(
+        "type: Note\n",
+        "title: Imported properties\n",
+        "count: -3\n",
+        "largest: 9223372036854775807\n",
+        "ratio: 1.5\n",
+        "nested: {enabled: true, values: [null, false, 'café']}\n",
+        "verified: {by: 'human:outside', at: '2026-01-01T00:00:00Z'}\n",
+    ))?;
+    let converted = okf_jawn_core::portable::json_of(&supplied);
+    let expected = json!({
+        "type": "Note", "title": "Imported properties", "count": -3,
+        "largest": 9223372036854775807_i64, "ratio": 1.5,
+        "nested": {"enabled": true, "values": [null, false, "café"]},
+        "verified": {"by": "human:outside", "at": "2026-01-01T00:00:00Z"}
+    });
+    assert_eq!(converted, expected);
+    let versions = seeded.storage.versions();
+    let item = uuid!(99)?;
+    let committed = versions
+        .commit(
+            &seeded.scope,
+            CommitChanges {
+                mutation_id: uuid!(100)?,
+                expected_head: seeded.revision.clone(),
+                author: person("ana"),
+                message: "Write portable properties".to_owned(),
+                edits: vec![TreeEdit::CreateItem {
+                    item_id: item,
+                    path: path("notes/imported-properties.md")?,
+                    title: Some("Imported properties".to_owned()),
+                    type_name: "Note".to_owned(),
+                    kind: ItemKind::Note,
+                    body: "Original text.\n".to_owned(),
+                    properties: serde_json::from_value(converted)?,
+                }],
+            },
+            Arc::new(Accept),
+        )
+        .await?;
+    let shown = versions
+        .show(&seeded.scope, &committed.revision, item)
+        .await?;
+    assert_eq!(shown.body, "Original text.");
+    assert_eq!(
+        serde_json::to_value(okf_jawn_core::items::without_header(&shown.properties))?,
+        expected
+    );
+    assert_eq!(shown.summary.id, item);
+    assert_eq!(shown.summary.path.as_str(), "notes/imported-properties.md");
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;

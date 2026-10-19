@@ -240,7 +240,11 @@ fn export_item_file_adds_only_the_current_whole_review() -> TestResult {
     );
     assert_eq!(after.body, before.body);
     for key in before.frontmatter.keys() {
-        assert_eq!(after.frontmatter.get(key), before.frontmatter.get(key), "{key}");
+        assert_eq!(
+            after.frontmatter.get(key),
+            before.frontmatter.get(key),
+            "{key}"
+        );
     }
     Ok(())
 }
@@ -269,6 +273,214 @@ fn export_item_file_without_whole_current_review_keeps_stored_bytes() -> TestRes
             None
         );
     }
+    Ok(())
+}
+
+/// Design VW4-VW5: a different content fingerprint and invalidated/imported coverage
+/// cannot become exported verification. C is the caller-provided vector fingerprint.
+#[test]
+fn export_item_file_does_not_promote_changed_or_invalidated_coverage() -> TestResult {
+    let content = digest('c')?;
+    for (reviewed, coverage) in [
+        (digest('d')?, ReviewCoverage::Current),
+        (content.clone(), ReviewCoverage::Invalidated),
+        (content.clone(), ReviewCoverage::Imported),
+    ] {
+        let reviews = [review(
+            "alice",
+            "2026-10-08T09:00:00.000Z",
+            reviewed,
+            Selection::All,
+            coverage,
+        )?];
+        assert_eq!(
+            okf_jawn_core::portable::export_item_file(
+                STORED_EXPORT_NOTE.as_bytes(),
+                &reviews,
+                &content,
+            )?,
+            None
+        );
+    }
+    Ok(())
+}
+
+/// Add a literal claim to the fixed input, without using the export writer for fixture setup.
+fn stored_export_claim(claim: &str) -> String {
+    STORED_EXPORT_NOTE.replacen(
+        "stale_after:",
+        &format!("verified: {claim}\nstale_after:"),
+        1,
+    )
+}
+
+/// VW6: an imported bare claim is retained as the first list member, never replaced.
+#[test]
+fn export_item_file_appends_the_review_to_the_existing_bare_claim() -> TestResult {
+    let stored = stored_export_claim("{by: 'human:x', at: '2026-01-01T00:00:00Z'}");
+    let content = digest('c')?;
+    let reviews = [review(
+        "alice",
+        "2026-10-08T09:00:00.000Z",
+        content.clone(),
+        Selection::All,
+        ReviewCoverage::Current,
+    )?];
+    let exported: Vec<u8> = some(
+        okf_jawn_core::portable::export_item_file(stored.as_bytes(), &reviews, &content)?,
+        "a file with the appended review",
+    )?;
+    let after = okf_core::Document::parse(std::str::from_utf8(&exported)?)?;
+    assert_eq!(
+        after.frontmatter.get(VERIFIED_KEY),
+        Some(&yaml(&json!([
+            {"by": "human:x", "at": "2026-01-01T00:00:00Z"},
+            {"by": "human:alice", "at": "2026-10-08T09:00:00.000Z"}
+        ])))
+    );
+    assert_eq!(after.body, "# Plan\n\nShip it.");
+    Ok(())
+}
+
+/// VW7 and VW9: unchanged claims leave the caller's original bytes intact, even when the
+/// entry's keys are reversed and the stored file has comments and CRLF line endings.
+#[test]
+fn export_item_file_unchanged_claims_require_no_reserialization() -> TestResult {
+    let stored = stored_export_claim(
+        "[{at: '2026-10-08T09:00:00.000Z', by: 'human:alice'}] # retained comment",
+    )
+    .replace('\n', "\r\n");
+    let content = digest('c')?;
+    let reviews = [review(
+        "alice",
+        "2026-10-08T09:00:00.000Z",
+        content.clone(),
+        Selection::All,
+        ReviewCoverage::Current,
+    )?];
+    for current in [&[][..], reviews.as_slice()] {
+        assert_eq!(
+            okf_jawn_core::portable::export_item_file(stored.as_bytes(), current, &content)?,
+            None
+        );
+    }
+    Ok(())
+}
+
+/// VW8: record-store enumeration order does not determine exported event order.
+#[test]
+fn export_item_file_writes_current_reviews_oldest_first() -> TestResult {
+    let content = export_note_fingerprint()?;
+    let reviews = [
+        review(
+            "bob",
+            "2026-10-09T09:00:00.000Z",
+            content.clone(),
+            Selection::All,
+            ReviewCoverage::Current,
+        )?,
+        review(
+            "alice",
+            "2026-10-08T09:00:00.000Z",
+            content.clone(),
+            Selection::All,
+            ReviewCoverage::Current,
+        )?,
+    ];
+    let exported: Vec<u8> = some(
+        okf_jawn_core::portable::export_item_file(
+            STORED_EXPORT_NOTE.as_bytes(),
+            &reviews,
+            &content,
+        )?,
+        "the file with chronologically ordered reviews",
+    )?;
+    let parsed = okf_core::Document::parse(std::str::from_utf8(&exported)?)?;
+    assert_eq!(
+        parsed.frontmatter.get(VERIFIED_KEY),
+        Some(&yaml(&json!([
+            {"by": "human:alice", "at": "2026-10-08T09:00:00.000Z"},
+            {"by": "human:bob", "at": "2026-10-09T09:00:00.000Z"}
+        ])))
+    );
+    Ok(())
+}
+
+/// VW10: a restored file's old key order may change only when verified is added; the
+/// logical original properties and body remain equal, including the application header.
+#[test]
+fn export_item_file_reorders_restored_frontmatter_without_changing_other_values() -> TestResult {
+    let stored = STORED_EXPORT_NOTE.replacen("type: Note\n", "", 1).replacen(
+        "okf_jawn:\n",
+        "type: Note\nokf_jawn:\n",
+        1,
+    );
+    let content = export_note_fingerprint()?;
+    let reviews = [review(
+        "alice",
+        "2026-10-08T09:00:00.000Z",
+        content.clone(),
+        Selection::All,
+        ReviewCoverage::Current,
+    )?];
+    let exported: Vec<u8> = some(
+        okf_jawn_core::portable::export_item_file(stored.as_bytes(), &reviews, &content)?,
+        "the file in preferred order",
+    )?;
+    let before = okf_core::Document::parse(&stored)?;
+    let after = okf_core::Document::parse(std::str::from_utf8(&exported)?)?;
+    assert_eq!(
+        after.frontmatter.keys().collect::<Vec<_>>(),
+        vec![
+            "type",
+            "title",
+            "generated",
+            "verified",
+            "stale_after",
+            "x_team",
+            APP_HEADER_KEY
+        ]
+    );
+    assert_eq!(after.body, "# Plan\n\nShip it.");
+    for key in before.frontmatter.keys() {
+        assert_eq!(
+            after.frontmatter.get(key),
+            before.frontmatter.get(key),
+            "{key}"
+        );
+    }
+    Ok(())
+}
+
+/// Design section2.4 treats invalid committed text as a store fault, even with no review.
+#[test]
+fn export_item_file_refuses_invalid_utf8_and_unparseable_stored_documents() -> TestResult {
+    for stored in [&[0xff_u8, 0xfe][..], b"---\ntype: Note\n"] {
+        let refused = err_of(okf_jawn_core::portable::export_item_file(
+            stored,
+            &[],
+            &digest('c')?,
+        ))?;
+        assert_eq!(refused.code, ErrorCode::Internal);
+    }
+    Ok(())
+}
+
+/// Design section6.2 copies storage's conversion, including scalar mapping keys and the
+/// nonfinite-to-null rule. Expected values are literals, not the JSON writer's output.
+#[test]
+fn json_of_preserves_storage_scalar_and_nested_property_values() -> TestResult {
+    let parsed = YamlValue::parse("count: -3\n5: true\nnested: [null, false, 7, 1.5, 'text']\n")?;
+    let source = YamlValue::Sequence(vec![
+        parsed,
+        YamlValue::Float(f64::NAN),
+        YamlValue::Float(f64::INFINITY),
+        YamlValue::Float(f64::NEG_INFINITY),
+    ]);
+    assert_eq!(
+        okf_jawn_core::portable::json_of(&source),
+        json!([{"count": -3, "5": true, "nested": [null, false, 7, 1.5, "text"]}, null, null, null])
+    );
     Ok(())
 }
 
