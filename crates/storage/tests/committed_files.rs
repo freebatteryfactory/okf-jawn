@@ -342,8 +342,11 @@ async fn an_item_file_carries_what_show_answers_of_it() -> TestResult {
     for file in &files {
         let Some(item) = &file.item else {
             // No file but an item file carries an item: indexes, the log and `.okf/` hold none.
+            // OKF reads only the exact lower-case `md` extension; `X.MD` is a plain file.
             assert!(
-                !file.path.ends_with(".md")
+                Path::new(&file.path)
+                    .extension()
+                    .is_none_or(|extension| extension != "md")
                     || file.path.ends_with("index.md")
                     || file.path == "log.md",
                 "{} holds no item",
@@ -527,7 +530,7 @@ async fn portable_json_properties_survive_a_real_item_write_and_read() -> TestRe
     let converted = okf_jawn_core::portable::json_of(&supplied);
     let expected = json!({
         "type": "Note", "title": "Imported properties", "count": -3,
-        "largest": 9223372036854775807_i64, "ratio": 1.5,
+        "largest": 9_223_372_036_854_775_807_i64, "ratio": 1.5,
         "nested": {"enabled": true, "values": [null, false, "café"]},
         "verified": {"by": "human:outside", "at": "2026-01-01T00:00:00Z"}
     });
