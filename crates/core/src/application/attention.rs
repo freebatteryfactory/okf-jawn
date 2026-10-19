@@ -46,6 +46,10 @@
 //!   pages not converted when they are one range. Action `redigest_item`.
 //! - `ExtractionWarnings`: a completed source whose conversion recorded warnings. Action
 //!   `read_item`.
+//! - `NewerSource`: a pinned View whose cited inputs differ at this scan's resolved revision,
+//!   using the ordinary View citation/freshness reads. One row names its affected bindings;
+//!   the saved inputs stay pinned. This never reads a later head or materializes datasets.
+//!   Action `get_view`.
 //! - `InstructionLike`: the current local English rule set scans the shown body, including
 //!   digest, corrected and supplied text. One row holds at most 32 original passages with the
 //!   same citation locations as `read_item`, plus the count omitted. Action `read_item`.
@@ -53,7 +57,7 @@
 //!   (`UploadStore::list` in `waiting`, every page), with their count and total retained bytes.
 //!   Action `list_uploads`.
 //!
-//! Remaining producers, said rather than hidden: `NewerSource`, `Invalidated` and
+//! Remaining producers, said rather than hidden: `Invalidated` and
 //! `UnparseableHeader` remain separate producer-backed work; this handler does not emit them.
 //!
 //! Order and pages: the rows are ordered by kind in the order `AttentionKind` declares them,
@@ -72,7 +76,8 @@
 //! uploads. Relevant accepted proposals also require all pages of the accepted head's history
 //! and the inspected revision's history (one history when those tips match); no such proposals
 //! means no attribution history reads. It is O(items + proposals + eligible proposal changes +
-//! history commits + waiting uploads) per page. Nothing is cached between pages.
+//! history commits + waiting uploads) per page, plus each pinned View's citation and source
+//! reads (at most 50 bindings per View). Nothing is cached between pages.
 //!
 //! An empty answer says only that these checks found nothing: SPEC section 11, "no clean scan
 //! becomes a safe-for-AI certificate". The answer is a listing of summaries, as `list_items` is,
@@ -98,12 +103,13 @@ use okf_jawn_contract::extraction::{
 };
 use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath};
 use okf_jawn_contract::import::{Job, UploadListState};
-use okf_jawn_contract::item::ItemDocument;
+use okf_jawn_contract::item::{ItemDocument, ItemKind};
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::proposal::{Change, Proposal, ProposalKind, ProposalStatus};
 use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::review::ReviewCoverage;
 use okf_jawn_contract::search::{Link, LinkDirection};
+use okf_jawn_contract::views::{MAX_VIEW_BINDINGS, ViewMode};
 use serde::{Deserialize, Serialize};
 
 use super::ApplicationService;
@@ -111,6 +117,7 @@ use super::navigation::indexed;
 use super::reviews::reviews_at;
 use super::shared::{invalid, next_page, resolve_page, workspace_scope};
 use super::sources::{citation, record_of};
+use super::views::{stored_fault, view_ports};
 use super::workspaces::start_job;
 use crate::conformance::names_markdown;
 use crate::context::OperationContext;
@@ -121,6 +128,8 @@ use crate::proposals::ProposalFilter;
 use crate::search::LinkQuery;
 use crate::storage::{LogQuery, Page, StorageScope};
 use crate::uploads::UploadQuery;
+use crate::views::layout::view_of;
+use crate::views::resolve::newer_sources;
 
 /// The accepted agent proposals' content: for each item, the content digests an agent's
 /// proposal gave it, each with the proposer.
@@ -165,6 +174,7 @@ const PAGE_CURSOR: &str = "/page/cursor";
 /// Returns `InvalidInput` on `/page/cursor` for a cursor this operation did not issue or that
 /// continues another revision than `at` names; the typed `NotFound` of an invalidated revision;
 /// the index's `Unavailable` for a revision outside the window an index is built for on demand;
+/// `Unsupported` for a stored View this build cannot read or whose bindings exceed the bound;
 /// or any port error.
 pub(super) async fn get_attention(
     service: &ApplicationService,
@@ -253,6 +263,7 @@ async fn scan(
         if let Some(message) = stale(service, scope, revision, document, &mut day).await? {
             rows.push(message);
         }
+        rows.extend(newer_source(service, scope, revision, document).await?);
         if let Some(writer) = writer_of(document, &agents)? {
             let shown = item_content_digest(document)?;
             let covered = reviews_at(service, scope, document.summary.id, &shown)
@@ -296,6 +307,44 @@ async fn scan(
     }
     rows.extend(uploads_waiting(service, scope).await?);
     Ok(rows)
+}
+
+/// One observation for a pinned View, so its (kind, path, item) cursor key stays unique.
+async fn newer_source(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    revision: &Revision,
+    document: &ItemDocument,
+) -> Result<Option<Row>, ApiError> {
+    if document.summary.kind != ItemKind::View {
+        return Ok(None);
+    }
+    let view = view_of(document, scope.workspace_id).map_err(stored_fault)?;
+    if view.mode != ViewMode::Pinned {
+        return Ok(None);
+    }
+    if view.bindings.len() > MAX_VIEW_BINDINGS {
+        return Err(stored_fault(invalid(
+            "the View has more than 50 bindings",
+            "/bindings",
+        )));
+    }
+    let names = newer_sources(view_ports(service), scope, &view, revision).await?;
+    if names.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(row(
+        AttentionKind::NewerSource,
+        document,
+        None,
+        format!(
+            "Pinned View has newer source content for bindings {} at revision {}; its cited \
+             inputs remain unchanged",
+            names.join(", "),
+            revision.as_str()
+        ),
+        OperationName::GetView,
+    )))
 }
 
 /// Current advisory evidence over the unchanged shown body, located by the ordinary read path.

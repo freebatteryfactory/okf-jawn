@@ -37,7 +37,7 @@ use okf_jawn_core::application::ApplicationService;
 use okf_jawn_core::jobs::{JobScope, JobSpec};
 use okf_jawn_core::portable::item_content_digest;
 use okf_jawn_core::ports::Application;
-use okf_jawn_core::storage::ObjectInfo;
+use okf_jawn_core::storage::{ObjectInfo, VersionStore};
 use okf_jawn_core::uploads::UploadRecord;
 use serde_json::json;
 use uuid::Uuid;
@@ -1219,5 +1219,118 @@ async fn attention_rebuild_index_queues_a_rebuild_job_and_wakes_the_worker() -> 
             (JobScope::Workspace(scope()?), job.id)
         ]
     );
+    Ok(())
+}
+
+/// A stored pinned/live View citing one historical note twice; distinct binding names
+/// must still produce just one Attention row for the View's pagination key.
+fn newer_source_view(mode: &str) -> Built<ItemDocument> {
+    let mut view = described(202, "views/pinned.md", json!({ "title": "Pinned" }))?;
+    view.summary.kind = okf_jawn_contract::item::ItemKind::View;
+    let source = json!({ "item_id": item(201), "path": "notes/source.md",
+        "revision": revision('c')?, "selection": { "kind": "all" } });
+    let block = json!({ "schema_version": 1, "mode": mode, "grammar": "json_render",
+        "bindings": [
+            { "name": "left", "source": source, "units": {}, "transforms": [] },
+            { "name": "right", "source": source, "units": {}, "transforms": [] }
+        ],
+        "spec": { "root": "root", "elements": {
+            "root": { "type": "SourceList", "props": { "bindings": ["left", "right"] },
+                "children": [] }
+        } }, "charts": {} });
+    view.body = format!("Pinned explanation.\n\n```json okf-jawn-view\n{block}\n```\n");
+    Ok(view)
+}
+
+fn newer_source_scan(mode: &str, current_body: &str, archived: bool) -> Built<Scan> {
+    let scan = scan_world()?;
+    let mut cited = note(
+        201,
+        &revision('c')?,
+        "notes/source.md",
+        "Old source.",
+        json!({}),
+    )?;
+    DESCRIBED.clone_into(&mut cited.summary.description);
+    scan.world
+        .versions
+        .put_document(&revision('c')?, cited.clone())?;
+    cited.summary.revision = revision('a')?;
+    current_body.clone_into(&mut cited.body);
+    put(&scan, &cited)?;
+    let mut view = newer_source_view(mode)?;
+    view.summary.archived = archived;
+    put(&scan, &view)?;
+    Ok(scan)
+}
+
+/// SPEC section10/R4: newer data is an observation about a pinned View, never a refresh.
+/// The literal expected item is the View202, not its note201; duplicate bindings aggregate.
+#[tokio::test]
+async fn attention_newer_source_names_the_pinned_view_without_refreshing_or_materializing()
+-> TestResult {
+    let scan = newer_source_scan("pinned", "New source.", false)?;
+    let rows = every_row(&scan).await?;
+    assert_eq!(
+        named(&rows, &AttentionKind::NewerSource),
+        vec![Some(item(202))]
+    );
+    let warning = only(&rows, &AttentionKind::NewerSource)?;
+    assert_eq!(warning.action, OperationName::GetView);
+    assert_eq!(warning.selection, None);
+    assert_eq!(
+        some(warning.item.as_ref(), "the pinned View")?
+            .path
+            .as_str(),
+        "views/pinned.md"
+    );
+    assert!(warning.message.contains("left"));
+    assert!(warning.message.contains("right"));
+    let opened = scan
+        .service
+        .get_view(
+            &alice(OperationName::GetView, None)?,
+            okf_jawn_contract::views::GetViewRequest {
+                workspace_id: scope()?.workspace_id,
+                item_id: item(202),
+                at: At::Latest,
+            },
+        )
+        .await?;
+    let expected_cited_revision = revision('c')?;
+    assert!(
+        opened
+            .bindings
+            .iter()
+            .all(|binding| binding.source.revision == expected_cited_revision)
+    );
+    assert_eq!(
+        scan.world
+            .versions
+            .show(&scope()?, &revision('c')?, item(201))
+            .await?
+            .body,
+        "Old source."
+    );
+    assert_eq!(scan.world.records.derived()?.len(), 0);
+    assert_eq!(scan.world.records.receipts()?.len(), 0);
+    Ok(())
+}
+
+/// Literal exclusions from AttentionKind::NewerSource and R4: unchanged, live and archived
+/// Views are not pinned Views with newer visible inputs. Worlds share no mutable state.
+#[tokio::test]
+async fn attention_newer_source_leaves_unchanged_live_and_archived_views_out() -> TestResult {
+    for (mode, body, archived) in [
+        ("pinned", "Old source.", false),
+        ("live", "New source.", false),
+        ("pinned", "New source.", true),
+    ] {
+        let scan = newer_source_scan(mode, body, archived)?;
+        assert_eq!(
+            named(&every_row(&scan).await?, &AttentionKind::NewerSource),
+            Vec::new()
+        );
+    }
     Ok(())
 }

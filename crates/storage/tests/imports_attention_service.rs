@@ -2791,5 +2791,74 @@ async fn imports_accepting_supply_after_human_correction_preserves_shown_human_o
     Ok(())
 }
 
+/// SPEC section10/R4 over real Git/store adapters: a later note edit raises one pinned
+/// View observation, leaves the historical bound source untouched, and does not write HEAD.
+/// Source edit uses the existing stated direct-version-store helper, not a fake resolver.
+#[tokio::test]
+async fn attention_newer_source_over_real_stores_keeps_pinned_history_and_snapshot_semantics()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let world = World::new(directory.path())?;
+    let (scope, initial) = world.workspace().await?;
+    let (source, cited_at) = note(
+        &world,
+        &scope,
+        &initial,
+        2,
+        "notes/source.md",
+        "Old source.",
+        json!({ "description": "The source" }),
+    )
+    .await?;
+    let block = json!({ "schema_version": 1, "mode": "pinned", "grammar": "json_render",
+        "bindings": [{ "name": "source", "source": { "item_id": source,
+            "path": "notes/source.md", "revision": cited_at, "selection": { "kind": "all" } },
+            "units": {}, "transforms": [] }],
+        "spec": { "root": "excerpt", "elements": { "excerpt": { "type": "SourceExcerpt",
+            "props": { "binding": "source" }, "children": [] } } }, "charts": {} });
+    let created: CreatedItem = serde_json::from_value(world.call("create_item", json!({
+        "workspace_id": scope.workspace_id, "base_revision": cited_at,
+        "path": "views/pinned.md", "title": "Pinned", "type_name": "Note", "kind": "view",
+        "body": format!("Pinned explanation.\n\n```json okf-jawn-view\n{block}\n```\n"),
+        "properties": { "description": "Pinned input" }, "idempotency_key": key(3)
+    })).await?)?;
+    let view = created.item.summary.id;
+    let versions = world.storage.versions();
+    let snapshot = created.item.summary.revision.clone();
+    let old = versions.show(&scope, &snapshot, source).await?;
+    let changed = replace_body(&world, &scope, 4, &old, "New source.").await?;
+    let response: GetAttentionResponse =
+        serde_json::from_value(attention_at(&world, &scope, &changed).await?)?;
+    let warnings = named(&response.items, &AttentionKind::NewerSource);
+    assert_eq!(
+        warnings.iter().map(|row| row.item_id).collect::<Vec<_>>(),
+        vec![Some(view)]
+    );
+    let warning = some(warnings.first(), "one pinned View warning")?;
+    assert_eq!(
+        warning.action,
+        okf_jawn_contract::metadata::OperationName::GetView
+    );
+    assert_eq!(warning.selection, None);
+    assert_eq!(versions.head(&scope).await?, changed);
+    assert_eq!(
+        versions.show(&scope, &cited_at, source).await?.body,
+        "Old source."
+    );
+    let opened: okf_jawn_contract::views::ViewDocument = serde_json::from_value(world.call("get_view",
+        json!({ "workspace_id": scope.workspace_id, "item_id": view, "at": { "kind": "latest" } })).await?)?;
+    assert_eq!(
+        some(opened.bindings.first(), "the pinned binding")?
+            .source
+            .revision,
+        cited_at
+    );
+    // R4's explicit-revision scan must not inspect data written after that revision.
+    let historical: GetAttentionResponse =
+        serde_json::from_value(attention_at(&world, &scope, &snapshot).await?)?;
+    assert!(named(&historical.items, &AttentionKind::NewerSource).is_empty());
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
