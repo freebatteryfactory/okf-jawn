@@ -79,6 +79,7 @@ fn completion(lease: okf_jawn_core::jobs::JobLease) -> JobCompletion {
         artifact: None,
         restore: None,
         backup: None,
+        clean_up: None,
         outputs: Vec::new(),
         warnings: Vec::new(),
     }
@@ -994,6 +995,50 @@ async fn a_records_database_at_schema_3_migrates_its_jobs_unsealed_after_a_backu
     let version: i64 =
         Connection::open(&records)?.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     assert_eq!(version, 4);
+    Ok(())
+}
+
+/// The approved R2 staging boundary refuses execution instead of claiming a cleanup sweep.
+#[tokio::test]
+async fn clean_up_storage_execution_is_explicitly_unimplemented_until_its_slice() -> TestResult {
+    use okf_jawn_core::storage::Purger;
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let refusal = err_of(storage.purger().clean_up(&tenant()?, uuid!(70)?).await)?;
+    assert_eq!(refusal.code, ErrorCode::NotImplemented);
+    Ok(())
+}
+
+/// R2 only forwards a completed report; this does not run or qualify any cleanup sweep.
+#[tokio::test]
+async fn clean_up_completion_forwards_its_literal_report_to_the_durable_job() -> TestResult {
+    use okf_jawn_contract::import::CleanUpReport;
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let records = storage.records();
+    let job_scope = JobScope::Tenant(tenant()?);
+    let job = records
+        .create_job(
+            &job_scope,
+            new_job(71, JobSpec::from_stored(json!({ "kind": "clean_up" }))?)?,
+        )
+        .await?;
+    let claimed = some(records.claim_job(job.id).await?, "the cleanup job's claim")?;
+    let report = CleanUpReport {
+        objects_removed: "18446744073709551616".to_owned(),
+        objects_kept: "7".to_owned(),
+        upload_files_removed: 2,
+    };
+    let mut completed = completion(claimed.lease);
+    completed.clean_up = Some(report.clone());
+    let written = records.complete_job(completed).await?;
+    assert_eq!(written.state, JobState::Succeeded);
+    assert_eq!(written.workspace_id, None);
+    assert_eq!(written.clean_up, Some(report.clone()));
+    assert_eq!(
+        records.get_job(&job_scope, job.id).await?.clean_up,
+        Some(report)
+    );
     Ok(())
 }
 

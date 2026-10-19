@@ -388,6 +388,7 @@ fn job_specs() -> Result<Vec<JobSpec>, Box<dyn Error>> {
             workspace_id: WorkspaceId(Uuid::from_u128(1)),
             item_id: ItemId(Uuid::from_u128(10)),
         },
+        JobSpec::CleanUp,
     ])
 }
 
@@ -431,6 +432,7 @@ async fn record_store_calls(
                 artifact: None,
                 restore: None,
                 backup: None,
+                clean_up: None,
                 outputs: Vec::new(),
                 warnings: Vec::new(),
             })
@@ -820,6 +822,7 @@ async fn artifact_calls(
             artifact: Some(record.id),
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: vec![record.object.digest.clone()],
             warnings: Vec::new(),
         })
@@ -1140,7 +1143,8 @@ fn every_job_spec_reports_its_kind_and_survives_storage() -> TestResult {
             JobKind::ExportView,
             JobKind::BackupInstallation,
             JobKind::PurgeWorkspace,
-            JobKind::PurgeItem
+            JobKind::PurgeItem,
+            JobKind::CleanUp
         ]
     ));
     for spec in &specs {

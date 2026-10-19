@@ -568,6 +568,7 @@ async fn seed_job(seeded: &Seeded) -> TestResult {
             artifact: Some(artifact.id),
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: vec![export.digest],
             warnings: Vec::new(),
         })

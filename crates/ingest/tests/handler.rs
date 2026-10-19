@@ -948,6 +948,26 @@ mod job_handler {
         Ok(())
     }
 
+    /// R2 declares the spec but leaves valid tenant execution to R3; bad scope stays a fault.
+    #[tokio::test]
+    async fn clean_up_dispatch_is_unimplemented_at_tenant_and_internal_at_workspace() -> TestResult
+    {
+        for (scope, expected) in [
+            (JobScope::Tenant(tenant()?), ErrorCode::NotImplemented),
+            (workspace_scope()?, ErrorCode::Internal),
+        ] {
+            let world = world()?;
+            let spec = JobSpec::from_stored(json!({ "kind": "clean_up" }))?;
+            let id = job(&world, 790, scope, spec)?;
+            let claimed = some(world.records.claim_job(id).await?, "the test claim")?;
+            let refusal = err_of(world.handler.handle(&claimed).await)?;
+            assert_eq!(refusal.code, expected);
+            assert!(world.records.entry(id)?.completions.is_empty());
+            assert!(world.versions.written()?.is_empty());
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn a_restore_passes_the_accepted_editors_and_consumes_its_upload() -> TestResult {
         let world = world()?;

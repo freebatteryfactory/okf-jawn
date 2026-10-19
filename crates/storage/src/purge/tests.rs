@@ -459,6 +459,7 @@ async fn a_job_output_completed_inside_the_objects_step_keeps_its_object() -> Re
             artifact: None,
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: vec![stored],
             warnings: Vec::new(),
         })

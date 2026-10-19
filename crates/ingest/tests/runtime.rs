@@ -81,6 +81,7 @@ mod job_runtime {
                                 artifact: None,
                                 restore: None,
                                 backup: None,
+                                clean_up: None,
                                 outputs: Vec::new(),
                                 warnings: Vec::new(),
                             })

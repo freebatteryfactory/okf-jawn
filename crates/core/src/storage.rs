@@ -20,6 +20,7 @@ use okf_jawn_contract::{
         Digest, ItemId, JobId, MutationId, ProposalId, PurgeId, ReviewId, Revision, TenantId,
         WorkspaceId, WorkspacePath,
     },
+    import::CleanUpReport,
     item::{ItemDocument, ItemKind, ItemStatus, ItemSummary, TypeDefinition},
     proposal::Change,
     purge::PurgeReport,
@@ -850,11 +851,23 @@ pub trait WorkspaceCatalog: Send + Sync {
 /// Removes a purge target from every store that holds it; storage implements it, because one
 /// call must own every store it clears (Stage 1b design section 6).
 ///
-/// Both calls are idempotent on the mutation id and resumable after a crash. A workspace purge
+/// Purge calls are idempotent on the mutation id and resumable after a crash. A workspace purge
 /// returns only when nothing section 6 lists still holds the workspace, and counts the objects
 /// kept because a surviving workspace or tenant record still references, pends or pins them. A
 /// purge is never cancelled; a failed call is resumed by repeating it with the same mutation
-/// and purge ids.
+/// and purge ids. A clean-up pass is resumable under its job id and shares the purge's
+/// reachability sweep, without removing a workspace.
+///
+/// The sweep reads no purge target. A survivor is the tenant itself or a workspace for
+/// which no workspace purge is recorded, in any state. It enumerates the tenant's stored
+/// digest objects, excluding multipart staging and stray files, and keeps every surviving
+/// record/history reference, pending put and running-write pin. Its roots include uploads,
+/// managed archives, written histories, artifacts, job outputs, derived objects, sandbox
+/// capabilities, unfinished restores and every retained Git reference's source appearances
+/// and conversion-record references. A citation alone is not another object-store root.
+/// Unreadable surviving records or history refuse the pass before any object is removed,
+/// naming the survivor by identity. Counts of removed objects are exact across resumes;
+/// counts kept include objects the purge target never referenced.
 ///
 /// What the caller must do:
 ///
@@ -873,7 +886,7 @@ pub trait WorkspaceCatalog: Send + Sync {
 ///   and a written history check the refusal before and again under the
 ///   workspace's lock, and store their files as workspace-scoped puts: a pending put is
 ///   recorded before the bytes are retained, and their record lands it, so a stop before the
-///   record leaves bytes the objects step deletes. An import copies its rows without the
+///   record leaves bytes the objects step sweeps. An import copies its rows without the
 ///   refusal; it runs only in a sealed restore, which the drain waits for. Ingest's purge job
 ///   handler is this caller.
 ///
@@ -889,8 +902,9 @@ pub trait WorkspaceCatalog: Send + Sync {
 ///   completions, derived objects, receipts, reviews,
 ///   proposals (insert, update), comments, confirmations (create, consume), sandbox
 ///   capabilities and catalog changes. Commits, candidates and promotions are refused under the
-///   workspace's write lock, under which the purge reads the workspace's records and history
-///   for its plan, so each either is in the plan or is refused. Every content-bearing write a
+///   workspace's write lock, so a write in flight lands before the refusal or is refused.
+///   The purge need not read its target's records or history to discover objects.
+///   Every content-bearing write a
 ///   conversion makes is among these: its object puts, its commits, its derived objects and its
 ///   job completion. Events are not refused: an event carries identities only. Job
 ///   cancellation is never refused because of the purge (only a sealed job's, by its seal).
@@ -905,24 +919,30 @@ pub trait WorkspaceCatalog: Send + Sync {
 ///   archive objects its restored history and rows name, or a conversion record among them
 ///   names. So a put whose record never lands (a failed or cancelled job, a failed retain, a
 ///   refused record write, a crash, a replay of a record that names different bytes) keeps its
-///   pending put, which has no lifetime.
+///   pending put, which has no lifetime. Tenant-level archive writes have a tenant-level
+///   pending put tied to their mutation; the transaction of their tenant record lands it.
 /// - Before the purge deletes the target's objects it waits until no write of the target that
 ///   pinned is still running, for at most ten minutes; after that the call fails with
 ///   `Unavailable` having deleted none of the target's objects (its earlier steps, which remove
 ///   the target's managed backups, rows, index entries and repository, may already have run),
-///   and repeating it resumes the purge. It then deletes every object the target's pending
-///   puts name that no surviving reference names, and clears those pending puts.
+///   and repeating it resumes the purge. It then sweeps every stored candidate of the tenant
+///   against the surviving roots, rather than only objects named by the target. The target's
+///   pending puts are cleared with its records and never keep objects on its behalf.
 /// - Writes to other workspaces of the tenant continue during the purge. An object is deleted
 ///   only when no durable reference the purge read names it (another workspace's pending puts
 ///   included) and no other workspace's write pinned it at any moment from the start of that
-///   read until the delete; so an object another workspace puts and then references while the
+///   read until the delete; the watch starts before roots are read, and every later pin joins
+///   its touched set even if the write ends before deletion. Thus an object another workspace
+///   puts and then references while the
 ///   purge runs is kept. One exception: a copy of one of the target's workspace archives that
 ///   another workspace holds in an upload slot or names in a pending put is no surviving
 ///   reference, and the archive goes with the target. A write of another workspace that is
 ///   putting the same bytes during the objects step pins them and keeps them, as it keeps any
 ///   pinned object. A pending put that never gets a record keeps an identical object of
-///   another workspace's purge, counted as kept, until the next purge of its own workspace
-///   deletes the bytes and clears it.
+///   another workspace's purge, counted as kept, until its own workspace is purged.
+///   A surviving card or history naming the target's archive keeps it; the upload/pending-put
+///   exception does not discard such a reference. Sweeps of one tenant serialize with one
+///   another; writes and sweeps of different tenants remain independent.
 /// - Index entries an indexing of the target stored after the index step are removed by the
 ///   index pass the purge runs again after it deleted the repository; an indexing reads and
 ///   stores under the workspace's write lock, so a later one finds no repository.
@@ -933,6 +953,14 @@ pub trait WorkspaceCatalog: Send + Sync {
 /// so a crash ends every write in flight; what such a write stored is named by its pending put,
 /// which carries it to the next purge of its workspace.
 pub trait Purger: Send + Sync {
+    /// One pass of the reachability sweep a workspace purge's objects step runs, for the
+    /// clean-up job `job`: remove every object of the tenant's store that no surviving
+    /// record, history or pending put names and no running write pins, and the received
+    /// bytes of discarded upload slots a stopped discard left. Run again for the same job
+    /// after a stop, it counts what the stopped attempt removed as removed. Refuses,
+    /// removing nothing, when a surviving workspace's records or history cannot be read,
+    /// naming that workspace by identity.
+    fn clean_up<'a>(&'a self, tenant: &'a TenantId, job: JobId) -> PortFuture<'a, CleanUpReport>;
     /// Remove a workspace: its repository, the objects only it references, its records, index
     /// entries, managed backups and retained exports.
     fn purge_workspace<'a>(
@@ -1267,6 +1295,19 @@ pub fn derive_drain_mutation_id(purge_mutation: MutationId, job: JobId) -> Mutat
     hasher.update(b"drain\0");
     hasher.update(purge_mutation.0.as_bytes());
     hasher.update(job.0.as_bytes());
+    MutationId(version_8(hasher.finalize().into()))
+}
+
+/// The identity under which a discarded upload asks for the tenant's clean-up.
+///
+/// Derived from the discard mutation with its own label, so a resumed request asks under
+/// the same identity and never shares a commit or drain cancellation's identity.
+#[must_use]
+pub fn derive_clean_up_mutation_id(discard: MutationId) -> MutationId {
+    let mut hasher = Sha256::new();
+    hasher.update(b"okf-jawn derived identity\0");
+    hasher.update(b"clean_up\0");
+    hasher.update(discard.0.as_bytes());
     MutationId(version_8(hasher.finalize().into()))
 }
 

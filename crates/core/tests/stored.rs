@@ -32,7 +32,7 @@ fn serde_alone_accepts_a_field_beside_a_unit_variant() -> TestResult {
     assert_eq!(accepted, JobSpec::RebuildIndex);
     let refused = err_of(JobSpec::from_stored(stray))?;
     assert_eq!(refused.code, ErrorCode::Internal);
-    for kind in ["backup_workspace", "backup_installation"] {
+    for kind in ["backup_workspace", "backup_installation", "clean_up"] {
         err_of(JobSpec::from_stored(
             json!({ "kind": kind, "unexpected": true }),
         ))?;
@@ -46,6 +46,7 @@ fn every_well_formed_specification_round_trips_through_storage() -> TestResult {
         import()?,
         JobSpec::RebuildIndex,
         JobSpec::BackupInstallation,
+        JobSpec::CleanUp,
     ] {
         assert_eq!(JobSpec::from_stored(spec.to_stored()?)?, spec);
     }

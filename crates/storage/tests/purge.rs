@@ -1563,6 +1563,7 @@ async fn refuse_records(
                 artifact: None,
                 restore: None,
                 backup: None,
+                clean_up: None,
                 outputs: vec![object.digest.clone()],
                 warnings: Vec::new(),
             })
@@ -2051,6 +2052,7 @@ async fn every_row_kind(fixture: &Fixture) -> Fallible<Vec<Digest>> {
                     artifact: None,
                     restore: None,
                     backup: None,
+                    clean_up: None,
                     outputs: vec![output.clone()],
                     warnings: Vec::new(),
                 })
@@ -3138,6 +3140,7 @@ async fn every_record_that_references_a_put_object_lands_its_pending_put() -> Te
             artifact: None,
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: vec![output.digest],
             warnings: Vec::new(),
         })
@@ -3411,6 +3414,7 @@ async fn a_repeated_job_completion_lands_no_pending_put() -> TestResult {
         artifact: None,
         restore: None,
         backup: None,
+        clean_up: None,
         outputs,
         warnings: Vec::new(),
     };

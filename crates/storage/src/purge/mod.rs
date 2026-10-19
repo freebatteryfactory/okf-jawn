@@ -84,8 +84,9 @@ use std::collections::BTreeSet;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{
-    Digest, ItemId, MutationId, PurgeId, TenantId, UploadId, WorkspaceId,
+    Digest, ItemId, JobId, MutationId, PurgeId, TenantId, UploadId, WorkspaceId,
 };
+use okf_jawn_contract::import::CleanUpReport;
 use okf_jawn_contract::purge::PurgeReport;
 use okf_jawn_contract::workspace::ArtifactKind;
 use okf_jawn_core::ports::PortFuture;
@@ -724,6 +725,15 @@ impl StoragePurger {
 }
 
 impl Purger for StoragePurger {
+    fn clean_up<'a>(&'a self, _tenant: &'a TenantId, _job: JobId) -> PortFuture<'a, CleanUpReport> {
+        Box::pin(async {
+            Err(ApiError::new(
+                ErrorCode::NotImplemented,
+                "clean-up execution awaits the lifecycle storage implementation",
+            ))
+        })
+    }
+
     fn purge_workspace<'a>(
         &'a self,
         tenant: &'a TenantId,

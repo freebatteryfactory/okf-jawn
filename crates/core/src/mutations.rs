@@ -2,7 +2,8 @@
 //!
 //! # Retention
 //! A completed row is kept for 7 days, and so is a released row; the clock starts when the row
-//! is completed or released. A released attempt may have left effects, and those are safe to
+//! is completed or released; a terminally purged row keeps that existing retention clock.
+//! A released attempt may have left effects, and those are safe to
 //! leave because every creating store keys them by `MutationId`; the row itself is no longer
 //! needed once the retry window has passed. A key reused after its row is dropped starts a new
 //! mutation. Only a row whose lease expired without `complete` or `release` (its attempt
@@ -44,23 +45,24 @@
 //! written in one workspace that cites another is recorded under the first; and `complete`
 //! records the workspace a response names for a mutation authorized at the tenant that creates
 //! or removes one (`RequestScope::RESPONSE_WORKSPACE`). A workspace purge reads that column,
-//! never the response text: it empties the completed rows of the purged workspace (the
-//! response is dropped and the row released, its id kept), so a retry under the same key
-//! re-runs under the same `MutationId` and is refused by the purge, and no other workspace's
-//! row is touched. The rows of `purge_workspace` and `purge_item` recorded under the
+//! never the response text: it marks completed and released rows of the purged workspace as
+//! terminally purged, dropping their response and request digest while retaining their key
+//! and identity. A retry is refused by `begin` before digest comparison, without another
+//! handler run or a retention-clock write. No other workspace's row is touched.
+//! The rows of `purge_workspace` and `purge_item` recorded under the
 //! workspace are kept: their response is the purge record, identities and counts only, and a
 //! retried purge replays it.
 //!
-//! Two known limits of that purge:
-//! - A row completed before the ledger recorded workspaces (storage's records schema 2) has no
-//!   workspace, so a purge leaves its response in place until the row expires (a completed
-//!   row is kept seven days; see "Retention").
-//! - A row that completes after the purge's last pass over the ledger keeps its response until
-//!   the row expires.
+//! `complete` and `release` check the recorded workspace purge inside their own transaction:
+//! a late completion stores no response or digest, and a late release is purged as well.
+//! Purged rows expire after seven days on their existing completion/release clock; refusing
+//! a retry never extends it. The caller's random idempotency key stays to refuse the retry.
 //!
-//! An emptied row is not gone: it keeps its idempotency key and the digest of its request until
-//! it expires, and a refused retry of it restarts that row's retention. The storage adapter's
-//! header states these, and what it does with a ledger it cannot read.
+//! Lifecycle ruling9 closes the earlier unattributed-row limit: no installation predates
+//! records schema2. The schema5 upgrade also empties the request digests of already-emptied
+//! rows in the one records copy taken immediately before upgrading. A pre-migration ledger
+//! missing a column required for purge is a store fault, never silently skipped. These are
+//! port guarantees; the lifecycle storage/schema implementation supplies them.
 
 use std::collections::BTreeMap;
 
@@ -152,6 +154,10 @@ pub trait MutationStore: Send + Sync {
     /// tenant (see the module header); it is recorded with a new row and is not part of the
     /// key. A row that already exists keeps what its first `begin` recorded: the same key and
     /// digest are the same request, so they name the same workspace.
+    /// An existing terminally purged row is refused with `Conflict` naming the workspace
+    /// and purge, before comparing its absent digest and without writing. The same refusal
+    /// converts an expired leased or released row whose workspace has a recorded purge to
+    /// purged, except for `purge_workspace` and `purge_item`; its retry never runs a handler.
     fn begin<'a>(
         &'a self,
         key: &'a MutationKey,

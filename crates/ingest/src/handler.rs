@@ -132,6 +132,8 @@ pub(crate) struct Done {
     pub(crate) restore: Option<RestoreReport>,
     /// What a workspace backup left out of its archive.
     pub(crate) backup: Option<BackupReport>,
+    /// What a clean-up removed and kept; execution is introduced by R3.
+    pub(crate) clean_up: Option<okf_jawn_contract::import::CleanUpReport>,
     /// Findings of the checks the commits ran.
     pub(crate) warnings: Vec<Warning>,
     /// The job was found cancelled: no completion is written.
@@ -229,6 +231,7 @@ impl IngestHandler {
                 artifact: done.artifact,
                 restore: done.restore,
                 backup: done.backup,
+                clean_up: done.clean_up,
                 outputs: done.outputs,
                 warnings: done.warnings,
             })
@@ -304,6 +307,10 @@ impl IngestHandler {
                 JobSpec::PurgeWorkspace { .. } | JobSpec::PurgeItem { .. },
                 JobScope::Tenant(tenant),
             ) => self.purge_job(attempt, tenant).await,
+            (JobSpec::CleanUp, JobScope::Tenant(_)) => Err(ApiError::new(
+                ErrorCode::NotImplemented,
+                "the ingest handler does not run clean-up jobs yet (R3)",
+            )),
             (JobSpec::ExportWorkspace { .. } | JobSpec::ExportView { .. }, _) => {
                 Err(ApiError::new(
                     ErrorCode::NotImplemented,
@@ -321,7 +328,8 @@ impl IngestHandler {
                 | JobSpec::RestoreWorkspace { .. }
                 | JobSpec::BackupInstallation
                 | JobSpec::PurgeWorkspace { .. }
-                | JobSpec::PurgeItem { .. },
+                | JobSpec::PurgeItem { .. }
+                | JobSpec::CleanUp,
                 _,
             ) => Err(ApiError::new(
                 ErrorCode::Internal,
@@ -585,6 +593,7 @@ impl IngestHandler {
             | JobSpec::RestoreWorkspace { .. }
             | JobSpec::RebuildIndex
             | JobSpec::ExportView { .. }
+            | JobSpec::CleanUp
             | JobSpec::BackupInstallation => Err(ApiError::new(
                 ErrorCode::Internal,
                 "a purge job was expected",

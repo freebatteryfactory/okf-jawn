@@ -379,6 +379,7 @@ async fn carry_out(storage: &Storage, purge: &Purge) -> Fallible<Result<(), ApiE
             artifact: None,
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: Vec::new(),
             warnings: Vec::new(),
         })

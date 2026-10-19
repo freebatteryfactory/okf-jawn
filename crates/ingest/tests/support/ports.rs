@@ -1125,6 +1125,14 @@ impl FakePurger {
 }
 
 impl Purger for FakePurger {
+    fn clean_up<'a>(
+        &'a self,
+        _tenant: &'a TenantId,
+        _job: JobId,
+    ) -> PortFuture<'a, okf_jawn_contract::import::CleanUpReport> {
+        unused("clean_up: execution awaits R3 and the lifecycle storage implementation")
+    }
+
     fn purge_workspace<'a>(
         &'a self,
         _tenant: &'a TenantId,

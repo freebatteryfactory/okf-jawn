@@ -829,6 +829,7 @@ async fn backup_a_workspace_archive_holds_every_object_its_records_name() -> Tes
             artifact: None,
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: vec![output.clone(), history.clone()],
             warnings: Vec::new(),
         })
@@ -3372,6 +3373,7 @@ async fn backup_a_restored_backup_job_advertises_no_download_it_lost() -> TestRe
                 artifact: Some(artifact.id),
                 restore: None,
                 backup: None,
+                clean_up: None,
                 outputs: Vec::new(),
                 warnings: Vec::new(),
             })
@@ -4254,6 +4256,7 @@ async fn rr4_missing_objects_of_every_named_kind_fail_the_archive() -> TestResul
             artifact: None,
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: vec![output.clone()],
             warnings: Vec::new(),
         })
@@ -4902,6 +4905,7 @@ async fn rr4_job_round_trip(control: bool, output: bool) -> TestResult {
                     artifact: None,
                     restore: None,
                     backup: None,
+                    clean_up: None,
                     outputs,
                     warnings: Vec::new(),
                 })
@@ -4986,6 +4990,7 @@ async fn rr4_rt_a_workspace_the_app_backed_up_once_restores_by_replacement() -> 
                 artifact: Some(artifact.id),
                 restore: None,
                 backup: None,
+                clean_up: None,
                 outputs: vec![archive.digest],
                 warnings: Vec::new(),
             })
@@ -6338,6 +6343,7 @@ async fn backup_a_conversion_before_its_completion_restores_with_its_exports_and
             artifact: None,
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: vec![export.clone(), asset.clone(), record.clone()],
             warnings: Vec::new(),
         })
@@ -7553,6 +7559,7 @@ async fn rr8_converted(
             artifact: None,
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: vec![
                 export.clone(),
                 render.clone(),
@@ -8210,6 +8217,7 @@ async fn n6_complete(storage: &Storage, claimed: ClaimedJob) -> TestResult {
             artifact: None,
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: Vec::new(),
             warnings: Vec::new(),
         })
@@ -9061,6 +9069,7 @@ async fn rr9_workspace_holding_its_own_backup(
             artifact: Some(artifact.id),
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: vec![archive.digest.clone()],
             warnings: Vec::new(),
         })
@@ -9214,6 +9223,7 @@ async fn finished_with_artifact(
             artifact: Some(artifact.id),
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: vec![object.digest],
             warnings: Vec::new(),
         })
@@ -9622,6 +9632,7 @@ async fn rr10_rows_left_out_counts_only_the_workspaces_own_rows() -> TestResult 
                 artifact: Some(artifact.id),
                 restore: None,
                 backup: None,
+                clean_up: None,
                 outputs: vec![archive.digest.clone()],
                 warnings: Vec::new(),
             })
