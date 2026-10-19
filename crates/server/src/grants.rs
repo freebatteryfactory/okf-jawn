@@ -17,6 +17,12 @@
 //! - An entry is stamped with the instant its lookup began, not the instant the answer arrived,
 //!   and an answer never replaces one whose lookup began later: a slow source cannot stretch
 //!   the 60 seconds, and a late, older answer cannot overwrite a newer one.
+//! - Each of the two maps (workspace grants, tenant grants) holds at most
+//!   [`GRANT_CACHE_MAX_ENTRIES`] entries, so a flood of distinct lookups cannot grow it without
+//!   end (server M1 review, N-g): an insert drops the stale entries first, and when the map is
+//!   still full it evicts the entry whose lookup began first. An entry refreshed in place takes no
+//!   place of another. An empty grant is cached like any other: that keeps a flood of one unknown
+//!   workspace id at one lookup a minute.
 //!
 //! The caller is keyed by tenant, subject, route and client: a connector and its owner, or two
 //! clients of one subject, never share an entry. Time comes from a [`Clock`], so the bound is
@@ -52,6 +58,8 @@ pub struct CachedAccess {
     clock: Arc<dyn Clock>,
     workspaces: Mutex<BTreeMap<(CallerKey, WorkspaceId), Fetched<WorkspaceGrant>>>,
     tenants: Mutex<BTreeMap<CallerKey, Fetched<TenantGrant>>>,
+    /// The most entries each map holds.
+    capacity: usize,
 }
 
 /// Who a cached grant belongs to: tenant, subject, route and client.
@@ -67,6 +75,9 @@ struct Fetched<T> {
 /// How long a cached `Read`, `Write` or `Propose` grant answers; stale at exactly this age.
 pub const GRANT_CACHE_TTL: Duration = Duration::from_secs(60);
 
+/// The most entries each of the cache's two maps holds (workspace grants, tenant grants).
+pub const GRANT_CACHE_MAX_ENTRIES: usize = 10_000;
+
 impl Clock for SystemClock {
     fn now(&self) -> Instant {
         Instant::now()
@@ -77,11 +88,22 @@ impl CachedAccess {
     /// A cache over the hosted raw adapter `source`, reading time from `clock`.
     #[must_use]
     pub fn new(source: Arc<dyn AccessControl>, clock: Arc<dyn Clock>) -> Self {
+        Self::with_capacity(source, clock, GRANT_CACHE_MAX_ENTRIES)
+    }
+
+    /// [`Self::new`], holding at most `capacity` entries in each map.
+    #[must_use]
+    pub fn with_capacity(
+        source: Arc<dyn AccessControl>,
+        clock: Arc<dyn Clock>,
+        capacity: usize,
+    ) -> Self {
         Self {
             source,
             clock,
             workspaces: Mutex::new(BTreeMap::new()),
             tenants: Mutex::new(BTreeMap::new()),
+            capacity: capacity.max(1),
         }
     }
 
@@ -117,6 +139,9 @@ impl CachedAccess {
         let mut entries = lock(&self.workspaces)?;
         entries.retain(|_, fetched| fresh(fetched.at, now));
         if entries.get(&key).is_none_or(|held| held.at <= began) {
+            if !entries.contains_key(&key) && entries.len() >= self.capacity {
+                evict_oldest(&mut entries);
+            }
             entries.insert(
                 key,
                 Fetched {
@@ -157,6 +182,9 @@ impl CachedAccess {
         let mut entries = lock(&self.tenants)?;
         entries.retain(|_, fetched| fresh(fetched.at, now));
         if entries.get(&key).is_none_or(|held| held.at <= began) {
+            if !entries.contains_key(&key) && entries.len() >= self.capacity {
+                evict_oldest(&mut entries);
+            }
             entries.insert(
                 key,
                 Fetched {
@@ -241,6 +269,17 @@ pub fn select_access(
     match kind {
         AuthKind::Hosted => Arc::new(CachedAccess::new(raw, clock)),
         AuthKind::Local => raw,
+    }
+}
+
+/// Remove the entry whose lookup began first, to make room for another.
+fn evict_oldest<K: Ord + Clone, T>(entries: &mut BTreeMap<K, Fetched<T>>) {
+    let oldest = entries
+        .iter()
+        .min_by_key(|(_, fetched)| fetched.at)
+        .map(|(key, _)| key.clone());
+    if let Some(oldest) = oldest {
+        let _evicted = entries.remove(&oldest);
     }
 }
 
