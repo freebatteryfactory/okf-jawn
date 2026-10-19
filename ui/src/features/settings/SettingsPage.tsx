@@ -64,8 +64,8 @@ export function SettingsPage() {
         These settings are kept in this browser, not in the workspace: they apply to every workspace
         you open in this browser, and to no other browser.
       </p>
-      <section aria-labelledby={webmcpHeading} className="setting">
-        <h3 id={webmcpHeading}>Page tools for an assistant (WebMCP)</h3>
+      <section aria-labelledby={webmcpHeading} className="workspace-page">
+        <h3 id={webmcpHeading} className="panel-heading">Page tools for an assistant (WebMCP)</h3>
         <p>
           <label>
             <input
@@ -80,7 +80,7 @@ export function SettingsPage() {
           Off unless you turn it on. While it is on and a workspace is open here, an assistant that
           this browser connects to the page through WebMCP can use five tools:
         </p>
-        <ul className="setting-tools">
+        <ul className="link-list">
           {TOOLS.map(([name, words]) => (
             <li key={name}>
               <code>{name}</code>: {words}
