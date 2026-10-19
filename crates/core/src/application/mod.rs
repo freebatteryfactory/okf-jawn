@@ -12,6 +12,8 @@
 //! `status` (health, readiness and the session), `purges` (recording, resuming and reading
 //! a workspace purge), `workspaces` (the catalog, archive, export, backup and restore),
 //! `events` (receipts and the two event logs), `connectors` (local connector credentials),
+//! `views` (persistent Views: reading, presenting, resolving and exporting them, and the check
+//! every saved-View write runs first),
 //! `uploads` (upload slots) and `job_control` (reading jobs, retrying and cancelling them),
 //! over the shared steps in `shared` (revision resolution, commits, receipts). Besides the
 //! operations, the service answers dispatch's archive question (`Application::archived_at`)
@@ -106,6 +108,21 @@ macro_rules! route {
     };
     (get_object) => {
         sources::get_object
+    };
+    (get_view) => {
+        views::get_view
+    };
+    (get_catalog) => {
+        views::get_catalog
+    };
+    (present_view) => {
+        views::present_view
+    };
+    (resolve_view) => {
+        views::resolve_view
+    };
+    (export_view) => {
+        views::export_view
     };
     (log_items) => {
         history::log_items
@@ -575,4 +592,5 @@ mod shared;
 mod sources;
 mod status;
 mod uploads;
+mod views;
 mod workspaces;

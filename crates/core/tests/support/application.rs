@@ -6,7 +6,9 @@
 //! staged directory, keeping the warnings that check gave so a replay (by `commit` or by
 //! `find_commit`) answers them, or the one `replay_warnings_unavailable` warning once a test
 //! made it forget them (`forget_warnings`); the draft store keeps one draft per (item, editor); the record store
-//! answers revision maps and derived objects for exactly the (item, revision, digest) recorded.
+//! answers revision maps and derived objects for exactly the (item, revision, digest) recorded, and records
+//! one once on that triple; the blob store retains what `put` hashes, refusing an expected digest
+//! that differs and bytes past the limit, as the port documents.
 //! Content is scripted by the test (`put_document`, `put_listing`). Three edits are applied, in
 //! order, to the items the commit's base holds, so what `show` reads at the revision a commit
 //! produced follows them (`VersionState::applied`): an `EditItem` (the edit's body and
@@ -130,6 +132,8 @@ use okf_jawn_core::storage::{
 };
 use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadRecord, UploadStore};
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
+use tokio::io::AsyncReadExt as _;
 use uuid::Uuid;
 
 /// Result of a fixture builder.
@@ -217,6 +221,7 @@ struct VersionState {
 pub struct FakeBlobs {
     objects: Mutex<BTreeMap<Digest, Vec<u8>>>,
     opens: Mutex<Vec<(Digest, u64, u64)>>,
+    puts: Mutex<Vec<Digest>>,
 }
 
 /// `RecordStore` answering revision maps and derived objects, and keeping receipts unique on
@@ -1021,6 +1026,22 @@ impl FakeBlobs {
     pub fn opens(&self) -> Built<Vec<(Digest, u64, u64)>> {
         Ok(lock(&self.opens)?.clone())
     }
+
+    /// The bytes retained under `digest`, put by a test or by `put`.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn bytes(&self, digest: &Digest) -> Built<Option<Vec<u8>>> {
+        Ok(lock(&self.objects)?.get(digest).cloned())
+    }
+
+    /// The digest of every `put` that retained its bytes, in order.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn puts(&self) -> Built<Vec<Digest>> {
+        Ok(lock(&self.puts)?.clone())
+    }
 }
 
 impl FakeRecords {
@@ -1040,6 +1061,14 @@ impl FakeRecords {
     pub fn put_derived(&self, object: DerivedObject) -> Built<()> {
         lock(&self.derived)?.push(object);
         Ok(())
+    }
+
+    /// Every derived object held, scripted or recorded, in order.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn derived(&self) -> Built<Vec<DerivedObject>> {
+        Ok(lock(&self.derived)?.clone())
     }
 
     /// Every receipt inserted, with the mutation it was inserted under.
@@ -1627,14 +1656,39 @@ impl VersionStore for FakeVersions {
 }
 
 impl BlobStore for FakeBlobs {
+    /// "Store and hash a bounded stream. Fails with `TooLarge` past `limit`, and with `Conflict`
+    /// when `expected` is given and differs from the computed digest; in both cases nothing is
+    /// retained. Storing bytes that are already retained writes nothing and returns the
+    /// existing identity."
     fn put<'a>(
         &'a self,
         _scope: &'a StorageScope,
-        _body: ByteReader,
-        _limit: u64,
-        _expected: Option<Digest>,
+        body: ByteReader,
+        limit: u64,
+        expected: Option<Digest>,
     ) -> PortFuture<'a, ObjectInfo> {
-        unused()
+        Box::pin(async move {
+            let mut bytes = Vec::new();
+            body.take(limit.saturating_add(1))
+                .read_to_end(&mut bytes)
+                .await
+                .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+            let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if size > limit {
+                return Err(ApiError::new(ErrorCode::TooLarge, "past the limit"));
+            }
+            let hash = Sha256::digest(&bytes);
+            let digest = Digest::try_from(format!("{hash:x}"))
+                .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+            if expected.as_ref().is_some_and(|wanted| *wanted != digest) {
+                return Err(ApiError::new(ErrorCode::Conflict, "another digest"));
+            }
+            lock_api(&self.puts)?.push(digest.clone());
+            lock_api(&self.objects)?
+                .entry(digest.clone())
+                .or_insert(bytes);
+            Ok(ObjectInfo { digest, size })
+        })
     }
     fn open<'a>(
         &'a self,
@@ -1776,12 +1830,25 @@ impl RecordStore for FakeRecords {
     ) -> PortFuture<'a, Option<RevisionMapping>> {
         Box::pin(async move { Ok(lock_api(&self.mappings)?.get(revision).cloned()) })
     }
+    /// "Unique on (item, revision, digest): a repeated record inserts nothing and returns the
+    /// prior one."
     fn record_derived_object<'a>(
         &'a self,
         _scope: &'a StorageScope,
-        _object: DerivedObject,
+        object: DerivedObject,
     ) -> PortFuture<'a, DerivedObject> {
-        unused()
+        Box::pin(async move {
+            let mut derived = lock_api(&self.derived)?;
+            if let Some(prior) = derived.iter().find(|held| {
+                held.item_id == object.item_id
+                    && held.revision == object.revision
+                    && held.digest == object.digest
+            }) {
+                return Ok(prior.clone());
+            }
+            derived.push(object.clone());
+            Ok(object)
+        })
     }
     fn derived_object<'a>(
         &'a self,
