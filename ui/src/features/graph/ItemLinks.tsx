@@ -5,10 +5,9 @@
  *
  * A link the item makes is its text and the path it names; it opens the item it leads to, pinned
  * to the revision the links were read at. One that leads nowhere (no item is at that path) says
- * so and offers nothing to follow. A backlink is named by its own text and the line it is on in
- * the item that makes it, and opens that item at that line: the operation answers the linking
- * item's identity, not its title, so its title is not shown here, and nothing more is asked for
- * it (a request is in the report: `Link` naming the linking item's path).
+ * so and offers nothing to follow. A backlink shows its own text, the linking item's path and
+ * the line it is on, and opens that item at that line. Both paths come from the answered
+ * revision; no extra item lookup is needed to identify the source.
  *
  * Links come `LINKS_PAGE` at a time; "Show more links" asks for the next page from the cursor,
  * and the service keeps it at the revision the first page resolved. A list that fails with
@@ -206,9 +205,11 @@ function Incoming({
           sel: { kind: 'lines', range: { start: link.line, end: link.line } },
         }}
       >
-        {link.label || link.to_path}
+        {link.label || link.from_path}
       </RouterLink>{' '}
-      <span className="meta">(in another item, line {link.line})</span>
+      <span className="meta">
+        ({link.from_path}, line {link.line})
+      </span>
     </li>
   );
 }
