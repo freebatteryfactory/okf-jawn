@@ -134,6 +134,18 @@ impl World {
     /// Dispatch `operation` as the installation owner in a browser session.
     async fn call(&self, operation: &str, input: Value) -> Result<Value, ApiError> {
         let principal = owner().map_err(internal)?;
+        self.call_as(&principal, Some("session"), operation, input)
+            .await
+    }
+
+    /// Dispatch with the actual human or delegated identity and its session, if any.
+    async fn call_as(
+        &self,
+        principal: &Principal,
+        session_id: Option<&str>,
+        operation: &str,
+        input: Value,
+    ) -> Result<Value, ApiError> {
         let mutations = self.storage.mutations();
         let events = self.storage.events();
         let ports = DispatchPorts {
@@ -142,8 +154,8 @@ impl World {
             events: &events,
         };
         let caller = Caller {
-            principal: &principal,
-            session_id: Some("session"),
+            principal,
+            session_id,
         };
         dispatch(&self.service, &ports, &caller, operation, input).await
     }
@@ -1190,6 +1202,51 @@ async fn imports_adopting_supplied_text_keeps_agent_origin_human_keeper_and_hist
     Ok(())
 }
 
+/// Open a delegated supply and have Ana confirm and accept its exact candidate through dispatch.
+async fn accept_supply(
+    world: &World,
+    scope: &StorageScope,
+    item: ItemId,
+    base: &Revision,
+    number: u32,
+    supplied: (&str, &str, &str),
+) -> Fallible<(ProposalId, Revision)> {
+    let (subject, client, text) = supplied;
+    let agent = Principal {
+        subject: subject.to_owned(),
+        tenant_id: tenant()?,
+        route: AccessRoute::McpDelegation,
+        client_id: Some(client.to_owned()),
+        delegation: None,
+    };
+    let proposal: okf_jawn_contract::proposal::Proposal = serde_json::from_value(
+        world.call_as(&agent, None, "open_proposal", json!({
+            "workspace_id": scope.workspace_id, "base_revision": base,
+            "title": "Supply this unprocessed source", "description": "Distinct accepted agent text",
+            "changes": [{ "kind": "supply_extraction", "item_id": item, "markdown": text }],
+            "idempotency_key": key(number)
+        })).await?,
+    )?;
+    let confirmation = world
+        .call(
+            "create_confirmation",
+            json!({
+                "workspace_id": scope.workspace_id, "action": "accept_proposal",
+                "target": { "kind": "proposal", "proposal_id": proposal.id },
+                "revision": proposal.proposal_revision, "content_digest": proposal.content_digest,
+                "idempotency_key": key(number + 1)
+            }),
+        )
+        .await?;
+    let accepted: MutationResult = serde_json::from_value(world.call("accept_proposal", json!({
+        "workspace_id": scope.workspace_id, "proposal_id": proposal.id, "expected_head": base,
+        "proposal_revision": proposal.proposal_revision,
+        "confirmation_id": some(confirmation.get("id"), "the human confirmation")?,
+        "idempotency_key": key(number + 2)
+    })).await?)?;
+    Ok((proposal.id, accepted.revision))
+}
+
 /// Design section 5 rule 4 selects the accepted proposal named by `adopts`, not the latest
 /// supplied-text companion file. Accepting another supply does not change an unsupported
 /// converter outcome, so both proposals below are admitted by the real proposal handlers.
@@ -1227,45 +1284,9 @@ async fn imports_adopting_an_earlier_supply_keeps_that_proposals_provenance() ->
             "Later agent passage.",
         ),
     ] {
-        let agent = Principal {
-            subject: subject.to_owned(),
-            tenant_id: tenant()?,
-            route: AccessRoute::McpDelegation,
-            client_id: Some(client.to_owned()),
-            delegation: None,
-        };
-        let proposal: okf_jawn_contract::proposal::Proposal = {
-            let mutations = world.storage.mutations();
-            let events = world.storage.events();
-            let ports = DispatchPorts {
-                access: &OpenAccess,
-                mutations: &mutations,
-                events: &events,
-            };
-            let caller = Caller {
-                principal: &agent,
-                session_id: None,
-            };
-            serde_json::from_value(dispatch(&world.service, &ports, &caller, "open_proposal", json!({
-                "workspace_id": scope.workspace_id, "base_revision": head,
-                "title": "Supply this unprocessed source", "description": "Distinct accepted agent text",
-                "changes": [{ "kind": "supply_extraction", "item_id": item, "markdown": text }],
-                "idempotency_key": key(number)
-            })).await?)?
-        };
-        let confirmation = world.call("create_confirmation", json!({
-            "workspace_id": scope.workspace_id, "action": "accept_proposal",
-            "target": { "kind": "proposal", "proposal_id": proposal.id },
-            "revision": proposal.proposal_revision, "content_digest": proposal.content_digest,
-            "idempotency_key": key(number + 1)
-        })).await?;
-        let accepted: MutationResult = serde_json::from_value(world.call("accept_proposal", json!({
-            "workspace_id": scope.workspace_id, "proposal_id": proposal.id, "expected_head": head,
-            "proposal_revision": proposal.proposal_revision,
-            "confirmation_id": some(confirmation.get("id"), "the human confirmation")?,
-            "idempotency_key": key(number + 2)
-        })).await?)?;
-        head = accepted.revision;
+        let (proposal, accepted) =
+            accept_supply(&world, &scope, item, &head, number, (subject, client, text)).await?;
+        head = accepted;
         let shown = world.storage.versions().show(&scope, &head, item).await?;
         assert_eq!(shown.body, body);
         let extraction = &some(shown.source.as_ref(), "the accepted supply")?.extraction;
@@ -1277,10 +1298,10 @@ async fn imports_adopting_an_earlier_supply_keeps_that_proposals_provenance() ->
             extraction.supplied.as_ref(),
             "the accepted supplier metadata",
         )?;
-        assert_eq!(supplied.proposal_id, proposal.id);
+        assert_eq!(supplied.proposal_id, proposal);
         assert_eq!(supplied.supplied_by, subject);
         assert_eq!(supplied.client_id.as_deref(), Some(client));
-        accepted_supplies.push((proposal.id, head.clone(), supplied.clone()));
+        accepted_supplies.push((proposal, head.clone(), supplied.clone()));
     }
     let (earlier_proposal, earlier_revision, earlier_supplier) =
         some(accepted_supplies.first(), "the earlier accepted supply")?;
@@ -1404,6 +1425,190 @@ async fn imports_adopting_an_earlier_supply_keeps_that_proposals_provenance() ->
         )?;
         assert_eq!(supplied.proposal_id, *proposal);
         assert_eq!(supplied.supplied_by, subject);
+        assert_eq!(supplied.kept_by, None);
+    }
+    Ok(())
+}
+
+/// SuppliedText's original acceptance (design section 5) is not a later Rewind's committer.
+/// Rewind restores the source's companions; a subsequent explicit adoption must still name
+/// Ana's original approval, while the person keeping it for the new digest is recorded separately.
+#[tokio::test]
+async fn imports_rewinding_a_supply_preserves_its_original_approval_when_adopted() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let world = World::new(directory.path())?;
+    let (scope, initial) = world.workspace().await?;
+    complete(&world, &scope, 2, "scan.pdf").await?;
+    let item = ItemId(Uuid::from_u128(122));
+    let mut unsupported = card(
+        item,
+        "sources/rewound-supply.md",
+        'd',
+        json!({ "outcome": { "status": "unsupported" }, "text_origin": "none",
+            "corrected": false, "warnings": [] }),
+        "",
+    )?;
+    unsupported.appearance.object = sha256(BYTES)?;
+    let base = write_card(&world, &scope, &initial, 1, unsupported).await?;
+    let (first_proposal, first_at) = accept_supply(
+        &world,
+        &scope,
+        item,
+        &base,
+        10,
+        ("agent-a", "client-a", "First accepted passage.\n"),
+    )
+    .await?;
+    let versions = world.storage.versions();
+    let first = versions.show(&scope, &first_at, item).await?;
+    let original = some(
+        some(first.source.as_ref(), "the original supplied appearance")?
+            .extraction
+            .supplied
+            .as_ref(),
+        "the original supplier and approval",
+    )?
+    .clone();
+    assert_eq!(original.approved_by, "ana");
+    let (second_proposal, second_at) = accept_supply(
+        &world,
+        &scope,
+        item,
+        &first_at,
+        20,
+        ("agent-b", "client-b", "Second accepted passage.\n"),
+    )
+    .await?;
+    assert_ne!(first_proposal, second_proposal);
+    let rewinder = Principal {
+        subject: "rui".to_owned(),
+        route: AccessRoute::BrowserSession,
+        ..owner()?
+    };
+    let rewound: MutationResult = serde_json::from_value(
+        world
+            .call_as(
+                &rewinder,
+                Some("rewind-session"),
+                "restore_items",
+                json!({
+                    "workspace_id": scope.workspace_id, "base_revision": second_at,
+                    "target": first_at, "item_id": item,
+                    "message": "Rui restores the first accepted supply", "idempotency_key": key(30)
+                }),
+            )
+            .await?,
+    )?;
+    assert_ne!(rewound.revision, first_at);
+    assert_eq!(
+        versions.show(&scope, &rewound.revision, item).await?.body,
+        "First accepted passage."
+    );
+    let queued: Job = serde_json::from_value(
+        world
+            .call(
+                "redigest_item",
+                json!({
+                    "workspace_id": scope.workspace_id, "item_id": item,
+                    "base_revision": rewound.revision, "settings": ConversionSettings::default(),
+                    "unconverted_only": false, "idempotency_key": key(31)
+                }),
+            )
+            .await?,
+    )?;
+    let converted = world
+        .run_job(&scope, queued.id, "New converter passage.\n")
+        .await?;
+    let converted_at = some(converted.revision.as_ref(), "the new converter revision")?;
+    let converted_document = versions.show(&scope, converted_at, item).await?;
+    assert_eq!(converted_document.body, "New converter passage.");
+    let converted_extraction = &some(
+        converted_document.source.as_ref(),
+        "the new converter appearance",
+    )?
+    .extraction;
+    let digest = some(converted_extraction.digest.as_ref(), "the new digest")?;
+    let keeper = Principal {
+        subject: "bea".to_owned(),
+        route: AccessRoute::BrowserSession,
+        ..owner()?
+    };
+    let kept: MutationResult = serde_json::from_value(
+        world
+            .call_as(
+                &keeper,
+                Some("rewound-supply-keeper"),
+                "correct_digest",
+                json!({
+                    "workspace_id": scope.workspace_id, "item_id": item,
+                    "base_revision": converted_at, "digest": digest, "adopts": first_proposal,
+                    "corrected_markdown": "First accepted passage.\n", "idempotency_key": key(32)
+                }),
+            )
+            .await?,
+    )?;
+    let shown = versions.show(&scope, &kept.revision, item).await?;
+    assert_eq!(shown.body, "First accepted passage.");
+    let extraction = &some(shown.source.as_ref(), "the adopted appearance")?.extraction;
+    assert_eq!(
+        serde_json::to_value(&extraction.text_origin)?,
+        json!("supplied_by_agent")
+    );
+    assert!(!extraction.corrected);
+    assert_eq!(extraction.outcome, converted_extraction.outcome);
+    assert_eq!(extraction.digest.as_ref(), Some(digest));
+    let supplied = some(
+        extraction.supplied.as_ref(),
+        "the adopted supplier metadata",
+    )?;
+    assert_eq!(supplied.proposal_id, first_proposal);
+    assert_eq!(supplied.supplied_by, "agent-a");
+    assert_eq!(supplied.client_id.as_deref(), Some("client-a"));
+    assert_eq!(supplied.approved_by, "ana");
+    assert_eq!(supplied.approved_at, original.approved_at);
+    assert_eq!(supplied.kept_by.as_deref(), Some("bea"));
+    assert_eq!(
+        supplied.content_digest,
+        sha256(b"First accepted passage.\n")?
+    );
+    for (revision, proposal, subject, body) in [
+        (
+            &first_at,
+            first_proposal,
+            "agent-a",
+            "First accepted passage.",
+        ),
+        (
+            &second_at,
+            second_proposal,
+            "agent-b",
+            "Second accepted passage.",
+        ),
+        (
+            &rewound.revision,
+            first_proposal,
+            "agent-a",
+            "First accepted passage.",
+        ),
+    ] {
+        let historical = versions.show(&scope, revision, item).await?;
+        assert_eq!(historical.body, body);
+        let supplied = some(
+            some(
+                historical.source.as_ref(),
+                "the historical supplied appearance",
+            )?
+            .extraction
+            .supplied
+            .as_ref(),
+            "the historical approval metadata",
+        )?;
+        assert_eq!(supplied.proposal_id, proposal);
+        assert_eq!(supplied.supplied_by, subject);
+        assert_eq!(supplied.approved_by, "ana");
+        if proposal == first_proposal {
+            assert_eq!(supplied.approved_at, original.approved_at);
+        }
         assert_eq!(supplied.kept_by, None);
     }
     Ok(())
