@@ -630,6 +630,63 @@ async fn accepting_checks_a_proposed_view_again_before_the_confirmation_is_used(
     Ok(())
 }
 
+/// E6 revalidates content, while the port error vocabulary preserves storage failures as such.
+/// A one-shot read failure must neither consume confirmation nor force proposal reconciliation;
+/// retrying the same acceptance after storage recovers can use that confirmation successfully.
+async fn proposed_view_read_failure_keeps_its_code(code: ErrorCode) -> TestResult {
+    let world = view_proposal_world()?;
+    let proposal = open(&world, OPENED, vec![view_create(plan_view_body('b')?)?]).await?;
+    let confirmation = confirm(&world, &proposal, 600).await?;
+    // For this create-View proposal, acceptance's next show is the binding's cited note at b.
+    world.world.versions.fail_next_show(code.clone())?;
+    let refused = err_of(
+        world
+            .service
+            .accept_proposal(
+                &accepting(ACCEPTING)?,
+                accept_request(&proposal, &confirmation, 'a')?,
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, code);
+    assert_eq!(refused.field.as_deref(), Some("/changes/0/body"));
+    assert_eq!(refused.message, "/bindings/0/source: the store failed");
+    assert_eq!(
+        some(world.confirmations.issued()?.first(), "the confirmation")?.2,
+        None
+    );
+    assert!(world.versions.promotions()?.is_empty());
+    assert_eq!(status(&world, proposal.id)?, ProposalStatus::Open);
+
+    let accepted = world
+        .service
+        .accept_proposal(
+            &resumed(accepting(ACCEPTING)?),
+            accept_request(&proposal, &confirmation, 'a')?,
+        )
+        .await?;
+    assert_eq!(accepted.revision, revision('d')?);
+    assert_eq!(world.versions.promotions()?.len(), 1);
+    assert_eq!(status(&world, proposal.id)?, ProposalStatus::Accepted);
+    let issued = world.confirmations.issued()?;
+    assert_eq!(issued.len(), 1);
+    assert_eq!(
+        some(issued.first(), "the same confirmation")?.2,
+        Some(mutation(ACCEPTING))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn accepting_a_proposed_view_preserves_an_unavailable_citation_read() -> TestResult {
+    proposed_view_read_failure_keeps_its_code(ErrorCode::Unavailable).await
+}
+
+#[tokio::test]
+async fn accepting_a_proposed_view_preserves_an_internal_citation_read() -> TestResult {
+    proposed_view_read_failure_keeps_its_code(ErrorCode::Internal).await
+}
+
 #[tokio::test]
 async fn a_resumed_acceptance_whose_promotion_landed_is_not_refused_by_the_view_check() -> TestResult
 {

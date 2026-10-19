@@ -112,6 +112,10 @@ describe('the CSRF header', () => {
     renderAt(`/w/${WS}/i/${NOTE}`);
     await screen.findByText('Text of Meeting notes');
     await screen.findByRole('heading', { name: 'Sources' });
+    // Beside the item, its reviews and links are read, and the workspace's event stream is opened
+    // to keep the reviews current (UI M3).
+    const stream = `/api/workspaces/${WS}/events`;
+    await waitFor(() => expect(api.calls.some((call) => call.path === stream)).toBe(true));
     const paths = new Set(api.calls.map((call) => call.path));
     expect([...paths].sort()).toEqual([
       '/api/attention/get-attention',
@@ -120,9 +124,19 @@ describe('the CSRF header', () => {
       '/api/items/list-items',
       '/api/reads/get-sources',
       '/api/reads/read-item',
+      '/api/reviews/list-reviews',
+      '/api/search/get-links',
+      stream,
       OPEN,
     ]);
-    expect(api.calls.filter((call) => call.headers[CSRF_HEADER] !== TOKEN)).toEqual([]);
+    // Every operation carries it. The event stream is a GET, which the server accepts without it,
+    // so it carries none ("is not sent on a GET" below).
+    expect(
+      api.calls.filter((call) => call.path !== stream && call.headers[CSRF_HEADER] !== TOKEN),
+    ).toEqual([]);
+    expect(api.calls.filter((call) => call.path === stream && CSRF_HEADER in call.headers)).toEqual(
+      [],
+    );
     expect(api.violations).toEqual([]);
   });
 

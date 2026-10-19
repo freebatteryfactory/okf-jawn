@@ -168,39 +168,38 @@ describe('who may edit, and where', () => {
     expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`);
   });
 
-  // A Source's text is changed through corrections and a View has its own editor.
-  it.each([
-    ['a Source', 'source', 'Annual report'],
-    ['a View', 'view', 'Quarterly'],
-  ] as const)('offers no editing for %s, even one that has a draft', async (_what, kind, title) => {
-    const item = summary(SOURCE, 'things/it.md', title, 'thing', kind);
-    const api = writable({
-      [ITEM]: () =>
-        ok({
-          ...itemDocument(item),
-          draft: {
-            body: 'a draft made elsewhere',
-            properties: { type: 'thing', okf_jawn: { id: SOURCE } },
-            draft: draftOf(SOURCE, HEAD, LATER),
-          },
-        }),
-      '/api/reads/read-item': () => ok(readResponse(item, `# ${title}\n\nCommitted text`)),
-    });
-    renderAt(`/w/${WS}/i/${SOURCE}`);
-    await screen.findByText('Committed text');
-    await screen.findByRole('tab', { name: `${title} (draft)` });
-    expect(screen.queryByRole('button', { name: /Edit/ })).toBeNull();
-    expect(screen.queryByRole('textbox', { name: `Text of ${title}` })).toBeNull();
-    expect(screen.queryByText(/Editing starts from/)).toBeNull();
-    expect(api.callsTo(SAVE)).toHaveLength(0);
-  });
+  // A View has its own editor. (A Source is offered its properties alone, with its text kept as
+  // committed: UI M3, `source-draft.test.tsx`.)
+  it.each([['a View', 'view', 'Quarterly']] as const)(
+    'offers no editing for %s, even one that has a draft',
+    async (_what, kind, title) => {
+      const item = summary(SOURCE, 'things/it.md', title, 'thing', kind);
+      const api = writable({
+        [ITEM]: () =>
+          ok({
+            ...itemDocument(item),
+            draft: {
+              body: 'a draft made elsewhere',
+              properties: { type: 'thing', okf_jawn: { id: SOURCE } },
+              draft: draftOf(SOURCE, HEAD, LATER),
+            },
+          }),
+        '/api/reads/read-item': () => ok(readResponse(item, `# ${title}\n\nCommitted text`)),
+      });
+      renderAt(`/w/${WS}/i/${SOURCE}`);
+      await screen.findByText('Committed text');
+      await screen.findByRole('tab', { name: `${title} (draft)` });
+      expect(screen.queryByRole('button', { name: /Edit/ })).toBeNull();
+      expect(screen.queryByRole('textbox', { name: `Text of ${title}` })).toBeNull();
+      expect(screen.queryByText(/Editing starts from/)).toBeNull();
+      expect(api.callsTo(SAVE)).toHaveLength(0);
+    },
+  );
 
-  // The line that leads to editing is for Notes too: a pane of a Source or a View that reads
-  // another revision is not offered a way to an editor it does not have.
-  it.each([
-    ['a Source', 'source', 'Annual report'],
-    ['a View', 'view', 'Quarterly'],
-  ] as const)(
+  // The line that leads to editing is for what can be edited: a pane of a View that reads another
+  // revision is not offered a way to an editor it does not have. (A Source's properties are
+  // edited from the version shown: UI M3, `source-draft.test.tsx`.)
+  it.each([['a View', 'view', 'Quarterly']] as const)(
     'says nothing of editing for %s that is read at another revision',
     async (_what, kind, title) => {
       const item = summary(SOURCE, 'things/it.md', title, 'thing', kind);
@@ -211,7 +210,7 @@ describe('who may edit, and where', () => {
       renderAt(`/w/${WS}/i/${SOURCE}?rev=${OLD}`);
       await screen.findByText('Committed text');
       // `get_item` has answered: the header says what kind of item this is.
-      await screen.findByText(new RegExp(`${kind === 'source' ? 'Source' : 'View'} · type`));
+      await screen.findByText(/View · type/);
       expect(screen.queryByText(/Editing starts from/)).toBeNull();
       expect(
         screen.queryByRole('button', { name: 'Open the version this workspace shows' }),
@@ -318,7 +317,9 @@ describe('who may edit, and where', () => {
       expect(within(drafts).getByRole('button', { name: 'Snapshot 0 drafts' })).toBeDefined();
     });
 
-    it('stops offering "Edit" once a read says it is a Source, and focus on the switch goes to the page’s heading', async () => {
+    // UI M3: a Source's properties are edited in a draft whose text stays as committed, so a read
+    // that says the item is a Source keeps the switch, as "Edit properties".
+    it('offers only the properties once a read says it is a Source: the switch stays, with focus', async () => {
       const { held } = becomesSource();
       renderAt(`/w/${WS}/i/${NOTE}`);
       const edit = await screen.findByRole('button', { name: 'Edit' });
@@ -328,14 +329,10 @@ describe('who may edit, and where', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
       await screen.findByText(`Refreshed: now showing revision ${NEWER.slice(0, 10)}.`);
       await screen.findByText(/Source · type/);
-      expect(screen.queryByRole('button', { name: /Edit/ })).toBeNull();
-      expect(edit.isConnected).toBe(false);
-      // The page's heading, by its name: once the item's text is read at the new revision the
-      // reader shows the document's own level-one heading as well.
-      expect(document.activeElement).toBe(
-        screen.getByRole('heading', { level: 1, name: 'Workshop notes' }),
-      );
-      expect(document.activeElement).not.toBe(document.body);
+      expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
+      expect(edit.isConnected).toBe(true);
+      expect(edit.textContent).toBe('Edit properties');
+      expect(document.activeElement).toBe(edit);
     });
 
     it('keeps the switch, with focus, while the item is read again', async () => {
@@ -452,12 +449,13 @@ describe('who may edit, and where', () => {
       expect(document.activeElement).toBe(show);
     }, 20_000);
 
+    // A View: nothing of it is drafted. (A Source would go on with its properties: UI M3.)
     it('ends a session in which nothing was typed instead of refusing it: nothing is kept, and "Edit" starts afresh once it is a Note again', async () => {
-      const { api, held } = becomesSource();
+      const { api, held } = becomesSource(asView);
       const { box } = await startEditing();
       act(() => box.focus());
       await refreshTo(held, NEWER);
-      await eventually(() => expect(screen.getByText(/Source · type/)).toBeDefined());
+      await eventually(() => expect(screen.getByText(/View · type/)).toBeDefined());
       expect(screen.queryByLabelText('Your text, read only')).toBeNull();
       expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull();
       expect(session()).toBeUndefined();
@@ -477,8 +475,9 @@ describe('who may edit, and where', () => {
       const answered = (body: Json): Reply => ok(draftOf(String(body.item_id), HEAD, LATER));
 
       it('asks as the editor asks, then asks the service, and the pane shows the item as it is now with focus on the page’s heading', async () => {
-        // The text was saved before the item was read as a Source: the service holds a draft.
-        const { api, held } = becomesSource(asSource, { [DISCARD]: answered });
+        // The text was saved before the item was read as a View: the service holds a draft. (A
+        // Source would offer its properties after the discard: UI M3.)
+        const { api, held } = becomesSource(asView, { [DISCARD]: answered });
         const { box } = await startEditing();
         typeInto(box, ' and more');
         await pass(AUTOSAVE_DELAY_MS);
