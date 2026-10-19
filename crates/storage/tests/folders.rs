@@ -1406,12 +1406,64 @@ async fn delete_folder_refuses_what_the_tree_does_not_allow_and_writes_nothing()
     Ok(())
 }
 
-/// F3 through the service: one commit, the items counted (the archived one too), a draft of a
-/// deleted item kept as `delete_item` keeps one, Rewind bringing each item back with its
-/// history, and a folder that does not exist `not_found` on `/folder`.
+/// A folder move includes raw files too: the literal new PDF path is 4335 UTF-8 bytes,
+/// beyond `WorkspacePath`'s 4096-byte bound, so the service must refuse before any commit.
 #[tokio::test]
-async fn delete_folder_through_the_service_and_rewind_brings_the_items_back() -> TestResult {
+async fn move_folder_refuses_an_overlong_non_item_path_without_changing_the_tree() -> TestResult {
     let service = Service::new().await?;
+    let space = &service.workspace;
+    let tail = format!("{}file.pdf", format!("{}/", "x".repeat(180)).repeat(20));
+    let source = format!("n/{tail}");
+    let destination = vec!["d".repeat(100); 7].join("/");
+    let target = format!("{destination}/{tail}");
+    assert_eq!(source.len(), 3630);
+    assert_eq!(destination.len(), 706);
+    assert_eq!(target.len(), 4335);
+    let _source_path = WorkspacePath::try_from(source.clone())?;
+    let _destination_path = WorkspacePath::try_from(destination.clone())?;
+    let payload = b"literal non-item PDF bytes";
+    let base = space.raw(60, &[(source.as_str(), payload)])?;
+    let files_before = space.files(&base)?;
+    let tree_before = space
+        .repository()?
+        .find_commit(git2::Oid::from_str(base.as_str())?)?
+        .tree_id();
+    assert_eq!(space.file(&base, &source)?, Some(payload.to_vec()));
+    let refused = err_of(
+        service
+            .call(
+                "move_folder",
+                json!({
+                    "workspace_id": space.scope.workspace_id, "base_revision": base,
+                    "folder": "n", "destination": destination, "idempotency_key": uuid_text(61),
+                }),
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::InvalidInput, "{refused:?}");
+    assert_eq!(
+        refused.field.as_deref(),
+        Some("/destination"),
+        "{refused:?}"
+    );
+    let head = space.storage.versions().head(&space.scope).await?;
+    assert_eq!(head, base);
+    assert_eq!(space.files(&head)?, files_before);
+    assert_eq!(space.file(&head, &source)?, Some(payload.to_vec()));
+    assert_eq!(
+        space
+            .repository()?
+            .find_commit(git2::Oid::from_str(head.as_str())?)?
+            .tree_id(),
+        tree_before
+    );
+    assert_eq!(space.file(&head, &target)?, None);
+    Ok(())
+}
+/// F3 setup: two items, one archived, with a saved draft ready for the delete/Rewind journey.
+async fn folder_to_delete_with_archived_item_and_draft(
+    service: &Service,
+) -> Fallible<(Revision, Revision)> {
     let space = &service.workspace;
     let created = space
         .commit(
@@ -1447,6 +1499,18 @@ async fn delete_folder_through_the_service_and_rewind_brings_the_items_back() ->
             }),
         )
         .await?;
+    Ok((created, base))
+}
+
+/// F3 through the service: one commit, the items counted (the archived one too), a draft of a
+/// deleted item kept as `delete_item` keeps one, Rewind bringing each item back with its
+/// history, and a folder that does not exist `not_found` on `/folder`.
+#[tokio::test]
+async fn delete_folder_through_the_service_and_rewind_brings_the_items_back() -> TestResult {
+    let service = Service::new().await?;
+    let space = &service.workspace;
+    let (created, base) = folder_to_delete_with_archived_item_and_draft(&service).await?;
+    let workspace = space.scope.workspace_id;
     let response = service
         .call(
             "delete_folder",

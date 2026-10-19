@@ -497,7 +497,8 @@ fn create_folder(staged: &Staged, folder: &WorkspacePath) -> Result<(), ApiError
 /// `InvalidInput` on `/destination`; a folder of the destination the tree spells another way
 /// (`Staged::refuse_respelled_folder`); and a destination taken (`Staged::occupied`, or, for a
 /// rename by letter case, any entry but the folder itself with the destination's key),
-/// `Conflict` on `/destination`.
+/// `Conflict` on `/destination`; and every file's final path as a `WorkspacePath`,
+/// `InvalidInput` on `/destination`, before either hop writes anything.
 fn move_folder(
     staged: &mut Staged,
     folder: &WorkspacePath,
@@ -551,6 +552,20 @@ fn move_folder(
             conflict(format!("{} is already taken", destination.as_str()))
                 .with_field("/destination"),
         );
+    }
+    let prefix = format!("{}/", folder.as_str());
+    for source in files_under(&staged.root, folder.as_str())? {
+        let suffix = source
+            .strip_prefix(&prefix)
+            .ok_or_else(|| internal(format!("{source} is not under {}", folder.as_str())))?;
+        let target = format!("{}/{suffix}", destination.as_str());
+        WorkspacePath::try_from(target.clone()).map_err(|error| {
+            ApiError::new(
+                ErrorCode::InvalidInput,
+                format!("Cannot move {source} to {target}: {error}"),
+            )
+            .with_field("/destination")
+        })?;
     }
     let others = other_files(staged, folder)?;
     if recase {
