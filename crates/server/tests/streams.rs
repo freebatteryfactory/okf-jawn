@@ -33,6 +33,7 @@ use okf_jawn_server::{BoundApplication, events, transfers};
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt as _;
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 use check::{TestResult, err_of, some};
@@ -90,6 +91,7 @@ struct Stream {
     base: LocalApp,
     scripted: Arc<Scripted>,
     app: Router,
+    stop: CancellationToken,
 }
 
 /// A wall clock a test sets, in milliseconds since the Unix epoch.
@@ -195,6 +197,7 @@ impl Stream {
             asked: Mutex::new(Vec::new()),
             allowed: Mutex::new(None),
         });
+        let stop = CancellationToken::new();
         let streams = EventStreams::new(
             BoundApplication {
                 application: scripted.clone(),
@@ -202,7 +205,8 @@ impl Stream {
             },
             identity.clone(),
             interval,
-        )?;
+        )?
+        .with_stop(stop.clone());
         let app = service(ServiceParts {
             bound: base.bound(),
             identity,
@@ -217,6 +221,7 @@ impl Stream {
             base,
             scripted,
             app,
+            stop,
         })
     }
 
@@ -861,6 +866,26 @@ async fn a_page_that_is_not_full_is_followed_by_a_wait() -> TestResult {
     // The second page is an hour away: nothing more arrives, and the operation ran once.
     let more = tokio::time::timeout(Duration::from_millis(300), frames.next()).await;
     assert!(more.is_err(), "an event arrived without the wait");
+    assert_eq!(stream.scripted.asked()?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn shutdown_ends_a_stream_waiting_for_its_next_poll() -> TestResult {
+    // Design section 1.6: shutdown ends an open stream without waiting for its poll interval.
+    let stream = Stream::new(NEVER, vec![json!({ "events": [] }), page(99, 1)])?;
+    let response = stream
+        .open(&[("authorization", &format!("Bearer {SECRET}"))])
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut frames = response.into_body().into_data_stream();
+    assert!(timeout(SHORT, frames.next()).await.is_err());
+    stream.stop.cancel();
+    assert!(
+        timeout(Duration::from_secs(1), frames.next())
+            .await?
+            .is_none()
+    );
     assert_eq!(stream.scripted.asked()?.len(), 1);
     Ok(())
 }
