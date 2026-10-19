@@ -406,3 +406,70 @@ describe('Attention rule freshness', { timeout: 30_000 }, () => {
     });
   }
 });
+
+describe('Attention continuation freshness', { timeout: 30_000 }, () => {
+  for (const automatic of [false, true]) {
+    it(`keeps current labels during a pending ${automatic ? 'automatic' : 'manual'} continuation and honours later invalidation`, async () => {
+      const continuation = Promise.withResolvers<Reply>();
+      const { api, events } = attentionService((body) =>
+        (body.page as { cursor?: string | null }).cursor === 'next'
+          ? continuation.promise
+          : ok({ revision: HEAD, items: [instructionWarning()], next_cursor: 'next' }),
+      );
+      // Isolate pagination from a genuine subscribe/reconnect invalidation. The first scan is
+      // current; inability to follow events is not itself a second scan or an idle scan clock.
+      events.state.refusal = fail(501, 'not_implemented', 'no event stream');
+      const view = attentionView({ link: automatic });
+      await screen.findAllByText('This text may contain instructions aimed at an AI assistant.');
+      if (!automatic) {
+        await waitFor(() => expect(view.client.isFetching()).toBe(0));
+        fireEvent.click(screen.getByRole('button', { name: 'Show more warnings' }));
+      }
+      await waitFor(() => expect(api.callsTo(ATTENTION)).toHaveLength(2));
+      await screen.findByRole('button', { name: /^Listing more warnings/ });
+      expect(
+        screen.getAllByText('This text may contain instructions aimed at an AI assistant.'),
+      ).toHaveLength(2);
+      // A continuation has not invalidated or rechecked the pages already read.
+      expect(view.client.getQueryCache().getAll().at(0)?.state.isInvalidated).toBe(false);
+      expect(screen.queryAllByText(/previous (findings|check)/i)).toHaveLength(0);
+
+      if (!automatic) {
+        // Explicit uncertainty wins even while another page is pending, without a new read.
+        await act(async () => {
+          await view.client.invalidateQueries({ refetchType: 'none' });
+        });
+        await waitFor(() =>
+          expect(screen.getAllByText(/Showing (the )?previous (findings|check)/i)).toHaveLength(2),
+        );
+        expect(api.callsTo(ATTENTION)).toHaveLength(2);
+      }
+
+      await act(async () => {
+        continuation.resolve(fail(500, 'internal', 'continuation unavailable'));
+        await continuation.promise;
+      });
+      await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(2));
+      expect(screen.getAllByText('continuation unavailable')).toHaveLength(2);
+      expect(
+        screen
+          .getAllByRole('alert')
+          .some((alert) => alert.textContent?.includes('Listing the warnings again')),
+      ).toBe(true);
+      expect(
+        screen
+          .getAllByRole('alert')
+          .some((alert) => alert.textContent?.includes('Checking this item')),
+      ).toBe(true);
+      expect(
+        screen.getAllByText('This text may contain instructions aimed at an AI assistant.'),
+      ).toHaveLength(2);
+      // Query 5.104 marks data invalidated on an error, including a continuation failure.
+      // The automatic case reaches this boundary without the explicit invalidation above.
+      expect(view.client.getQueryCache().getAll().at(0)?.state.isInvalidated).toBe(true);
+      expect(screen.getAllByText(/Showing (the )?previous (findings|check)/i)).toHaveLength(2);
+      expect(api.callsTo(ATTENTION)).toHaveLength(2);
+      expect(api.violations).toEqual([]);
+    });
+  }
+});
