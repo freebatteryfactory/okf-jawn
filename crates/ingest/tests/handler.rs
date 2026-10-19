@@ -3008,7 +3008,7 @@ mod job_handler {
         let error = some(entry.job.error.as_ref(), "the destination refusal")?;
         assert_eq!(error.code, ErrorCode::InvalidInput);
         assert_eq!(error.field.as_deref(), Some("/destination"));
-        assert!(world.uploads.consumed()?.is_empty());
+        assert_eq!(world.uploads.consumed()?, []);
         assert!(world.versions.written()?.is_empty());
         Ok(())
     }
