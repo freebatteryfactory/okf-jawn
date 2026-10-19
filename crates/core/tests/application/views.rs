@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use okf_jawn_contract::common::{PageRange, TextRange};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
-use okf_jawn_contract::extraction::{Extraction, TextOrigin};
+use okf_jawn_contract::extraction::{ConversionOutcome, Extraction, TextOrigin};
 use okf_jawn_contract::history::{CommitRequest, FileChange, FileChangeKind, RestoreRequest};
 use okf_jawn_contract::identity::{At, IdempotencyKey, ItemId, PurgeId, Revision};
 use okf_jawn_contract::import::JobKind;
@@ -19,7 +19,7 @@ use okf_jawn_contract::item::{
     CreateItemRequest, DraftContent, ItemDocument, ItemKind, SaveDraftRequest,
 };
 use okf_jawn_contract::metadata::OperationName;
-use okf_jawn_contract::read::Selection;
+use okf_jawn_contract::read::{AssetRole, Selection};
 use okf_jawn_contract::source::{
     DeclaredOutcome, GetObjectRequest, GetSourcesRequest, SourceLocation, SourceLocator,
 };
@@ -29,7 +29,9 @@ use okf_jawn_contract::views::{
     ViewDocument,
 };
 use okf_jawn_core::context::Attempt;
-use okf_jawn_core::conversion::{ConversionRecord, ConvertedCell, ConvertedTable};
+use okf_jawn_core::conversion::{
+    ConversionRecord, ConvertedCell, ConvertedTable, PixelSize, RetainedAsset,
+};
 use okf_jawn_core::jobs::{JobScope, JobSpec, RevisionMapping};
 use okf_jawn_core::portable::draft_digest;
 use okf_jawn_core::ports::Application;
@@ -1192,6 +1194,72 @@ async fn newer_source_data_at_the_head_is_reported_and_not_used() -> TestResult 
     Ok(())
 }
 
+/// SPEC section 10: changing who supplies the shown text is observable at an unchanged digest.
+#[tokio::test]
+async fn source_freshness_observes_correction_and_supplied_text_state_at_the_same_digest()
+-> TestResult {
+    for (corrected, text_origin) in [
+        (true, TextOrigin::Converter),
+        (false, TextOrigin::SuppliedByAgent),
+    ] {
+        let world = standard_world()?;
+        let extraction = Extraction {
+            corrected,
+            text_origin,
+            ..converted(&digest('b')?)
+        };
+        world.versions.replace_document(
+            &revision('a')?,
+            source_card(SOURCE, &revision('a')?, SOURCE_PATH, CARD_BODY, extraction)?,
+        )?;
+        let response = resolved(&world, false).await??;
+        assert!(
+            codes(&response).contains(&("newer_source".to_owned(), Some("/bindings/0".to_owned())))
+        );
+        let bound = some(response.resolved_bindings.first(), "the pinned binding")?;
+        assert_eq!(bound.source.revision, revision('c')?);
+        assert_eq!(bound.source.digest, Some(digest('b')?));
+        assert_eq!(first_failure(&response).ok(), None);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn source_freshness_observes_a_further_correction_without_a_digest_or_state_change()
+-> TestResult {
+    let world = standard_world()?;
+    let corrected = Extraction {
+        corrected: true,
+        ..converted(&digest('b')?)
+    };
+    with_source_text(&world, corrected.clone())?;
+    world.versions.replace_document(
+        &revision('a')?,
+        source_card(
+            SOURCE,
+            &revision('a')?,
+            SOURCE_PATH,
+            "# Revenue\nA further correction: revenue is 1300.\n",
+            corrected,
+        )?,
+    )?;
+    let response = resolved(&world, false).await??;
+    assert!(
+        codes(&response).contains(&("newer_source".to_owned(), Some("/bindings/0".to_owned())))
+    );
+    let bound = some(
+        response.resolved_bindings.first(),
+        "the pinned corrected text",
+    )?;
+    assert_eq!(bound.source.revision, revision('c')?);
+    assert_eq!(bound.source.digest, Some(digest('b')?));
+    assert_eq!(
+        first_failure(&response)?.0,
+        ChartFailure::DatasetUnavailable
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn resolve_view_resolves_a_pinned_view_at_its_saved_revisions() -> TestResult {
     let world = standard_world()?;
@@ -1314,6 +1382,164 @@ async fn a_live_view_refreshed_reads_each_binding_at_the_head() -> TestResult {
         some(response.warnings.first(), "the warning")?
             .message
             .contains(at.as_str())
+    );
+    Ok(())
+}
+
+/// A live binding of a precise representation, with the same table/chart layout as the fixture.
+fn live_representation(cited: Option<char>) -> Built<World> {
+    let mut block = block_with("/mode", json!("live"))?;
+    let source = some(
+        block
+            .pointer_mut("/bindings/0/source")
+            .and_then(Value::as_object_mut),
+        "revenue source",
+    )?;
+    source.insert("selection".to_owned(), json!({ "kind": "all" }));
+    match cited {
+        Some(fill) => {
+            source.insert("digest".to_owned(), json!(digest(fill)?));
+        }
+        None => {
+            source.remove("digest");
+        }
+    }
+    view_world(&view_body("Live representations.", &block)?)
+}
+
+/// Re-conversion changes the record to f; the retained original is named explicitly by the test.
+fn converted_head(world: &World, original: char, record: &ConversionRecord) -> Built<()> {
+    let at = revision('a')?;
+    let mut document = source_card(
+        SOURCE,
+        &at,
+        SOURCE_PATH,
+        CARD_BODY,
+        converted(&digest('f')?),
+    )?;
+    some(document.source.as_mut(), "the source appearance")?.object = digest(original)?;
+    world.versions.replace_document(&at, document)?;
+    world
+        .blobs
+        .put_object(digest('f')?, serde_json::to_vec(record)?)
+}
+
+fn picture(fill: char) -> Built<RetainedAsset> {
+    Ok(RetainedAsset {
+        digest: digest(fill)?,
+        media_type: "image/png".to_owned(),
+        role: AssetRole::Picture,
+        location: page(2),
+        pixel_size: Some(PixelSize {
+            width: 1,
+            height: 1,
+        }),
+        caption: None,
+    })
+}
+
+/// SPEC section 10: refreshing current inputs preserves which representation a binding cites.
+#[tokio::test]
+async fn live_refresh_preserves_the_original_representation() -> TestResult {
+    let world = live_representation(Some('a'))?;
+    converted_head(&world, 'd', &table_record()?)?;
+    let response = resolved(&world, true).await??;
+    let source = &some(response.resolved_bindings.first(), "the refreshed binding")?.source;
+    assert_eq!(source.revision, revision('a')?);
+    assert_eq!(source.digest, Some(digest('d')?));
+    assert_eq!(source.selection, Selection::All);
+    assert!(
+        source.locations.is_empty(),
+        "the original acquires no conversion locators"
+    );
+    assert_eq!(
+        first_failure(&response)?.0,
+        ChartFailure::DatasetUnavailable
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn live_refresh_preserves_a_retained_image_representation() -> TestResult {
+    let world = live_representation(Some('d'))?;
+    let mut record = table_record()?;
+    record.assets = vec![picture('d')?];
+    world
+        .blobs
+        .put_object(digest('b')?, serde_json::to_vec(&record)?)?;
+    converted_head(&world, 'a', &record)?;
+    let response = resolved(&world, true).await??;
+    let source = &some(response.resolved_bindings.first(), "the refreshed image")?.source;
+    assert_eq!(source.revision, revision('a')?);
+    assert_eq!(source.digest, Some(digest('d')?));
+    assert_eq!(source.locations, vec![page(2)]);
+    assert_eq!(
+        first_failure(&response)?.0,
+        ChartFailure::DatasetUnavailable
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn live_refresh_marks_a_vanished_image_unavailable_without_guessing_its_replacement()
+-> TestResult {
+    let world = live_representation(Some('d'))?;
+    let mut cited = table_record()?;
+    cited.assets = vec![picture('d')?];
+    world
+        .blobs
+        .put_object(digest('b')?, serde_json::to_vec(&cited)?)?;
+    let mut current = table_record()?;
+    // Same role and location are insufficient evidence that a different image is its successor.
+    current.assets = vec![picture('e')?];
+    converted_head(&world, 'a', &current)?;
+    let response = resolved(&world, true).await??;
+    let binding = some(response.resolved_bindings.first(), "the unavailable image")?;
+    assert_eq!(
+        binding.source.revision,
+        revision('c')?,
+        "no fabricated current citation"
+    );
+    assert_eq!(binding.source.digest, Some(digest('d')?));
+    assert!(binding.materialized.is_none());
+    assert_eq!(
+        first_failure(&response)?.0,
+        ChartFailure::DatasetUnavailable
+    );
+    assert!(codes(&response).contains(&(
+        "source_unavailable".to_owned(),
+        Some("/bindings/0".to_owned())
+    )));
+    Ok(())
+}
+
+#[tokio::test]
+async fn live_refresh_adopts_a_conversion_for_a_previously_pending_text_binding() -> TestResult {
+    let world = live_representation(None)?;
+    let pending = Extraction {
+        outcome: ConversionOutcome::Pending,
+        converter: None,
+        digest: None,
+        text_origin: TextOrigin::None,
+        page_count: None,
+        ..converted(&digest('b')?)
+    };
+    world.versions.replace_document(
+        &revision('c')?,
+        source_card(SOURCE, &revision('c')?, SOURCE_PATH, "", pending)?,
+    )?;
+    converted_head(&world, 'a', &table_record()?)?;
+    let response = resolved(&world, true).await??;
+    let binding = some(
+        response.resolved_bindings.first(),
+        "the newly converted text",
+    )?;
+    assert_eq!(binding.source.revision, revision('a')?);
+    assert_eq!(binding.source.digest, Some(digest('f')?));
+    assert!(binding.materialized.is_some());
+    assert_eq!(
+        some(response.charts.first(), "the ready chart")?.status,
+        ready(&["revenue"])
     );
     Ok(())
 }

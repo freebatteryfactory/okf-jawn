@@ -24,10 +24,14 @@
 //! source's converted text, or a source whose shown text is not the converter's (decision O2:
 //! `materialize`'s own sentence says why), `TooLarge` past a bound. No port error is turned
 //! into a chart's failure except the conversion record's read bound (`TooLarge`).
+//! A live refresh preserves the cited representation: the current original or source text,
+//! or an exact retained object still authorized in the same role. An object with no provable
+//! current counterpart leaves its old citation intact and is explicitly unavailable; neither
+//! an asset's position nor its locator proves that a different object is its successor.
 //!
 //! Warnings (each located at `/bindings/<i>`): `newer_source` when a binding read as cited names
-//! an item whose content at the head differs from the cited revision's (a source card's converted
-//! text, any other item's content digest: SPEC section 10, "Newer source data is an
+//! an item whose content at the head differs from the cited revision's (a source card's original,
+//! extraction state or shown content; any other item's content digest: SPEC section 10, "Newer source data is an
 //! observation"); `source_removed` when the item is not at the head; `dataset_unavailable` for a
 //! binding a chart or a table reads whose dataset could not be produced, with the reason (a
 //! table has no chart status to carry it); `unknown_unit` for a unit naming no column of the
@@ -38,7 +42,7 @@ use std::collections::BTreeMap;
 
 use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::identity::{Revision, Timestamp};
+use okf_jawn_contract::identity::{Digest, Revision, Timestamp};
 use okf_jawn_contract::item::ItemDocument;
 use okf_jawn_contract::source::SourceReference;
 use okf_jawn_contract::views::{
@@ -49,7 +53,7 @@ use super::validate::{ChartCheck, Checked};
 use super::{BindingFailure, materialize, retain_dataset};
 use crate::jobs::{RecordStore, RevisionMapping};
 use crate::portable::item_content_digest;
-use crate::reading::{citation_locations, read_conversion_record};
+use crate::reading::{ObjectRole, authorize_object, citation_locations, read_conversion_record};
 use crate::storage::{BlobStore, StorageScope, VersionStore};
 
 /// The ports a View is read and resolved through.
@@ -96,6 +100,8 @@ enum Cited {
     Removed,
     /// The revision does not hold the item.
     Missing,
+    /// The cited representation has no provably equivalent current representation.
+    Unavailable(BindingFailure),
 }
 
 /// What a resolution found besides the bindings: each binding's failure, and the warnings.
@@ -131,6 +137,15 @@ impl Found {
                 }
                 self.failures
                     .insert(name.to_owned(), unavailable(missing(inputs)));
+                None
+            }
+            Cited::Unavailable(failure) => {
+                self.warnings.push(warning(
+                    "source_unavailable",
+                    format!("binding {name}: {}", failure.message),
+                    at,
+                ));
+                self.failures.insert(name.to_owned(), failure);
                 None
             }
         }
@@ -185,7 +200,7 @@ pub async fn resolve(
                 }
                 cited
             }
-            Inputs::AtHead => at_head(ports, scope, &mut binding.source, head).await?,
+            Inputs::AtHead => at_head(ports, scope, &mut binding.source, &cited, head).await?,
         };
         if let Some(document) = found.settle(read, &binding.name, inputs, &at)
             && needed.contains(&binding.name)
@@ -268,12 +283,13 @@ async fn read_cited(
     Ok(Cited::Read(Box::new(document)))
 }
 
-/// Re-point a live binding at the head: its item there, its path and (for a citation of a
-/// source's text) its converted text there, its own selection.
+/// Re-point a live binding only after its represented input has been identified and mapped.
+/// An unavailable mapping leaves the old citation intact, rather than claiming it is current.
 async fn at_head(
     ports: ViewPorts<'_>,
     scope: &StorageScope,
     source: &mut SourceReference,
+    cited: &Cited,
     head: &Revision,
 ) -> Result<Cited, ApiError> {
     let document = match ports.versions.show(scope, head, source.item_id).await {
@@ -281,17 +297,95 @@ async fn at_head(
         Err(error) if error.code == ErrorCode::NotFound => return Ok(Cited::Missing),
         Err(error) => return Err(error),
     };
+    let cited = match cited {
+        Cited::Read(cited) => cited,
+        Cited::Removed => return Ok(Cited::Removed),
+        Cited::Missing | Cited::Unavailable(_) => {
+            return Ok(Cited::Unavailable(unavailable(
+                "the cited representation cannot be identified to refresh it".to_owned(),
+            )));
+        }
+    };
+    let digest = match refreshed_digest(ports, scope, source, cited, &document, head).await {
+        Ok(digest) => digest,
+        Err(error) if error.code == ErrorCode::NotFound => {
+            return Ok(Cited::Unavailable(unavailable(
+                "the cited representation has no equivalent at the current head".to_owned(),
+            )));
+        }
+        Err(error) if error.code == ErrorCode::TooLarge => {
+            return Ok(Cited::Unavailable(BindingFailure {
+                reason: ChartFailure::TooLarge,
+                message: error.message,
+            }));
+        }
+        Err(error) => return Err(error),
+    };
     source.revision = head.clone();
     source.path = document.summary.path.clone();
-    if source.digest.is_some() {
-        source.digest = document
-            .source
-            .as_ref()
-            .and_then(|appearance| appearance.extraction.digest.clone());
-    }
+    source.digest = digest;
     source.locations =
         unlocated_on_fault(citation_locations(ports.blobs, scope, &document, source, "").await)?;
     Ok(Cited::Read(Box::new(document)))
+}
+
+/// Refresh the same represented input: original, converted text (including previously pending
+/// text with no digest), or the same retained object still authorized in the same role.
+async fn refreshed_digest(
+    ports: ViewPorts<'_>,
+    scope: &StorageScope,
+    source: &SourceReference,
+    cited: &ItemDocument,
+    current: &ItemDocument,
+    head: &Revision,
+) -> Result<Option<Digest>, ApiError> {
+    let no_equivalent = || ApiError::new(ErrorCode::NotFound, "no equivalent representation");
+    let Some(digest) = source.digest.as_ref() else {
+        return match (&cited.source, &current.source) {
+            (Some(_), Some(current)) => Ok(current.extraction.digest.clone()),
+            (None, None) => Ok(None),
+            _ => Err(no_equivalent()),
+        };
+    };
+    let role = authorize_object(
+        ports.versions,
+        ports.blobs,
+        ports.records,
+        scope,
+        source.item_id,
+        &source.revision,
+        digest,
+    )
+    .await?;
+    match role {
+        ObjectRole::Original => current
+            .source
+            .as_ref()
+            .map(|appearance| Some(appearance.object.clone()))
+            .ok_or_else(no_equivalent),
+        ObjectRole::ConversionRecord => current
+            .source
+            .as_ref()
+            .map(|appearance| appearance.extraction.digest.clone())
+            .ok_or_else(no_equivalent),
+        ObjectRole::Asset(_) | ObjectRole::StructuredExport | ObjectRole::Derived(_) => {
+            let current_role = authorize_object(
+                ports.versions,
+                ports.blobs,
+                ports.records,
+                scope,
+                source.item_id,
+                head,
+                digest,
+            )
+            .await?;
+            if current_role == role {
+                Ok(Some(digest.clone()))
+            } else {
+                Err(no_equivalent())
+            }
+        }
+    }
 }
 
 /// The freshness warning of a binding read as cited: its item gone from the head, or changed
@@ -325,10 +419,13 @@ async fn freshness(
         }
         Err(error) => return Err(error),
     };
-    let changed = match (&cited.source, &current.source) {
-        (Some(then), Some(now)) => then.extraction.digest != now.extraction.digest,
-        _ => item_content_digest(cited)? != item_content_digest(&current)?,
+    // A correction changes shown content/state while retaining the conversion record's digest.
+    let source_changed = match (&cited.source, &current.source) {
+        (Some(then), Some(now)) => then.object != now.object || then.extraction != now.extraction,
+        (None, None) => false,
+        _ => true,
     };
+    let changed = source_changed || item_content_digest(cited)? != item_content_digest(&current)?;
     Ok(changed.then(|| {
         warning(
             "newer_source",
