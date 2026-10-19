@@ -1062,14 +1062,24 @@ async fn download_artifact_serves_each_workspace_kind_by_its_own_permission_and_
                     whole("application/zip", ARCHIVE)?,
                     "{kind:?} on {route:?}"
                 );
-                assert_eq!(tenancy.access.lookups()?, vec![permission], "{kind:?}");
+                let expected_lookups = match kind {
+                    ArtifactKind::WorkspaceBackup => vec![Permission::Read, Permission::Admin],
+                    _ => vec![Permission::Read],
+                };
+                assert_eq!(tenancy.access.lookups()?, expected_lookups, "{kind:?}");
                 assert!(tenancy.log.appended()?.is_empty(), "{kind:?} on {route:?}");
             } else {
                 let refused = err_of(outcome.map(drop))?;
                 assert_eq!(refused.code, ErrorCode::Forbidden, "{kind:?} on {route:?}");
-                assert!(
-                    tenancy.access.lookups()?.is_empty(),
-                    "{kind:?} on {route:?}: refused by its route before any lookup"
+                let expected_lookups = if route == McpDelegation {
+                    Vec::new()
+                } else {
+                    vec![Permission::Read]
+                };
+                assert_eq!(
+                    tenancy.access.lookups()?,
+                    expected_lookups,
+                    "{kind:?} on {route:?}: connectors are refused before lookup; service access first needs Read"
                 );
                 assert!(
                     tenancy.world.blobs.opens()?.is_empty(),
@@ -1250,9 +1260,10 @@ async fn an_artifact_is_found_only_through_its_own_scope() -> TestResult {
         let refused = err_of(outcome.map(drop))?;
         assert_eq!(refused.code, ErrorCode::NotFound, "{what}");
     }
-    assert!(
-        tenancy.access.lookups()?.is_empty(),
-        "no grant was looked up"
+    assert_eq!(
+        tenancy.access.lookups()?,
+        vec![Permission::Read, Permission::Read],
+        "workspace access is required before either scoped artifact lookup"
     );
     assert_eq!(
         tenancy.access.tenant_lookups()?,
