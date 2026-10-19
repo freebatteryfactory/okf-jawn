@@ -10,8 +10,13 @@
  * that it could not be kept. What a change did is said in a polite status, present from the start
  * so that it is announced. Whether the browser offers WebMCP at all is said apart, in a note: the
  * choice is kept either way, and does nothing in a browser that does not offer it.
+ *
+ * While the setting is on in a browser that offers WebMCP, the page says what the browser
+ * answered the shell's registration (`webmcp/use-page-tools.ts`): how many of the tools it took,
+ * and each it refused, in its own words. It never says a tool is offered that was not taken.
  */
 import { useId, useState } from 'react';
+import { useRegistrations } from '../../webmcp/use-page-tools';
 import { keepWebMcpSetting, useWebMcpSetting, webMcpOffered } from './webmcp-setting';
 
 /** The five page tools and what each lets an assistant do, in the person's words. */
@@ -32,6 +37,8 @@ export function SettingsPage() {
   const on = useWebMcpSetting();
   const offered = webMcpOffered();
   const [said, setSaid] = useState('');
+  const taken = useRegistrations((state) => state.taken);
+  const refused = useRegistrations((state) => state.refused);
   const change = (next: boolean) => {
     const kept = keepWebMcpSetting(next);
     if (!kept) {
@@ -41,7 +48,9 @@ export function SettingsPage() {
     } else if (!next) {
       setSaid('Turned off: no assistant can use the page tools.');
     } else if (offered) {
-      setSaid('Turned on: an assistant in this browser can use the five page tools.');
+      setSaid(
+        'Turned on: this page offers its tools to the browser while a workspace is open here.',
+      );
     } else {
       setSaid('Turned on. This browser does not offer WebMCP, so no tool is offered here.');
     }
@@ -90,6 +99,19 @@ export function SettingsPage() {
             This browser does not offer WebMCP: no assistant can use these tools here, whatever this
             setting says.
           </p>
+        )}
+        {on && offered && taken.length > 0 && (
+          <p className="meta">{`The browser took ${taken.length} of the ${TOOLS.length} page tools.`}</p>
+        )}
+        {on && offered && refused.length > 0 && (
+          <div role="note" className="notice">
+            <p>Not every page tool is offered:</p>
+            <ul>
+              {refused.map(({ name, reason }) => (
+                <li key={name}>{`The browser refused ${name}: ${reason}`}</li>
+              ))}
+            </ul>
+          </div>
         )}
         <p role="status">{said}</p>
       </section>

@@ -17,6 +17,7 @@
  * does nothing there.
  */
 import { useSyncExternalStore } from 'react';
+import { modelContext } from '../../webmcp/register';
 
 /** The key the setting is kept under in this origin's `localStorage`. */
 export const WEBMCP_SETTING_KEY = 'okf-jawn.webmcp';
@@ -69,6 +70,5 @@ export function useWebMcpSetting(): boolean {
 
 /** Whether this browser offers WebMCP: a model context on the document (the W3C draft). */
 export function webMcpOffered(): boolean {
-  const context: unknown = Reflect.get(document, 'modelContext');
-  return context !== undefined && context !== null;
+  return modelContext() !== null;
 }
