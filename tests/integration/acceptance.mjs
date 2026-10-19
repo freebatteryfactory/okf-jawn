@@ -45,7 +45,7 @@ if(!local && (base.protocol!=='https:'||process.env['OKF_TEST_ALLOW_REMOTE']!=='
 async function call(domain,id,body,agent=false,expected=200){
  const headers={'content-type':'application/json'};
  if(agent)headers.authorization=`Bearer ${process.env['OKF_TEST_AGENT_TOKEN']}`;
- else{headers.cookie=process.env['OKF_TEST_BROWSER_COOKIE'];headers['x-csrf-token']=process.env['OKF_TEST_CSRF'];headers.origin=base.origin;}
+ else{headers.cookie=process.env['OKF_TEST_BROWSER_COOKIE'];headers['x-okf-csrf']=process.env['OKF_TEST_CSRF'];headers.origin=base.origin;}
  const response=await fetch(new URL(`/api/${domain}/${id.replaceAll('_','-')}`,base),{method:'POST',headers,redirect:'error',signal:AbortSignal.timeout(30000),body:JSON.stringify(body)});
  assert.equal(response.status,expected,`${id} status`);return response.json();
 }

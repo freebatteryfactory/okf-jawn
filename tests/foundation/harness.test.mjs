@@ -171,6 +171,27 @@ async function fixture(t, body) {
  t.after(()=>new Promise(resolve=>server.close(resolve)));
  return `http://127.0.0.1:${server.address().port}`;
 }
+test('acceptance executable sends the contract CSRF header on browser writes',async t=>{
+ // The literal header is the contract's CSRF_HEADER, not derived from the harness under test.
+ // Stop at the first request: this proves transport authentication, not application acceptance.
+ let observed;
+ const server=createServer((request,response)=>{
+  observed={method:request.method,path:request.url,headers:request.headers};
+  request.resume();response.writeHead(418,{'content-type':'application/json'});response.end('{}');
+ });
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+ t.after(()=>new Promise(resolve=>server.close(resolve)));
+ const base=`http://127.0.0.1:${server.address().port}`;
+ const result=await runCommand(process.execPath,['tests/integration/acceptance.mjs'],{
+  cwd:root,capture:true,allowFailure:true,timeout:SLOW_MACHINE_BUDGET_MS,
+  env:{OKF_TEST_DISPOSABLE:'1',OKF_TEST_BASE_URL:base,OKF_TEST_BROWSER_COOKIE:'session=fixture',OKF_TEST_CSRF:'fixture-csrf',OKF_TEST_AGENT_TOKEN:'fixture-agent',OKF_TEST_ALLOW_REMOTE:'0'},
+ });
+ assert.notEqual(result.code,0);assert.match(result.stderr,/create_workspace status/);
+ assert.ok(observed);assert.equal(observed.method,'POST');assert.equal(observed.path,'/api/workspaces/create-workspace');
+ assert.equal(observed.headers.cookie,'session=fixture');assert.equal(observed.headers.origin,base);
+ assert.equal(observed.headers['x-okf-csrf'],'fixture-csrf');
+ assert.equal(observed.headers['x-csrf-token'],undefined);assert.equal(observed.headers.authorization,undefined);
+});
 test('positive HTTP control reaches and validates a correct reviewed revision',async t=>{
  const revision='a'.repeat(40);const url=await fixture(t,{source:{revision},coverage:'current'});
  const body=await (await fetch(url)).json();
