@@ -43,9 +43,7 @@
 //!   which loses the data directory to the first;
 //! - nothing identifies the service: whatever answers the liveness check with success at the
 //!   address is sent the credential with the next message. On a loopback address that is any
-//!   program of this computer that listens there first;
-//! - on Windows a server the relay starts holds an end of the relay's own standard streams
-//!   (`launch::ProcessLauncher` says why).
+//!   program of this computer that listens there first.
 
 pub use self::frame::{Frame, Frames};
 pub use self::http::HttpTransport;

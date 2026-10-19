@@ -46,6 +46,10 @@ serde_json.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 
+# Owner-approved C1: the Windows launcher clears inheritance on its own standard handles.
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 # The executable is `okf-jawn`, the name its help, completions and man pages use
 # (`generated/cli/`), not the package's name.
 [[bin]]

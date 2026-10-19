@@ -39,7 +39,8 @@
 //! never too lenient. What it cannot see, stated rather than hidden: code a build script or a
 //! procedural macro (a derive or an attribute) generates, and a reader reached through generic
 //! code bounded by a trait the reader implements. None of these exists here, the reader file
-//! derives nothing that hands its fields out, and authored `unsafe` is forbidden workspace-wide.
+//! derives nothing that hands its fields out. Authored `unsafe` is forbidden except the owner's
+//! one Windows standard-handle call, confined by `unsafe_use`.
 
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -359,6 +360,9 @@ pub(crate) fn check(root: &Path) -> Result<(), Box<dyn Error>> {
         for violation in zip_violations(&relative, &syntax) {
             failures.push(format!("{}: {violation}", path.display()));
         }
+        for violation in unsafe_use::violations(&relative, &syntax) {
+            failures.push(format!("{}: {violation}", path.display()));
+        }
     }
     if failures.is_empty() {
         Ok(())
@@ -533,6 +537,8 @@ mod tests {
             "#[cfg(windows)] fn keep_back_standard_handles() { unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0); arbitrary(); } }",
             "#[cfg(windows)] fn keep_back_standard_handles() { unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) }; unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) }; }",
             "#[cfg(windows)] fn keep_back_standard_handles() { fn nested() { unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) }; } }",
+            "#[cfg(windows)] fn keep_back_standard_handles() { impl Thing { fn nested() { unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) }; } } }",
+            "#[cfg_attr(windows, unsafe(no_mangle))] fn other() {}",
         ] {
             assert!(
                 refused_unsafe("crates/cli/src/relay/launch.rs", source)?,
@@ -791,3 +797,5 @@ mod tests {
         Ok(())
     }
 }
+
+mod unsafe_use;
