@@ -19,6 +19,9 @@ mod job_handler {
 
     use okf_jawn_contract::access::AccessRoute;
     use okf_jawn_contract::common::{PageRange, Warning};
+    use okf_jawn_contract::conventions::{
+        CollisionPolicy, DateOrder, ExtensionPolicy, LetterCase, NamingRule, NamingRules,
+    };
     use okf_jawn_contract::error::{ApiError, ErrorCode};
     use okf_jawn_contract::events::EventKind;
     use okf_jawn_contract::extraction::{
@@ -31,17 +34,19 @@ mod job_handler {
     use okf_jawn_contract::import::JobState;
     use okf_jawn_contract::purge::{Purge, PurgeReport, PurgeState};
     use okf_jawn_contract::workspace::{ArtifactKind, BackupReport};
+    use okf_jawn_core::conventions::{COLLISION_KEPT, COLLISION_SUFFIXED, PATH_NOT_VALID};
     use okf_jawn_core::conversion::{ConversionRecord, ConverterLimits, PixelSize, RetainedAsset};
     use okf_jawn_core::events::EventScope;
     use okf_jawn_core::jobs::{JobHandler, JobScope, JobSpec, NewJob, RecordStore};
     use okf_jawn_core::storage::{
-        CandidateCheck, ObjectInfo, Provenance, SourceCard, StorageScope, TreeEdit, VersionStore,
-        derive_commit_mutation_id, derive_drain_mutation_id, derive_item_id,
+        CandidateCheck, ObjectInfo, Provenance, RulesFile, RulesParseError, SourceCard,
+        StorageScope, TreeEdit, VersionStore, derive_commit_mutation_id, derive_drain_mutation_id,
+        derive_item_id,
     };
     use okf_jawn_core::uploads::UploadRecord;
     use okf_jawn_ingest::handler::{
         ARCHIVE_MEDIA_TYPE, CARD_NOT_WRITTEN, DRAIN_BOUND, HandlerLimits, HandlerPorts,
-        IngestHandler,
+        IngestHandler, NAMING_RULES_ABSENT,
     };
 
     use okf_jawn_ingest::runtime::run_one;
@@ -2842,20 +2847,8 @@ mod job_handler {
     }
 
     #[tokio::test]
-    async fn naming_rules_and_a_partial_redigest_are_refused_until_core_has_their_inputs()
-    -> TestResult {
+    async fn a_partial_redigest_is_refused_until_core_has_its_inputs() -> TestResult {
         let world = world()?;
-        let report = upload(&world, 96, "report.pdf", b"%PDF")?;
-        let id = job(
-            &world,
-            11,
-            workspace_scope()?,
-            import_spec(vec![report], true)?,
-        )?;
-        assert!(run(&world, id).await?);
-        let entry = world.records.entry(id)?;
-        assert_eq!(entry.job.state, JobState::Failed);
-        assert!(world.versions.written()?.is_empty());
         let redigest = job(
             &world,
             12,
@@ -2874,6 +2867,269 @@ mod job_handler {
         let (message, retryable) = some(entry.failures.first(), "the failure")?;
         assert!(message.contains("R-I5"), "{message}");
         assert!(!retryable);
+        Ok(())
+    }
+
+    /// The baseline naming rule R0 of the design (kebab case joined by `-`) with `collision`.
+    fn naming_rules(collision: CollisionPolicy) -> NamingRules {
+        NamingRules {
+            schema_version: 1,
+            rules: vec![NamingRule {
+                glob: "**".to_owned(),
+                type_name: None,
+                case: LetterCase::Kebab,
+                separator: "-".to_owned(),
+                prefix: String::new(),
+                suffix: None,
+                date_order: DateOrder::Ymd,
+                date_format: String::new(),
+                strip_version_suffix: false,
+                extension_policy: ExtensionPolicy::Preserve,
+                alias_preservation: false,
+                destination: None,
+                collision,
+            }],
+        }
+    }
+
+    /// Save `parsed` as the rules file at every revision of the world's store.
+    fn save_rules(world: &World, parsed: Result<NamingRules, RulesParseError>) -> Built<()> {
+        world.versions.put_rules(RulesFile {
+            text: "schema_version: 1\n".to_owned(),
+            parsed,
+        })?;
+        Ok(())
+    }
+
+    /// A source card numbered `number` at `at` in the base, of an original named `original`.
+    fn card_at_base(world: &World, number: u128, at: &str, original: &str) -> Built<()> {
+        let object = world.blobs.insert(original.as_bytes())?;
+        world
+            .versions
+            .at_base
+            .lock()
+            .map_err(|_| "poisoned")?
+            .push(SourceCard {
+                item_id: serde_json::from_value::<ItemId>(json!(format!(
+                    "00000000-0000-0000-0000-{number:012}"
+                )))?,
+                path: WorkspacePath::try_from(at.to_owned())?,
+                title: original.to_owned(),
+                type_name: "source".to_owned(),
+                body: String::new(),
+                properties: std::collections::BTreeMap::new(),
+                appearance: serde_json::from_value(json!({
+                    "object": object.digest.as_str(),
+                    "names": [{ "filename": original, "folder": "", "observed_at": "2026-10-09T00:00:00.000Z", "supplied_by": "owner" }],
+                    "media_type": "application/pdf",
+                    "size": object.size.to_string(),
+                    "metadata": {},
+                    "extraction": {
+                        "outcome": { "status": "unsupported" },
+                        "text_origin": "none",
+                        "corrected": false,
+                        "warnings": []
+                    }
+                }))?,
+            });
+        Ok(())
+    }
+
+    /// Run an import of `files` with the naming rules applied, and answer the paths of its
+    /// pending cards and the codes and locations of its completion's warnings.
+    async fn import_named(
+        world: &World,
+        number: u128,
+        files: &[&str],
+    ) -> Built<(Vec<String>, Vec<(String, Option<String>)>)> {
+        let mut uploads = Vec::new();
+        for (offset, name) in (0_u128..).zip(files) {
+            uploads.push(upload(
+                world,
+                number.saturating_mul(10).saturating_add(offset),
+                name,
+                b"%PDF named",
+            )?);
+        }
+        let id = job(
+            world,
+            number,
+            workspace_scope()?,
+            import_spec(uploads, true)?,
+        )?;
+        assert!(run(world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let paths = cards(world)?
+            .iter()
+            .take(files.len())
+            .map(|card| card.path.as_str().to_owned())
+            .collect();
+        let warnings = some(entry.completions.first(), "the completion")?
+            .warnings
+            .iter()
+            .filter(|warning| !warning.code.starts_with("okf"))
+            .map(|warning| (warning.code.clone(), warning.location.clone()))
+            .collect();
+        Ok((paths, warnings))
+    }
+
+    #[tokio::test]
+    async fn conventions_import_im1_with_no_rules_saved_names_without_them_and_says_so()
+    -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let (paths, warnings) = import_named(&world, 201, &["Q3 Report.PDF"]).await?;
+        assert_eq!(paths, ["inbox/Q3 Report-PDF.md"]);
+        assert_eq!(warnings, [(NAMING_RULES_ABSENT.to_owned(), None)]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn conventions_import_im2_im3_cards_are_named_by_the_rules_and_by_each_other()
+    -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        save_rules(&world, Ok(naming_rules(CollisionPolicy::Suffix)))?;
+        let (paths, warnings) =
+            import_named(&world, 202, &["Q3 Report.PDF", "a.pdf", "A.pdf"]).await?;
+        assert_eq!(
+            paths,
+            [
+                "inbox/q3-report-PDF.md",
+                "inbox/a-pdf.md",
+                "inbox/a-pdf-2.md"
+            ]
+        );
+        assert_eq!(
+            warnings,
+            [(
+                COLLISION_SUFFIXED.to_owned(),
+                Some("inbox/a-pdf-2.md".to_owned())
+            )]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn conventions_import_im4_im7_names_taken_at_the_base_are_numbered_or_kept() -> TestResult
+    {
+        // `suffix` numbers the ruled name; `keep_existing` falls back to the name without rules.
+        for (collision, named, warned) in [
+            (
+                CollisionPolicy::Suffix,
+                "inbox/q3-report-pdf-2.md",
+                COLLISION_SUFFIXED,
+            ),
+            (
+                CollisionPolicy::KeepExisting,
+                "inbox/Q3 Report-pdf.md",
+                COLLISION_KEPT,
+            ),
+        ] {
+            let world = world_with(Some(3), Vec::new())?;
+            card_at_base(&world, 90, "inbox/q3-report-pdf.md", "q3 report.pdf")?;
+            save_rules(&world, Ok(naming_rules(collision)))?;
+            let (paths, warnings) = import_named(&world, 203, &["Q3 Report.pdf"]).await?;
+            assert_eq!(paths, [named]);
+            assert_eq!(warnings, [(warned.to_owned(), Some(named.to_owned()))]);
+        }
+        Ok(())
+    }
+
+    /// SPEC section 6: an unusable ruled folder falls back before consumption, so an item
+    /// called archive.md never becomes a directory. These literal paths are the import's
+    /// ordinary unruled card names, not answers computed by the naming engine under test.
+    #[tokio::test]
+    async fn conventions_import_an_item_ancestor_falls_back_before_the_upload_is_consumed()
+    -> TestResult {
+        for collision in [
+            CollisionPolicy::Suffix,
+            CollisionPolicy::KeepExisting,
+            CollisionPolicy::Reject,
+        ] {
+            let world = world_with(Some(3), Vec::new())?;
+            card_at_base(&world, 90, "archive.md", "archive.pdf")?;
+            let mut rules = naming_rules(collision);
+            let rule = some(rules.rules.first_mut(), "the naming rule")?;
+            rule.destination = Some("ARCHIVE.md/nested".to_owned());
+            save_rules(&world, Ok(rules))?;
+            let (paths, warnings) = import_named(&world, 205, &["report.pdf"]).await?;
+            assert_eq!(paths, ["inbox/report-pdf.md"]);
+            assert_eq!(
+                warnings,
+                [(
+                    PATH_NOT_VALID.to_owned(),
+                    Some("inbox/report-pdf.md".to_owned())
+                )]
+            );
+            assert_eq!(world.uploads.consumed()?.len(), 1);
+            assert!(
+                cards(&world)?
+                    .iter()
+                    .all(|card| { card.path.as_str() == "inbox/report-pdf.md" })
+            );
+        }
+        Ok(())
+    }
+
+    /// A folder may itself end in .md. SPEC section 3 requires its stored spelling; the item
+    /// ancestor refusal must distinguish this real folder from an item of the same name.
+    #[tokio::test]
+    async fn conventions_import_an_existing_folder_is_allowed_with_its_stored_spelling()
+    -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        card_at_base(&world, 90, "Archive.md/kept.md", "kept.pdf")?;
+        let mut rules = naming_rules(CollisionPolicy::Suffix);
+        let rule = some(rules.rules.first_mut(), "the naming rule")?;
+        rule.destination = Some("archive.MD".to_owned());
+        save_rules(&world, Ok(rules))?;
+        let (paths, warnings) = import_named(&world, 206, &["report.pdf"]).await?;
+        assert_eq!(paths, ["Archive.md/report-pdf.md"]);
+        assert_eq!(warnings, Vec::new());
+        assert_eq!(world.uploads.consumed()?.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn conventions_import_im6_rules_that_cannot_be_applied_fail_the_job_for_good()
+    -> TestResult {
+        let unreadable = Err(RulesParseError {
+            message: "unknown field `colour`".to_owned(),
+            line: Some(2),
+            column: Some(1),
+        });
+        let mut refused = naming_rules(CollisionPolicy::Suffix);
+        if let Some(rule) = refused.rules.first_mut() {
+            rule.glob = "notes/**x".to_owned();
+        }
+        for parsed in [unreadable, Ok(refused)] {
+            let world = world_with(Some(3), Vec::new())?;
+            save_rules(&world, parsed)?;
+            let report = upload(&world, 2041, "report.pdf", b"%PDF")?;
+            let id = job(
+                &world,
+                204,
+                workspace_scope()?,
+                import_spec(vec![report], true)?,
+            )?;
+            assert!(run(&world, id).await?);
+            let entry = world.records.entry(id)?;
+            assert_eq!(entry.job.state, JobState::Failed);
+            let (message, retryable) = some(entry.failures.first(), "the failure")?;
+            assert!(message.contains("naming rules"), "{message}");
+            assert!(!retryable);
+            let error = some(entry.job.error.as_ref(), "the job's error")?;
+            assert_eq!(error.code, ErrorCode::InvalidInput);
+            assert_eq!(error.field.as_deref(), Some("/apply_naming_rules"));
+            assert!(world.versions.written()?.is_empty());
+            assert!(
+                world
+                    .uploads
+                    .consumed
+                    .lock()
+                    .map_err(|_| "poisoned")?
+                    .is_empty()
+            );
+        }
         Ok(())
     }
 
@@ -3014,6 +3270,7 @@ mod job_handler {
             .edit_elsewhere_with(vec![TreeEdit::MoveItem {
                 item_id,
                 destination: WorkspacePath::try_from("archive/report.md".to_owned())?,
+                keep_alias: false,
             }])?;
         assert!(run(&world, id).await?);
         let (completed, kept) = redigest_warnings(&world, id)?;
@@ -3094,6 +3351,7 @@ mod job_handler {
             TreeEdit::MoveItem {
                 item_id,
                 destination: WorkspacePath::try_from("archive/report.md".to_owned())?,
+                keep_alias: false,
             },
             TreeEdit::EditItem {
                 item_id,
