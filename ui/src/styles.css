@@ -752,3 +752,133 @@ main.app-main:has(.explorer) {
   padding: 0.25rem 0.5rem;
   border: 1px solid GrayText;
 }
+/* History and review (UI M3). System colors and the shell's own tokens only; the owner decides
+   any further visual system at the design pass. */
+.timeline-entries,
+.proposal-list,
+.comment-list,
+.review-list,
+.link-list,
+.graph-links {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+.version,
+.proposal-row,
+.comment-list > li {
+  border-left: 3px solid GrayText;
+  padding: 0.25rem 0.75rem;
+}
+.version p,
+.proposal-row p,
+.comment-list p {
+  margin: 0.15rem 0;
+}
+.version-message {
+  white-space: pre-line;
+}
+.version-actions,
+.item-history .document-actions,
+.propose-change .document-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+.rewind,
+.who,
+.proposal-actions,
+.discussion {
+  border: 1px solid GrayText;
+  border-radius: 0.25rem;
+  padding: 0.5rem 0.75rem;
+  margin: 0.5rem 0;
+}
+.changes h2,
+.changes h3,
+.changes h4,
+.changes h5,
+.rewind h3,
+.rewind h4,
+.who h3,
+.discussion h3 {
+  font-size: 1rem;
+  margin: 0.25rem 0;
+}
+.who-lines td {
+  vertical-align: top;
+}
+.who-text {
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.review-badge {
+  border: 2px solid CanvasText;
+  border-radius: 0.25rem;
+  padding: 0 0.35rem;
+}
+.reviews,
+.item-links {
+  margin-top: 1rem;
+}
+.comment-text,
+.proposal-description {
+  white-space: pre-line;
+}
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: CanvasText;
+  opacity: 0.35;
+}
+.dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  box-sizing: border-box;
+  width: min(48rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
+  background: Canvas;
+  color: CanvasText;
+  border: 1px solid CanvasText;
+  border-radius: 0.25rem;
+  padding: 1rem 1.25rem;
+}
+.dialog-title {
+  font-size: 1.2rem;
+  margin: 0 0 0.5rem;
+}
+.dialog-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.dialog button {
+  border: 1px solid GrayText;
+  border-radius: 0.25rem;
+  background: ButtonFace;
+  color: ButtonText;
+}
+.dialog button[aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: default;
+}
+.confirm-text {
+  box-sizing: border-box;
+  width: 100%;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+}
+.graph-drawing {
+  height: 28rem;
+  border: 1px solid GrayText;
+  border-radius: 0.25rem;
+  color: CanvasText;
+}

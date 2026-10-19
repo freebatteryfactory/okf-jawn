@@ -65,8 +65,9 @@
  * page being about to leave. The last still asks before the page goes: the session is at risk.
  *
  * A refused session. A session is refused while the last answer of `get_item` that a pane of its
- * item read says the item is not a Note (it is a Source or a View): the service takes no draft of
- * such an item. The pane tells the session at each read (`refuseSaving`, from `DocumentView`) and
+ * item read says the item is a View, or a Source while the session's text is not the text it
+ * started from: the service takes no draft of a View, and a draft of a Source only with its text
+ * unchanged (a Source's text changes through corrections; its properties can change in a draft). The pane tells the session at each read (`refuseSaving`, from `DocumentView`) and
  * the session carries it (`refused`: what the item is, or null). This is the one place that says
  * what follows; the functions here and in `snapshot.ts` that send or wait ask that field.
  * - Nothing of it is sent. Every `save_draft` goes through `save` (the autosave's timer, leaving
@@ -275,9 +276,9 @@ export function releaseEditor(workspaceId: string, itemId: string, pane: string)
 }
 
 /**
- * A pane read the item, and this is what the answer says it is. Anything but a Note refuses the
- * item's session (see the header: nothing of it is sent, and nothing waits on it); a Note lifts
- * the refusal, and the save the session owes is sent a moment later (the autosave the refusal
+ * A pane read the item, and this is what the answer says it is. A View, and a Source whose session
+ * changed its text, refuse the item's session (see the header: nothing of it is sent, and nothing
+ * waits on it); a Note, and a Source whose session keeps its text, lift the refusal, and the save the session owes is sent a moment later (the autosave the refusal
  * held up). An item with no session has nothing to refuse.
  */
 export function refuseSaving(
@@ -288,8 +289,9 @@ export function refuseSaving(
 ) {
   const key = sessionKey(workspaceId, itemId);
   const session = sessions().sessions[key];
-  const refused = kind === 'note' ? null : kind;
-  if (session === undefined || session.refused === refused) return;
+  if (session === undefined) return;
+  const refused = kind === 'note' || mayDraft(kind, session) ? null : kind;
+  if (session.refused === refused) return;
   if (refused !== null && saveStateOf(session) === 'unchanged') {
     // Nothing of the person's is in it: there is nothing to keep on screen.
     endSession(workspaceId, itemId);
@@ -298,6 +300,12 @@ export function refuseSaving(
   sessions().change(key, { refused });
   // A save that failed is not sent again by itself: its notice, back with the editor, has the retry.
   if (refused === null && session.failure === null) saveSoon(client, key);
+}
+
+/** Whether the service takes a draft of an item of this kind holding this session's text. */
+export function mayDraft(kind: ItemSummary['kind'], session: DraftText & { committed: DraftText }) {
+  if (kind === 'note') return true;
+  return kind === 'source' && session.body === session.committed.body;
 }
 
 function cancelTimer(key: string) {
