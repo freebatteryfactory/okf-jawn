@@ -5,7 +5,8 @@
 //! and a `signed_in` event naming the subject and route is appended to the tenant's log before the
 //! cookies are sent, by core's one rule for it (`okf_jawn_core::events::record_sign_in`, which
 //! `ApplicationService::record_sign_in` applies too); a sign-in that cannot be recorded is undone
-//! and refused. Locally the session's
+//! and refused. A completed local sign-in tells the launch link to publish the next token
+//! (`LaunchTokens::sign_in_completed`). Locally the session's
 //! principal is the persistent installation identity with route `LocalOwner`; hosted it is the
 //! AuthKit user in their organization with route `BrowserSession`. No other route ever gets a
 //! session. A hosted sign-in in progress lives in its browser's cookie, never on the server
@@ -181,15 +182,15 @@ async fn begin_local(
     }
     let presented = query.get("token").map(String::as_str).unwrap_or_default();
     let taken = match tokens.redeem(presented) {
-        Ok(taken) => taken,
+        Ok(Some(taken)) => taken,
+        Ok(None) => {
+            return private(error_response(ApiError::new(
+                ErrorCode::Unauthenticated,
+                "The launch link is not valid or was already used",
+            )));
+        }
         Err(error) => return private(error_response(error)),
     };
-    if !taken {
-        return private(error_response(ApiError::new(
-            ErrorCode::Unauthenticated,
-            "The launch link is not valid or was already used",
-        )));
-    }
     let outcome = async {
         let owner = sessions
             .inner
@@ -209,10 +210,14 @@ async fn begin_local(
     }
     .await;
     match outcome {
-        Ok(response) => private(response),
+        Ok(response) => {
+            // The launch link publishes the next token.
+            tokens.sign_in_completed();
+            private(response)
+        }
         Err(error) => {
             // The first error is the answer; a failed give-back leaves the token spent.
-            let _given_back = tokens.give_back(presented);
+            let _given_back = tokens.give_back(taken);
             private(error_response(error))
         }
     }

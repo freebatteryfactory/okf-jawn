@@ -172,6 +172,8 @@ pub mod grants;
 pub mod hosted;
 pub mod hosts;
 pub mod identity;
+#[cfg(feature = "runtime")]
+pub mod launch;
 pub mod local;
 #[cfg(feature = "runtime")]
 pub mod mcp;
