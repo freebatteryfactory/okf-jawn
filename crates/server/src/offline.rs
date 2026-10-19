@@ -154,7 +154,9 @@ fn inside(path: &Path, directory: &Path) -> Result<bool, ApiError> {
     Ok(true)
 }
 
-/// `path` with its longest existing ancestor canonicalized and the rest appended as written.
+/// Canonicalize the longest existing ancestor before resolving the remaining components.
+/// A missing component followed by `..` cancels that component; each resulting existing path
+/// is canonicalized again, so a link reached after that cancellation keeps its real target.
 fn resolved(path: &Path) -> Result<PathBuf, ApiError> {
     let absolute = std::path::absolute(path)
         .map_err(|_| invalid("--output", "must be a path this system can resolve"))?;
@@ -164,7 +166,14 @@ fn resolved(path: &Path) -> Result<PathBuf, ApiError> {
         if let Ok(canonical) = existing.canonicalize() {
             let mut whole = canonical;
             for part in rest.iter().rev() {
-                whole.push(part);
+                if part == OsStr::new("..") {
+                    let _popped = whole.pop();
+                } else {
+                    whole.push(part);
+                }
+                if let Ok(canonical) = whole.canonicalize() {
+                    whole = canonical;
+                }
             }
             return Ok(whole);
         }
@@ -173,8 +182,12 @@ fn resolved(path: &Path) -> Result<PathBuf, ApiError> {
         };
         if let Some(name) = existing.file_name() {
             rest.push(name.to_os_string());
-        } else if !matches!(existing.components().next_back(), Some(Component::CurDir)) {
-            return Ok(absolute.clone());
+        } else {
+            match existing.components().next_back() {
+                Some(Component::ParentDir) => rest.push(OsStr::new("..").to_os_string()),
+                Some(Component::CurDir) => {}
+                _ => return Ok(absolute.clone()),
+            }
         }
         existing = parent;
     }
