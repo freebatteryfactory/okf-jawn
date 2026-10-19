@@ -57,6 +57,8 @@ import { useLeaveGuard } from '../drafts/leave-guard';
 import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, messageFor } from '../errors/failure';
 import { useRetry } from '../errors/retry';
+import { ItemLinks } from '../graph/ItemLinks';
+import { ItemReviews } from '../reviews/ItemReviews';
 import { SearchForm, SearchResults } from '../search/SearchPanel';
 import { ChangesContext } from '../tree/context';
 import { matchingLayout } from './DocumentPanes';
@@ -367,6 +369,7 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
     workspaceId,
     head,
     canWrite,
+    rights: { permissions: workspace.permissions, archivedAt: workspace.archived_at ?? null },
     refresh: headState.refresh,
     onChanged: followSnapshot,
   };
@@ -498,6 +501,12 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
                 itemId={gone ? null : itemId}
                 revision={revision}
               />
+              {itemId !== null && !gone && (
+                <>
+                  <ItemReviews workspaceId={workspaceId} itemId={itemId} revision={revision} />
+                  <ItemLinks workspaceId={workspaceId} itemId={itemId} revision={revision} />
+                </>
+              )}
             </section>
           </Panel>
         </Group>

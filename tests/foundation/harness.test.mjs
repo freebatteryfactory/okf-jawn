@@ -3020,11 +3020,54 @@ test('killProcessTree stops grandchildren, not only the process it was given', a
 });
 
 const REVISION = '0123456789abcdef0123456789abcdef01234567';
+// Fixed fixture identities, independent of the UI's abbreviation helper and harness rules.
+const HISTORY_REVISION = '89abcdef0123456789abcdef0123456789abcdef';
+const VIEW_REVISIONS = {
+  render_changes: [REVISION, HISTORY_REVISION],
+  render_timeline: [HISTORY_REVISION],
+};
+
+test('history qualification accepts shortened visible revisions only with the exact full identities', () => {
+  for (const tool of ['render_changes', 'render_timeline']) {
+    const view = VIEWS.find((entry) => entry.tool === tool);
+    const text = VIEW_TEXT[tool].replaceAll(REVISION, '0123456789').replaceAll(HISTORY_REVISION, '89abcdef01');
+    const revisions = VIEW_REVISIONS[tool];
+    assert.equal(judgeView(view, { text, alerts: [], revisions }).ok, true, tool);
+    for (const missing of revisions) {
+      for (const replacement of [null, `${missing.slice(0, -1)}0`]) {
+        const wrong = revisions.filter((revision) => revision !== missing);
+        if (replacement !== null) wrong.push(replacement);
+        const frame = { text, alerts: [], revisions: wrong };
+        assert.equal(judgeView(view, frame).ok, false, `${tool}: ${missing} replaced by ${replacement}`);
+        const criteria = viewCriteria(view, null, { frame }).criteria;
+        assert.equal(criteria.find((criterion) => criterion.id === `${tool}/text`).result, 'fail');
+      }
+    }
+  }
+});
+
+test('history revision observation reads full titles only from displayed matching code text', () => {
+  const node = (title, text, visible) => ({
+    getAttribute: (name) => name === 'title' ? title : null,
+    innerText: text,
+    getClientRects: () => visible ? [{}] : [],
+  });
+  const doc = documentDouble({
+    '[role="alert"]': [], svg: [], 'svg g[class~="role-mark"] > *': [], table: [],
+    'code[title]': [
+      node(REVISION, '0123456789', true),
+      node(HISTORY_REVISION, '89abcdef01', true),
+      node('hidden', 'hidden', false), node('empty', '', true), node('mismatch', 'different', true),
+    ],
+  }, 'From revision 0123456789 to revision 89abcdef01.');
+  assert.deepEqual(readAppDom(DOM_SELECTORS, doc).revisions, [REVISION, HISTORY_REVISION]);
+});
+
 /** What each view's App frame shows for the committed fixtures (innerText, abbreviated). */
 const VIEW_TEXT = {
   render_source: `fixtures/qualification-source.md ${REVISION}\nQualification source\nContract-valid ReadItemResponse fixture for the MCP Apps harness.`,
-  render_changes: `Changes\n${REVISION} → 89abcdef0123456789abcdef0123456789abcdef\nfixtures/qualification-source.md\n@@ -1,3 +1,4 @@\n # Qualification source\n+\n+Harness fixture line.`,
-  render_timeline: `Timeline\nQualification timeline fixture\nokf-qualify-mcp-apps · 2026-10-05T12:00:00Z\n89abcdef0123456789abcdef0123456789abcdef`,
+  render_changes: `Changes\nFrom revision 0123456789 to revision 89abcdef01.\nfixtures/qualification-source.md\n@@ -1,3 +1,4 @@\n # Qualification source\n+\n+Harness fixture line.`,
+  render_timeline: `Timeline\nQualification timeline fixture\nokf-qualify-mcp-apps · 2026-10-05T12:00:00Z\n89abcdef01`,
   render_present: `Six-component catalog\nfixtures/qualification-source.md ${REVISION}\nQualification source\nContract-valid ReadItemResponse fixture for the MCP Apps harness.\nmetrics\ncategory\tvalue\nIngested\t412\nConverted\t397\nIndexed\t389\nReviewed\t127\nPublished\t61\nMetrics chart\nConverted\nIndexed\nIngested\nPublished\nReviewed\ncategory\nvalue\nSource data\nfixtures/qualification-source.md @ ${REVISION}\nfixtures/qualification-metrics.json @ ${REVISION}`,
 };
 /** The two alerts the present view showed while the fixture retained no dataset; never accepted again. */
@@ -3040,7 +3083,7 @@ test('each of the four views is recognised by its own text and by no other view'
       `http://127.0.0.1:8080/?server=okf-qualify-mcp-apps&tool=${view.tool}&call=true&theme=hide`,
     );
     for (const other of VIEWS) {
-      const verdict = judgeView(view, { text: VIEW_TEXT[other.tool], alerts: other.alerts });
+      const verdict = judgeView(view, { text: VIEW_TEXT[other.tool], alerts: other.alerts, revisions: VIEW_REVISIONS[other.tool] ?? [] });
       assert.equal(verdict.ok, view === other, `${view.tool} judged against ${other.tool}: ${JSON.stringify(verdict)}`);
     }
   }
@@ -3483,6 +3526,7 @@ async function goodObservations() {
     app_frame_depth: 2,
     frame: {
       text: VIEW_TEXT[view.tool],
+      revisions: VIEW_REVISIONS[view.tool] ?? [],
       alerts: [],
       svgs: view.dataset ? 1 : 0,
       svg_marks: view.dataset ? 5 : 0,
@@ -3863,6 +3907,7 @@ test('the App document is read with the selectors that separate marks from axes 
     chart_mark: 'svg g[class~="role-mark"] > *',
     table: 'table',
     header_cell: 'thead th',
+    revision: 'code[title]',
   });
   const cell = (textContent) => ({ textContent });
   const tableNode = ({ caption, rects, details, columns, rows }) => ({
@@ -3876,6 +3921,7 @@ test('the App document is read with the selectors that separate marks from axes 
   const everything = Array.from({ length: 40 }, () => ({}));
   const doc = documentDouble({
     '[role="alert"]': [{ innerText: 'Dataset digest verification failed' }],
+    'code[title]': [],
     svg: [{}],
     'svg g[class~="role-mark"] > *': marks,
     // What a loosened selector would count: the axes, their ticks and labels as well.
@@ -3888,6 +3934,7 @@ test('the App document is read with the selectors that separate marks from axes 
   }, 'Six-component catalog');
   assert.deepEqual(readAppDom(DOM_SELECTORS, doc), {
     text: 'Six-component catalog',
+    revisions: [],
     alerts: ['Dataset digest verification failed'],
     svgs: 1,
     svg_marks: 5,
@@ -3900,7 +3947,7 @@ test('the App document is read with the selectors that separate marks from axes 
   // It is sent to the page as source text, so it may name nothing outside itself.
   assert.doesNotMatch(readAppDom.toString(), /DOM_SELECTORS|import|require\(/);
   const empty = readAppDom(DOM_SELECTORS, { body: null, querySelectorAll: () => [] });
-  assert.deepEqual(empty, { text: '', alerts: [], svgs: 0, svg_marks: 0, tables: [] });
+  assert.deepEqual(empty, { text: '', revisions: [], alerts: [], svgs: 0, svg_marks: 0, tables: [] });
 
   // The App document is the deepest frame at least two levels below the host page.
   const frame = (parent) => ({ parentFrame: () => parent });

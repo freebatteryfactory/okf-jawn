@@ -41,6 +41,15 @@
  * was being edited here, saved or not; else the draft the service holds, which `get_item` answers
  * beside the item at the revision the delete was made on (the last one that holds it). After the
  * discard, keyboard focus is on "Close this tab".
+ *
+ * The notice of a deleted item offers to bring it back (`history/BringBack.tsx`: Rewind of the
+ * item to the last version that held it). Once it is back, the notice leaves; focus that was in
+ * it goes to the page's heading.
+ *
+ * Below the properties, the item's own history is offered on demand (`history/ItemHistory.tsx`):
+ * its Timeline and Who changed each line, at the revision the tab reads. A Note at the version
+ * the workspace shows offers "Propose a change…" to a person who may propose
+ * (`proposals/ProposeChange.tsx`).
  */
 import {
   type UseQueryResult,
@@ -71,13 +80,16 @@ import { ConflictNotice } from '../drafts/ConflictNotice';
 import { DraftEditor } from '../drafts/DraftEditor';
 import { KeptText } from '../drafts/KeptText';
 import { draftMarkOf } from '../drafts/marks';
-import { beginSession, claimEditor, refuseSaving, releaseEditor } from '../drafts/saving';
+import { beginSession, claimEditor, mayDraft, refuseSaving, releaseEditor } from '../drafts/saving';
 import { saveStateOf, useConflict, useDraftSession } from '../drafts/sessions';
 import type { Snapshotted } from '../drafts/snapshot';
 import { FailureNotice } from '../errors/FailureNotice';
 import { type FailureRetry, useRetry } from '../errors/retry';
 import type { ItemSelection } from '../explorer/search-params';
 import { useDeletedItem, useExplorerStore } from '../explorer/store';
+import { BringBack } from '../history/BringBack';
+import { ItemHistory } from '../history/ItemHistory';
+import { ProposeChange } from '../proposals/ProposeChange';
 import { ItemActions } from '../tree/ItemActions';
 import { ConversionState } from './ConversionState';
 import { describeSelection, short, textLabels } from './describe';
@@ -359,13 +371,14 @@ export function DocumentView({
 
   // Reading or editing. Until the person chooses, an item with a draft opens on the draft.
   const session = useDraftSession(workspaceId, itemId);
-  // Editing is for Notes: a Source's text is changed through corrections and a View has its own
-  // editor, so neither is offered "Edit". What kind the item is, is what the last `get_item` that
+  // Editing is for Notes, and for a Source's properties: a Source's text is changed through
+  // corrections, so its draft changes its properties alone ("Edit properties", no text box), and a
+  // View has its own editor, so it is offered no "Edit". What kind the item is, is what the last `get_item` that
   // answered said. It is read with every read, not kept from the first: no sentence of SPEC or of
   // the contract says an item's kind stays what it was (`ItemKind` is its "built-in rendering
   // role", a field of each answer). While the item is read again at another revision the last
   // answer stands, so the switch does not leave under keyboard focus for the time of a read. A
-  // session is begun only for a Note, and while there is one its editor stays, with its text.
+  // session is begun only for a Note or a Source, and while there is one its editor stays.
   const atShown = canWrite && revision === head;
   const [kind, setKind] = useState<ItemSummary['kind'] | null>(null);
   if (document !== undefined && kind !== document.summary.kind) setKind(document.summary.kind);
@@ -374,7 +387,11 @@ export function DocumentView({
   if (document !== undefined && typeName !== document.summary.type_name) {
     setTypeName(document.summary.type_name);
   }
-  const isNote = session !== undefined || kind === 'note';
+  const isNote = session !== undefined || kind === 'note' || kind === 'source';
+  // A Source's draft keeps its text: no text box is drawn, and focus is not sent to one. A session
+  // whose text was changed (it began on a Note) keeps its text box until the read refuses it, so
+  // what this pane draws still follows the session.
+  const textFixed = kind === 'source' && (session === undefined || mayDraft('source', session));
   // The session is told what each read says the item is: one that is not a Note refuses it, and a
   // Note lifts that (`saving.ts` says what a refused session is). What this pane draws follows the
   // session, not the read: the editor leaves only once the session is refused, so the save the
@@ -540,6 +557,13 @@ export function DocumentView({
   useLayoutEffect(() => {
     if (takeHeld(heldInLeft)) (closeRef.current ?? pageHeading())?.focus();
   });
+  // The notice of a deleted item leaves when the item is there again (it was brought back by a
+  // Rewind from this notice): focus that was in it goes to the page's heading, never the body.
+  const heldInDeleted = useRef<HTMLElement | null>(null);
+  const [, deletedRef] = useWatchedPart<HTMLDivElement>(heldInDeleted);
+  useLayoutEffect(() => {
+    if (takeHeld(heldInDeleted)) pageHeading()?.focus();
+  });
   const heldFailure = useRetry({
     request: `${workspaceId}/${itemId}`,
     failed: gone && lastHeld.isError,
@@ -584,7 +608,7 @@ export function DocumentView({
     if (takeHeld(heldNotice)) (keptRef.current ?? switchRef.current ?? pageHeading())?.focus();
     if (takeHeld(heldKept) && editing && notANote === null) {
       switchRef.current?.focus();
-      focusNext.current = 'text';
+      if (!textFixed) focusNext.current = 'text';
     }
   });
   const reading = JSON.stringify(request);
@@ -634,7 +658,7 @@ export function DocumentView({
       </header>
 
       {deletedTitle !== undefined && (
-        <div role="note" className="notice">
+        <div ref={deletedRef} role="note" className="notice">
           <p>
             <strong>You deleted this item.</strong> It is not in the workspace as it is now; its
             history is kept.{' '}
@@ -648,6 +672,14 @@ export function DocumentView({
           <button type="button" ref={closeRef} onClick={onClose}>
             Close this tab
           </button>
+          {deleted !== undefined && (
+            <BringBack
+              workspaceId={workspaceId}
+              itemId={itemId}
+              title={deleted.title}
+              at={deleted.at}
+            />
+          )}
         </div>
       )}
       {heldFailure.shown && (
@@ -720,7 +752,7 @@ export function DocumentView({
                 claimEditor(workspaceId, itemId, pane, true);
                 // Into the text box, which the next drawing has unless the session is refused:
                 // that drawing shows the kept text ("Show your draft"), and focus stays here.
-                if (notANote === null) focusNext.current = 'text';
+                if (notANote === null && !textFixed) focusNext.current = 'text';
                 setChosen('edit');
               }
             }}
@@ -733,7 +765,9 @@ export function DocumentView({
                   ? 'Edit here'
                   : hasDraft
                     ? 'Edit your draft'
-                    : 'Edit'}
+                    : textFixed
+                      ? 'Edit properties'
+                      : 'Edit'}
           </button>
         </p>
       )}
@@ -799,6 +833,7 @@ export function DocumentView({
               <DraftEditor
                 session={session}
                 title={title}
+                textFixed={textFixed}
                 onDiscarded={() => {
                   focusNext.current = 'switch';
                   setChosen('read');
@@ -835,6 +870,20 @@ export function DocumentView({
                 </ol>
               </nav>
             </details>
+          )}
+
+          {document !== undefined && (
+            <ItemHistory
+              workspaceId={workspaceId}
+              itemId={itemId}
+              title={title}
+              revision={revision}
+              body={document.body}
+            />
+          )}
+          {/* A Note at the version the workspace shows: a new text can be proposed for it. */}
+          {document !== undefined && kind === 'note' && revision === head && (
+            <ProposeChange workspaceId={workspaceId} document={document} />
           )}
 
           {textLabels(extraction).map((label) => (

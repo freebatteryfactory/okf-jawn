@@ -1437,12 +1437,14 @@ async function eventuallyButton(name: string): Promise<HTMLElement> {
 // properties, whether it went into the draft or was held back.
 describe('the kept text of a refused session', () => {
   const NEWER = 'd'.repeat(40);
-  const asSource = summary(NOTE, 'notes/meeting.md', 'Meeting notes', 'meeting-note', 'source');
+  // A View: no draft of it is taken. (A Source's draft is taken while its text is unchanged, so a
+  // Source would not refuse a draft that changed only properties: UI M3.)
+  const asView = summary(NOTE, 'notes/meeting.md', 'Meeting notes', 'meeting-note', 'view');
   const DRAFT_PROPERTIES = 'The properties of your draft, read only';
   const HELD = 'What you entered in the properties and was held back, read only';
 
-  /** The note with its type's form; at the newer head the same item is a Source. */
-  function becomesSource() {
+  /** The note with its type's form; at the newer head the same item is a View. */
+  function becomesView() {
     const held = { head: HEAD };
     const api = typed({
       '/api/workspaces/open-workspace': () => ok({ ...writableWorkspace, head: held.head }),
@@ -1450,7 +1452,7 @@ describe('the kept text of a refused session', () => {
         ok(
           body.item_id === NOTE
             ? {
-                ...itemDocument(JSON.stringify(body.at).includes(NEWER) ? asSource : noteSummary),
+                ...itemDocument(JSON.stringify(body.at).includes(NEWER) ? asView : noteSummary),
                 properties: stored,
               }
             : itemDocument(otherSummary),
@@ -1459,7 +1461,7 @@ describe('the kept text of a refused session', () => {
     return { api, held };
   }
 
-  /** The workspace is refreshed to the head where the item is a Source: the kept text is shown. */
+  /** The workspace is refreshed to the head where the item is a View: the kept text is shown. */
   async function refuse(held: { head: string }) {
     held.head = NEWER;
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
@@ -1481,10 +1483,10 @@ describe('the kept text of a refused session', () => {
     );
 
   it('shows the properties of the draft when the person changed one, and nothing as held back', async () => {
-    const { api, held } = becomesSource();
+    const { api, held } = becomesView();
     await editNote();
     set('Owner', 'Grace');
-    // Still waiting for its autosave when the read says the item is a Source.
+    // Still waiting for its autosave when the read says the item is a View.
     await pass(100);
     const region = await refuse(held);
     const group = within(region).getByRole('group', { name: DRAFT_PROPERTIES });
@@ -1500,7 +1502,7 @@ describe('the kept text of a refused session', () => {
   }, 20_000);
 
   it('shows what was entered and held back as it was entered, an emptied field as empty, and the question names it', async () => {
-    const { api, held } = becomesSource();
+    const { api, held } = becomesView();
     await editNote();
     // Neither fits the type: fewer attendees than one, and no owner. Both are held back.
     set('Attendees', '0');
@@ -1522,7 +1524,7 @@ describe('the kept text of a refused session', () => {
   }, 20_000);
 
   it('shows the text alone when nothing was entered in the properties', async () => {
-    const { held } = becomesSource();
+    const { held } = becomesView();
     await editNote();
     typeInto(textBox('Text of Meeting notes'), ' and more');
     await pass(100);
