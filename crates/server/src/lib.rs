@@ -175,6 +175,8 @@ pub mod identity;
 pub mod local;
 #[cfg(feature = "runtime")]
 pub mod mcp;
+#[cfg(feature = "runtime")]
+pub mod outbound;
 pub mod public;
 pub mod sandbox;
 pub mod schemas;
