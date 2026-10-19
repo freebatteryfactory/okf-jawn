@@ -24,7 +24,7 @@ import {
 import { BindingsContext, type ResolvedPresentation } from '../../src/features/views/Bindings';
 import { Layout, prepareSpec } from '../../src/features/views/Layout';
 import { datasetRecords, PresentView, parseDataset } from '../../src/features/views/PresentView';
-import { SavedView } from '../../src/features/views/SavedView';
+import { SavedView, type SavedViewProps } from '../../src/features/views/SavedView';
 import { serverToolData } from '../../src/mcp-apps/view-data';
 
 /** The source the committed dataset cites, as the generated schema reads it. */
@@ -547,9 +547,10 @@ describe('a saved View reopens with the server as the source of truth', () => {
   const ids = {
     workspaceId: 'aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff',
     itemId: '11111111-2222-4333-8444-555555555555',
-  };
+    at: { kind: 'revision', revision: '0123456789abcdef0123456789abcdef01234567' },
+  } satisfies Partial<SavedViewProps>;
 
-  it('asks the server to resolve the pinned View, never to refresh it', async () => {
+  it('asks the server to resolve the View at the revision its caller pins, never to refresh it', async () => {
     const { client, asked } = server(200, { ...saved, resolved_bindings: [] });
     render(<SavedView {...ids} data={noTools} client={client} />);
     expect(await screen.findByRole('heading', { name: 'Six-component catalog' })).toBeTruthy();
@@ -558,9 +559,53 @@ describe('a saved View reopens with the server as the source of truth', () => {
     expect(asked[0]?.body).toEqual({
       workspace_id: ids.workspaceId,
       item_id: ids.itemId,
-      at: { kind: 'latest' },
+      at: ids.at,
       refresh_live: false,
     });
+  });
+
+  it('asks again at the revision its caller pins next, and never shows the earlier answer', async () => {
+    const later = {
+      kind: 'revision',
+      revision: '89abcdef0123456789abcdef0123456789abcdef',
+    } as const;
+    const asked: unknown[] = [];
+    const client = createClient({
+      baseUrl: 'http://okf.test',
+      fetch: Object.assign(
+        async (input: URL | RequestInfo, init?: RequestInit) => {
+          const body = (await new Request(input, init).json()) as { at: { revision: string } };
+          asked.push(body.at);
+          const title = `Board at ${body.at.revision.slice(0, 7)}`;
+          const spec = {
+            root: 'root',
+            elements: { root: { type: 'Stack', props: { title }, children: [] } },
+          };
+          return new Response(
+            JSON.stringify({ ...saved, view: { ...saved.view, spec }, resolved_bindings: [] }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        },
+        { preconnect: () => {} },
+      ),
+    });
+    const view = render(<SavedView {...ids} data={noTools} client={client} />);
+    expect(await screen.findByRole('heading', { name: 'Board at 0123456' })).toBeTruthy();
+    view.rerender(<SavedView {...ids} at={later} data={noTools} client={client} />);
+    expect(screen.queryByRole('heading', { name: 'Board at 0123456' })).toBeNull();
+    expect(await screen.findByRole('heading', { name: 'Board at 89abcde' })).toBeTruthy();
+    expect(asked).toEqual([ids.at, later]);
+  });
+
+  it('asks once for a selector its caller gives again as a new object of the same value', async () => {
+    const { client, asked } = server(200, { ...saved, resolved_bindings: [] });
+    const view = render(<SavedView {...ids} at={{ ...ids.at }} data={noTools} client={client} />);
+    expect(await screen.findByRole('heading', { name: 'Six-component catalog' })).toBeTruthy();
+    view.rerender(<SavedView {...ids} at={{ ...ids.at }} data={noTools} client={client} />);
+    view.rerender(<SavedView {...ids} at={{ ...ids.at }} data={noTools} client={client} />);
+    await new Promise((done) => setTimeout(done, 50));
+    expect(asked).toHaveLength(1);
+    expect(screen.getByRole('heading', { name: 'Six-component catalog' })).toBeTruthy();
   });
 
   it("shows the server's failed chart status as that chart's alert, beside the View's text", async () => {
@@ -610,7 +655,8 @@ describe('a saved View follows the ids it was asked for', () => {
   const first = {
     workspaceId: 'aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff',
     itemId: '11111111-2222-4333-8444-555555555555',
-  };
+    at: { kind: 'latest' },
+  } satisfies Partial<SavedViewProps>;
   const second = { ...first, itemId: '99999999-2222-4333-8444-555555555555' };
 
   /** A client whose answer for each item is released by the test, so a request can stay pending. */
