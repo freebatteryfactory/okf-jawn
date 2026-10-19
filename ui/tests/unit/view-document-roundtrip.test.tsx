@@ -732,3 +732,85 @@ describe('a saved View follows the ids it was asked for', () => {
     }
   });
 });
+
+describe('a View says how its data was read, under it', () => {
+  const presented = zPresentResponse.parse(presentResponseFixture);
+  const refusing = serverToolData(async () => ({
+    isError: true,
+    content: [{ type: 'text', text: 'not read here' }],
+  }));
+  const revision = presented.resolved_bindings[0]?.source.revision ?? '';
+
+  async function regionOf(response: typeof presented) {
+    render(<PresentView response={response} data={refusing} />);
+    return screen.findByRole('region', { name: "Where this View's data comes from" });
+  }
+  const texts = (nodes: HTMLElement[]) => nodes.map((node) => node.textContent);
+
+  it('names each source and the revision it is shown at, for a pinned View', async () => {
+    const region = await regionOf(presented);
+    expect(within(region).getByText(/^Pinned:/).textContent).toBe(
+      'Pinned: each source is shown at the revision this View cites, and does not refresh.',
+    );
+    const read = within(region).getByRole('list', { name: 'Sources read' });
+    expect(texts(within(read).getAllByRole('listitem'))).toEqual([
+      `venue: fixtures/qualification-source.md at revision ${revision}`,
+      `metrics: fixtures/qualification-metrics.json at revision ${revision}`,
+    ]);
+    // A pinned View names no as-of time: its inputs are the cited revisions.
+    expect(region.querySelector('time')).toBeNull();
+    expect(within(region).queryByRole('list', { name: 'Warnings' })).toBeNull();
+  });
+
+  it('names the as-of time and each resolved revision, for a live View', async () => {
+    const later = '89abcdef0123456789abcdef0123456789abcdef';
+    const live = {
+      ...presented,
+      view: { ...presented.view, mode: 'live' as const },
+      resolved_bindings: presented.resolved_bindings.map((binding) => ({
+        ...binding,
+        source: { ...binding.source, revision: later },
+      })),
+      as_of: '2026-10-05T12:00:00.000Z',
+    };
+    const region = await regionOf(live);
+    const said = within(region).getByText(/^Live:/);
+    expect(said.textContent).toMatch(
+      /^Live: each source is shown at the revision it resolved to as of .+\.$/,
+    );
+    expect(said.querySelector('time')?.getAttribute('datetime')).toBe('2026-10-05T12:00:00.000Z');
+    const read = within(region).getByRole('list', { name: 'Sources read' });
+    expect(texts(within(read).getAllByRole('listitem'))).toEqual([
+      `venue: fixtures/qualification-source.md at revision ${later}`,
+      `metrics: fixtures/qualification-metrics.json at revision ${later}`,
+    ]);
+  });
+
+  it('shows every warning in plain words with the server message as sent, naming its binding by location', async () => {
+    const warned = {
+      ...presented,
+      warnings: [
+        {
+          code: 'dataset_unavailable',
+          message: 'binding metrics: no text',
+          location: '/bindings/1',
+        },
+        { code: 'newer_source', message: 'the head differs', location: '/bindings/0' },
+        { code: 'source_removed', message: 'the item is gone', location: '/bindings/1' },
+        { code: 'live_resolution', message: 'resolved at the current head' },
+        { code: 'unknown_unit', message: 'EUR names no column', location: '/bindings/1' },
+        { code: 'some_future_code', message: 'a new note', location: '/bindings/9' },
+      ],
+    };
+    const region = await regionOf(warned);
+    const warnings = within(region).getByRole('list', { name: 'Warnings' });
+    expect(texts(within(warnings).getAllByRole('listitem'))).toEqual([
+      'metrics: its data could not be read, so what draws from it is not shown. The server said: “binding metrics: no text”',
+      'venue: its source has changed since the revision this View cites. The View still shows that revision: newer data is an observation, not proof that the View is wrong. The server said: “the head differs”',
+      'metrics: its source is no longer in the workspace. The View still shows the revision it cites. The server said: “the item is gone”',
+      'This View: its sources were read as the workspace stands now, and a review never covers live data. The server said: “resolved at the current head”',
+      'metrics: a unit it declares names no column of its data. The server said: “EUR names no column”',
+      'This View (/bindings/9): the server noted “some_future_code”. The server said: “a new note”',
+    ]);
+  });
+});

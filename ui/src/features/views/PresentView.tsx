@@ -14,6 +14,7 @@ import { BindingsContext } from './Bindings';
 import { Chart } from './Chart';
 import { readDataset, readSource, type ViewData } from './data';
 import { Layout } from './Layout';
+import { Resolution } from './Resolution';
 
 export interface PresentViewProps {
   response: z.infer<typeof zPresentResponse>;
@@ -247,6 +248,7 @@ export function PresentView({ response, data }: PresentViewProps) {
     return (
       <BindingsContext.Provider value={bindings}>
         <Layout spec={view.spec} />
+        <Resolution response={response} />
       </BindingsContext.Provider>
     );
   }
@@ -255,6 +257,7 @@ export function PresentView({ response, data }: PresentViewProps) {
       <h2>{view.title}</h2>
       <p>{view.description}</p>
       <VegaLiteChart view={view} resolved={bindings} response={response} />
+      <Resolution response={response} />
     </section>
   );
 }
