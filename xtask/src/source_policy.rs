@@ -39,7 +39,8 @@
 //! never too lenient. What it cannot see, stated rather than hidden: code a build script or a
 //! procedural macro (a derive or an attribute) generates, and a reader reached through generic
 //! code bounded by a trait the reader implements. None of these exists here, the reader file
-//! derives nothing that hands its fields out, and authored `unsafe` is forbidden workspace-wide.
+//! derives nothing that hands its fields out. Authored `unsafe` is forbidden except the owner's
+//! one Windows standard-handle call, confined by `unsafe_use`.
 
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -359,6 +360,9 @@ pub(crate) fn check(root: &Path) -> Result<(), Box<dyn Error>> {
         for violation in zip_violations(&relative, &syntax) {
             failures.push(format!("{}: {violation}", path.display()));
         }
+        for violation in unsafe_use::violations(&relative, &syntax) {
+            failures.push(format!("{}: {violation}", path.display()));
+        }
     }
     if failures.is_empty() {
         Ok(())
@@ -492,9 +496,66 @@ fn collect(root: &Path, paths: &mut Vec<std::path::PathBuf>) -> Result<(), std::
 mod tests {
     use std::error::Error;
 
-    use super::{ZIP_READER_FILE, zip_violations};
+    use super::{ZIP_READER_FILE, check, zip_violations};
 
     type TestResult = Result<(), Box<dyn Error>>;
+
+    /// Run the production policy over a miniature authored tree, without compiling its code.
+    fn refused_unsafe(relative: &str, source: &str) -> Result<bool, Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join(relative);
+        let parent = path.parent().ok_or("source has no parent")?;
+        std::fs::create_dir_all(parent)?;
+        std::fs::write(path, format!("//! Policy fixture.\n{source}"))?;
+        Ok(check(directory.path()).is_err())
+    }
+
+    #[test]
+    fn unsafe_policy_allows_only_the_windows_handle_call() -> TestResult {
+        let source = "#[cfg(windows)] fn keep_back_standard_handles() { for handle in handles { if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 { return; } } }";
+        assert!(!refused_unsafe("crates/cli/src/relay/launch.rs", source)?);
+        assert!(refused_unsafe("crates/cli/src/other.rs", source)?);
+        assert!(refused_unsafe(
+            "crates/cli/src/relay/launch.rs",
+            &source.replace("keep_back_standard_handles", "other")
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn unsafe_policy_refuses_other_operations_and_declarations() -> TestResult {
+        for source in [
+            "fn other() { unsafe { arbitrary(); } }",
+            "unsafe fn other() {}",
+            "unsafe trait Other {}",
+            "unsafe impl Other for Thing {}",
+            "unsafe extern \"C\" { fn other(); }",
+            "macro_rules! other { () => { unsafe { arbitrary() } }; }",
+            "#[cfg(windows)] fn keep_back_standard_handles() { unsafe { arbitrary(); } }",
+            "fn keep_back_standard_handles() { unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) }; }",
+            "#[cfg(windows)] fn keep_back_standard_handles() { unsafe { SetHandleInformation(arbitrary(), HANDLE_FLAG_INHERIT, 0) }; }",
+            "#[cfg(windows)] fn keep_back_standard_handles() { unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0); arbitrary(); } }",
+            "#[cfg(windows)] fn keep_back_standard_handles() { unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) }; unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) }; }",
+            "#[cfg(windows)] fn keep_back_standard_handles() { fn nested() { unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) }; } }",
+            "#[cfg(windows)] fn keep_back_standard_handles() { impl Thing { fn nested() { unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) }; } } }",
+            "#[cfg_attr(windows, unsafe(no_mangle))] fn other() {}",
+        ] {
+            assert!(
+                refused_unsafe("crates/cli/src/relay/launch.rs", source)?,
+                "{source}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unsafe_policy_ignores_documentation_and_string_literals() -> TestResult {
+        assert!(!refused_unsafe(
+            "crates/cli/src/other.rs",
+            "// unsafe { arbitrary() }\nfn safe() { let text = \"unsafe fn fake() {}\"; say!(\"unsafe\"); }"
+        )?);
+        Ok(())
+    }
 
     /// The zip rule's findings for `source` at `relative`.
     fn zip(relative: &str, source: &str) -> Result<Vec<String>, Box<dyn Error>> {
@@ -736,3 +797,5 @@ mod tests {
         Ok(())
     }
 }
+
+mod unsafe_use;

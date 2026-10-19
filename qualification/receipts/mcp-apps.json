@@ -1,5 +1,5 @@
 {
-  "git_sha": "d39980d0c86123b32c99de9f7622657b1954a9d6",
+  "git_sha": "13537fc755580faa2ee107700b8ff8c341ba2c84",
   "inputs": [
     ".bun-version",
     ".cargo/config.toml",
@@ -23,7 +23,7 @@
     "ui/tsconfig.json",
     "ui/vite.config.ts"
   ],
-  "produced_at": "2026-10-19T20:08:48.696Z",
+  "produced_at": "2026-10-19T22:26:16.129Z",
   "component": "mcp-apps-protocol-qualification",
   "gate": "mcp-apps-protocol-qualification",
   "result": "PASS",
@@ -212,7 +212,7 @@
   ],
   "not_judged": [],
   "harness_error_detail": [],
-  "finished_at": "2026-10-19T20:10:33.293Z",
+  "finished_at": "2026-10-19T22:27:54.115Z",
   "scope": {
     "summary": "This run renders the real MCP App bundle in a real MCP Apps host, against a fixture MCP server. It qualifies the App side and the protocol libraries; it does not test the product server.",
     "real": [
@@ -286,7 +286,7 @@
   "harness_binary": {
     "path": "<abs>/release/okf-qualify-mcp-apps.exe",
     "bytes": 5330432,
-    "sha256": "04781e884949fa074ea0d77ac46bb6d7856fd07ef2c0d3ee67dae3358b9852bc",
+    "sha256": "21544e58ee654c846c0c1012e9a98dfcf34839740a98075eb70247c4c75d8ddd",
     "args": [
       "--http",
       "127.0.0.1:18765"
@@ -311,7 +311,7 @@
     ]
   },
   "bundle_sizes": {
-    "app": 1617933
+    "app": 1623046
   },
   "app_bundle": {
     "node_env": "development",
@@ -336,7 +336,7 @@
     "resource_count": 1,
     "resources": [
       {
-        "byteLength": 1617933,
+        "byteLength": 1623046,
         "metaUi": {
           "csp": {
             "connectDomains": [],
@@ -348,7 +348,7 @@
         "name": "app",
         "path": "ui/dist-apps/app.html",
         "readable": true,
-        "sha256": "be91428614815c756a28afbf3d447edc280dacc3faacd6435d9e473c5655aa55",
+        "sha256": "ccee539a343c4b496f4174f545551eb8ffbad49cbb8bc4a9f8430eb0b485fc19",
         "uri": "ui://okf-jawn/app.html"
       }
     ],
@@ -451,7 +451,7 @@
       {
         "uri": "ui://okf-jawn/app.html",
         "mime_type": "text/html;profile=mcp-app",
-        "text_sha256": "be91428614815c756a28afbf3d447edc280dacc3faacd6435d9e473c5655aa55",
+        "text_sha256": "ccee539a343c4b496f4174f545551eb8ffbad49cbb8bc4a9f8430eb0b485fc19",
         "csp": {
           "connectDomains": [],
           "resourceDomains": []
@@ -541,11 +541,11 @@
   "basic_host": {
     "status": "passed",
     "source": {
-      "status": "fetched",
+      "status": "cached",
       "repository": "https://github.com/modelcontextprotocol/ext-apps",
       "requested_tag": "v2.0.3",
       "commit": "82221c0c8ce7661efa6771c9d461511b1650495f",
-      "commit_resolved_at": "2026-10-19T20:09:07.410Z",
+      "commit_resolved_at": "2026-10-19T21:09:00.049Z",
       "files_verified": 14,
       "files_expected": 14,
       "package": {
@@ -712,7 +712,7 @@
         "url": "http://127.0.0.1:8080/?server=okf-qualify-mcp-apps&tool=render_present&call=true&theme=hide",
         "screenshot": ".artifacts/qualification/mcp-apps/basic-host-render_present.png",
         "app_frame_depth": 2,
-        "feature_text": "Six-component catalog\nfixtures/qualification-source.md\n0123456789abcdef0123456789abcdef01234567\nQualification source\n\nContract-valid ReadItemResponse fixture for the MCP Apps harness.\n\nmetrics\ncategory\tvalue\nIngested\t412\nConverted\t397\nIndexed\t389\nReviewed\t127\nPublished\t61\nMetrics chart\nConverted\nIndexed\nIngested\nPublished\nReviewed\ncategory\n0\n50\n100\n150\n200\n250\n300\n350\n400\n450\nvalue\nSource data\nfix",
+        "feature_text": "Six-component catalog view\n\nViewDocument wrapping the approved six-component json-render Spec for Phase 0 round-trip.\n\nSix-component catalog\nfixtures/qualification-source.md\n0123456789abcdef0123456789abcdef01234567\nQualification source\n\nContract-valid ReadItemResponse fixture for the MCP Apps harness.\n\nmetrics\ncategory\tvalue\nIngested\t412\nConverted\t397\nIndexed\t389\nReviewed\t127\nPublished\t61\nMetrics ",
         "revisions": [],
         "alerts": [],
         "expected_alerts": [],
@@ -867,7 +867,7 @@
   },
   "host_render": {
     "status": "not_run",
-    "meaning": "No files under .artifacts/qualification/mcp-apps/hosts/. Host render for claude.ai / ChatGPT remains not_run until screenshots or notes are placed there. This receipt does not invent PASS.",
+    "meaning": "hosts/ directory exists but is empty. Place screenshots or notes from claude.ai / ChatGPT before claiming an observed host render.",
     "gate": "mcp-apps-web-hosts"
   },
   "static_bundle_smoke": {

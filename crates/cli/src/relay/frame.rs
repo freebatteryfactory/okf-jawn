@@ -5,7 +5,8 @@
 //! its bytes are dropped, the rest of it is read and dropped up to the line feed, and it is
 //! reported as [`Frame::TooLong`]. At most `limit + 1` bytes of one line are buffered, beside
 //! the reader's own fixed buffer. Input that ends without a line feed still yields its last
-//! line.
+//! line, and one that ends inside a line already over the limit yields it as
+//! [`Frame::TooLong`] before [`Frame::End`], however far over the limit it had grown.
 //!
 //! A read that is given up loses no byte: the part of a line read so far stays with the
 //! [`Frames`], and the next read goes on from it. That is what lets the relay look for the

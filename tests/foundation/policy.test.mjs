@@ -15,6 +15,16 @@ const exposed=operations.filter(o=>o.alias);
 const approvedModelTools=['ls','grep','show','log','diff','blame','sources','links','propose','catalog','present','workspaces','rules'];
 const humanOnly=['approve','review','admin'];
 
+test('the CLI handle exception retains every other workspace lint and requires documented single-operation unsafe blocks',async()=>{
+ const workspace=Bun.TOML.parse(await readFile(join(root,'Cargo.toml'),'utf8')).workspace.lints;
+ const cli=Bun.TOML.parse(await readFile(join(root,'crates/cli/Cargo.toml'),'utf8')).lints;
+ assert.deepEqual(cli,{
+  rust:{...workspace.rust,unsafe_code:'allow'},
+  clippy:{...workspace.clippy,undocumented_unsafe_blocks:'deny',multiple_unsafe_ops_per_block:'deny'},
+ });
+ assert.equal(workspace.rust.unsafe_code,'forbid');
+});
+
 test('complete operation surface has unique canonical identifiers and paths',()=>{
  assert.ok(operations.length>0,'api/operations.json is empty');
  assert.equal(new Set(operations.map(o=>o.id)).size,operations.length);

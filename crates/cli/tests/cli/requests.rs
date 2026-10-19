@@ -218,16 +218,18 @@ async fn a_refusal_with_what_this_cli_does_not_know_keeps_its_code_and_message()
 
 /// A credential that holds a quote and a backslash is removed from a refusal's message and
 /// from its detail, which is JSON and spells both with an escape.
+/// A token the service's refusal spells with an escape is removed from its message and its
+/// detail. (A bearer token is a `b64token`, so it holds no quote or backslash; the slash it may
+/// hold is the character JSON lets an encoder escape.)
 #[tokio::test]
 async fn a_credential_that_needs_escaping_is_removed_from_a_refusal_and_its_detail() -> TestResult {
-    let token = "ab\"cd\\ef-9912-k7m2x";
-    let refusal = json!({
-        "code": "unauthenticated",
-        "message": format!("Bearer {token} is not known"),
-        "detail": {"seen": token}
-    });
-    let listener =
-        Answering::with(vec![json_answer("401 Unauthorized", &refusal.to_string())]).await?;
+    let token = "ab/cd+ef-9912-k7m2x";
+    let spelled = token.replace('/', "\\/");
+    let refusal = format!(
+        "{{\"code\":\"unauthenticated\",\"message\":\"Bearer {spelled} is not known\",\
+         \"detail\":{{\"seen\":\"{spelled}\"}}}}"
+    );
+    let listener = Answering::with(vec![json_answer("401 Unauthorized", &refusal)]).await?;
     let ran = cli(
         &["get_session", "--server", &listener.origin()],
         Some(token),
@@ -426,6 +428,72 @@ async fn the_token_never_appears_in_an_error() -> TestResult {
         "{}",
         unusable.stderr
     );
+    Ok(())
+}
+
+/// An operation's bearer token is an RFC 6750 `b64token` of at least 16 characters (the
+/// integration owner's ruling on the follow-up's request 2): letters, digits and `-` `.` `_`
+/// `~` `+` `/`, then any number of `=`. So `[` and `]`, from which the mark `[credential]`
+/// could complete a token in a refusal the CLI prints, are refused, as are a quote, a
+/// backslash, a space, a letter that is not ASCII and an `=` before the end, each in words
+/// that do not repeat the token, and nothing is sent. A JWT-shaped token (a WorkOS Connect
+/// access token is base64url with dots), one with padding, one with every other character of
+/// the alphabet, and a connector secret are each sent as they are.
+#[tokio::test]
+async fn an_operation_token_is_a_b64token_or_is_refused() -> TestResult {
+    let stem = "okfjawn0token1234";
+    let refused = [
+        format!("{stem}["),
+        format!("{stem}]"),
+        format!("[{stem}"),
+        format!("{stem}\""),
+        format!("{stem}\\x"),
+        format!("{stem} x"),
+        format!("{stem}\u{e9}"),
+        format!("{stem}=x"),
+        format!("{stem},x"),
+        format!("{stem}:x"),
+    ];
+    let quiet = Answering::with(Vec::new()).await?;
+    for token in &refused {
+        let ran = cli(
+            &["get_session", "--server", &quiet.origin()],
+            Some(token),
+            b"",
+        )
+        .await?;
+        assert_eq!((ran.code, ran.stdout.as_str()), (1, ""), "{token}");
+        assert!(
+            ran.stderr.starts_with("okf-jawn: invalid_input: The ")
+                && ran.stderr.contains("OKF_JAWN_TOKEN")
+                && !ran.stderr.contains(stem),
+            "{token}: {}",
+            ran.stderr
+        );
+    }
+    assert!(quiet.heard()?.is_empty(), "a refused token was sent");
+    let jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyXzAxIn0.c2lnbmF0dXJlLV9fYmFzZTY0dXJs";
+    let issued = format!("okfj_{}", "0123456789abcdef".repeat(4));
+    let taken = [
+        jwt.to_owned(),
+        format!("{stem}=="),
+        format!("{stem}-._~+/AZaz09"),
+        issued,
+    ];
+    for token in &taken {
+        let listener = Answering::with(vec![json_answer("200 OK", "{}")]).await?;
+        let ran = cli(
+            &["get_session", "--server", &listener.origin()],
+            Some(token),
+            b"",
+        )
+        .await?;
+        assert_eq!((ran.code, ran.stderr.as_str()), (0, ""), "{token}");
+        assert_eq!(
+            only(&listener)?.header("authorization"),
+            Some(format!("Bearer {token}"))
+        );
+    }
     Ok(())
 }
 
