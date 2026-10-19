@@ -255,6 +255,7 @@ async function service(): Promise<Service> {
         warnings: [],
         considered: considered.length,
         unchanged: considered.length - entries.length,
+        refused: 0,
         archived_left_out: selected.length - considered.length,
       });
     },

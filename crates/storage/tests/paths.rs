@@ -421,6 +421,7 @@ fn moved(item: u32, to: &str) -> Fallible<TreeEdit> {
     Ok(TreeEdit::MoveItem {
         item_id: uuid!(item)?,
         destination: path(to)?,
+        keep_alias: false,
     })
 }
 

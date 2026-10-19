@@ -1572,6 +1572,92 @@
       "qualification": [
         "explorer-playwright-journeys"
       ]
+    },
+    {
+      "name": "glob",
+      "use_sites": [],
+      "planned_use_sites": [
+        "crates/core/src/conventions.rs"
+      ],
+      "official_sources": [
+        "https://docs.rs/glob/0.3.4/glob/struct.Pattern.html"
+      ],
+      "symbols": [
+        "Pattern::new",
+        "Pattern::matches_with",
+        "MatchOptions",
+        "PatternError"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Installed source read in the cargo registry for the core M1.3b design (2026-10-14) and official API documentation; reference, no Context7 lookup",
+      "offline_notes": [
+        "Which items a naming rule applies to: a glob over the workspace path, refused at set_rules with PatternError.pos located in the field.",
+        "`**` must form a whole path component (`**a` and `b**` are invalid); `[!...]` negates; `{` is an ordinary character (no alternation).",
+        "MatchOptions.require_literal_separator keeps `*`, `?` and `[...]` from matching `/`; matching walks chars, so `?` is one Unicode scalar value.",
+        "Case folding is ASCII only (chars_eq, issue #9084): match collision keys of both sides (contract `collision_key_of`) case-sensitively instead.",
+        "Separators include `` on Windows (std::path::is_separator), so a glob holding `` is refused."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": []
+    },
+    {
+      "name": "convert_case",
+      "use_sites": [],
+      "planned_use_sites": [
+        "crates/core/src/conventions.rs"
+      ],
+      "official_sources": [
+        "https://docs.rs/convert_case/0.12.0/convert_case/"
+      ],
+      "symbols": [
+        "split",
+        "Boundary::Space",
+        "Boundary::Hyphen",
+        "Boundary::Underscore",
+        "Pattern::mutate",
+        "Pattern::Lowercase",
+        "Pattern::Uppercase",
+        "Pattern::Capital",
+        "Pattern::Custom",
+        "Pattern::RemoveEmpty"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Installed source read in the cargo registry for the core M1.3b design (2026-10-14) and official API documentation; reference, no Context7 lookup",
+      "offline_notes": [
+        "Word breaks are space, `-` and `_` only (owner decision 2026-10-14): pass exactly those three boundaries to `split`; the defaults would also split digits and camelCase (`iPhone`).",
+        "Leading, trailing and repeated delimiters make empty words: drop them (RemoveEmpty) before joining.",
+        "Use `split` and `Pattern::mutate`, not `Converter`, because a recognised date is one protected word that is never split or re-cased.",
+        "Title case keeps a word that already holds a capital (owner decision): a `Pattern::Custom`, not `Pattern::Capital`, which lower-cases the rest of the word."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": []
+    },
+    {
+      "name": "regex",
+      "use_sites": [],
+      "planned_use_sites": [
+        "crates/core/src/conventions.rs"
+      ],
+      "official_sources": [
+        "https://docs.rs/regex/1.13.1/regex/"
+      ],
+      "symbols": [
+        "Regex::new",
+        "Regex::captures_at",
+        "Captures"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Installed source read in the cargo registry for the core M1.3b design (2026-10-14) and official API documentation; reference, no Context7 lookup",
+      "offline_notes": [
+        "Recognises dates and version suffixes in a name. No look-around and no backreferences: use a boundary group and `captures_at`, whose `A` matches only at start 0.",
+        "`captures_at` panics when start is past the end of the text: never call it so.",
+        "Patterns are constants compiled once at first use; a failure to compile is an Internal error, never a refusal of the person."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": []
     }
   ]
 }

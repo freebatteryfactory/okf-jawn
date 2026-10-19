@@ -173,6 +173,16 @@ pub enum TreeEdit {
         item_id: ItemId,
         /// New path.
         destination: WorkspacePath,
+        /// Before the move, record the item's path in its frontmatter `aliases`, a list of its
+        /// former workspace paths, oldest first, each once (a naming rule's
+        /// `alias_preservation`): an absent `aliases` becomes a list of that path, a string
+        /// becomes a list of the string and the path, and a list of strings gains the path unless
+        /// it holds it already. Any other value refuses the commit with `InvalidInput` naming
+        /// the item's path, and the value is not written over. `false` writes nothing, and a
+        /// move to the path the item holds records nothing either. The review fingerprint
+        /// leaves `aliases` out (`portable::item_content_digest`), so recording one changes no
+        /// review.
+        keep_alias: bool,
     },
     /// Set an item's OKF status word, its archived flag, or both; `None` leaves one unchanged.
     SetStatus {
@@ -376,6 +386,30 @@ pub struct Committed {
     pub warnings: Vec<Warning>,
 }
 
+/// The naming rules file as one revision stores it (`VersionStore::rules`).
+#[derive(Debug, Clone)]
+pub struct RulesFile {
+    /// The file's text. Bytes that are not UTF-8 are replaced with U+FFFD
+    /// (`String::from_utf8_lossy`); such a file never reads as rules (`parsed` is an error).
+    pub text: String,
+    /// The stored bytes read as `NamingRules` (YAML, unknown keys refused), or why they do not
+    /// read. Nothing beyond the reader's own checks is applied here: whether the rules can be
+    /// applied is the application's (`conventions::CompiledRules`).
+    pub parsed: Result<NamingRules, RulesParseError>,
+}
+
+/// Why a stored rules file does not read as `NamingRules`: the reader's message, and where in
+/// the file it stopped when it says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RulesParseError {
+    /// The reader's message.
+    pub message: String,
+    /// The 1-based line the reader stopped at; `None` when it names none.
+    pub line: Option<u32>,
+    /// The 1-based column on that line; `None` when it names none.
+    pub column: Option<u32>,
+}
+
 /// One page of a folder at one revision.
 #[derive(Debug, Clone)]
 pub struct FolderListing {
@@ -385,6 +419,28 @@ pub struct FolderListing {
     pub folders: Vec<WorkspacePath>,
     /// Continuation cursor, when more entries remain.
     pub next_cursor: Option<String>,
+}
+
+/// Every item of one revision with what the naming rules read of it, and every folder
+/// (`VersionStore::tree`).
+#[derive(Debug, Clone)]
+pub struct WorkspaceTree {
+    /// Every item, in path order, archived items and items under a folder whose name starts
+    /// with `.` included.
+    pub items: Vec<TreeItem>,
+    /// Every folder that holds a file, at any depth, in path order: each folder above each file
+    /// of the tree, `.okf` and the folders under it included.
+    pub folders: Vec<WorkspacePath>,
+}
+
+/// One item of a `WorkspaceTree`.
+#[derive(Debug, Clone)]
+pub struct TreeItem {
+    /// The item, summarized as `list` of its folder summarizes it.
+    pub summary: ItemSummary,
+    /// A source card's original file name (`items::SourceHeader::original_name`); `None` for
+    /// every other item.
+    pub original_name: Option<String>,
 }
 
 /// History of a workspace or of one item, newest first.
@@ -473,6 +529,15 @@ pub trait VersionStore: Send + Sync {
         folder: Option<&'a WorkspacePath>,
         page: Page,
     ) -> PortFuture<'a, FolderListing>;
+    /// Every item and every folder of `revision` in one pass over its tree, each item file read
+    /// once (`WorkspaceTree`): what the naming rules read to name a selection against the whole
+    /// workspace. Unlike `list`, it includes the items under a folder whose name starts with
+    /// `.`, and it is not paged. `NotFound` only when the revision itself is unknown.
+    fn tree<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+    ) -> PortFuture<'a, WorkspaceTree>;
     /// The item whose path is exactly `path` at `revision`, summarized as `list` of its folder
     /// summarizes it.
     ///
@@ -498,12 +563,17 @@ pub trait VersionStore: Send + Sync {
         revision: &'a Revision,
         path: &'a WorkspacePath,
     ) -> PortFuture<'a, Vec<u8>>;
-    /// Read the naming rules stored in `.okf/rules.yaml`; `None` when no rules were saved.
+    /// Read the naming rules file `.okf/rules.yaml` at `revision`: `None` when no rules were
+    /// saved there; otherwise the file's text and what reading its bytes as `NamingRules` gave
+    /// (`RulesFile`). A file that does not read as rules (a YAML error, an unknown key, bytes
+    /// that are not UTF-8) is answered with its text and the reader's error, never as an error
+    /// of this call: a person or an import wrote it, and `get_rules` gives it back to be
+    /// repaired. `NotFound` only when the revision itself is unknown.
     fn rules<'a>(
         &'a self,
         scope: &'a StorageScope,
         revision: &'a Revision,
-    ) -> PortFuture<'a, Option<NamingRules>>;
+    ) -> PortFuture<'a, Option<RulesFile>>;
     /// Read every user-defined type definition.
     fn types<'a>(
         &'a self,
@@ -1010,6 +1080,7 @@ impl TreeEdit {
             } => Self::MoveItem {
                 item_id,
                 destination,
+                keep_alias: false,
             },
             Change::Archive { item_id } => Self::SetStatus {
                 item_id,

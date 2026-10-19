@@ -264,3 +264,48 @@ async fn the_rules_tool_reads_the_naming_rules() -> TestResult {
     );
     Ok(())
 }
+
+/// The `rules` tool answers what `get_rules` answers in its other two shapes too (design
+/// section 7.5, GR1 and GR3): no rules saved, and a stored file that does not read, with its
+/// text and its problems, so an agent sees what a person repairs.
+#[tokio::test]
+async fn the_rules_tool_answers_no_rules_and_an_unreadable_file_as_get_rules_does() -> TestResult {
+    let revision = "a".repeat(40);
+    let answers = [
+        ("tools-rules-none.html", json!({ "revision": revision })),
+        (
+            "tools-rules-unreadable.html",
+            json!({
+                "revision": revision,
+                "unreadable": {
+                    "text": "schema_version: 1\ncolour: red\nrules: []\n",
+                    "problems": [{
+                        "code": "rules_yaml_invalid",
+                        "message": "unknown field `colour`",
+                        "location": "line 2, column 1"
+                    }]
+                }
+            }),
+        ),
+    ];
+    for (page, answer) in answers {
+        let world = reader();
+        world.application.answer_with("get_rules", answer.clone())?;
+        let server = McpServer::new(world.ports, bundle(page, "<p>app</p>")?)?;
+        let result = server
+            .call_tool_as(
+                Some(&agent("alice")?),
+                "rules",
+                Some(arguments(json!({
+                    "workspace_id": "11111111-1111-4111-8111-111111111111",
+                    "at": {"kind": "latest"}
+                }))?),
+            )
+            .await?;
+        assert_eq!(result.is_error, Some(false), "{result:?}");
+        assert_eq!(result.structured_content, Some(answer.clone()));
+        let text: Value = serde_json::from_str(text_of(&result)?)?;
+        assert_eq!(text, answer);
+    }
+    Ok(())
+}

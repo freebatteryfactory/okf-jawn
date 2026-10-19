@@ -472,6 +472,7 @@ async fn a_moved_item_answers_at_the_revision_asked_not_the_head() -> TestResult
                 vec![TreeEdit::MoveItem {
                     item_id: uuid!(10)?,
                     destination: path("plans/plan.md")?,
+                    keep_alias: false,
                 }],
             )?,
             Arc::new(Accept),
