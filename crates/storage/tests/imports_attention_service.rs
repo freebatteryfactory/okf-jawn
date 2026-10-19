@@ -867,6 +867,232 @@ async fn imports_a_correction_survives_the_actual_redigest_job() -> TestResult {
     Ok(())
 }
 
+/// Design section 5 rules 3-5: choosing accepted agent text after a completed conversion
+/// preserves its supplier and records the actual human keeper; it is not a human correction.
+/// Only the unsupported starting card is fixture setup. Proposal, confirmation, acceptance,
+/// redigest and adoption use the real handlers/stores, with the stated converter double.
+/// The Imports handlers must land before this can reach its provenance-specific runtime red.
+#[tokio::test]
+async fn imports_adopting_supplied_text_keeps_agent_origin_human_keeper_and_history() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let world = World::new(directory.path())?;
+    let (scope, initial) = world.workspace().await?;
+    complete(&world, &scope, 2, "scan.pdf").await?;
+    let item = ItemId(Uuid::from_u128(120));
+    let mut unsupported = card(
+        item,
+        "sources/adopted.md",
+        'd',
+        json!({ "outcome": { "status": "unsupported" }, "text_origin": "none",
+            "corrected": false, "warnings": [] }),
+        "",
+    )?;
+    // complete_upload retained these actual original bytes; no fabricated conversion record
+    // or geometry is injected into the later read/redigest journey.
+    unsupported.appearance.object = sha256(BYTES)?;
+    let base = write_card(&world, &scope, &initial, 1, unsupported).await?;
+    let supplied_text = "The agent supplied this passage.\n";
+    let agent = Principal {
+        subject: "test-agent".to_owned(),
+        tenant_id: tenant()?,
+        route: AccessRoute::McpDelegation,
+        client_id: Some("test-client".to_owned()),
+        delegation: None,
+    };
+    let proposal: okf_jawn_contract::proposal::Proposal = {
+        let mutations = world.storage.mutations();
+        let events = world.storage.events();
+        let ports = DispatchPorts {
+            access: &OpenAccess,
+            mutations: &mutations,
+            events: &events,
+        };
+        let caller = Caller {
+            principal: &agent,
+            session_id: None,
+        };
+        serde_json::from_value(dispatch(&world.service, &ports, &caller, "open_proposal", json!({
+            "workspace_id": scope.workspace_id, "base_revision": base,
+            "title": "Supply the unprocessed source's text", "description": "Test fixture agent text",
+            "changes": [{ "kind": "supply_extraction", "item_id": item,
+                "markdown": supplied_text }], "idempotency_key": key(3)
+        })).await?)?
+    };
+    let confirmation = world
+        .call(
+            "create_confirmation",
+            json!({
+                "workspace_id": scope.workspace_id, "action": "accept_proposal",
+                "target": { "kind": "proposal", "proposal_id": proposal.id },
+                "revision": proposal.proposal_revision, "content_digest": proposal.content_digest,
+                "idempotency_key": key(4)
+            }),
+        )
+        .await?;
+    let accepted: MutationResult = serde_json::from_value(world.call("accept_proposal", json!({
+        "workspace_id": scope.workspace_id, "proposal_id": proposal.id, "expected_head": base,
+        "proposal_revision": proposal.proposal_revision,
+        "confirmation_id": some(confirmation.get("id"), "the human confirmation")?,
+        "idempotency_key": key(5)
+    })).await?)?;
+    let recorded = world
+        .call(
+            "get_proposal",
+            json!({
+                "workspace_id": scope.workspace_id, "proposal_id": proposal.id
+            }),
+        )
+        .await?;
+    assert_eq!(recorded.get("status"), Some(&json!("accepted")));
+    let versions = world.storage.versions();
+    let supplied = versions.show(&scope, &accepted.revision, item).await?;
+    assert_eq!(supplied.body, supplied_text);
+    let supplied_extraction =
+        &some(supplied.source.as_ref(), "the accepted appearance")?.extraction;
+    assert_eq!(
+        serde_json::to_value(&supplied_extraction.text_origin)?,
+        json!("supplied_by_agent")
+    );
+    assert!(!supplied_extraction.corrected);
+    let original_supplied = some(
+        supplied_extraction.supplied.as_ref(),
+        "accepted supplier metadata",
+    )?;
+    assert_eq!(original_supplied.supplied_by, "test-agent");
+    assert_eq!(original_supplied.approved_by, "ana");
+    assert_eq!(original_supplied.kept_by, None);
+
+    let queued: Job = serde_json::from_value(world.call("redigest_item", json!({
+        "workspace_id": scope.workspace_id, "item_id": item, "base_revision": accepted.revision,
+        "settings": ConversionSettings::default(), "unconverted_only": false,
+        "idempotency_key": key(6)
+    })).await?)?;
+    let converted = world
+        .run_job(
+            &scope,
+            queued.id,
+            "The converter supplied different text.\n",
+        )
+        .await?;
+    let converted_at = some(converted.revision.as_ref(), "the completed conversion")?;
+    let converter_document = versions.show(&scope, converted_at, item).await?;
+    assert_eq!(
+        converter_document.body,
+        "The converter supplied different text.\n"
+    );
+    let converter_extraction = &some(
+        converter_document.source.as_ref(),
+        "the converted appearance",
+    )?
+    .extraction;
+    assert_eq!(
+        serde_json::to_value(&converter_extraction.outcome)?,
+        json!({ "status": "completed" })
+    );
+    assert_eq!(
+        serde_json::to_value(&converter_extraction.text_origin)?,
+        json!("converter")
+    );
+    let converted_digest = some(converter_extraction.digest.as_ref(), "the completed digest")?;
+    // A different authenticated human keeps the text. OpenAccess deliberately grants both
+    // fixture principals; this is provenance coverage, not identity-provider qualification.
+    let keeper = Principal {
+        subject: "bea".to_owned(),
+        route: AccessRoute::BrowserSession,
+        client_id: None,
+        ..owner()?
+    };
+    let kept: MutationResult = {
+        let mutations = world.storage.mutations();
+        let events = world.storage.events();
+        let ports = DispatchPorts {
+            access: &OpenAccess,
+            mutations: &mutations,
+            events: &events,
+        };
+        let caller = Caller {
+            principal: &keeper,
+            session_id: Some("keeper-session"),
+        };
+        serde_json::from_value(dispatch(&world.service, &ports, &caller, "correct_digest", json!({
+            "workspace_id": scope.workspace_id, "item_id": item, "base_revision": converted_at,
+            "digest": converted_digest, "adopts": proposal.id, "corrected_markdown": supplied_text,
+            "idempotency_key": key(7)
+        })).await?)?
+    };
+    let shown = versions.show(&scope, &kept.revision, item).await?;
+    assert_eq!(shown.body, supplied_text);
+    let extraction = &some(shown.source.as_ref(), "the kept appearance")?.extraction;
+    assert_eq!(
+        serde_json::to_value(&extraction.text_origin)?,
+        json!("supplied_by_agent")
+    );
+    assert!(
+        !extraction.corrected,
+        "adoption is not a human-authored correction"
+    );
+    assert_eq!(extraction.outcome, converter_extraction.outcome);
+    assert_eq!(extraction.digest.as_ref(), Some(converted_digest));
+    let supplier = some(extraction.supplied.as_ref(), "kept supplier metadata")?;
+    assert_eq!(supplier.proposal_id, proposal.id);
+    assert_eq!(supplier.supplied_by, "test-agent");
+    assert_eq!(supplier.client_id.as_deref(), Some("test-client"));
+    assert_eq!(supplier.approved_by, "ana");
+    assert_eq!(supplier.approved_at, original_supplied.approved_at);
+    assert_eq!(supplier.kept_by.as_deref(), Some("bea"));
+    assert_eq!(supplier.content_digest, sha256(supplied_text.as_bytes())?);
+    let read = world
+        .call(
+            "read_item",
+            json!({
+                "workspace_id": scope.workspace_id, "item_id": item,
+                "at": { "kind": "revision", "revision": kept.revision }, "view": "text",
+                "selection": { "kind": "lines", "range": { "start": 1, "end": 1 } },
+                "max_bytes": 4096, "max_images": 0
+            }),
+        )
+        .await?;
+    assert_eq!(read.get("markdown"), Some(&json!(supplied_text)));
+    assert_eq!(
+        read.pointer("/source/locations"),
+        Some(&json!([
+            { "provenance": "unresolved", "reason": { "kind": "supplied_text" } }
+        ]))
+    );
+    // The choice does not rewrite either historical representation or its origin metadata.
+    let historical = versions.show(&scope, &accepted.revision, item).await?;
+    assert_eq!(historical.body, supplied_text);
+    assert_eq!(
+        some(historical.source.as_ref(), "the historical supplier")?.extraction,
+        *supplied_extraction
+    );
+    let historical = versions.show(&scope, converted_at, item).await?;
+    assert_eq!(historical.body, "The converter supplied different text.\n");
+    assert_eq!(
+        some(historical.source.as_ref(), "the historical converter")?.extraction,
+        *converter_extraction
+    );
+    // A same-digest producer replacement is a separate store-level persistence check, not
+    // another conversion claim: it must reapply the kept choice with its origin intact.
+    let mut same_digest = card(
+        item,
+        "sources/adopted.md",
+        'd',
+        serde_json::to_value(converter_extraction)?,
+        "The converter supplied different text.\n",
+    )?;
+    same_digest.appearance.object = sha256(BYTES)?;
+    let replaced_at = write_card(&world, &scope, &kept.revision, 2, same_digest).await?;
+    let replaced = versions.show(&scope, &replaced_at, item).await?;
+    assert_eq!(replaced.body, supplied_text);
+    assert_eq!(
+        some(replaced.source.as_ref(), "the replaced appearance")?.extraction,
+        *extraction
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn imports_a_correction_is_committed_and_kept_across_later_conversions() -> TestResult {
     let directory = tempfile::tempdir()?;
