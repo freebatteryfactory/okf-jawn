@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderValue, Request, StatusCode};
 use axum::routing::{get, post};
 use okf_jawn_server::grants::Clock;
 use okf_jawn_server::ingress::{SIGN_IN_PER_MINUTE, SignInLimit, guard};
@@ -205,6 +205,27 @@ async fn a_forwarded_address_from_an_untrusted_peer_is_ignored() -> TestResult {
         .await?,
         StatusCode::SERVICE_UNAVAILABLE
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_non_text_forwarded_hop_ends_the_trusted_walk() -> TestResult {
+    // Design section 6.5: a malformed hop stops the right-to-left walk at the last trusted
+    // proxy. Earlier addresses must therefore share that proxy's one-request allowance.
+    let app = limited(&["10.0.0.5", "10.0.0.6"], TestClock::new(), 1, 10_000)?;
+    for (client, expected) in [
+        ("203.0.113.7", StatusCode::OK),
+        ("203.0.113.8", StatusCode::SERVICE_UNAVAILABLE),
+    ] {
+        let mut request = from("GET", "/auth/login", "10.0.0.5", &[client])?;
+        request
+            .headers_mut()
+            .append("x-forwarded-for", HeaderValue::from_bytes(&[0xff])?);
+        request
+            .headers_mut()
+            .append("x-forwarded-for", HeaderValue::from_static("10.0.0.6"));
+        assert_eq!(status(&app, request).await?, expected);
+    }
     Ok(())
 }
 

@@ -103,15 +103,18 @@ impl SignInLimit {
         if !self.trusted.contains(&source) {
             return Source::Address(source);
         }
-        let forwarded: Vec<&str> = headers
+        // Keep malformed header values as hops: discarding one would trust earlier addresses
+        // across a boundary the proxy chain does not establish.
+        let forwarded: Vec<&[u8]> = headers
             .get_all("x-forwarded-for")
             .iter()
-            .filter_map(|value| value.to_str().ok())
-            .flat_map(|value| value.split(','))
-            .map(str::trim)
+            .flat_map(|value| value.as_bytes().split(|byte| *byte == b','))
             .collect();
         for entry in forwarded.iter().rev() {
-            let Ok(address) = IpAddr::from_str(entry) else {
+            let Ok(text) = std::str::from_utf8(entry) else {
+                break;
+            };
+            let Ok(address) = IpAddr::from_str(text.trim()) else {
                 break;
             };
             source = address;
