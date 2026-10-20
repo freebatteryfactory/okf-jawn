@@ -74,9 +74,12 @@ export function useContinuation(read: ContinuedRead, reading: string): Continuat
   const [button, buttonRef] = useWatchedPart<HTMLButtonElement>(held);
   // The part asked for, in which reading.
   const asked = useRef<{ reading: string; part: number } | null>(null);
+  const previousReading = useRef(reading);
   const { parts, continuing, failed } = read;
 
   useLayoutEffect(() => {
+    const changed = previousReading.current !== reading;
+    previousReading.current = reading;
     const left = takeHeld(held);
     const wanted = asked.current;
     if (wanted !== null && wanted.reading !== reading) asked.current = null;
@@ -88,8 +91,9 @@ export function useContinuation(read: ContinuedRead, reading: string): Continuat
     } else if (mine !== null && failed && !continuing) {
       asked.current = null;
       if (free) (button.current ?? partOf(bodyRef.current, 'last'))?.focus();
-    } else if (left) {
+    } else if (left && !changed) {
       // The button left with focus on it, though nothing asked of it settled now.
+      // A different cached selection/revision must not inherit that focus transfer.
       partOf(bodyRef.current, 'last')?.focus();
     }
   });
