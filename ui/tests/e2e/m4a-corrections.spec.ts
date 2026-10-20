@@ -27,7 +27,8 @@ import {
   WS,
 } from './support/explorer';
 import { CORRECTED, DIGEST, FIXED, playCorrections, RECONVERTED } from './support/m4a-corrections';
-import { openOriginal } from './support/reader';
+import { inked, pageImage } from './support/m4a-pdf';
+import { chooseView, openOriginal } from './support/reader';
 import { tabTo } from './support/views';
 
 const short = (revision: string) => revision.slice(0, 10);
@@ -48,7 +49,12 @@ const jobRow = (page: Page) =>
 
 async function openSource(page: Page, origin: string, keyboard = false) {
   await page.goto(`${origin}/w/${WS}/i/${SOURCE}`);
-  await expect(await openOriginal(page, { keyboard })).toBeVisible();
+  const original = await openOriginal(page, { keyboard });
+  await expect(original).toBeVisible();
+  const drawing = pageImage(original, 1, 1, 'annual-report.pdf.md');
+  await expect(drawing).toBeVisible();
+  await expect.poll(() => inked(drawing)).toBe(true);
+  await expect(original.locator('.textLayer')).toContainText('Annual report 2025');
   await expect(section(page)).toContainText(
     `As of revision ${short(HEAD)}, the version this workspace shows, the text shown is the converter’s text.`,
   );
@@ -68,11 +74,18 @@ async function fixTheYear(page: Page, box: Locator) {
 }
 
 /** What the page says once the correction is the head the workspace shows. */
-async function expectCorrectionShown(page: Page) {
+async function expectCorrectionShown(page: Page, keyboard = false) {
   await expect(section(page).getByRole('status').filter({ hasText: 'Saved:' })).toHaveText(
     `Saved: your correction is revision ${short(CORRECTED)}. The workspace now shows it, and the text above is your correction.`,
   );
   await expect(page.locator('.head-line')).toContainText(`revision ${short(CORRECTED)}`);
+  if (keyboard) {
+    // Check the mutation's focus before explicitly choosing the new digest's Text view.
+    const done = section(page).locator('[tabindex="-1"]').filter({ hasText: 'Saved:' });
+    await expect(done).toBeFocused();
+    await expectVisibleFocus(page);
+  }
+  await chooseView(page, 'Text', { keyboard });
   await expect(page.getByText('Revenue grew by 21% in 2025.', { exact: true })).toBeVisible();
   await expect(
     page.getByText('A person’s correction is shown over the converted text.'),
@@ -138,11 +151,7 @@ test.describe('correct a source’s text through to the new revision', () => {
     await shot(page, 'm4a-corrections-04-keyboard-editing');
 
     await page.keyboard.press('Enter');
-    await expectCorrectionShown(page);
-    // Focus is on the words that say what was done.
-    const done = section(page).locator('[tabindex="-1"]').filter({ hasText: 'Saved:' });
-    await expect(done).toBeFocused();
-    await expectVisibleFocus(page);
+    await expectCorrectionShown(page, true);
     expect(service.corrections.map((body) => body.corrected_markdown)).toEqual([FIXED]);
     await expectNoAxeViolations(page, 'the correction saved, from the keyboard');
     await shot(page, 'm4a-corrections-05-keyboard-saved');
@@ -166,11 +175,18 @@ test.describe('Reconvert’s job', () => {
   }
 
   /** The new conversion is the head shown, and the reader reads its text. */
-  async function expectNewConversionShown(page: Page) {
+  async function expectNewConversionShown(page: Page, keyboard = false) {
     await expect(reconvert(page)).toContainText(
       `The workspace now shows revision ${short(RECONVERTED)}, which the conversion made.`,
     );
     await expect(page.locator('.head-line')).toContainText(`revision ${short(RECONVERTED)}`);
+    if (keyboard) {
+      // The button keeps focus through the head change, before the person chooses another view.
+      await expect(showNew(page)).toBeFocused();
+      await expect(showNew(page)).toHaveAttribute('aria-disabled', 'true');
+      await expectVisibleFocus(page);
+    }
+    await chooseView(page, 'Text', { keyboard });
     await expect(
       page.getByText('The pages that were not converted are converted now.'),
     ).toBeVisible();
@@ -235,11 +251,7 @@ test.describe('Reconvert’s job', () => {
     await shot(page, 'm4a-corrections-09-keyboard-reconvert');
 
     await page.keyboard.press('Enter');
-    await expectNewConversionShown(page);
-    // The button stays, with focus, and has nothing more to show.
-    await expect(showNew(page)).toBeFocused();
-    await expect(showNew(page)).toHaveAttribute('aria-disabled', 'true');
-    await expectVisibleFocus(page);
+    await expectNewConversionShown(page, true);
     expect(service.reconversions.map((body) => body.unconverted_only)).toEqual([true]);
     await expectNoAxeViolations(page, 'the new conversion shown, from the keyboard');
   });

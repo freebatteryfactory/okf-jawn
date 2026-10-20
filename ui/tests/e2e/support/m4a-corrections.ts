@@ -213,6 +213,9 @@ export async function playCorrections(
   await routeApi(page, {
     ...extra,
     '/api/workspaces/open-workspace': () => ok({ ...writableWorkspace, head: state.head }),
+    // Attention is outside these journeys: the service reports no findings at the requested revision.
+    '/api/attention/get-attention': (body) =>
+      ok({ revision: revisionAsked(body, state.head), items: [], next_cursor: null }),
     '/api/items/list-items': (body) => {
       const version = versions.get(state.head);
       return ok({
