@@ -15,9 +15,11 @@
  * origin's headers and shows that the frame's own sandbox still stops every script.
  *
  * A reload mints a new capability: after the first has expired (the page says so), and when the
- * person asks. One journey goes by the keyboard alone (Tab and Enter; buttons and fields are in
- * the Tab order of both engines, so no link needs E8 here). Every screen has zero axe violations
- * and visible focus where a control of the page has it, and a screenshot for the owner under
+ * person asks. One journey enters Original through the reader's keyboard helper, then uses Tab
+ * and Enter; WebKit's E8 link limitation uses direct link focus before keyboard activation.
+ * Axe checks cover the workspace page beside the opaque iframe, whose title is checked separately;
+ * no axe claim covers the hostile document inside it. The first journey also checks the normal
+ * Markdown heading before choosing Original. Visible focus and screenshots are recorded under
  * `.artifacts/ui/` (untracked).
  *
  * Needs `bun --bun run build` first: the spec serves the built `dist/` itself; the API and the
@@ -82,7 +84,13 @@ async function watchPage(page: Page): Promise<Watched> {
 async function openHtmlSource(
   page: Page,
   origin: string,
-  options: { lifetimeMs?: number; isolation?: Record<string, string>; archived?: boolean } = {},
+  options: {
+    lifetimeMs?: number;
+    isolation?: Record<string, string>;
+    archived?: boolean;
+    keyboard?: boolean;
+    checkText?: boolean;
+  } = {},
 ): Promise<{ service: SandboxService; watched: Watched; original: Locator }> {
   const watched = await watchPage(page);
   await underPagePolicy(page, origin);
@@ -98,7 +106,19 @@ async function openHtmlSource(
       : {}),
   });
   await page.goto(`${origin}/w/${WS}/i/${HTML_ITEM}`);
-  const original = await openOriginal(page);
+  await expect(
+    page
+      .getByRole('article', { name: 'Workshop welcome page' })
+      .getByRole('heading', { name: 'Welcome to the workshop', exact: true }),
+  ).toBeVisible();
+  if (options.checkText === true) {
+    await expectNoAxeViolationsBesideTheSandbox(
+      page,
+      'the HTML source text with its own Markdown heading',
+    );
+    await shot(page, 'm4a-sandbox-00-text-heading');
+  }
+  const original = await openOriginal(page, { keyboard: options.keyboard === true });
   await expect(original).toBeVisible();
   return { service, watched, original };
 }
@@ -185,7 +205,9 @@ test.describe('an HTML source in the sandbox', () => {
   const server = useExplorerServer();
 
   test('the file in its frame, with its words; its scripts do not run', async ({ page }) => {
-    const { service, watched, original } = await openHtmlSource(page, server.origin());
+    const { service, watched, original } = await openHtmlSource(page, server.origin(), {
+      checkText: true,
+    });
     await expect(viewer(original).getByRole('note')).toHaveText(
       'This is the file as written, shown in a sandbox on a separate origin. Scripts in it do not run, and its links and forms do nothing: none of them reaches another site or changes this page. Pictures, styles and fonts from elsewhere are not loaded.',
     );
@@ -288,7 +310,9 @@ test.describe('an HTML source in the sandbox', () => {
     page,
     browserName,
   }) => {
-    const { service, watched, original } = await openHtmlSource(page, server.origin());
+    const { service, watched, original } = await openHtmlSource(page, server.origin(), {
+      keyboard: true,
+    });
     await expectFramed(page, original, service);
 
     // E8: WebKit omits links from its default Tab order. Focus the link there, then exercise

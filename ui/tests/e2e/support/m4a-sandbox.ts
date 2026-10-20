@@ -38,6 +38,9 @@ export const HTML_ITEM = '88888888-8888-4888-8888-888888888888';
 export const HTML_OBJECT = 'e'.repeat(64);
 export const HTML_PATH = 'welcome.html.md';
 export const HTML_FILE = 'welcome.html';
+/** Representative converted Markdown, including its own heading, shared by item and read. */
+export const HTML_TEXT =
+  '# Welcome to the workshop\n\nWelcome to the workshop.\n\nPlease read the programme before Monday.';
 
 /** The HTML source as a listing shows it. */
 export const htmlSource = {
@@ -237,7 +240,7 @@ export function htmlSourceAnswers(): Answers {
     '/api/items/get-item': () =>
       ok({
         summary: htmlSource,
-        body: '# Workshop welcome page\n\nWelcome to the workshop.',
+        body: HTML_TEXT,
         content_digest: 'c'.repeat(64),
         properties: { type: 'page', okf_jawn: { id: HTML_ITEM } },
         source: htmlAppearance,
@@ -247,11 +250,16 @@ export function htmlSourceAnswers(): Answers {
     '/api/attention/get-attention': () => ok({ revision: HEAD, items: [], next_cursor: null }),
     '/api/reads/read-item': (body) =>
       ok({
-        // No level-one heading in the text: one puts an h1 before the reader's h3 "Original", and
-        // axe reports heading-order there (`DocumentView.tsx`, the reader's; requested in M4a).
-        markdown: 'Welcome to the workshop.\n\nPlease read the programme before Monday.',
+        markdown: HTML_TEXT,
         media: [],
-        outline: [],
+        outline: [
+          {
+            kind: 'heading',
+            label: 'Welcome to the workshop',
+            level: 1,
+            selection: { kind: 'lines', range: { start: 1, end: 5 } },
+          },
+        ],
         receipt_id: '55555555-5555-4555-8555-555555555555',
         source: {
           workspace_id: WS,
@@ -262,7 +270,7 @@ export function htmlSourceAnswers(): Answers {
           locations: [],
         },
         truncated: false,
-        view: 'text',
+        view: body.view ?? 'text',
         warnings: [],
         extraction: { status: 'completed', text_origin: 'converter', corrected: false },
       }),
@@ -354,7 +362,7 @@ export const ORIGINALS: Original[] = [
     object: '1'.repeat(64),
     bytes: onePagePdf(),
     sentAs: 'application/pdf',
-    text: 'Annual report 2025.',
+    text: '# Annual report 2025\n\nAnnual report 2025.',
   },
   {
     kind: 'image',
@@ -366,7 +374,7 @@ export const ORIGINALS: Original[] = [
     object: '2'.repeat(64),
     bytes: png(320, 180, 1),
     sentAs: 'image/png',
-    text: 'A photo of the whiteboard.',
+    text: '# Whiteboard photo\n\nA photo of the whiteboard.',
   },
   {
     kind: 'html',
@@ -378,7 +386,7 @@ export const ORIGINALS: Original[] = [
     object: HTML_OBJECT,
     bytes: Buffer.from(HOSTILE_HTML),
     sentAs: 'application/octet-stream',
-    text: 'Welcome to the workshop.',
+    text: HTML_TEXT,
   },
   {
     kind: 'spreadsheet',
@@ -390,7 +398,7 @@ export const ORIGINALS: Original[] = [
     object: '4'.repeat(64),
     bytes: Buffer.from('quarter,revenue\nQ1,1.2\nQ2,1.4\nQ3,1.9\nQ4,2.3\n'),
     sentAs: 'application/octet-stream',
-    text: '| quarter | revenue |\n| --- | --- |\n| Q1 | 1.2 |\n| Q2 | 1.4 |\n| Q3 | 1.9 |\n| Q4 | 2.3 |',
+    text: '# Revenue by quarter\n\n| quarter | revenue |\n| --- | --- |\n| Q1 | 1.2 |\n| Q2 | 1.4 |\n| Q3 | 1.9 |\n| Q4 | 2.3 |',
   },
   {
     kind: 'office',
@@ -402,7 +410,7 @@ export const ORIGINALS: Original[] = [
     object: '5'.repeat(64),
     bytes: Buffer.from('{\\rtf1\\ansi Minutes of the October workshop.}'),
     sentAs: 'application/octet-stream',
-    text: 'Minutes of the October workshop.',
+    text: '# Minutes\n\nMinutes of the October workshop.',
   },
   {
     kind: 'text',
@@ -414,7 +422,7 @@ export const ORIGINALS: Original[] = [
     object: '6'.repeat(64),
     bytes: Buffer.from('def tally(rows):\n    return sum(row["revenue"] for row in rows)\n'),
     sentAs: 'application/octet-stream',
-    text: '```python\ndef tally(rows):\n    return sum(row["revenue"] for row in rows)\n```',
+    text: '# Tally script\n\n```python\ndef tally(rows):\n    return sum(row["revenue"] for row in rows)\n```',
   },
   {
     kind: 'other',
@@ -451,7 +459,7 @@ export const ORIGINALS: Original[] = [
     object: 'a'.repeat(64),
     bytes: Buffer.from('{"revenue":[1.2,1.4,1.9,2.3]}\n'),
     sentAs: 'application/octet-stream',
-    text: 'Revenue data: 1.2, 1.4, 1.9, 2.3.\n',
+    text: '# Revenue data\n\nRevenue data: 1.2, 1.4, 1.9, 2.3.\n',
   },
 ];
 
