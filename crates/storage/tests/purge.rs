@@ -915,10 +915,7 @@ async fn purge_reaches_a_schema_2_copy_that_has_no_table_of_kept_warnings() -> T
         .join("backups")
         .join("pre-migration")
         .join("records-v2-1.sqlite");
-    rusqlite::Connection::open(&copy)?.execute_batch(
-        "DROP TABLE commit_warnings; ALTER TABLE jobs DROP COLUMN sealed;
-             PRAGMA user_version = 2;",
-    )?;
+    legacy_schema::rebuild(&copy, 2)?;
     assert!(
         marked_files(directory.path())?.contains(&copy.display().to_string()),
         "the copy holds the marker before the purge"
@@ -1236,31 +1233,9 @@ async fn completed_row(
     Ok(())
 }
 
-/// Put a records database back as records schema 1 left it: without the tables schemas 2 and 3
-/// add and the job column schema 4 adds, without the ledger's workspace column, and with the
-/// events table as it was before event keys.
+/// Build the fixture from released schema1 steps and copy its original columns only.
 fn as_records_schema_1(records: &Path) -> TestResult {
-    let connection = rusqlite::Connection::open(records)?;
-    connection.execute_batch(
-        "ALTER TABLE jobs DROP COLUMN sealed; DROP TABLE commit_warnings;
-         DROP TABLE purge_progress; DROP TABLE backup_archives; DROP TABLE restores;
-         DROP TABLE pending_puts; DROP TABLE replacement_restores;
-         DROP INDEX mutations_by_workspace; ALTER TABLE mutations DROP COLUMN workspace_id;
-         CREATE TABLE unkeyed_events (
-             seq INTEGER PRIMARY KEY AUTOINCREMENT,
-             tenant_id TEXT NOT NULL,
-             workspace_id TEXT,
-             replay_key TEXT UNIQUE,
-             record TEXT NOT NULL
-         ) STRICT;
-         INSERT INTO unkeyed_events SELECT seq, tenant_id, workspace_id, replay_key, record
-             FROM events;
-         DROP TABLE events;
-         ALTER TABLE unkeyed_events RENAME TO events;
-         CREATE INDEX events_by_log ON events (tenant_id, workspace_id, seq);
-         PRAGMA user_version = 1;",
-    )?;
-    Ok(())
+    legacy_schema::rebuild(records, 1)
 }
 
 /// The ledger rows of the records database at `records`, in key order: tenant, operation,
@@ -1388,7 +1363,8 @@ fn ledger_key(tenant: &str, operation: OperationName, n: u32) -> Fallible<Mutati
 /// Round 2, B1: a row of the purged workspace that is still leased is an attempt in flight. The
 /// purge leaves its state, lease and token alone, so its holder can still complete or release it
 /// (SPEC section 8: a superseded attempt can neither complete nor release the mutation, and
-/// this one was not superseded).
+/// this one was not superseded). Design5.2 requires that late finish to record purged without
+/// digest or response, naming the original purge instead of retaining the late payload.
 #[tokio::test]
 async fn purge_leaves_a_leased_ledger_row_of_the_workspace_to_its_holder() -> TestResult {
     let directory = tempfile::tempdir()?;
@@ -1421,8 +1397,26 @@ async fn purge_leaves_a_leased_ledger_row_of_the_workspace_to_its_holder() -> Te
         .await?;
     ledger.release(second).await?;
     let done = ledger_row(&records, 50)?;
-    assert_eq!((done.0.as_str(), done.3.is_some()), ("completed", true));
-    assert_eq!(ledger_row(&records, 51)?.0, "released");
+    assert_eq!((done.0.as_str(), done.3.is_some()), ("purged", false));
+    let released = ledger_row(&records, 51)?;
+    assert_eq!(
+        (released.0.as_str(), released.3.is_some()),
+        ("purged", false)
+    );
+    assert_eq!((done.1, done.2), (completing.1, completing.2));
+    assert_eq!((released.1, released.2), (releasing.1, releasing.2));
+    let connection = rusqlite::Connection::open(&records)?;
+    for n in [50, 51] {
+        let payload: String = connection.query_row(
+            "SELECT json_array(digest,response,purge_id) FROM mutations WHERE idempotency_key=?1",
+            [uuid_text(n)],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&payload)?,
+            json!([null, null, uuid_text(60)])
+        );
+    }
     Ok(())
 }
 
@@ -3680,6 +3674,9 @@ async fn an_archive_and_a_written_history_land_only_their_own_pending_put() -> T
 fn busy() -> ApiError {
     ApiError::new(ErrorCode::Unavailable, "busy")
 }
+
+#[path = "support/legacy_schema.rs"]
+mod legacy_schema;
 
 #[path = "../../../tests/support/check.rs"]
 mod check;

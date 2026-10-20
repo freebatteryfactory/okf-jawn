@@ -75,9 +75,9 @@ fn migrations_bring_a_new_directory_to_the_latest_schema() -> TestResult {
     let records = storage.data().records_path();
     let index = storage.data().index_path();
     drop(storage);
-    // Records schema 4 adds the seal of a job past its point of no return; the index schema is
+    // Records schema 5 adds lifecycle state; the index schema is
     // still at 1.
-    assert_eq!(user_version(&records)?, 4);
+    assert_eq!(user_version(&records)?, 5);
     assert_eq!(user_version(&index)?, 1);
     let marker: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
         directory.path().join(FORMAT_FILE),
@@ -92,7 +92,7 @@ fn migrations_bring_a_new_directory_to_the_latest_schema() -> TestResult {
     );
     // Opening again finds nothing pending.
     drop(Storage::open(directory.path())?);
-    assert_eq!(user_version(&records)?, 4);
+    assert_eq!(user_version(&records)?, 5);
     Ok(())
 }
 

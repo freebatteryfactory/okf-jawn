@@ -982,8 +982,7 @@ async fn a_records_database_at_schema_3_migrates_its_jobs_unsealed_after_a_backu
         job.id
     };
     let records = directory.path().join("records.sqlite");
-    Connection::open(&records)?
-        .execute_batch("ALTER TABLE jobs DROP COLUMN sealed; PRAGMA user_version = 3;")?;
+    legacy_schema::rebuild(&records, 3)?;
     let storage = Storage::open(directory.path())?;
     assert!(!sealed(&storage, job)?);
     let backups: Vec<String> = std::fs::read_dir(storage.data().pre_migration_path())?
@@ -994,7 +993,7 @@ async fn a_records_database_at_schema_3_migrates_its_jobs_unsealed_after_a_backu
     assert_eq!(backups.len(), 1, "{backups:?}");
     let version: i64 =
         Connection::open(&records)?.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     Ok(())
 }
 
@@ -1041,6 +1040,9 @@ async fn clean_up_completion_forwards_its_literal_report_to_the_durable_job() ->
     );
     Ok(())
 }
+
+#[path = "support/legacy_schema.rs"]
+mod legacy_schema;
 
 #[path = "../../../tests/support/check.rs"]
 mod check;

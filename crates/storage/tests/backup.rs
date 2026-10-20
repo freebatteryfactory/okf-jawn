@@ -2664,37 +2664,15 @@ async fn migrations_take_a_pre_migration_backup_set_before_an_upgrade() -> TestR
             &directory.path().join("records.sqlite"),
             "PRAGMA user_version"
         )?,
-        4,
+        5,
         "then the records are upgraded"
     );
     Ok(())
 }
 
-/// Put a records database back as records schema 1 left it: without the tables schemas 2 and 3
-/// add and the job column schema 4 adds, without the ledger's workspace column, and with the
-/// events table as it was before event keys.
+/// Build the fixture from released schema1 steps and copy its original columns only.
 fn as_records_schema_1(records: &Path) -> TestResult {
-    let connection = rusqlite::Connection::open(records)?;
-    connection.execute_batch(
-        "ALTER TABLE jobs DROP COLUMN sealed; DROP TABLE commit_warnings;
-         DROP TABLE purge_progress; DROP TABLE backup_archives; DROP TABLE restores;
-         DROP TABLE pending_puts; DROP TABLE replacement_restores;
-         DROP INDEX mutations_by_workspace; ALTER TABLE mutations DROP COLUMN workspace_id;
-         CREATE TABLE unkeyed_events (
-             seq INTEGER PRIMARY KEY AUTOINCREMENT,
-             tenant_id TEXT NOT NULL,
-             workspace_id TEXT,
-             replay_key TEXT UNIQUE,
-             record TEXT NOT NULL
-         ) STRICT;
-         INSERT INTO unkeyed_events SELECT seq, tenant_id, workspace_id, replay_key, record
-             FROM events;
-         DROP TABLE events;
-         ALTER TABLE unkeyed_events RENAME TO events;
-         CREATE INDEX events_by_log ON events (tenant_id, workspace_id, seq);
-         PRAGMA user_version = 1;",
-    )?;
-    Ok(())
+    legacy_schema::rebuild(records, 1)
 }
 
 /// The tenant `local`'s tenant-level events in `records`: (event key, record), by sequence.
@@ -5703,10 +5681,7 @@ async fn backup_a_records_schema_2_backup_set_restores_by_replacement_and_by_imp
     let fixture = fixture(directory.path()).await?;
     let workspace = fixture.workspace.clone();
     drop(fixture);
-    rusqlite::Connection::open(directory.path().join("records.sqlite"))?.execute_batch(
-        "DROP TABLE commit_warnings; ALTER TABLE jobs DROP COLUMN sealed;
-             PRAGMA user_version = 2;",
-    )?;
+    legacy_schema::rebuild(&directory.path().join("records.sqlite"), 2)?;
     let (installation, archive) = {
         let storage = Storage::open(directory.path())?;
         let sets: Vec<_> = std::fs::read_dir(storage.data().pre_migration_path())?
@@ -5749,7 +5724,7 @@ async fn backup_a_records_schema_2_backup_set_restores_by_replacement_and_by_imp
         .restore_replacement(&installation, std::slice::from_ref(&archive))
         .await?;
     let live = directory.path().join("records.sqlite");
-    assert_eq!(count(&live, "PRAGMA user_version")?, 4);
+    assert_eq!(count(&live, "PRAGMA user_version")?, 5);
     assert_eq!(count(&live, "SELECT count(*) FROM workspaces")?, 1);
     assert!(
         count(&live, "SELECT count(*) FROM drafts")? > 0,
@@ -5781,6 +5756,33 @@ async fn backup_a_records_schema_2_backup_set_restores_by_replacement_and_by_imp
     let imported = some(imported, "the import's commit")?;
     assert_eq!(imported.revision, versions.head(&target).await?);
     Ok(())
+}
+
+/// V9.4: the real import checker refuses a forged terminal ledger row before writes.
+/// Run after schema5 declarations exist: a missing `purge_id` column is fixture setup, not
+/// evidence that the real archive checker accepted the forged terminal state.
+#[tokio::test]
+async fn schema5_an_archive_with_a_purged_request_digest_is_invalid_input() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let forged = rr4_forged_records(
+        &bytes,
+        "PRAGMA ignore_check_constraints=ON;
+         INSERT INTO mutations (tenant_id,subject,client_key,operation,idempotency_key,
+             mutation_id,digest,state,token,lease_expires_ms,purge_id)
+         VALUES ('local','fixture','client','edit_item','forged','forged-mutation',
+             'forged-request-digest','purged',1,2,'forged-purge');",
+    )?;
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|name| (name == "records.sqlite").then(|| forged.clone()),
+        &[],
+    )?;
+    let outcome = import_crafted(&storage, crafted).await?;
+    assert_import_refused(&storage, outcome, "records database").await
 }
 
 /// Gap 2: a `records.sqlite` that is not a database is refused as invalid input.
@@ -9466,7 +9468,7 @@ async fn rr10_refused_import_leaves_the_backups_working(
     assert_eq!(sets, 1, "the pre-migration backup set was written");
     assert_eq!(
         count(&records, "PRAGMA user_version")?,
-        4,
+        5,
         "then the records are upgraded"
     );
     Ok(())
@@ -9751,6 +9753,9 @@ async fn rr10_a_survivor_whose_references_do_not_list_fails_the_purge_naming_it(
     })
     .await
 }
+
+#[path = "support/legacy_schema.rs"]
+mod legacy_schema;
 
 #[path = "../../../tests/support/check.rs"]
 mod check;

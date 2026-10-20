@@ -8,7 +8,8 @@
 //! needed once the retry window has passed. A key reused after its row is dropped starts a new
 //! mutation. Only a row whose lease expired without `complete` or `release` (its attempt
 //! crashed, or could not reach the ledger) stays until it is reconciled, that is until a later
-//! attempt resumes it and completes or releases it. The 7-day TTL never drops such a row, or
+//! attempt resumes and completes/releases it, or a recorded workspace purge terminalizes it.
+//! The 7-day TTL never drops an unreconciled row, or
 //! crash protection has a hole. SPEC §8's "abandoned mutations stay until reconciled" means a
 //! row whose lease expired without `complete` or `release`; `BeginOutcome::Abandoned` is also
 //! returned for a released row, which does expire.
@@ -36,7 +37,8 @@
 //! (the response cannot be serialized, the ledger body cannot be built, or `complete` fails
 //! for a reason other than a lost lease). The row keeps its id and digest and is not
 //! completed, so the same key and body may be sent again at once; that retry runs as a
-//! resumed attempt.
+//! resumed attempt. A recorded workspace purge instead terminalizes the attempt without
+//! its digest or response; `begin` then refuses it as described below.
 //!
 //! # Workspace
 //! Each row records the workspace its mutation writes, beside the key and never part of it:
@@ -62,7 +64,8 @@
 //! records schema2. The schema5 upgrade also empties the request digests of already-emptied
 //! rows in the one records copy taken immediately before upgrading. A pre-migration ledger
 //! missing a column required for purge is a store fault, never silently skipped. These are
-//! port guarantees; the lifecycle storage/schema implementation supplies them.
+//! port guarantees; the lifecycle storage/schema implementation must supply them. The
+//! `purge::rows` live/copy rewrite remains separate pending implementation work.
 
 use std::collections::BTreeMap;
 
@@ -165,7 +168,8 @@ pub trait MutationStore: Send + Sync {
         workspace: Option<WorkspaceId>,
     ) -> PortFuture<'a, BeginOutcome>;
 
-    /// Mark the mutation completed and retain the response for replay.
+    /// Finish the current grant: retain its response for replay, or record purged without
+    /// digest/response when its effective workspace has a recorded purge.
     ///
     /// `workspace` is the workspace the completed response names
     /// (`RequestScope::RESPONSE_WORKSPACE`), or `None`; it is recorded only when `begin`
@@ -185,12 +189,14 @@ pub trait MutationStore: Send + Sync {
         workspace: Option<WorkspaceId>,
     ) -> PortFuture<'_, ()>;
 
-    /// End the lease after a failed attempt. The row keeps its id; the same key may begin again.
+    /// End the current lease after a failed attempt, preserving its identity.
     ///
     /// Ends the lease only if `lease` is the current grant; a stale lease is a no-op, and so is
     /// releasing a completed mutation. This is what keeps a row completed when `complete`
-    /// committed and then reported an error. After a release that took effect, the next `begin` with
-    /// the same key and digest returns `Abandoned` without waiting for the lease to expire.
+    /// committed and then reported an error. A recorded workspace purge writes purged instead;
+    /// releasing an already purged row is a no-op. When no recorded workspace purge applies,
+    /// after a release that took effect the next `begin` with the same key and digest returns
+    /// `Abandoned` without waiting for the lease to expire.
     fn release(&self, lease: MutationLease) -> PortFuture<'_, ()>;
 }
 

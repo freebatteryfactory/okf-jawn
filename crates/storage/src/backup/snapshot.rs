@@ -62,9 +62,11 @@ pub(crate) const WORKSPACE_TABLES: &[&str] = &[
 /// puts, which belong to writes of this installation.
 pub(crate) const NOT_IN_WORKSPACE_ARCHIVE: &[&str] = &[
     "backup_archives",
+    "clean_up_requests",
     "commit_warnings",
     "confirmations",
     "connectors",
+    "discarded_uploads",
     "draft_mutations",
     "history_exports",
     "installation",
@@ -76,6 +78,7 @@ pub(crate) const NOT_IN_WORKSPACE_ARCHIVE: &[&str] = &[
     "restores",
     "sandbox_capabilities",
     "sessions",
+    "sweep_removals",
     "workspace_mutations",
 ];
 
