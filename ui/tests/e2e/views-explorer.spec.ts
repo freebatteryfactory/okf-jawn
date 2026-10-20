@@ -3,9 +3,10 @@
  * with its table, its chart's data table, its text one step away and a cited source opened at the
  * revision the View pins; a proposed View drawn beside what the proposal changes, then approved;
  * and a proposed file that does not read as a View, said in words with Approve still offered.
- * Each journey has a keyboard-only pass (Tab and Shift+Tab, Enter, Space; Option+Tab to a link in
- * WebKit, as Safari reaches links). Each screen has zero axe violations and visible focus, and a
- * screenshot for the owner under `.artifacts/ui/` (untracked).
+ * Each journey has a keyboard-only pass (Tab and Shift+Tab, Enter, Space; in WebKit, which leaves
+ * links out of the Tab order as Safari does, a link is focused directly, as E8 in
+ * explorer-keyboard.spec.ts does, and Enter follows it). Each screen has zero axe violations and
+ * visible focus, and a screenshot for the owner under `.artifacts/ui/` (untracked).
  *
  * Needs `bun --bun run build` first: the spec serves the built `dist/` itself. The API is answered
  * through `page.route` (`support/explorer.ts`, `support/views.ts`).
@@ -48,12 +49,14 @@ const tables = (within: Locator) => within.getByRole('table', { name: 'revenue' 
 const drawnChart = (within: Locator) => within.locator('.vega-embed canvas, .vega-embed svg');
 
 /**
- * Bring keyboard focus to a link from the keyboard alone. WebKit, like Safari by default, leaves
- * links out of the Tab order (a platform setting the page cannot change); Option+Tab is how a
- * Safari user reaches them, and it does so here.
+ * Bring keyboard focus to a link. WebKit, like Safari by default, leaves links out of the Tab order
+ * (a platform setting the page cannot change: see E8 in explorer-keyboard.spec.ts), and Option+Tab
+ * does not reach them on every platform, so there the link is focused directly; Enter still
+ * follows it.
  */
 async function focusLink(page: Page, link: Locator, browserName: string) {
-  await tabTo(page, link, 150, browserName === 'webkit' ? 'Alt+Tab' : 'Tab');
+  if (browserName === 'webkit') await link.focus();
+  else await tabTo(page, link);
 }
 
 test.describe('Views in the Explorer', () => {
