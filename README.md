@@ -2,6 +2,10 @@
 
 A document workspace for people and their AI tools.
 
+For the supervised x86-64 Linux demo, use the [download and laptop setup instructions](deploy/local-demo/README.md).
+The preview includes the runtime and conversion models, requires glibc 2.39+, and retains explicit
+Pop!_OS-native, AI-client and complete-release verification limits.
+
 ## What this delivery is
 
 This repository contains the **full-scope Phase 0 foundation source**: typed contracts for the intended application, real generator integrations, repository/task setup, shared application, storage and search ports, HTTP/CLI adapters, MCP result adapters, reusable presentation source, tests, and an offline vendor-reference index.
