@@ -113,9 +113,19 @@ test.describe('open a PDF and page through it', () => {
 
     // Closing the reader's tab lets the document go: its worker ends.
     expect(workers.ended()).toEqual([]);
+    const canvas = await pageImage(original, 1).elementHandle();
+    if (canvas === null) throw new Error('the drawn PDF canvas is missing');
     await page.getByRole('button', { name: 'Close tab' }).click();
     await expect(page).toHaveURL(new RegExp(`/w/${WS}$`));
     await expect.poll(() => workers.ended()).toEqual(workers.started());
+    // Keep a handle after detach to prove that closing also frees the browser's pixel buffer.
+    expect(
+      await canvas.evaluate((element) => {
+        if (!(element instanceof HTMLCanvasElement)) throw new Error('the page is not a canvas');
+        return { width: element.width, height: element.height };
+      }),
+    ).toEqual({ width: 0, height: 0 });
+    await canvas.dispose();
   });
 
   test('from the keyboard alone: Tab, Enter and the number field', async ({ page }) => {
@@ -160,7 +170,8 @@ test.describe('open a PDF and page through it', () => {
 
     // Closing the tab from the keyboard lets the document go.
     const close = page.getByRole('button', { name: 'Close tab' });
-    await close.focus();
+    await tabTo(page, close);
+    await expectVisibleFocus(page);
     await page.keyboard.press('Enter');
     await expect(page).toHaveURL(new RegExp(`/w/${WS}$`));
     await expect.poll(() => workers.ended()).toEqual(workers.started());

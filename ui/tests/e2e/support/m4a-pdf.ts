@@ -31,7 +31,9 @@ import { expect, type Locator, type Page, test, type Worker } from '@playwright/
 import { type Answers, HEAD, ok, readAnswer, routeApi, SOURCE, summary, WS } from './explorer';
 
 const dist = fileURLToPath(new URL('../../../dist', import.meta.url));
-const pdfjsPackage = fileURLToPath(new URL('../../../node_modules/pdfjs-dist/package.json', import.meta.url));
+const pdfjsPackage = fileURLToPath(
+  new URL('../../../node_modules/pdfjs-dist/package.json', import.meta.url),
+);
 
 /** The installed PDF.js version, and where this build serves its files. */
 export const PDFJS_VERSION: string = (
@@ -114,10 +116,15 @@ export function buildPdf(pages: PdfPageSpec[], padding = 0): Buffer {
   const kids: number[] = [];
   for (const spec of pages) {
     const drawn = spec.lines
-      .map((line, index) => `BT /F1 ${index === 0 ? 28 : 16} Tf 72 ${700 - index * 40} Td ${literal(line)} Tj ET`)
+      .map(
+        (line, index) =>
+          `BT /F1 ${index === 0 ? 28 : 16} Tf 72 ${700 - index * 40} Td ${literal(line)} Tj ET`,
+      )
       .concat(spec.cjk === undefined ? [] : [`BT /F2 20 Tf 72 300 Td <${ucs2(spec.cjk)}> Tj ET`])
       .join('\n');
-    const content = add(`<< /Length ${Buffer.byteLength(drawn, 'latin1')} >>\nstream\n${drawn}\nendstream`);
+    const content = add(
+      `<< /Length ${Buffer.byteLength(drawn, 'latin1')} >>\nstream\n${drawn}\nendstream`,
+    );
     kids.push(
       add(
         `<< /Type /Page /Parent ${tree} 0 R /MediaBox [0 0 612 792] ` +
@@ -323,15 +330,21 @@ export async function routeSource(page: Page, options: SourceOptions): Promise<B
         properties: { type: 'report', okf_jawn: { id: SOURCE } },
         source: appearance,
       }),
-    // The converted text opens with no heading of its own: with one, the reader's "Original" h3
-    // (DocumentView.tsx, the reader's file) follows the text's h1, and axe reports heading-order
-    // there. That is the reader's to settle (requested in the report), not this viewer's.
-    '/api/reads/read-item': (body) =>
-      ok(
-        readAnswer(row, body, {
-          markdown: 'The year in figures, as converted from the original.\n\nRevenue grew by 12 percent.',
-        }),
-      ),
+    // Representative converted Markdown includes its document heading. Axe must see the reader's
+    // actual heading hierarchy rather than a fixture chosen to conceal a reader defect.
+    '/api/reads/read-item': (body) => {
+      const answer = readAnswer(row, body);
+      const original = body.view === 'original';
+      return ok({
+        ...answer,
+        view: body.view,
+        markdown: original
+          ? ''
+          : '# Annual report 2025\n\nThe year in figures, as converted from the original.\n\nRevenue grew by 12 percent.',
+        outline: original ? [] : answer.outline,
+        source: { ...answer.source, digest: original ? OBJECT : 'c'.repeat(64) },
+      });
+    },
     ...options.extra,
   });
   const reads: ByteRead[] = [];
@@ -348,7 +361,8 @@ export async function routeSource(page: Page, options: SourceOptions): Promise<B
       status: asked === null ? 200 : 206,
       headers: {
         ...DOWNLOAD_HEADERS,
-        'content-type': options.mediaType === 'application/pdf' ? 'application/pdf' : 'application/octet-stream',
+        'content-type':
+          options.mediaType === 'application/pdf' ? 'application/pdf' : 'application/octet-stream',
         ...(asked === null ? {} : { 'content-range': `bytes ${start}-${end}/${total}` }),
       },
       body,
@@ -389,17 +403,30 @@ export async function watchPolicy(page: Page): Promise<PolicyWatch> {
     Object.assign(window, { okfPolicyRefusals: found });
     document.addEventListener('securitypolicyviolation', (event) => {
       found.push(
-        `${event.violatedDirective} refused ${event.blockedURI || "(inline)"} at ${event.sourceFile}:${event.lineNumber}:${event.columnNumber}`,
+        `${event.violatedDirective} refused ${event.blockedURI || '(inline)'} at ${event.sourceFile}:${event.lineNumber}:${event.columnNumber}`,
       );
     });
   });
   return {
     refusals: async () => {
-      const fromPage = await page.evaluate(() => {
+      const footprint = await page.evaluate(() => {
         const found = (window as { okfPolicyRefusals?: unknown }).okfPolicyRefusals;
-        return Array.isArray(found) ? found.map(String) : [];
+        return {
+          refusals: Array.isArray(found) ? found.map(String) : [],
+          inlineStyles: [...document.querySelectorAll('style')].map((style) => style.textContent),
+          specialResources: performance
+            .getEntriesByType('resource')
+            .map((entry) => entry.name)
+            .filter((name) => /^(blob:|data:)/.test(name)),
+          fontLoadingApi: typeof FontFace === 'function',
+        };
       });
-      return [...seen, ...fromPage];
+      const refusals = [...seen, ...footprint.refusals];
+      await test.info().attach('page-policy', {
+        body: JSON.stringify({ policy: PAGE_POLICY, ...footprint, refusals, warnings }, null, 2),
+        contentType: 'application/json',
+      });
+      return refusals;
     },
     warnings: () => [...warnings],
   };
