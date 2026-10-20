@@ -15,6 +15,7 @@ use std::time::Duration;
 use axum::body::Bytes;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use serde_json::Value;
+use tokio::sync::Semaphore;
 use workos::transport::{HttpRequest, HttpResponse, HttpTransport, TransportError};
 
 /// One scripted answer.
@@ -22,6 +23,8 @@ use workos::transport::{HttpRequest, HttpResponse, HttpTransport, TransportError
 pub enum Reply {
     /// An HTTP answer with a JSON body.
     Json(u16, Value),
+    /// An HTTP answer held behind a test-controlled gate, without a wall-clock delay.
+    Gated(Arc<Semaphore>, u16, Value),
     /// A transport failure (a refused connection).
     Down,
     /// No answer, ever.
@@ -133,6 +136,13 @@ impl HttpTransport for Scripted {
         Box::pin(async move {
             match reply {
                 Some(Reply::Json(status, body)) => Ok(json(status, &body)),
+                Some(Reply::Gated(gate, status, body)) => {
+                    let _permit = gate
+                        .acquire()
+                        .await
+                        .map_err(|_| TransportError::connect("scripted response gate closed"))?;
+                    Ok(json(status, &body))
+                }
                 Some(Reply::Down) => Err(TransportError::connect("connection refused")),
                 Some(Reply::Hang) => {
                     tokio::time::sleep(HANG).await;

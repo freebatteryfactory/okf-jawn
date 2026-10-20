@@ -55,6 +55,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::{StreamExt, stream};
 use okf_jawn_contract::access::{Permission, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::WorkspaceId;
@@ -283,11 +284,20 @@ impl WorkosAccess {
                 .map(|workspace| grant(scope(workspace.id), ALL.to_vec()))
                 .collect());
         }
+        let mut requests = stream::iter(held)
+            .map(|workspace| {
+                let membership = &membership;
+                async move {
+                    let permissions = self.effective(membership, workspace.id).await?;
+                    Ok::<_, ApiError>((workspace.id, permissions))
+                }
+            })
+            .buffered(4);
         let mut grants = Vec::new();
-        for workspace in held {
-            let permissions = self.effective(&membership, workspace.id).await?;
+        while let Some(result) = requests.next().await {
+            let (workspace, permissions) = result?;
             if !permissions.is_empty() {
-                grants.push(grant(scope(workspace.id), permissions));
+                grants.push(grant(scope(workspace), permissions));
             }
         }
         Ok(grants)

@@ -6,7 +6,9 @@
 //! - the AuthKit sign-in: the authorize URL names the AuthKit provider, and the code exchange.
 #![cfg(feature = "runtime")]
 
+use std::future::poll_fn;
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::time::Duration;
 
 use axum::http::Method;
@@ -27,6 +29,7 @@ use okf_jawn_server::hosted::HostedLogin;
 use okf_jawn_server::outbound::workos_client;
 use okf_jawn_server::workos_access::WorkosAccess;
 use serde_json::{Value, json};
+use tokio::sync::Semaphore;
 
 use check::{TestResult, err_of, some};
 use support::workos::{
@@ -46,6 +49,8 @@ const MEMBERSHIP: &str = "om_1";
 const A: &str = "11111111-1111-4111-8111-111111111111";
 const B: &str = "22222222-2222-4222-8222-222222222222";
 const C: &str = "33333333-3333-4333-8333-333333333333";
+const D: &str = "44444444-4444-4444-8444-444444444444";
+const E: &str = "55555555-5555-4555-8555-555555555555";
 const BOUND: Duration = Duration::from_secs(30);
 
 const ALL: [Permission; 6] = [
@@ -217,6 +222,12 @@ fn permissions_path(workspace: &str) -> String {
     format!(
         "/authorization/organization_memberships/{MEMBERSHIP}/resources/workspace/{workspace}/permissions"
     )
+}
+
+/// Effective permissions whose response cannot complete until the test opens `gate`.
+fn gated_permissions(gate: &Arc<Semaphore>, slugs: &[&str]) -> Reply {
+    let data: Vec<_> = slugs.iter().map(|slug| permission(slug)).collect();
+    Reply::Gated(Arc::clone(gate), 200, list(&data, None))
 }
 
 /// The scripted transport answered everything it was asked and nothing was left over.
@@ -948,6 +959,127 @@ async fn a_sign_in_without_an_organization_or_refused_by_workos_opens_nothing() 
     assert_eq!(refused.message, "The sign-in was not accepted");
     assert!(!format!("{refused:?}").contains("test-api-key"));
     exhausted(&script)?;
+    Ok(())
+}
+
+// The bounded repair admits four concurrent requests, not serial or unbounded fan-out.
+// The explicit four-request cap is the regression oracle, independent of the implementation:
+// it is the integrator's bounded repair choice, not a new owner ruling.
+#[tokio::test]
+async fn concurrent_grants_overlap_four_requests_and_keep_all_held_results_in_order() -> TestResult
+{
+    let gate = Arc::new(Semaphore::new(0));
+    let script = Scripted::new(vec![
+        member(&["member"]),
+        gated_permissions(&gate, &["workspace:read"]),
+        gated_permissions(&gate, &[]),
+        gated_permissions(&gate, &["workspace:write"]),
+        gated_permissions(&gate, &["workspace:read", "workspace:propose"]),
+        gated_permissions(&gate, &["workspace:review"]),
+    ]);
+    let adapter = access(
+        &script,
+        &[(A, false), (B, false), (C, true), (D, false), (E, false)],
+        BOUND,
+    )?;
+    let principal = caller()?;
+    let mut grants = adapter.grants(&principal);
+    assert!(poll_fn(|context| Poll::Ready(grants.as_mut().poll(context).is_pending())).await);
+    let started: Vec<_> = script
+        .seen()
+        .iter()
+        .skip(1)
+        .map(|request| request.path.clone())
+        .collect();
+    assert_eq!(
+        started,
+        vec![
+            permissions_path(A),
+            permissions_path(B),
+            permissions_path(C),
+            permissions_path(D)
+        ],
+        "four requests must start behind the closed gate; the fifth must wait"
+    );
+    gate.add_permits(4);
+    let listed: Vec<_> = grants
+        .await?
+        .into_iter()
+        .map(|grant| (grant.scope.workspace_id, grant.permissions))
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            (id(A)?, vec![Permission::Read]),
+            (id(C)?, vec![Permission::Write]),
+            (id(D)?, vec![Permission::Read, Permission::Propose]),
+            (id(E)?, vec![Permission::Review])
+        ]
+    );
+    exhausted(&script)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_grants_provider_error_drops_other_in_flight_requests() -> TestResult {
+    let gate = Arc::new(Semaphore::new(0));
+    let script = Scripted::new(vec![
+        member(&["member"]),
+        Reply::Gated(
+            Arc::clone(&gate),
+            418,
+            json!({"code":"unexpected", "message":"do not echo"}),
+        ),
+        gated_permissions(&gate, &["workspace:read"]),
+        gated_permissions(&gate, &["workspace:write"]),
+        gated_permissions(&gate, &["workspace:review"]),
+    ]);
+    let adapter = access(
+        &script,
+        &[(A, false), (B, false), (C, false), (D, false)],
+        BOUND,
+    )?;
+    let principal = caller()?;
+    let mut grants = adapter.grants(&principal);
+    assert!(poll_fn(|context| Poll::Ready(grants.as_mut().poll(context).is_pending())).await);
+    assert_eq!(
+        script.seen().len(),
+        5,
+        "membership and four gated effective requests"
+    );
+    gate.add_permits(4);
+    let fault = err_of(grants.await)?;
+    assert_eq!(fault.code, ErrorCode::Internal);
+    assert_eq!(fault.message, "The identity provider answered unexpectedly");
+    assert_eq!(
+        Arc::strong_count(&gate),
+        1,
+        "in-flight response futures must be dropped on failure"
+    );
+    exhausted(&script)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_grants_keep_the_overall_deadline_and_drop_gated_responses() -> TestResult {
+    let gate = Arc::new(Semaphore::new(0));
+    let script = Scripted::new(vec![
+        member(&["member"]),
+        gated_permissions(&gate, &["workspace:read"]),
+        gated_permissions(&gate, &["workspace:write"]),
+    ]);
+    let adapter = access(&script, &[(A, false), (B, false)], Duration::ZERO)?;
+    let fault = err_of(adapter.grants(&caller()?).await)?;
+    assert_eq!(fault.code, ErrorCode::Unavailable);
+    assert_eq!(
+        fault.message,
+        "The identity provider did not answer in time"
+    );
+    // Discard unused scripted answers too: any remaining reference would then be an in-flight
+    // response future leaked by the deadline, not an answer it never started.
+    drop(adapter);
+    drop(script);
+    assert_eq!(Arc::strong_count(&gate), 1);
     Ok(())
 }
 
