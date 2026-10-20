@@ -209,6 +209,33 @@ async fn a_forwarded_address_from_an_untrusted_peer_is_ignored() -> TestResult {
 }
 
 #[tokio::test]
+async fn mapped_ipv4_peers_and_hops_keep_the_same_proxy_boundary() -> TestResult {
+    // A dual-stack socket must not collapse unrelated clients onto the proxy's allowance.
+    for trusted in [
+        ["10.0.0.5", "10.0.0.6"],
+        ["::ffff:10.0.0.5", "::ffff:10.0.0.6"],
+    ] {
+        let app = limited(&trusted, TestClock::new(), 1, 10_000)?;
+        for client in ["203.0.113.7", "203.0.113.8"] {
+            let hops = format!("{client}, ::ffff:10.0.0.6");
+            assert_eq!(
+                status(
+                    &app,
+                    from("GET", "/auth/login", "[::ffff:10.0.0.5]", &[&hops])?
+                )
+                .await?,
+                StatusCode::OK
+            );
+            assert_eq!(
+                status(&app, from("GET", "/auth/login", "10.0.0.5", &[client])?).await?,
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_non_text_forwarded_hop_ends_the_trusted_walk() -> TestResult {
     // Design section 6.5: a malformed hop stops the right-to-left walk at the last trusted
     // proxy. Earlier addresses must therefore share that proxy's one-request allowance.

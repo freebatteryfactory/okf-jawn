@@ -87,7 +87,10 @@ impl SignInLimit {
         max_sources: usize,
     ) -> Self {
         Self {
-            trusted,
+            trusted: trusted
+                .into_iter()
+                .map(|address| address.to_canonical())
+                .collect(),
             clock,
             per_window,
             max_sources,
@@ -97,7 +100,7 @@ impl SignInLimit {
 
     /// The source of a request from `peer` carrying `headers`.
     fn source(&self, peer: Option<IpAddr>, headers: &HeaderMap) -> Source {
-        let Some(mut source) = peer else {
+        let Some(mut source) = peer.map(|address| address.to_canonical()) else {
             return Source::Unknown;
         };
         if !self.trusted.contains(&source) {
@@ -117,8 +120,8 @@ impl SignInLimit {
             let Ok(address) = IpAddr::from_str(text.trim()) else {
                 break;
             };
-            source = address;
-            if !self.trusted.contains(&address) {
+            source = address.to_canonical();
+            if !self.trusted.contains(&source) {
                 break;
             }
         }
