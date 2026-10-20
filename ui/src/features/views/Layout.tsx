@@ -9,7 +9,7 @@
 import { type Spec, type UIElement, validateSpec } from '@json-render/core';
 import { defineRegistry, JSONUIProvider, Renderer } from '@json-render/react';
 import { SourceExcerpt } from '../documents/SourceExcerpt';
-import { useBindings } from './Bindings';
+import { linked, useBindings } from './Bindings';
 import { Chart } from './Chart';
 import { catalog } from './catalog';
 import { DataTable } from './DataTable';
@@ -112,7 +112,13 @@ const { registry } = defineRegistry(catalog, {
             const entry = context.bindings.get(name);
             return (
               <li key={name}>
-                {entry ? `${entry.source.path} @ ${entry.source.revision}` : `Unresolved: ${name}`}
+                {entry
+                  ? linked(
+                      context.sourceLink,
+                      entry.source,
+                      `${entry.source.path} @ ${entry.source.revision}`,
+                    )
+                  : `Unresolved: ${name}`}
               </li>
             );
           })}

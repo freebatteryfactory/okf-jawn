@@ -582,15 +582,12 @@ fn mcp_stdio_executable_exits_1_when_no_service_can_be_reached() -> TestResult {
     Ok(())
 }
 
-/// B2, on Unix: a client that waits for the end of the relay's stdout sees it when the relay
-/// ends, although the server the relay started lives on: the started process holds no end of
-/// the relay's own streams. The measure is the review's: the end of the stream within two
-/// seconds of the relay's end, while the stand-in is still running.
+/// B2 and ruling C1: a client that waits for the end of the relay's stdout sees it when the
+/// relay ends, although the server the relay started lives on: the started process holds no
+/// end of the relay's own streams. The measure is the review's: the end of the stream within
+/// two seconds of the relay's end, while the stand-in is still running.
 ///
-/// On Windows this does not hold and the test is not built there: the started process
-/// inherits every inheritable handle of the relay, its three standard streams among them
-/// (`relay/launch.rs` says so). The same test, run on Windows, fails after about 30 seconds.
-#[cfg(unix)]
+/// On Windows this exercises the owner's confined `SetHandleInformation` call (C1).
 #[test]
 fn mcp_stdio_the_started_server_does_not_hold_the_relay_s_stdout_open() -> TestResult {
     let stand_in = StandIn::new()?;

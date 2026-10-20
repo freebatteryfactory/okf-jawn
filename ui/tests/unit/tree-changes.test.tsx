@@ -156,6 +156,8 @@ function service(
   }
   const api = mockApi({
     [OPEN]: () => ok({ ...writableWorkspace, permissions: state.permissions, head: state.head }),
+    '/api/attention/get-attention': (body) =>
+      ok({ revision: revisionAsked(body, state.head), items: [], next_cursor: null }),
     [LIST]: (body) => {
       const revision = revisionAsked(body, state.head);
       const tree = treeAt(revision);

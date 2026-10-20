@@ -25,8 +25,6 @@ import {
   zCompleteUploadRequest,
   zCreateUploadRequest,
   zDiscardUploadRequest,
-  zGetAttentionRequest,
-  zGetAttentionResponse,
   zGetJobRequest,
   zGetUploadRequest,
   zJob,
@@ -65,7 +63,6 @@ Object.assign(CONTRACT, {
   [JOB]: { request: zGetJobRequest, response: zJob },
   [CANCEL]: { request: zCancelJobRequest, response: zJob },
   [RETRY]: { request: zRetryJobRequest, response: zJob },
-  [ATTENTION]: { request: zGetAttentionRequest, response: zGetAttentionResponse },
 });
 
 /** SHA-256 of "abc" and of nothing: published test vectors, not computed by the code under test. */

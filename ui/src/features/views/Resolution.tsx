@@ -8,10 +8,13 @@
  * location `/bindings/<i>` is a binding of the View's document, named by that binding's name; a
  * warning without one, or with one this View has no binding at, is about the whole View. A code
  * this build does not know is shown with its message, never dropped.
+ *
+ * Each source read is the host's link to it at that revision when the host gives one (`sourceLink`).
  */
 import type { z } from 'zod';
 import type { zPresentResponse, zWarning } from '../../api/generated/zod.gen';
 import { Instant } from '../../lib/instant';
+import { linked, type SourceLink } from './Bindings';
 
 type PresentResponse = z.infer<typeof zPresentResponse>;
 type Warning = z.infer<typeof zWarning>;
@@ -52,7 +55,13 @@ export function warningLine(view: PresentResponse['view'], warning: Warning): st
   return `${about(view, warning)}: ${words} The server said: “${warning.message}”`;
 }
 
-export function Resolution({ response }: { response: PresentResponse }) {
+export function Resolution({
+  response,
+  sourceLink,
+}: {
+  response: PresentResponse;
+  sourceLink?: SourceLink | undefined;
+}) {
   const heading = `view-resolution-${response.receipt_id}`;
   return (
     <section aria-labelledby={heading} className="view-resolution">
@@ -71,8 +80,14 @@ export function Resolution({ response }: { response: PresentResponse }) {
         <ul aria-label="Sources read">
           {response.resolved_bindings.map((binding) => (
             <li key={binding.name}>
-              {binding.name}: {binding.source.path} at revision{' '}
-              <code>{binding.source.revision}</code>
+              {binding.name}:{' '}
+              {linked(
+                sourceLink,
+                binding.source,
+                <>
+                  {binding.source.path} at revision <code>{binding.source.revision}</code>
+                </>,
+              )}
             </li>
           ))}
         </ul>

@@ -484,6 +484,31 @@ async fn materialized(
     }
 }
 
+/// Every portable segment has one spelling and is either a file or a directory, never both.
+/// Impossible layouts are refused rather than relocated or written as an unextractable ZIP.
+fn check_archive_paths(entries: &[Entry]) -> Result<(), ApiError> {
+    let mut paths = BTreeMap::new();
+    for entry in entries {
+        validate_name(&entry.name)?;
+        let mut parts = entry.name.split('/').peekable();
+        let mut prefix = String::new();
+        while let Some(part) = parts.next() {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(part);
+            let is_file = parts.peek().is_none();
+            let identity = paths
+                .entry(collision_key_of(&prefix))
+                .or_insert_with(|| (prefix.clone(), is_file));
+            if identity.0 != prefix || identity.1 != is_file {
+                return Err(fault("the portable archive holds conflicting paths"));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn write_zip(directory: &TempDir, mut entries: Vec<Entry>) -> Result<(PathBuf, u64), ApiError> {
     entries.sort_by(|left, right| left.name.cmp(&right.name));
     if entries.windows(2).any(|pair| {
@@ -493,12 +518,12 @@ fn write_zip(directory: &TempDir, mut entries: Vec<Entry>) -> Result<(PathBuf, u
     }) {
         return Err(fault("the portable archive holds a repeated path"));
     }
+    check_archive_paths(&entries)?;
     let archive = directory.path().join("export.zip");
     let file = File::create(&archive).map_err(|error| io_fault("create its archive", error))?;
     let mut zip = ZipWriter::new(file);
     let mut buffer = vec![0_u8; COPY_BYTES];
     for entry in entries {
-        validate_name(&entry.name)?;
         let mut source =
             File::open(&entry.source).map_err(|error| io_fault("open an archive input", error))?;
         let size = source

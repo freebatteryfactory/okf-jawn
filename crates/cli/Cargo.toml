@@ -6,8 +6,37 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[lints]
-workspace = true
+# C1's one Windows handle call requires confinement by xtask source-policy before
+# integration. The foundation test holds this table equal to the workspace except
+# for these three unsafe lints.
+[lints.rust]
+unsafe_code = "allow"
+missing_docs = "deny"
+unused_must_use = "deny"
+unfulfilled_lint_expectations = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+arithmetic_side_effects = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+missing_errors_doc = "deny"
+missing_panics_doc = "deny"
+arbitrary_source_item_ordering = "deny"
+items_after_test_module = "deny"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
 
 [dependencies]
 okf-jawn-contract = { path = "../contract" }
@@ -16,6 +45,10 @@ serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
+
+# Owner-approved C1: the Windows launcher clears inheritance on its own standard handles.
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
 
 # The executable is `okf-jawn`, the name its help, completions and man pages use
 # (`generated/cli/`), not the package's name.

@@ -22,8 +22,12 @@
  * bar or any other navigation (the router holds it back until the question is answered), and a
  * link of the bar to the place the address already names, which is no navigation and is
  * followed here. Asking for the rules while a page is shown puts them in front of that page.
+ *
+ * While the WebMCP setting is on, the shell offers the page tools to the browser
+ * (`webmcp/use-page-tools.ts`): they read what it shows when they run, and open an item or a
+ * comparison the way the shell does, so the naming rules' question is asked of them too.
  */
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Outlet,
   type ShouldBlockFn,
@@ -49,6 +53,7 @@ import type { Workspace } from '../../api/generated/types.gen';
 import { zItemId } from '../../api/generated/zod.gen';
 import { pageHeading } from '../../lib/focus';
 import { Instant } from '../../lib/instant';
+import { usePageTools } from '../../webmcp/use-page-tools';
 import { type LeaveGuard, NamingRulesPanel } from '../conventions/NamingRules';
 import { itemOptions } from '../documents/DocumentView';
 import { short } from '../documents/describe';
@@ -58,6 +63,7 @@ import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, messageFor } from '../errors/failure';
 import { useRetry } from '../errors/retry';
 import { ItemLinks } from '../graph/ItemLinks';
+import type { Comparison } from '../history/ComparisonPage';
 import { ItemReviews } from '../reviews/ItemReviews';
 import { SearchForm, SearchResults } from '../search/SearchPanel';
 import { ChangesContext } from '../tree/context';
@@ -315,6 +321,28 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
         return next === undefined ? rest : { ...rest, q: next };
       },
     });
+  const goToComparison = ({ from, to, item }: Comparison) =>
+    void navigate({
+      to: '/w/$workspaceId/compare',
+      params: { workspaceId },
+      search: {
+        ...(query === undefined ? {} : { q: query }),
+        from,
+        to,
+        ...(item === null ? {} : { item }),
+      },
+    });
+  // The page tools read the item the address names, at its selection and cited revision.
+  const client = useQueryClient();
+  usePageTools({
+    workspaceId,
+    head,
+    rights: { permissions: workspace.permissions, archivedAt: workspace.archived_at ?? null },
+    open: itemId === null ? null : { itemId, selection: sel, revision: rev },
+    client,
+    openItem: (target, location) => goToItem(target, location),
+    openComparison: goToComparison,
+  });
 
   /**
    * The person's own change moved the shown head to the revision it made (`head.ts`): a

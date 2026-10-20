@@ -34,6 +34,7 @@ serde = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
 
 [dev-dependencies]
+okf-jawn-ingest = { path = "../ingest", features = ["runtime"] }
 tempfile.workspace = true
 tokio = { workspace = true }
 

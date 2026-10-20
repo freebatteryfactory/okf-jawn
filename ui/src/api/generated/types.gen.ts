@@ -180,6 +180,10 @@ export type AttentionItem = {
      */
     action: OperationName;
     /**
+     * Present only for instruction-like warnings; absence never certifies safety.
+     */
+    instruction_like?: InstructionEvidence | null;
+    /**
      * The item at the response's `revision`; absent when the observation is about no one
      * item or the item was purged.
      */
@@ -2416,6 +2420,51 @@ export type ImportedClaim = {
      */
     by?: string | null;
 };
+
+/**
+ * Bounded current evidence for one item's instruction-like observation.
+ */
+export type InstructionEvidence = {
+    /**
+     * First matches in source order, at most 32 for version one.
+     */
+    findings: Array<InstructionFinding>;
+    /**
+     * Language supported by this rule set; version one is English only (`en`).
+     */
+    language: string;
+    /**
+     * Additional matches counted but not included in this bounded evidence list.
+     */
+    omitted_findings: number;
+};
+
+/**
+ * One advisory match, quoted from the original text and located like an ordinary citation.
+ */
+export type InstructionFinding = {
+    /**
+     * Original matching lines; normalization never rewrites the displayed evidence.
+     */
+    passage: string;
+    /**
+     * Rule that matched, not a verdict about intent or safety.
+     */
+    rule_id: InstructionRule;
+    /**
+     * Exact version of the rules that produced this finding.
+     */
+    rule_set_version: string;
+    /**
+     * The same revision, representation and locator used by application reads.
+     */
+    source: SourceReference;
+};
+
+/**
+ * Explainable rules in the local English instruction-warning detector.
+ */
+export type InstructionRule = 'role_impersonation' | 'override_instructions' | 'reveal_secrets' | 'external_action' | 'hidden_text';
 
 /**
  * A newly issued connector and its secret, which is returned exactly once and never stored in plain text.

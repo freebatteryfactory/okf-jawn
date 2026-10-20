@@ -22,7 +22,7 @@ import {
 } from '../../src/features/imports/import-start';
 import { resetUploads } from '../../src/features/imports/uploading';
 import { JOBS_POLL_MS, JOBS_SAFETY_POLL_MS } from '../../src/features/jobs/jobs';
-import { fail, type Handler, mockApi, ok } from './support/api';
+import { fail, type Handler, mockApi, notImplemented, ok } from './support/api';
 import {
   accepted,
   CANCEL,
@@ -112,11 +112,14 @@ async function uploadedFiles(
   files: File[],
   overrides: Record<string, Handler>,
   service: UploadService = uploadService(),
+  follow: () => ReturnType<typeof mockEvents> = () =>
+    mockEvents(notImplemented(`/api/workspaces/${WS}/events`)),
 ) {
   const api = mockApi(
     explorerHandlers({ [OPEN]: () => ok(writableWorkspace), ...service.handlers, ...overrides }),
   );
   mockTransfers(service.transfer);
+  const events = follow();
   const app = renderAt(`/w/${WS}/import`);
   await screen.findByRole('heading', { name: 'Import files' });
   choose(files);
@@ -128,7 +131,7 @@ async function uploadedFiles(
   );
   await waitFor(() => expect(screen.queryByText(/^Uploading: /)).toBeNull());
   vi.useFakeTimers();
-  return { api, service, ...app };
+  return { api, service, events, ...app };
 }
 
 const importButton = () => screen.getByRole('button', { name: /^Import \d+ uploaded files?$/ });
@@ -380,22 +383,29 @@ describe('starting the import', () => {
     let job: Job = jobOf('queued');
     // The service answers a read as waiting until the stream is open (the test's own clock).
     let streamOpen = false;
-    const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {
-      [START]: () => {
-        const answered = job;
-        job = jobOf('succeeded', { item_ids: [NOTE], revision: IMPORTED });
-        return accepted(answered);
-      },
-      [JOB]: () => ok(streamOpen ? job : jobOf('queued')),
-    });
-    const events = mockEvents();
     let open: () => void = () => undefined;
-    events.state.hold = new Promise<void>((resolve) => {
-      open = resolve;
-    });
+    const { api, events } = await uploadedFiles(
+      [fileOf('a.txt', 'abc')],
+      {
+        [START]: () => {
+          const answered = job;
+          job = jobOf('succeeded', { item_ids: [NOTE], revision: IMPORTED });
+          return accepted(answered);
+        },
+        [JOB]: () => ok(streamOpen ? job : jobOf('queued')),
+      },
+      undefined,
+      () => {
+        const events = mockEvents();
+        events.state.hold = new Promise<void>((resolve) => {
+          open = resolve;
+        });
+        return events;
+      },
+    );
     fireEvent.click(importButton());
     await eventually(() => jobRow());
-    // The stream is asked for only now, after the answer, and is not open yet.
+    // Attention subscribed with the workspace; the job joins it after acceptance, still pending.
     await eventually(() => expect(events.state.requests).toBe(1));
     await later(() => expect(api.callsTo(JOB)).toHaveLength(1));
     expect(jobRow().textContent).toContain('Waiting to start.');
@@ -411,11 +421,12 @@ describe('starting the import', () => {
 
   it('asks for a started job when the stream says it changed, and on the slow clock only beside it', async () => {
     let job: Job = jobOf('running', { progress: 20 });
-    const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {
-      [START]: () => accepted(job),
-      [JOB]: () => ok(job),
-    });
-    const events = mockEvents();
+    const { api, events } = await uploadedFiles(
+      [fileOf('a.txt', 'abc')],
+      { [START]: () => accepted(job), [JOB]: () => ok(job) },
+      undefined,
+      () => mockEvents(),
+    );
     fireEvent.click(importButton());
     await eventually(() => jobRow());
     await eventually(() => expect(events.streams).toHaveLength(1));
@@ -471,11 +482,15 @@ describe('starting the import', () => {
 
   it('asks for the stream again, on the import page, once a job is answered after the session had ended', async () => {
     let signedIn = true;
-    const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {
-      [START]: () => accepted(jobOf('running')),
-      [JOB]: () => (signedIn ? ok(jobOf('running')) : fail(401, 'unauthenticated', 'no session')),
-    });
-    const events = mockEvents(fail(401, 'unauthenticated', 'no session'));
+    const { api, events } = await uploadedFiles(
+      [fileOf('a.txt', 'abc')],
+      {
+        [START]: () => accepted(jobOf('running')),
+        [JOB]: () => (signedIn ? ok(jobOf('running')) : fail(401, 'unauthenticated', 'no session')),
+      },
+      undefined,
+      () => mockEvents(fail(401, 'unauthenticated', 'no session')),
+    );
     signedIn = false;
     fireEvent.click(importButton());
     await eventually(() => jobRow());
@@ -682,14 +697,18 @@ describe('starting the import', () => {
     let head = HEAD;
     let first: Job = jobOf('running');
     let second: Job = jobOf('queued', { id: SECOND });
-    const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {
-      [OPEN]: () => ok({ ...writableWorkspace, head }),
-      [START]: () => accepted(api.callsTo(START).length === 1 ? first : second),
-      [JOB]: (body) => ok(body.job_id === SECOND ? second : first),
-    });
+    const { api, events } = await uploadedFiles(
+      [fileOf('a.txt', 'abc')],
+      {
+        [OPEN]: () => ok({ ...writableWorkspace, head }),
+        [START]: () => accepted(api.callsTo(START).length === 1 ? first : second),
+        [JOB]: (body) => ok(body.job_id === SECOND ? second : first),
+      },
+      undefined,
+      () => mockEvents(),
+    );
     // The stream is open, so a job is read again when the test says it changed: no clock is needed.
     vi.useRealTimers();
-    const events = mockEvents();
     const changed = (id: string, jobId: string) =>
       act(() => events.streams.at(0)?.send(id, eventOf('job_updated', id, { job_id: jobId })));
     /** Upload one more file and press Import. */

@@ -301,6 +301,9 @@ impl RecordStore for PurgeRecords {
     fn create_job<'a>(&'a self, _scope: &'a JobScope, _job: NewJob) -> PortFuture<'a, Job> {
         unused()
     }
+    fn job_mutation<'a>(&'a self, _scope: &'a JobScope, _job: JobId) -> PortFuture<'a, MutationId> {
+        unused()
+    }
     // "Read one durable job within its scope."
     fn get_job<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, Job> {
         Box::pin(async move {

@@ -91,6 +91,15 @@ function violations(id: string, kind: 'request' | 'response', value: unknown): s
  */
 const STAND_IN_CONTENT_DIGEST = '9'.repeat(64);
 
+// SaveDraftRequest.properties is the complete preserved map (contract/item.rs), not a patch.
+// These returned fields are a literal server-answer fixture; the journey must send all of them back.
+const RETURNED_ITEM_PROPERTIES = {
+  type: 'Note',
+  title: 'Case',
+  our_extension: { kept: true },
+  server_extension: { preserved: 'also keep returned fields' },
+};
+
 /** A scripted stand-in: schema-valid answers, and the refusals the journey expects of an agent. */
 function standIn(
   recorded: Recorded[],
@@ -161,7 +170,7 @@ function standIn(
               archived: false,
             },
             body: body.body,
-            properties: body.properties,
+            properties: RETURNED_ITEM_PROPERTIES,
             content_digest: STAND_IN_CONTENT_DIGEST,
           },
           receipt_id: randomUUID(),
@@ -254,6 +263,11 @@ function requestViolations(recorded: Recorded[]): string[] {
 }
 
 describe('acceptance journey requests against the generated contract', () => {
+  it('preserves the complete returned property map when saving the draft for Snapshot', async () => {
+    const { recorded } = await run();
+    const saved = recorded.find((entry) => entry.id === 'save_draft');
+    expect(saved?.body.properties).toEqual(RETURNED_ITEM_PROPERTIES);
+  });
   it('sends only requests that validate against their generated input schema and path', async () => {
     const { recorded } = await run();
     expect(recorded.length).toBeGreaterThan(10);

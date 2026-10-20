@@ -96,10 +96,14 @@ where
             Err(error) => fail(&mut stderr, None, &error, None).await,
         };
     }
-    let credential = match Credential::from_environment(environment, TOKEN_VARIABLE) {
-        Ok(credential) => credential,
-        Err(error) => return fail(&mut stderr, None, &error, None).await,
-    };
+    let credential =
+        match Credential::from_environment(environment, TOKEN_VARIABLE).and_then(|read| {
+            read.map(|token| token.operation(TOKEN_VARIABLE))
+                .transpose()
+        }) {
+            Ok(credential) => credential,
+            Err(error) => return fail(&mut stderr, None, &error, None).await,
+        };
     match operate(name, selected, credential.as_ref(), &mut stdin, &mut stdout).await {
         Ok(()) => 0,
         Err(failure) => {
@@ -201,13 +205,15 @@ fn relay(
     environment: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Relay<HttpTransport, ProcessLauncher, SystemClock>, ApiError> {
     let secret = match selected.get_one::<PathBuf>("token-file") {
-        Some(path) => Credential::from_file(path)?,
-        None => Credential::from_environment(environment, TOKEN_VARIABLE)?.ok_or_else(|| {
-            ApiError::new(
-                ErrorCode::Unauthenticated,
-                "No connector credential: set OKF_JAWN_TOKEN, or name a file with --token-file",
-            )
-        })?,
+        Some(path) => Credential::from_file(path)?.connector("--token-file")?,
+        None => Credential::from_environment(environment, TOKEN_VARIABLE)?
+            .ok_or_else(|| {
+                ApiError::new(
+                    ErrorCode::Unauthenticated,
+                    "No connector credential: set OKF_JAWN_TOKEN, or name a file with --token-file",
+                )
+            })?
+            .connector(TOKEN_VARIABLE)?,
     };
     let endpoint = endpoint(selected)?;
     let limits = Limits::default();

@@ -182,6 +182,15 @@ export function explorerHandlers(overrides: Record<string, Handler> = {}): Recor
     body.item_id === NOTE ? noteSummary : body.item_id === SOURCE ? sourceSummary : otherSummary;
   return {
     '/api/workspaces/open-workspace': () => ok(workspace),
+    // Attention found nothing at the requested revision, unless the test supplies findings/failure.
+    '/api/attention/get-attention': (body) => {
+      const at = body.at as { revision?: unknown } | undefined;
+      return ok({
+        revision: typeof at?.revision === 'string' ? at.revision : HEAD,
+        items: [],
+        next_cursor: null,
+      });
+    },
     '/api/items/list-items': (body) =>
       body.folder === 'notes'
         ? ok(listing([], [noteSummary, otherSummary]))

@@ -303,6 +303,14 @@ pub trait RecordStore: Send + Sync {
     fn create_job<'a>(&'a self, scope: &'a JobScope, job: NewJob) -> PortFuture<'a, Job>;
     /// Read one durable job within its scope.
     fn get_job<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, Job>;
+    /// Read the immutable creating mutation of a known job identity within its scope.
+    ///
+    /// The same tenant/workspace filtering as `get_job`: an unknown job or another scope is
+    /// `NotFound`. This reads by `JobId`, never finds a job by mutation, and creates or claims
+    /// nothing. Import acceptance uses it to recognize uploads its own earlier attempt's job
+    /// consumed before its pending-card commit, as SPEC section 5 requires: "a retried request
+    /// returns the job it already created".
+    fn job_mutation<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, MutationId>;
     /// List durable jobs of one scope, newest first, with bounded pagination.
     fn list_jobs<'a>(&'a self, scope: &'a JobScope, page: Page)
     -> PortFuture<'a, ListJobsResponse>;

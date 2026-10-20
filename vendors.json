@@ -899,7 +899,11 @@
     {
       "name": "webmcp",
       "use_sites": [
-        "ui/src/webmcp/register.ts"
+        "ui/src/webmcp/register.ts",
+        "ui/src/webmcp/tools.ts",
+        "ui/src/webmcp/use-page-tools.ts",
+        "ui/src/webmcp/proposal-form.ts",
+        "ui/src/features/settings/webmcp-setting.ts"
       ],
       "official_sources": [
         "https://webmachinelearning.github.io/webmcp/",
@@ -908,17 +912,20 @@
       "symbols": [
         "document.modelContext",
         "registerTool",
-        "unregisterTool"
+        "ModelContextRegisterToolOptions.signal",
+        "ToolAnnotations.readOnlyHint"
       ],
       "context7_library_id": null,
       "context7_query": null,
-      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "knowledge_source": "W3C WebMCP community draft dated 2026-10-16, read directly 2026-10-19: registration returns a Promise and aborting its signal unregisters the tool; no Context7 lookup was run",
       "offline_notes": [
         "Capability-detect plus an app setting. Never rely on universal browser/host availability.",
         "Expose a small page-specific tool set, never Verify/Approve.",
-        "Pin selection and revision at invocation; current page state must not silently change the requested source."
+        "Pin selection and revision at invocation; current page state must not silently change the requested source.",
+        "Handle every registration Promise. Rejection after the page's own abort is expected; other registration refusals appear on Settings.",
+        "The draft defines removal through the registration AbortSignal, not an unregisterTool method. This is a community draft, not a claim of universal browser support."
       ],
-      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "version_authority": "WebMCP community draft and the actual browser implementation; no installed package supplies this browser API",
       "qualification": []
     },
     {

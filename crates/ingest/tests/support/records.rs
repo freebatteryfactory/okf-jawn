@@ -552,6 +552,18 @@ impl RecordStore for FakeRecords {
         Box::pin(async move { found })
     }
 
+    // "Read the immutable creating mutation of a known job identity within its scope."
+    fn job_mutation<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, MutationId> {
+        let found = self.entry(job).and_then(|entry| {
+            if entry.scope == *scope {
+                Ok(entry.created.mutation_id)
+            } else {
+                Err(not_found())
+            }
+        });
+        Box::pin(async move { found })
+    }
+
     // "List durable jobs of one scope, newest first, with bounded pagination."
     fn list_jobs<'a>(
         &'a self,

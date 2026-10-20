@@ -55,6 +55,9 @@ pub struct ServiceParts {
     pub cors_origins: Vec<String>,
     /// The UI's build output, served for every path no route claims; `None` serves no page.
     pub ui_dir: Option<PathBuf>,
+    /// The sandbox origin the pages may frame (their policy's `frame-src`); `None` frames
+    /// nothing.
+    pub sandbox_origin: Option<String>,
     /// Extra routes mounted beside the operations, already bound to their own state: the MCP
     /// endpoint, the session routes and the declared non-JSON transports.
     pub extra: Router,
@@ -71,7 +74,8 @@ type Refusal = fn(ProtectionError) -> Response;
 ///
 /// # Errors
 /// Returns `InvalidInput` naming `hosts` when the host list is empty (an empty list would answer
-/// any `Host`), and naming `cors_origins` for an entry that is not an `http` or `https` origin.
+/// any `Host`) or holds an empty or spaced entry, naming `cors_origins` for an entry that is not
+/// an `http` or `https` origin, and naming `sandbox_origin` when it is not an origin.
 pub fn service(parts: ServiceParts) -> Result<Router, ApiError> {
     if parts.hosts.is_empty() {
         return Err(ApiError::new(
@@ -80,12 +84,24 @@ pub fn service(parts: ServiceParts) -> Result<Router, ApiError> {
         )
         .with_field("hosts"));
     }
+    // An empty entry would match a request that names an empty host.
+    if parts
+        .hosts
+        .iter()
+        .any(|host| host.is_empty() || host.chars().any(char::is_whitespace))
+    {
+        return Err(ApiError::new(
+            ErrorCode::InvalidInput,
+            "No host the service answers for may be empty or hold whitespace",
+        )
+        .with_field("hosts"));
+    }
     let routes = operation_routes(parts.bound)
         .merge(public::routes(parts.hosted.as_ref()))
         .merge(parts.extra);
     let routes = match parts.ui_dir {
         Some(directory) => routes
-            .fallback_service(assets::pages(&directory))
+            .fallback_service(assets::pages(&directory, parts.sandbox_origin.as_deref())?)
             .method_not_allowed_fallback(wrong_method),
         None => with_fallbacks(routes),
     };

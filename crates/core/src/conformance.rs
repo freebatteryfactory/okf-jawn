@@ -222,13 +222,18 @@ fn conformance(root: &Path, bundle: &okf_core::Bundle) -> Result<Vec<Warning>, A
 fn linked_file(diagnostic: &okf_validator::Diagnostic) -> Option<(&okf_core::ConceptId, &str)> {
     let source = diagnostic.concept.as_ref()?;
     let target = diagnostic.message.strip_prefix(BROKEN_LINK)?;
+    (!names_markdown(target)).then_some((source, target))
+}
+
+/// Whether a link names Markdown or an extensionless OKF concept, using the same rule in
+/// candidate validation and Attention. A fragment is not part of the file name.
+pub(crate) fn names_markdown(target: &str) -> bool {
     let without_anchor = target.split('#').next().unwrap_or_default();
     let name = without_anchor.rsplit('/').next().unwrap_or_default();
-    let markdown = match name.rsplit_once('.') {
+    match name.rsplit_once('.') {
         None => true,
         Some((_, extension)) => extension == "md",
-    };
-    (!markdown).then_some((source, target))
+    }
 }
 
 /// Whether the loaded candidate holds a file at what the link `target` written in `source`
