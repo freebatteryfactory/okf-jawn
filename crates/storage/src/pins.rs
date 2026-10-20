@@ -18,7 +18,7 @@
 //!   looks whether the object is held, so a put that pins after a delete finds the object
 //!   missing and writes it again.
 //! - Before the target's objects go, the sweep waits until the target holds no running pin
-//!   (`Sweep::drain`). Every write of the target that pins after the purge was recorded is
+//!   (`Pins::drain`). Every write of the target that pins after the purge was recorded is
 //!   refused before it records or stores anything (`LocalBlobs::put_pinned`), and every write
 //!   that pinned earlier ends, so the wait is bounded by the writes already running; after
 //!   `DRAIN_LIMIT` the purge stops with `Unavailable` and resumes when repeated.
@@ -30,7 +30,7 @@
 //! Pins live in memory: the data directory has one writer process, and a crash ends every
 //! write in flight with it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -55,6 +55,8 @@ struct Table {
     next: u64,
     /// A shorter `DRAIN_LIMIT` a test sets.
     drain_limit: Option<Duration>,
+    /// Purge and cleanup collections of one tenant never interleave.
+    sweep_locks: BTreeMap<String, Arc<tokio::sync::Mutex<()>>>,
 }
 
 /// One running write's put of an object in a workspace.
@@ -62,7 +64,7 @@ struct Table {
 struct Pin {
     id: u64,
     tenant: String,
-    workspace: String,
+    workspace: Option<String>,
     digest: Digest,
 }
 
@@ -71,7 +73,7 @@ struct Pin {
 struct Watch {
     id: u64,
     tenant: String,
-    target: String,
+    target: Option<String>,
     /// Every digest a workspace other than the target pinned since the step began.
     touched: BTreeSet<Digest>,
     /// Whether the step is waiting for the target's running writes (`Sweep::drain`).
@@ -91,7 +93,7 @@ pub(crate) struct Sweep {
     pins: Pins,
     id: u64,
     tenant: String,
-    target: String,
+    target: Option<String>,
 }
 
 /// How often `drain` looks at the table again.
@@ -109,20 +111,29 @@ impl Pins {
         workspace: &str,
         digest: &Digest,
     ) -> Result<Pinned, ApiError> {
+        self.pin_for(tenant, Some(workspace), digest)
+    }
+
+    /// A workspace put or a tenant-level archive stays touched in every eligible sweep.
+    pub(crate) fn pin_for(
+        &self,
+        tenant: &str,
+        workspace: Option<&str>,
+        digest: &Digest,
+    ) -> Result<Pinned, ApiError> {
         let mut table = self.lock()?;
         let id = table.next;
         table.next = table.next.saturating_add(1);
         table.pins.push(Pin {
             id,
             tenant: tenant.to_owned(),
-            workspace: workspace.to_owned(),
+            workspace: workspace.map(str::to_owned),
             digest: digest.clone(),
         });
-        for watch in table
-            .sweeps
-            .iter_mut()
-            .filter(|watch| watch.tenant == tenant && watch.target != workspace)
-        {
+        for watch in table.sweeps.iter_mut().filter(|watch| {
+            watch.tenant == tenant
+                && (watch.target.is_none() || watch.target.as_deref() != workspace)
+        }) {
             watch.touched.insert(digest.clone());
         }
         Ok(Pinned {
@@ -134,16 +145,28 @@ impl Pins {
     /// Begin the objects step of a purge of `target` (module header); returns the sweep and
     /// the digests it is touched by from the start, so the step can follow conversion records
     /// among them.
+    #[cfg(test)]
     pub(crate) fn sweep(
         &self,
         tenant: &str,
         target: &str,
     ) -> Result<(Sweep, BTreeSet<Digest>), ApiError> {
+        self.sweep_for(tenant, Some(target))
+    }
+
+    /// Register before marking. Cleanup watches every pin; a purge excludes only its target.
+    pub(crate) fn sweep_for(
+        &self,
+        tenant: &str,
+        target: Option<&str>,
+    ) -> Result<(Sweep, BTreeSet<Digest>), ApiError> {
         let mut table = self.lock()?;
         let touched: BTreeSet<Digest> = table
             .pins
             .iter()
-            .filter(|pin| pin.tenant == tenant && pin.workspace != target)
+            .filter(|pin| {
+                pin.tenant == tenant && (target.is_none() || pin.workspace.as_deref() != target)
+            })
             .map(|pin| pin.digest.clone())
             .collect();
         let id = table.next;
@@ -151,7 +174,7 @@ impl Pins {
         table.sweeps.push(Watch {
             id,
             tenant: tenant.to_owned(),
-            target: target.to_owned(),
+            target: target.map(str::to_owned),
             touched: touched.clone(),
             draining: false,
         });
@@ -159,20 +182,36 @@ impl Pins {
             pins: self.clone(),
             id,
             tenant: tenant.to_owned(),
-            target: target.to_owned(),
+            target: target.map(str::to_owned),
         };
         Ok((sweep, touched))
+    }
+
+    /// Serialize one tenant's collections without holding the pin table across an await.
+    pub(crate) async fn serial(
+        &self,
+        tenant: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, ApiError> {
+        let lock = {
+            let mut table = self.lock()?;
+            Arc::clone(table.sweep_locks.entry(tenant.to_owned()).or_default())
+        };
+        Ok(lock.lock_owned().await)
+    }
+
+    /// A purge drains target writers before registering its reachability snapshot watch.
+    pub(crate) async fn drain(&self, tenant: &str, target: &str) -> Result<(), ApiError> {
+        let (watch, _) = self.sweep_for(tenant, Some(target))?;
+        watch.drain().await
     }
 
     /// Whether a sweep of `target` is waiting for its running writes; for tests that act
     /// inside that wait, which comes after the sweep read every surviving reference.
     #[cfg(test)]
     pub(crate) fn draining(&self, tenant: &str, target: &str) -> Result<bool, ApiError> {
-        Ok(self
-            .lock()?
-            .sweeps
-            .iter()
-            .any(|watch| watch.tenant == tenant && watch.target == target && watch.draining))
+        Ok(self.lock()?.sweeps.iter().any(|watch| {
+            watch.tenant == tenant && watch.target.as_deref() == Some(target) && watch.draining
+        }))
     }
 
     /// Make every later drain give up after `limit`; for a test of the bound.
@@ -213,6 +252,9 @@ impl Sweep {
     /// has not ended after `DRAIN_LIMIT` stops the purge with `Unavailable`; repeating the
     /// purge resumes it.
     pub(crate) async fn drain(&self) -> Result<(), ApiError> {
+        let Some(target) = self.target.as_deref() else {
+            return Ok(()); // A tenant cleanup has no purged workspace whose writers it drains.
+        };
         let started = std::time::Instant::now();
         let limit = self.pins.lock()?.drain_limit.unwrap_or(DRAIN_LIMIT);
         loop {
@@ -221,11 +263,9 @@ impl Sweep {
                 if let Some(watch) = table.sweeps.iter_mut().find(|watch| watch.id == self.id) {
                     watch.draining = true;
                 }
-                if !table
-                    .pins
-                    .iter()
-                    .any(|pin| pin.tenant == self.tenant && pin.workspace == self.target)
-                {
+                if !table.pins.iter().any(|pin| {
+                    pin.tenant == self.tenant && pin.workspace.as_deref() == Some(target)
+                }) {
                     return Ok(());
                 }
             }
@@ -235,7 +275,7 @@ impl Sweep {
                     format!(
                         "a write to workspace {} that began before the purge was recorded is \
                          still running; repeat the purge to resume it",
-                        self.target
+                        target
                     ),
                 ));
             }
@@ -251,7 +291,7 @@ impl Sweep {
         &self,
         digest: &Digest,
         delete: impl FnOnce() -> Result<bool, ApiError>,
-    ) -> Result<bool, ApiError> {
+    ) -> Result<Option<bool>, ApiError> {
         let table = self.pins.lock()?;
         let watch = table
             .sweeps
@@ -259,9 +299,9 @@ impl Sweep {
             .find(|watch| watch.id == self.id)
             .ok_or_else(|| internal("a purge's sweep left the pin table while it ran"))?;
         if watch.touched.contains(digest) {
-            return Ok(false);
+            return Ok(None);
         }
-        delete().map(|_| true)
+        delete().map(Some)
     }
 }
 

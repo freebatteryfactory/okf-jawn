@@ -1,85 +1,36 @@
-//! Purge (`Purger`): removing a target from every store the application manages.
+//! Workspace purge over the application's managed stores (SPEC section 8).
 //!
-//! SPEC section 8: "Purge ... removes the original bytes, derivatives, index entries, historical
-//! content and installation-managed backups of an item or a workspace, and marks the revisions,
-//! citations and Views that referred to them as invalidated. Purge never claims to erase
-//! exports, clones or backups outside the application's control." This module only removes
-//! what this data directory holds; the `PurgeReport` counts what it removed and kept.
+//! Durable `purge_progress` steps resume after a stop:
+//! 1. Plan from rows and managed-copy identities, without opening or locking the target's Git
+//!    repository. Earlier revision mappings are invalidated; the recorded workspace purge
+//!    independently invalidates every revision, including a revision no per-commit row names.
+//! 2. Rewrite or remove managed copies. Survivor archive rewrites are tenant-level tracked
+//!    puts under the recorded purge mutation; moving their references lands only that mutation's
+//!    pending puts. Superseded objects are left to the shared sweep, never deleted here.
+//! 3. Collect archive/upload identities and remove scoped records transactionally, then unlink
+//!    received upload files. Downloads stop being available when their records go.
+//! 4. Remove and merge the index.
+//! 5. Delete the target repository under its write lock, then repeat records and index passes
+//!    to catch writes that held the lock before the purge was recorded.
+//! 6. Drain target pins, then run the tenant-serialized reachability sweep (`sweep`). It reads
+//!    one durable-root snapshot and every surviving reference/history before streaming canonical
+//!    object files. A recorded-purged workspace is never a survivor. Malformed survivor data
+//!    stops before deleting any candidate and names only workspace/item/table/object identities.
+//!    Durable removal rows survive an interrupted batch; the plan/counts and removal-row clear
+//!    land together. The sweep lock/watch remain held through that report transaction.
+//! 7. Reach managed backups again, vacuum both databases, and record the completed report.
 //!
-//! A workspace purge runs in steps recorded in `purge_progress`, each safe to repeat, so a purge
-//! that stopped resumes by repeating the call (it is never cancelled: a half-removed target is
-//! worse than either end):
+//! No target history is read, so target corruption cannot prevent its own removal. A survivor's
+//! damage must be repaired or that workspace itself recorded for purge before collection can
+//! proceed. Retained exports and archives outside this data directory are outside the purge's
+//! guarantee. Reports count the bytes this sweep actually removed and every candidate it kept;
+//! they do not infer which survivor objects once belonged to the target.
 //!
-//! 1. **Plan**, before anything is removed: the objects the workspace references, read
-//!    structurally (`references`: what the cards of its whole Git history on every reference
-//!    name, what the conversion records among them name, and its records), its
-//!    workspace archives (recorded as artifacts or only written), its uploads, the
-//!    pre-migration backups that hold it, and the counts of the report. Its records and
-//!    history are read under the workspace's write lock, under which every Git write checks
-//!    the purge refusal (`guard`), so a commit either is in the plan or is refused. In the
-//!    same transaction every commit of the workspace is written to
-//!    the revision map as invalidated by this purge with no replacement. The plan holds
-//!    identities and counts, never content. The workspace's own damage (an appearance or a
-//!    card-named conversion record that does not read, an entry under `.okf/sources` that is
-//!    not a file, an object its history needs but does not hold) never stops its purge: the
-//!    plan reads past it (`references::history_recording`) and records each unread file, by
-//!    path or record digest, in `WorkspacePlan::unread`, so the purge record says that the
-//!    objects only those files named may remain stored.
-//! 2. **Backups**: every pre-migration copy that holds the workspace is rewritten without it or
-//!    deleted, its archive in every pre-migration backup set is deleted, and every archive of
-//!    another workspace (in a backup set or in the object store) whose records still cite it is
-//!    rewritten with them scrubbed (`copies`). The pre-migration backups are read again on
-//!    every attempt, and this step runs once more before the purge completes, so a backup
-//!    written after the plan is reached too.
-//! 3. **Records**: its rows are removed, the warnings kept for its commits' replays among them
-//!    (`commit_warnings`), and what cites it is scrubbed (`rows`); its upload files are deleted. Its retained exports and archives stop being downloadable here.
-//! 4. **Index**: its index entries are removed and the full-text index is merged, so no removed
-//!    term stays in an index segment.
-//! 5. **Repository**: its repository is deleted under the workspace's write lock; then the rows
-//!    and index steps run again, for a row a write in flight added after step 3 and for index
-//!    entries an indexing that read the repository before it went stored after step 4 (an
-//!    indexing reads and stores under the same lock).
-//! 6. **Objects**: a sweep of the in-flight pins begins (`pins`), then what every surviving
-//!    workspace and tenant record references is read, other workspaces' pending puts included
-//!    (`puts`), except that a survivor's upload slot or pending put holding one of the target's
-//!    workspace archives keeps nothing (`references::except_archives`); the step waits for the
-//!    target's running writes, adds the objects the target's
-//!    pending puts name, deletes each planned object that no surviving reference names and no
-//!    other workspace pinned since the sweep began, and clears the target's pending puts; the
-//!    others are counted as kept. A surviving workspace's damage stops this step, loudly
-//!    (`Internal`, `references::refusing_in`): guessing past it could delete what the damaged
-//!    file names. The message names the damaged workspace and the path or record digest, so an
-//!    operator knows where to look; a survivor whose repository does not open stops the step
-//!    naming it the same way. The remedy is a fix of the damaged file or of the reader,
-//!    or a purge of the damaged workspace, which its own damage does not stop (step 1); the
-//!    stopped purge then resumes by repeating the call. A restore refuses to import an archive
-//!    holding such a file (`backup::restore::refuse_unheld`), so no import plants damage.
-//! 7. **Vacuum**: both databases are rebuilt without free pages and their write-ahead logs folded
-//!    back, so removed rows leave no bytes behind; then the report is recorded.
-//!
-//! The purge record itself (`RecordStore::create_purge`), its tenant job and the revision map
-//! outlive the workspace: they hold identities only. Installation archives hold no workspace
-//! content (Stage 1b design section 8) and are left as they are.
-//!
-//! What a write in flight can and cannot leave behind (the `Purger` contract in core):
-//!
-//! - Storage refuses every write to the workspace that the `guard` header lists, new jobs,
-//!   job retries and job claims included, from the moment the purge is recorded; a Git write
-//!   checks under the workspace's lock, under which step 1 reads. An object put pins, then
-//!   records a durable pending put (`puts`) in the transaction of its second refusal check,
-//!   before it retains; only a record of the workspace that names the object deletes it. Step 6
-//!   waits for the target's running writes (at most ten minutes, then `Unavailable` having
-//!   deleted none of the target's objects; repeating the purge resumes it) and deletes the
-//!   objects the target's pending puts name, the bytes of a refused, failed, crashed or
-//!   replayed write among them; pending puts have no lifetime.
-//! - Another workspace's object is deleted only when no reference step 6 read names it (that
-//!   workspace's pending puts included, a copy of the target's archive excepted) and no write
-//!   of another workspace pinned it since step 6 began (`pins`).
-//! - A workspace archive and a written history are refused under the workspace's lock and
-//!   record themselves before they release it, so step 1 either refused them or reads them.
-//! - Known limit: job work core did not drain before calling the purger can still store what
-//!   the plan does not name: an import copies its rows without the refusal.
-
+//! Publication is pin-before-retain and durable-pending-before-retain. Workspace records land
+//! the objects they actually name; tenant archive records land only their producing mutation's
+//! pending puts. A dead write's pending puts and object-store crash staging files have no age
+//! reaper. Tenant clean-up uses this collector; its durable absorption/completion and discard
+//! consumers are the connected construction boundary. Item purge remains `NotImplemented`.
 use std::collections::BTreeSet;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
@@ -98,7 +49,7 @@ use crate::data::io_error;
 use crate::db::{internal, json, scope_key, sql};
 use crate::puts;
 use crate::storage::Storage;
-use references::Rows;
+use crate::sweep::{SweepCounts, SweepRun};
 
 /// `Purger` over every store of the opened data directory.
 #[derive(Debug, Clone)]
@@ -111,8 +62,6 @@ pub struct StoragePurger {
 struct WorkspacePlan {
     /// The purged workspace.
     workspace_id: WorkspaceId,
-    /// Held objects the workspace referenced when the plan was made.
-    objects: BTreeSet<Digest>,
     /// Its workspace archives: an upload slot elsewhere holding one is no surviving reference.
     archives: BTreeSet<Digest>,
     /// Its uploads, whose files lie outside the object store.
@@ -126,15 +75,10 @@ struct WorkspacePlan {
     /// store by the digest it had.
     #[serde(default)]
     rewritten: BTreeSet<String>,
-    /// Archive objects a rewrite replaced; each is deleted, never counted as a kept object.
+    /// Archive objects a rewrite replaced. Old progress plans retain this field, but only the
+    /// shared sweep decides whether those bytes can be removed.
     #[serde(default)]
     superseded: BTreeSet<Digest>,
-    /// What of the workspace's own history and card-named conversion records the plan could not
-    /// read, each by its path or record digest and why (`references::History::unread`). The
-    /// objects only those files named are not in `objects`, so they may remain stored once the
-    /// purge completes: recorded here, never hidden, and never a stop of the purge.
-    #[serde(default)]
-    unread: Vec<String>,
     /// The report; the object counts are filled in by the objects step.
     report: PurgeReport,
 }
@@ -145,16 +89,6 @@ enum Progress {
     Running(i64, Box<WorkspacePlan>),
     /// Done, with its report.
     Done(PurgeReport),
-}
-
-/// What a plan read of the target's history and objects (`planned_objects`).
-struct Planned {
-    /// Every commit of the history, for the revision map.
-    revisions: Vec<git2::Oid>,
-    /// Every held object the target references.
-    held: BTreeSet<Digest>,
-    /// What could not be read (`WorkspacePlan::unread`).
-    unread: Vec<String>,
 }
 
 /// The completed-step numbers recorded in `purge_progress.step`.
@@ -179,6 +113,84 @@ impl WorkspacePlan {
 impl StoragePurger {
     pub(crate) const fn new(storage: Storage) -> Self {
         Self { storage }
+    }
+
+    /// One tenant pass. Requests arriving after this start clock are served by another pass
+    /// when the real job completion compares its request generations (lifecycle design 3.3).
+    async fn clean_up_pass(
+        &self,
+        tenant: &TenantId,
+        job: JobId,
+    ) -> Result<CleanUpReport, ApiError> {
+        let key = tenant.as_str().to_owned();
+        self.storage
+            .records
+            .transaction(move |transaction| {
+                transaction
+                    .execute(
+                        "UPDATE clean_up_requests SET started=requested WHERE tenant_id=?1",
+                        [key],
+                    )
+                    .map(|_| ())
+                    .map_err(|error| sql(&error))
+            })
+            .await?;
+        let counts = crate::sweep::run(
+            &self.storage,
+            SweepRun {
+                tenant: tenant.clone(),
+                target: None,
+                key: format!("clean_up/{}", job.0),
+                excluded: BTreeSet::new(),
+            },
+        )
+        .await?;
+        let key = tenant.as_str().to_owned();
+        let uploads = self
+            .storage
+            .records
+            .call(move |connection| {
+                let mut statement = connection.prepare(
+                "SELECT upload_id FROM discarded_uploads WHERE tenant_id=?1 ORDER BY upload_id",
+            ).map_err(|error| sql(&error))?;
+                let uploads = statement
+                    .query_map([key], |row| row.get::<_, String>(0))
+                    .map_err(|error| sql(&error))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| sql(&error))?;
+                uploads
+                    .into_iter()
+                    .map(|text| from_text!(text.as_str()))
+                    .collect::<Result<Vec<UploadId>, _>>()
+            })
+            .await?;
+        let directory = self.storage.data.root().join("uploads");
+        // Keep the sweep's lock/watch with the actual blocking work if its async owner aborts.
+        blocking(move || {
+            // Capture the whole guard-bearing value, not only its two numeric fields.
+            let protection = counts;
+            let mut removed = 0_u32;
+            for upload in uploads {
+                for suffix in ["part", "incoming"] {
+                    let path = directory.join(format!("{}.{suffix}", upload.0));
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {
+                            removed = removed.checked_add(1).ok_or_else(|| {
+                                internal("a clean-up file count exceeds its report")
+                            })?
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(io_error("remove", &path, &error)),
+                    }
+                }
+            }
+            Ok(CleanUpReport {
+                objects_removed: protection.removed.to_string(),
+                objects_kept: protection.kept.to_string(),
+                upload_files_removed: removed,
+            })
+        })
+        .await
     }
 
     /// See `Purger::purge_workspace` and the module header.
@@ -209,7 +221,7 @@ impl StoragePurger {
             step = self.advance(purge, BACKUPS, None).await?;
         }
         if step < RECORDS {
-            self.records(&scope, purge, &plan.uploads).await?;
+            self.records(&scope, purge, &mut plan).await?;
             step = self.advance(purge, RECORDS, None).await?;
         }
         if step < INDEX {
@@ -220,14 +232,14 @@ impl StoragePurger {
             let repositories = self.storage.repositories.clone();
             let removed = scope.clone();
             blocking(move || repositories.remove(&removed)).await?;
-            self.records(&scope, purge, &plan.uploads).await?;
+            self.records(&scope, purge, &mut plan).await?;
             self.index(&scope).await?;
             step = self.advance(purge, REPOSITORY, None).await?;
         }
         if step < OBJECTS {
-            let (removed, kept) = self.objects(&scope, &plan).await?;
-            plan.report.objects_removed = removed.to_string();
-            plan.report.objects_kept_shared = kept.to_string();
+            let counts = self.objects(&scope, purge, &plan).await?;
+            plan.report.objects_removed = counts.removed.to_string();
+            plan.report.objects_kept_shared = counts.kept.to_string();
             step = self.advance(purge, OBJECTS, Some(&plan)).await?;
         }
         if step < DONE {
@@ -265,7 +277,9 @@ impl StoragePurger {
             .await
     }
 
-    /// Step 1: read what the workspace references and record the plan with the revision map.
+    /// Step 1 records only durable rows and copy identities. The target repository is never
+    /// opened or locked: the repository step waits for earlier Git writers before its repeat
+    /// of the records pass, so that pass catches every archive/upload that landed meanwhile.
     async fn plan(
         &self,
         scope: &StorageScope,
@@ -273,50 +287,10 @@ impl StoragePurger {
         purge: PurgeId,
     ) -> Result<WorkspacePlan, ApiError> {
         let (tenant, workspace) = scope_key(scope);
-        let (history, objects, copy_plan, archives, uploads, unread) = {
-            let repositories = self.storage.repositories.clone();
-            let records = self.storage.records.clone();
-            let blobs = self.storage.blobs.clone();
-            let pre_migration = self.storage.data.pre_migration_path();
-            let scope = scope.clone();
+        let directory = self.storage.data.pre_migration_path();
+        let copy_plan = {
             let (tenant, workspace) = (tenant.clone(), workspace.clone());
-            blocking(move || {
-                // Read under the workspace's write lock: a Git write checks the purge refusal
-                // under the same lock, so it either landed before this read or is refused.
-                let (target, archives, uploads, history) = repositories.locked(&scope, || {
-                    let (tenant, workspace) = (tenant.clone(), workspace.clone());
-                    let (target, archives, uploads) = tokio::runtime::Handle::current().block_on(
-                        records.call(move |connection| {
-                            let target = references::records(
-                                connection,
-                                &tenant,
-                                &workspace,
-                                Rows::Target,
-                                &BTreeSet::new(),
-                            )?;
-                            let archives = archives(connection, &tenant, &workspace)?;
-                            let uploads = uploads(connection, &tenant, &workspace)?;
-                            Ok((target, archives, uploads))
-                        }),
-                    )?;
-                    // The workspace's own damage is recorded, never a stop: it is being
-                    // removed, and nothing else could remove it.
-                    let history = if repositories.path(&scope).exists() {
-                        references::history_recording(&repositories.open(&scope)?)?
-                    } else {
-                        references::History::default()
-                    };
-                    Ok((target, archives, uploads, history))
-                })?;
-                let Planned {
-                    revisions,
-                    held,
-                    unread,
-                } = planned_objects(&blobs, &scope.tenant_id, target, history)?;
-                let copy_plan = copies::plan(&pre_migration, &tenant, &workspace)?;
-                Ok((revisions, held, copy_plan, archives, uploads, unread))
-            })
-            .await?
+            blocking(move || copies::plan(&directory, &tenant, &workspace)).await?
         };
         let workspace_id = scope.workspace_id;
         self.storage
@@ -327,6 +301,13 @@ impl StoragePurger {
                 {
                     return Ok(*plan);
                 }
+                let named_revisions: i64 = transaction
+                    .query_row(
+                        "SELECT count(*) FROM revision_map WHERE tenant_id=?1 AND workspace_id=?2",
+                        params![tenant, workspace],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| sql(&error))?;
                 let plan = WorkspacePlan {
                     workspace_id,
                     report: report_at_plan(
@@ -334,19 +315,18 @@ impl StoragePurger {
                         &tenant,
                         &workspace,
                         &copy_plan,
-                        archives.len(),
-                        history.len(),
+                        0,
+                        usize::try_from(named_revisions)
+                            .map_err(|_| internal("a purge revision count is negative"))?,
                     )?,
-                    objects,
-                    archives,
-                    uploads,
+                    archives: BTreeSet::new(),
+                    uploads: Vec::new(),
                     rewrite: copy_plan.rewrite,
                     remove: copy_plan.remove,
                     rewritten: BTreeSet::new(),
                     superseded: BTreeSet::new(),
-                    unread,
                 };
-                invalidate_revisions(transaction, &tenant, &workspace, purge, &history)?;
+                invalidate_revisions(transaction, &tenant, &workspace, purge)?;
                 transaction
                     .execute(
                         "INSERT INTO purge_progress (purge_id, tenant_id, mutation_id, plan, step)
@@ -364,7 +344,6 @@ impl StoragePurger {
             })
             .await
     }
-
     /// Step 2, and again before the purge completes: rewrite or delete every managed backup that
     /// holds the workspace (`copies`). The pre-migration backups are read again on every pass,
     /// so a set written after the plan (an upgrade after a failed attempt) is reached too.
@@ -436,8 +415,8 @@ impl StoragePurger {
     }
 
     /// Rewrite every archive of another workspace in the object store whose records still cite
-    /// the workspace: the rewritten archive is stored, every record naming the old one is moved
-    /// to it (with the plan, in one transaction), and the old one is deleted.
+    /// the workspace: a tracked tenant put protects the rewrite until its references and plan
+    /// land atomically. Superseded bytes become ordinary candidates of the shared sweep.
     async fn stored_archives(
         &self,
         scope: &StorageScope,
@@ -446,16 +425,25 @@ impl StoragePurger {
         staging: &std::path::Path,
     ) -> Result<(), ApiError> {
         let (tenant, workspace) = scope_key(scope);
-        let digests = {
+        let (digests, mutation) = {
             let (tenant, workspace) = (tenant.clone(), workspace.clone());
             self.storage
                 .records
-                .call(move |connection| other_archives(connection, &tenant, &workspace))
+                .call(move |connection| {
+                    let mutation: String = connection.query_row(
+                        "SELECT mutation_id FROM purge_progress WHERE tenant_id=?1 AND purge_id=?2",
+                        params![tenant, purge.0.to_string()], |row| row.get(0),
+                    ).map_err(|error| sql(&error))?;
+                    let mutation =
+                        uuid::Uuid::parse_str(&mutation)
+                            .map(MutationId)
+                            .map_err(|_| {
+                                internal("the purge progress holds an invalid mutation identity")
+                            })?;
+                    Ok((other_archives(connection, &tenant, &workspace)?, mutation))
+                })
                 .await?
         };
-        for old in &plan.superseded {
-            self.storage.blobs.remove_for(&scope.tenant_id, old)?;
-        }
         for (old, owner) in digests {
             let path = self.storage.blobs.local_path(&scope.tenant_id, &old)?;
             if !path.is_file() {
@@ -482,30 +470,35 @@ impl StoragePurger {
             let size = std::fs::metadata(&next)
                 .map_err(|error| io_error("read", &next, &error))?
                 .len();
-            let new = self
+            let (new, pinned) = self
                 .storage
                 .blobs
-                .put_for(
+                .put_tracked(
                     &scope.tenant_id,
+                    mutation,
                     crate::blobs::file_reader(Some(next), 0, size),
                     size,
-                    None,
                 )
                 .await?;
+            #[cfg(test)]
+            crate::pause::point(&rewrite_stored_point(&self.storage, purge)).await?;
             plan.rewritten.insert(old.as_str().to_owned());
             plan.superseded.insert(old.clone());
             plan.recount();
             let text = serde_json::to_string(&*plan).map_err(|error| json(&error))?;
             let tenant = tenant.clone();
             let moved = old.clone();
-            self.storage
+            let moved = self
+                .storage
                 .records
                 .transaction(move |transaction| {
                     move_archive(transaction, &tenant, &moved, &new)?;
+                    puts::land_tenant(transaction, &tenant, mutation)?;
                     store_plan(transaction, purge, &text)
                 })
-                .await?;
-            self.storage.blobs.remove_for(&scope.tenant_id, &old)?;
+                .await;
+            pinned.end()?;
+            moved?;
         }
         Ok(())
     }
@@ -524,15 +517,34 @@ impl StoragePurger {
         &self,
         scope: &StorageScope,
         purge: PurgeId,
-        uploads: &[UploadId],
+        plan: &mut WorkspacePlan,
     ) -> Result<(), ApiError> {
         let (tenant, workspace) = scope_key(scope);
-        self.storage
+        let mut next = plan.clone();
+        let written = self
+            .storage
             .records
-            .transaction(move |transaction| rows::remove(transaction, &tenant, &workspace, purge))
+            .transaction(move |transaction| {
+                next.archives
+                    .extend(archives(transaction, &tenant, &workspace)?);
+                for upload in uploads(transaction, &tenant, &workspace)? {
+                    if !next.uploads.contains(&upload) {
+                        next.uploads.push(upload);
+                    }
+                }
+                rows::remove(transaction, &tenant, &workspace, purge)?;
+                next.recount();
+                store_plan(
+                    transaction,
+                    purge,
+                    &serde_json::to_string(&next).map_err(|error| json(&error))?,
+                )?;
+                Ok(next)
+            })
             .await?;
+        *plan = written;
         let directory = self.storage.data.root().join("uploads");
-        let uploads = uploads.to_vec();
+        let uploads = plan.uploads.clone();
         blocking(move || {
             for upload in uploads {
                 for suffix in ["part", "incoming"] {
@@ -567,137 +579,31 @@ impl StoragePurger {
             .await
     }
 
-    /// Step 6: delete each planned object no survivor references; (removed, kept).
-    ///
-    /// The sweep (`pins`) begins before any surviving reference is read. An object is deleted
-    /// only when no durable reference the step read names it (another workspace's pending puts
-    /// included, `puts`, but no survivor's copy of the target's archive) and no other
-    /// workspace's write pinned it at any moment from the start
-    /// of that read until the delete, which runs under the pin table's lock. The target's own
-    /// pending puts, read once its running writes have ended, name bytes no record of it names:
-    /// they are deleted with it, and the rows are cleared.
+    /// Step 6 shares the tenant reachability sweep with clean-up. It drains target writers
+    /// before marking and never reads the target repository. The returned counts own the
+    /// tenant lock/watch until the caller records them and clears this sweep's progress.
     async fn objects(
         &self,
         scope: &StorageScope,
+        purge: PurgeId,
         plan: &WorkspacePlan,
-    ) -> Result<(usize, usize), ApiError> {
-        let (tenant, workspace) = scope_key(scope);
-        let blobs = self.storage.blobs.clone();
-        let (sweep, pinned) = blobs.pins().sweep(&tenant, &workspace)?;
-        let archives = plan.archives.clone();
-        let (mut surviving, pending) = {
-            let (tenant, workspace) = (tenant.clone(), workspace.clone());
-            self.storage
-                .records
-                .call(move |connection| {
-                    let surviving = references::records(
-                        connection,
-                        &tenant,
-                        &workspace,
-                        Rows::Survivors,
-                        &archives,
-                    )?;
-                    // Another workspace's pending put of the target's archive keeps it no more
-                    // than its upload slot would (`references::except_archives`).
-                    let pending = references::except_archives(
-                        puts::others(connection, &tenant, &workspace)?,
-                        &archives,
-                    )
-                    .collect::<Vec<_>>();
-                    Ok((surviving, pending))
-                })
-                .await?
-        };
-        let repositories = self.storage.repositories.clone();
-        let scope = scope.clone();
-        let surviving = {
-            let (blobs, scope) = (blobs.clone(), scope.clone());
-            blocking(move || {
-                let (mut found, mut followed) = (BTreeSet::new(), BTreeSet::new());
-                for path in repositories.others(&scope.tenant_id, &scope)? {
-                    // The survivor's identity, from its repository directory
-                    // (`Repositories::path`): a failure opening or reading it names it.
-                    let workspace = path
-                        .file_stem()
-                        .map(|stem| stem.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let repository = git2::Repository::open_bare(&path).map_err(|error| {
-                        references::naming(&workspace, crate::git::repo::git(&error))
-                    })?;
-                    // Read structurally, as the plan reads the target: a survivor's card or
-                    // conversion record that does not read fails the purge (`damaged`, naming
-                    // the survivor) rather than risk deleting what it names. Each record is
-                    // followed once, under the first survivor whose card names it.
-                    let history = references::history_naming(&repository, &workspace)?;
-                    found.extend(history.objects.into_keys());
-                    let records: BTreeSet<Digest> = history
-                        .records
-                        .into_iter()
-                        .filter(|record| !followed.contains(record))
-                        .collect();
-                    references::follow_records(
-                        &blobs,
-                        &scope.tenant_id,
-                        &records,
-                        &mut found,
-                        &mut references::refusing_in(&workspace),
-                    )?;
-                    followed.extend(records);
-                }
-                // The objects other workspaces were putting when the sweep began, and those of
-                // their pending puts, are about to be referenced, and kept. A conversion record
-                // is followed only once a card names it; until then its exports and assets are
-                // pending puts of the same write, kept as such, and its job's completion then
-                // names each as a job output.
-                found.extend(pinned);
-                found.extend(pending);
-                surviving.extend(found);
-                Ok(surviving)
-            })
-            .await?
-        };
-        // Every write of the target that pinned before the purge was recorded has ended; one
-        // that pins from now on records and stores nothing (`LocalBlobs::put_pinned`). The
-        // bytes its pending puts name, a refused upload completion's and a crashed write's
-        // among them, go with the target.
-        sweep.drain().await?;
-        let held = {
-            let (tenant, workspace) = (tenant.clone(), workspace.clone());
-            self.storage
-                .records
-                .call(move |connection| puts::of(connection, &tenant, &workspace))
-                .await?
-        };
-        let mut planned = plan.objects.clone();
-        for digest in held {
-            if blobs.local_path(&scope.tenant_id, &digest)?.is_file() {
-                planned.insert(digest);
-            }
-        }
-        let (removed, kept) = blocking(move || {
-            let mut removed = 0_usize;
-            let mut kept = 0_usize;
-            for digest in &planned {
-                let deleted = !surviving.contains(digest)
-                    && sweep.delete_unless_touched(digest, || {
-                        blobs.remove_for(&scope.tenant_id, digest)
-                    })?;
-                if deleted {
-                    removed = removed.saturating_add(1);
-                } else {
-                    kept = kept.saturating_add(1);
-                }
-            }
-            Ok((removed, kept))
-        })
-        .await?;
+    ) -> Result<SweepCounts, ApiError> {
         self.storage
-            .records
-            .transaction(move |transaction| puts::clear(transaction, &tenant, &workspace))
+            .blobs
+            .pins()
+            .drain(scope.tenant_id.as_str(), &scope.workspace_id.0.to_string())
             .await?;
-        Ok((removed, kept))
+        crate::sweep::run(
+            &self.storage,
+            SweepRun {
+                tenant: scope.tenant_id.clone(),
+                target: Some(scope.workspace_id),
+                key: format!("purge/{}", purge.0),
+                excluded: plan.archives.clone(),
+            },
+        )
+        .await
     }
-
     /// Record `step` as done (and the plan, when it changed); returns `step`.
     async fn advance(
         &self,
@@ -718,6 +624,15 @@ impl StoragePurger {
                         params![step, plan, purge.0.to_string()],
                     )
                     .map_err(|error| sql(&error))?;
+                if step == OBJECTS {
+                    transaction
+                        .execute(
+                            "DELETE FROM sweep_removals WHERE sweep=?1 AND tenant_id=(
+                            SELECT tenant_id FROM purge_progress WHERE purge_id=?2)",
+                            params![format!("purge/{}", purge.0), purge.0.to_string()],
+                        )
+                        .map_err(|error| sql(&error))?;
+                }
                 Ok(step)
             })
             .await
@@ -725,13 +640,8 @@ impl StoragePurger {
 }
 
 impl Purger for StoragePurger {
-    fn clean_up<'a>(&'a self, _tenant: &'a TenantId, _job: JobId) -> PortFuture<'a, CleanUpReport> {
-        Box::pin(async {
-            Err(ApiError::new(
-                ErrorCode::NotImplemented,
-                "clean-up execution awaits the lifecycle storage implementation",
-            ))
-        })
+    fn clean_up<'a>(&'a self, tenant: &'a TenantId, job: JobId) -> PortFuture<'a, CleanUpReport> {
+        Box::pin(self.clean_up_pass(tenant, job))
     }
 
     fn purge_workspace<'a>(
@@ -760,39 +670,14 @@ impl Purger for StoragePurger {
     }
 }
 
-/// The plan's objects: every held object the target's `rows`, its `history`'s cards and the
-/// conversion records among them name, the same structural sets a survivor is read by
-/// (`StoragePurger::objects`). A card-named record that does not read is recorded with the
-/// history's own unread files, never a stop. Blocking.
-fn planned_objects(
-    blobs: &crate::blobs::LocalBlobs,
-    tenant: &TenantId,
-    rows: BTreeSet<Digest>,
-    history: references::History,
-) -> Result<Planned, ApiError> {
-    let references::History {
-        revisions,
-        objects: named,
-        records: followed,
-        mut unread,
-    } = history;
-    let mut objects = rows;
-    objects.extend(named.into_keys());
-    references::follow_records(blobs, tenant, &followed, &mut objects, &mut |message| {
-        unread.push(message);
-        Ok(())
-    })?;
-    let mut held = BTreeSet::new();
-    for digest in objects {
-        if blobs.local_path(tenant, &digest)?.is_file() {
-            held.insert(digest);
-        }
-    }
-    Ok(Planned {
-        revisions,
-        held,
-        unread,
-    })
+/// Test-only boundary after retaining a rewrite and before moving its durable references.
+#[cfg(test)]
+fn rewrite_stored_point(storage: &Storage, purge: PurgeId) -> String {
+    format!(
+        "purge|{}|{}|rewrite-stored",
+        storage.data.root().display(),
+        purge.0
+    )
 }
 
 /// Map every revision of the workspace, and every revision an earlier item purge of it
@@ -802,7 +687,6 @@ fn invalidate_revisions(
     tenant: &str,
     workspace: &str,
     purge: PurgeId,
-    revisions: &[git2::Oid],
 ) -> Result<(), ApiError> {
     transaction
         .execute(
@@ -811,18 +695,6 @@ fn invalidate_revisions(
             params![tenant, workspace, purge.0.to_string()],
         )
         .map_err(|error| sql(&error))?;
-    for revision in revisions {
-        transaction
-            .execute(
-                "INSERT INTO revision_map (tenant_id, workspace_id, old_revision, purge_id,
-                     replacement)
-                 VALUES (?1, ?2, ?3, ?4, NULL)
-                 ON CONFLICT (tenant_id, workspace_id, old_revision)
-                 DO UPDATE SET purge_id = excluded.purge_id, replacement = NULL",
-                params![tenant, workspace, revision.to_string(), purge.0.to_string()],
-            )
-            .map_err(|error| sql(&error))?;
-    }
     Ok(())
 }
 

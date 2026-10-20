@@ -90,6 +90,16 @@ struct Seeded {
     objects: Vec<Digest>,
 }
 
+/// Minimal real-store roots shared by the public sweep regressions: the target has one
+/// pending object and the live survivor has one card-rooted object. Expected counts are1/1.
+struct SweepFixture {
+    storage: Storage,
+    target: StorageScope,
+    survivor: StorageScope,
+    target_object: Digest,
+    kept_object: Digest,
+}
+
 /// The marker of the target's content.
 const MARKER: &[u8] = b"zanzibar";
 
@@ -3675,6 +3685,383 @@ fn busy() -> ApiError {
     ApiError::new(ErrorCode::Unavailable, "busy")
 }
 
+/// Reuse this target's existing create/put/commit/card helpers instead of another broad fixture.
+async fn sweep_fixture(directory: &Path) -> Fallible<SweepFixture> {
+    let storage = Storage::open(directory)?;
+    let (target, _) = create(&storage, 1, "Sweep target").await?;
+    let (survivor, head) = create(&storage, 2, "Sweep survivor").await?;
+    let target_object = put(&storage, &target, b"only the target's pending put").await?;
+    let kept_object = put(&storage, &survivor, b"only the survivor's source card").await?;
+    commit(
+        &storage,
+        &survivor,
+        3,
+        &head,
+        vec![card(
+            uuid!(10)?,
+            "sources/kept.md",
+            &kept_object.digest,
+            None,
+        )?],
+    )
+    .await?;
+    Ok(SweepFixture {
+        storage,
+        target,
+        survivor,
+        target_object: target_object.digest,
+        kept_object: kept_object.digest,
+    })
+}
+
+/// The private fixture represents a retained legacy/untracked put, without bypassing any
+/// data constraint. The expected deletion count is literal: exactly this one pending row.
+async fn sweep_unreferenced_object(fixture: &SweepFixture) -> Fallible<Digest> {
+    let orphan = put(
+        &fixture.storage,
+        &fixture.survivor,
+        b"unreferenced sweep candidate",
+    )
+    .await?;
+    let changed = rusqlite::Connection::open(fixture.storage.data().records_path())?.execute(
+        "DELETE FROM pending_puts WHERE tenant_id=?1 AND workspace_id=?2 AND digest=?3",
+        rusqlite::params![
+            fixture.survivor.tenant_id.as_str(),
+            fixture.survivor.workspace_id.0.to_string(),
+            orphan.digest.as_str()
+        ],
+    )?;
+    assert_eq!(changed, 1);
+    Ok(orphan.digest)
+}
+
+/// Design1.2/2.1: purge uses all valid tenant candidates, not only the target's old plan.
+/// The fixture has exactly two unreferenced candidates and one live survivor object.
+#[tokio::test]
+async fn sweep_purge_removes_unreferenced_candidates_outside_the_target_plan() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = sweep_fixture(directory.path()).await?;
+    let orphan = sweep_unreferenced_object(&fixture).await?;
+    record_purge_of(&fixture.storage, &fixture.target, uuid!(60)?).await?;
+    let report = fixture
+        .storage
+        .purger()
+        .purge_workspace(
+            &tenant()?,
+            uuid!(61)?,
+            uuid!(60)?,
+            fixture.target.workspace_id,
+        )
+        .await?;
+    assert!(!held(&fixture.storage, &fixture.survivor, &orphan).await?);
+    assert!(!held(&fixture.storage, &fixture.survivor, &fixture.target_object).await?);
+    assert!(held(&fixture.storage, &fixture.survivor, &fixture.kept_object).await?);
+    assert_eq!(report.objects_removed, "2");
+    assert_eq!(report.objects_kept_shared, "1");
+    Ok(())
+}
+
+/// DesignV2.2: the target repository is never opened to plan/delete it, even without HEAD.
+/// Its one object goes; the survivor's one object and readable source card stay.
+#[tokio::test]
+async fn sweep_purge_removes_a_target_whose_head_is_missing() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = sweep_fixture(directory.path()).await?;
+    let repository = fixture
+        .storage
+        .data()
+        .repositories_path()
+        .join("local")
+        .join(format!("{}.git", fixture.target.workspace_id.0));
+    std::fs::remove_file(repository.join("HEAD"))?;
+    record_purge_of(&fixture.storage, &fixture.target, uuid!(60)?).await?;
+    let report = fixture
+        .storage
+        .purger()
+        .purge_workspace(
+            &tenant()?,
+            uuid!(61)?,
+            uuid!(60)?,
+            fixture.target.workspace_id,
+        )
+        .await?;
+    assert!(!repository.exists());
+    assert!(!held(&fixture.storage, &fixture.survivor, &fixture.target_object).await?);
+    assert!(held(&fixture.storage, &fixture.survivor, &fixture.kept_object).await?);
+    assert_eq!(report.objects_removed, "1");
+    assert_eq!(report.objects_kept_shared, "1");
+    let head = fixture.storage.versions().head(&fixture.survivor).await?;
+    fixture
+        .storage
+        .versions()
+        .show(&fixture.survivor, &head, uuid!(10)?)
+        .await?;
+    Ok(())
+}
+
+/// DesignV1.12/ruling3: recording another purge excludes that damaged workspace before its
+/// own purge runs. Neither its repository nor rows are guessed/read as survivor roots.
+#[tokio::test]
+async fn sweep_purge_excludes_a_recorded_purged_workspace_before_its_purge_runs() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = sweep_fixture(directory.path()).await?;
+    let (damaged, _) = create(&fixture.storage, 4, "Already purging").await?;
+    let object = put(&fixture.storage, &damaged, b"object of a recorded purge").await?;
+    let repository = fixture
+        .storage
+        .data()
+        .repositories_path()
+        .join("local")
+        .join(format!("{}.git", damaged.workspace_id.0));
+    std::fs::remove_file(repository.join("HEAD"))?;
+    fixture
+        .storage
+        .records()
+        .create_purge(
+            &tenant()?,
+            uuid!(80)?,
+            NewPurge {
+                id: uuid!(81)?,
+                target: PurgeTarget::Workspace {
+                    workspace_id: damaged.workspace_id,
+                },
+                initiator: person("ana"),
+            },
+        )
+        .await?;
+    record_purge_of(&fixture.storage, &fixture.target, uuid!(60)?).await?;
+    let report = fixture
+        .storage
+        .purger()
+        .purge_workspace(
+            &tenant()?,
+            uuid!(61)?,
+            uuid!(60)?,
+            fixture.target.workspace_id,
+        )
+        .await?;
+    assert!(
+        repository.exists(),
+        "the other purge has not run its repository step"
+    );
+    assert!(!held(&fixture.storage, &fixture.survivor, &object.digest).await?);
+    assert!(!held(&fixture.storage, &fixture.survivor, &fixture.target_object).await?);
+    assert!(held(&fixture.storage, &fixture.survivor, &fixture.kept_object).await?);
+    assert_eq!(report.objects_removed, "2");
+    assert_eq!(report.objects_kept_shared, "1");
+    assert_eq!(
+        fixture
+            .storage
+            .records()
+            .get_purge(&tenant()?, uuid!(81)?)
+            .await?
+            .id,
+        uuid!(81)?
+    );
+    Ok(())
+}
+
+/// Public `clean_up` behavior RED, design1/3: one genuinely unreferenced candidate is removed;
+/// the card-rooted and still-pending objects survive. A real durable claimed job is used.
+/// This cannot become GREEN while cleanup remains `NotImplemented`; it is not a sweep-helper
+/// compile test or a claim that job absorption/report accumulation already works.
+#[tokio::test]
+async fn sweep_clean_up_removes_only_unreferenced_candidates_of_its_tenant() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = sweep_fixture(directory.path()).await?;
+    let orphan = sweep_unreferenced_object(&fixture).await?;
+    let scope = JobScope::Tenant(tenant()?);
+    let job = fixture
+        .storage
+        .records()
+        .create_job(
+            &scope,
+            NewJob {
+                mutation_id: uuid!(90)?,
+                initiator: person("ana"),
+                spec: JobSpec::CleanUp,
+            },
+        )
+        .await?;
+    let claim = some(
+        fixture.storage.records().claim_job(job.id).await?,
+        "the real cleanup claim",
+    )?;
+    assert_eq!(claim.job.id, job.id);
+    let report = fixture
+        .storage
+        .purger()
+        .clean_up(&tenant()?, job.id)
+        .await?;
+    assert!(!held(&fixture.storage, &fixture.survivor, &orphan).await?);
+    assert!(held(&fixture.storage, &fixture.survivor, &fixture.target_object).await?);
+    assert!(held(&fixture.storage, &fixture.survivor, &fixture.kept_object).await?);
+    assert_eq!(report.objects_removed, "1");
+    assert_eq!(report.objects_kept, "2");
+    assert_eq!(report.upload_files_removed, 0);
+    Ok(())
+}
+
+/// Replace only the survivor's appearance blob with intentionally damaged fixture bytes.
+fn sweep_corrupt_appearance(fixture: &SweepFixture, bytes: &[u8]) -> TestResult {
+    let path = fixture
+        .storage
+        .data()
+        .repositories_path()
+        .join("local")
+        .join(format!("{}.git", fixture.survivor.workspace_id.0));
+    let repository = git2::Repository::open_bare(path)?;
+    let parent = repository.head()?.peel_to_commit()?;
+    let root = parent.tree()?;
+    let okf = repository.find_tree(root.get_path(Path::new(".okf"))?.id())?;
+    let sources = repository.find_tree(root.get_path(Path::new(".okf/sources"))?.id())?;
+    let mut next = repository.blob(bytes)?;
+    for (base, name, mode) in [
+        (&sources, format!("{}.json", uuid_text(10)), 0o100_644),
+        (&okf, "sources".to_owned(), 0o040_000),
+        (&root, ".okf".to_owned(), 0o040_000),
+    ] {
+        let mut builder = repository.treebuilder(Some(base))?;
+        builder.insert(&name, next, mode)?;
+        next = builder.write()?;
+    }
+    repository.commit(
+        Some("refs/heads/main"),
+        &parent.author(),
+        &parent.committer(),
+        "Intentionally damaged survivor fixture",
+        &repository.find_tree(next)?,
+        &[&parent],
+    )?;
+    Ok(())
+}
+
+/// An independent filesystem inventory, never the collector's candidate/root implementation.
+fn sweep_object_files(root: &Path) -> Fallible<std::collections::BTreeSet<std::path::PathBuf>> {
+    let mut found = std::collections::BTreeSet::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                directories.push(entry.path());
+            } else {
+                found.insert(entry.path());
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// DesignV1.5: damage of a survivor is a stop before any CAS candidate is removed. The error
+/// names workspace/item identities and never a machine path or private appearance filename.
+async fn sweep_refuses_corrupt_survivor(bytes: &[u8]) -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = sweep_fixture(directory.path()).await?;
+    sweep_unreferenced_object(&fixture).await?;
+    sweep_corrupt_appearance(&fixture, bytes)?;
+    let root = fixture.storage.data().objects_path();
+    let before = sweep_object_files(&root)?;
+    record_purge_of(&fixture.storage, &fixture.target, uuid!(60)?).await?;
+    let error = err_of(
+        fixture
+            .storage
+            .purger()
+            .purge_workspace(
+                &tenant()?,
+                uuid!(61)?,
+                uuid!(60)?,
+                fixture.target.workspace_id,
+            )
+            .await,
+    )?;
+    // Check no-removal before diagnostic wording so that guarantee cannot be hidden by it.
+    assert_eq!(sweep_object_files(&root)?, before);
+    assert_eq!(error.code, ErrorCode::Internal);
+    assert!(
+        error
+            .message
+            .contains(&format!("workspace {}", fixture.survivor.workspace_id.0)),
+        "{error}"
+    );
+    assert!(
+        error.message.contains(&format!("item {}", uuid_text(10))),
+        "{error}"
+    );
+    assert!(!error.message.contains(".okf/sources"), "{error}");
+    assert!(
+        !error
+            .message
+            .contains(&directory.path().display().to_string()),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn sweep_safety_non_json_survivor_stops_before_any_candidate_deletion() -> TestResult {
+    sweep_refuses_corrupt_survivor(b"this is not JSON").await
+}
+
+#[tokio::test]
+async fn sweep_safety_non_digest_survivor_stops_before_any_candidate_deletion() -> TestResult {
+    sweep_refuses_corrupt_survivor(br#"{"object":5}"#).await
+}
+
+/// DesignV2.5: recording the workspace purge immediately overrides even an old item mapping;
+/// a never-committed revision is invalid too. The report counts one earlier named map row.
+#[tokio::test]
+async fn sweep_safety_revision_invalidation_starts_at_the_workspace_purge_record() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = sweep_fixture(directory.path()).await?;
+    let old = Revision::try_from("a".repeat(40))?;
+    let replacement = Revision::try_from("c".repeat(40))?;
+    let unlisted = Revision::try_from("b".repeat(40))?;
+    rusqlite::Connection::open(fixture.storage.data().records_path())?.execute(
+        "INSERT INTO revision_map VALUES (?1,?2,?3,?4,?5)",
+        rusqlite::params![
+            tenant()?.as_str(),
+            fixture.target.workspace_id.0.to_string(),
+            old.as_str(),
+            uuid_text(81),
+            replacement.as_str()
+        ],
+    )?;
+    let records = fixture.storage.records();
+    let prior = some(
+        records.revision_mapping(&fixture.target, &old).await?,
+        "earlier item mapping",
+    )?;
+    assert_eq!(prior.purge_id, uuid!(81)?);
+    assert_eq!(prior.replacement, Some(replacement));
+    assert!(
+        records
+            .revision_mapping(&fixture.target, &unlisted)
+            .await?
+            .is_none()
+    );
+    record_purge_of(&fixture.storage, &fixture.target, uuid!(60)?).await?;
+    for revision in [&old, &unlisted] {
+        let mapped = some(
+            records.revision_mapping(&fixture.target, revision).await?,
+            "the recorded workspace purge",
+        )?;
+        assert_eq!(mapped.purge_id, uuid!(60)?);
+        assert_eq!(mapped.replacement, None);
+    }
+    let report = fixture
+        .storage
+        .purger()
+        .purge_workspace(
+            &tenant()?,
+            uuid!(61)?,
+            uuid!(60)?,
+            fixture.target.workspace_id,
+        )
+        .await?;
+    assert_eq!(report.revisions_invalidated, 1);
+    Ok(())
+}
 #[path = "support/legacy_schema.rs"]
 mod legacy_schema;
 

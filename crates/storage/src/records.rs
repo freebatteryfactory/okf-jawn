@@ -478,6 +478,23 @@ impl RecordStore for SqliteRecords {
         let (tenant, workspace) = scope_key(scope);
         let revision = revision.as_str().to_owned();
         Box::pin(self.db.call(move |connection| {
+            // A workspace purge invalidates every revision from recording onward, even a
+            // revision never listed by Git or an earlier item-purge mapping with a replacement.
+            let purged: Option<String> = connection
+                .query_row(
+                    "SELECT purge_id FROM purges WHERE tenant_id=?1 AND target_key=?2
+                 ORDER BY state='completed',rowid LIMIT 1",
+                    params![tenant, format!("workspace/{workspace}")],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| sql(&error))?;
+            if let Some(purge) = purged {
+                return Ok(Some(RevisionMapping {
+                    purge_id: from_text!(purge.as_str())?,
+                    replacement: None,
+                }));
+            }
             let found: Option<(String, Option<String>)> = connection
                 .query_row(
                     "SELECT purge_id, replacement FROM revision_map

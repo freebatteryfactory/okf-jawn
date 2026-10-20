@@ -18,7 +18,7 @@ use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
 use object_store::{GetOptions, ObjectStore, PutMultipartOptions, PutPayload};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::identity::{Digest, TenantId};
+use okf_jawn_contract::identity::{Digest, MutationId, TenantId};
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
     BlobStore, ByteReader, LocalSource, ObjectInfo, ObjectRead, StorageScope,
@@ -54,6 +54,15 @@ struct ChunkReader {
     receiver: mpsc::Receiver<std::io::Result<Vec<u8>>>,
     current: Vec<u8>,
     position: usize,
+}
+
+/// Who publishes managed bytes. Raw retention is confined to private fixture tests.
+#[derive(Clone, Copy)]
+enum PutOwner<'a> {
+    Workspace(&'a StorageScope),
+    Tenant(MutationId),
+    #[cfg(test)]
+    Untracked,
 }
 
 /// Bytes read from a body or a file at a time.
@@ -120,13 +129,20 @@ impl LocalBlobs {
             guard::refuse_scope(records, scope).await?;
         }
         let (object, pinned) = self
-            .store_staged(&scope.tenant_id, body, limit, expected, Some(scope))
+            .store_staged(
+                &scope.tenant_id,
+                body,
+                limit,
+                expected,
+                PutOwner::Workspace(scope),
+            )
             .await?;
         let pinned = pinned.ok_or_else(|| internal("a scoped put took no pin"))?;
         Ok((object, pinned))
     }
 
-    /// Store a bounded stream in `tenant`'s objects; see `BlobStore::put`.
+    /// Private fixtures may model retained bytes with no surviving publisher record.
+    #[cfg(test)]
     pub(crate) async fn put_for(
         &self,
         tenant: &TenantId,
@@ -134,25 +150,47 @@ impl LocalBlobs {
         limit: u64,
         expected: Option<Digest>,
     ) -> Result<ObjectInfo, ApiError> {
-        self.store_staged(tenant, body, limit, expected, None)
+        self.store_staged(tenant, body, limit, expected, PutOwner::Untracked)
             .await
             .map(|(object, _)| object)
     }
 
-    /// Stage, hash, pin and record (when `scope` names a workspace) and retain a body.
+    /// Retain a tenant archive only after its pin and mutation-scoped pending row exist.
+    pub(crate) async fn put_tracked(
+        &self,
+        tenant: &TenantId,
+        mutation: MutationId,
+        body: ByteReader,
+        limit: u64,
+    ) -> Result<(ObjectInfo, Pinned), ApiError> {
+        if self.records.is_none() {
+            return Err(internal(
+                "a tracked tenant put needs the managed records store",
+            ));
+        }
+        let (object, pinned) = self
+            .store_staged(tenant, body, limit, None, PutOwner::Tenant(mutation))
+            .await?;
+        Ok((
+            object,
+            pinned.ok_or_else(|| internal("a tracked tenant put took no pin"))?,
+        ))
+    }
+
+    /// Stage, hash, protect the publishing owner and retain a body.
     async fn store_staged(
         &self,
         tenant: &TenantId,
         body: ByteReader,
         limit: u64,
         expected: Option<Digest>,
-        scope: Option<&StorageScope>,
+        owner: PutOwner<'_>,
     ) -> Result<(ObjectInfo, Option<Pinned>), ApiError> {
         std::fs::create_dir_all(&self.incoming)
             .map_err(|error| io_error("create", &self.incoming, &error))?;
         let staged = self.incoming.join(seam::hex(&seam::random_bytes::<16>()?));
         let result = self
-            .pin_and_retain(tenant, body, &staged, limit, expected, scope)
+            .pin_and_retain(tenant, body, &staged, limit, expected, owner)
             .await;
         // The staged copy is never referenced; a failure to remove it is cleared at startup.
         let _ = std::fs::remove_file(&staged);
@@ -168,22 +206,49 @@ impl LocalBlobs {
         staged: &std::path::Path,
         limit: u64,
         expected: Option<Digest>,
-        scope: Option<&StorageScope>,
+        owner: PutOwner<'_>,
     ) -> Result<(ObjectInfo, Option<Pinned>), ApiError> {
         let (digest, size) = receive(body, staged, limit).await?;
         #[cfg(test)]
         crate::pause::point(&self.pause_point(&digest, "received")).await?;
         // Pinned before it is retained, and before the object is looked for: a purge's delete
         // either ran before (and this stores the object again) or sees the pin.
-        let pinned = match scope {
-            Some(scope) => Some(self.pin_unless_purged(scope, &digest).await?),
-            None => None,
+        let pinned = match owner {
+            PutOwner::Workspace(scope) => Some(self.pin_unless_purged(scope, &digest).await?),
+            PutOwner::Tenant(mutation) => Some(self.pin_tenant(tenant, mutation, &digest).await?),
+            #[cfg(test)]
+            PutOwner::Untracked => None,
         };
         #[cfg(test)]
         crate::pause::point(&self.pause_point(&digest, "pinned")).await?;
         // On a failed retain the pin ends with the write (dropped) and the pending put stays.
         let object = self.retain(tenant, staged, digest, size, expected).await?;
         Ok((object, pinned))
+    }
+
+    /// Publication protection of tenant-level bytes, distinct from a workspace purge guard.
+    async fn pin_tenant(
+        &self,
+        tenant: &TenantId,
+        mutation: MutationId,
+        digest: &Digest,
+    ) -> Result<Pinned, ApiError> {
+        let pinned = self.pins.pin_for(tenant.as_str(), None, digest)?;
+        let records = self
+            .records
+            .as_ref()
+            .ok_or_else(|| internal("a tracked put has no records store"))?;
+        let (tenant, digest) = (tenant.as_str().to_owned(), digest.clone());
+        if let Err(error) = records
+            .transaction(move |transaction| {
+                puts::record_tenant(transaction, &tenant, mutation, &digest)
+            })
+            .await
+        {
+            pinned.end()?;
+            return Err(error);
+        }
+        Ok(pinned)
     }
 
     /// Pin `digest` for `scope`, then, in one transaction, check the purge refusal again and

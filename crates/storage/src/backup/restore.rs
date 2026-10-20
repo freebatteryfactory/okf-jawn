@@ -63,7 +63,7 @@ use crate::git::repo::{
     trailer_of,
 };
 use crate::pins::Pinned;
-use crate::purge::references::{self, Rows};
+use crate::purge::references;
 use crate::puts;
 use crate::storage::Storage;
 
@@ -1269,8 +1269,6 @@ fn write_tables(
         transaction,
         &target.tenant,
         &target.workspace,
-        Rows::Target,
-        &BTreeSet::new(),
     )?);
     let followed: Vec<Digest> = named
         .iter()
