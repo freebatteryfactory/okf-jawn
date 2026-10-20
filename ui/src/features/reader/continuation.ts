@@ -17,8 +17,8 @@
  *
  * Focus moves in a layout effect, in the commit that shows the part: never a painted frame with
  * focus on the body. The button is watched as it leaves (`useWatchedPart`): a button that leaves
- * with focus on it for any other reason (the reading was read again and is whole now) gives focus
- * to the last part on the page.
+ * with focus on it for any other reason within the same reading (the reading was read again and
+ * is whole now) gives focus to the last part on the page. A replacement reading never receives it.
  */
 import { type RefCallback, type RefObject, useLayoutEffect, useRef } from 'react';
 import { takeHeld, useWatchedPart } from '../../lib/focus';

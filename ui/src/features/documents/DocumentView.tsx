@@ -900,6 +900,7 @@ export function DocumentView({
               moreFailure={moreFailure}
               continuation={continuation}
               onSelect={onSelect}
+              textHeadingLevel={3}
               originalId={originalId}
             />
           </ItemText>
