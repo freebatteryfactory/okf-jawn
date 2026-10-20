@@ -64,17 +64,23 @@ impl SqliteSearch {
             return Ok(());
         }
         let repositories = self.repositories.clone();
+        let index = self.index.clone();
         let owned = scope.clone();
-        let read = revision.clone();
-        let entries = tokio::task::spawn_blocking(move || entries(&repositories, &owned, &read))
-            .await
-            .map_err(|error| crate::db::internal(format!("an index task stopped: {error}")))??;
-        let (tenant, workspace) = scope_key(scope);
-        self.index
-            .transaction(move |transaction| {
-                store(transaction, &tenant, &workspace, &revision, &entries)
+        // Read and stored under the workspace's write lock: a purge deletes the repository
+        // under that lock and then removes the workspace's index entries again, so an indexing
+        // that read the revision before the repository went is removed by that second pass,
+        // and one that comes later finds no repository to read.
+        tokio::task::spawn_blocking(move || {
+            repositories.locked(&owned, || {
+                let entries = entries(&repositories, &owned, &revision)?;
+                let (tenant, workspace) = scope_key(&owned);
+                tokio::runtime::Handle::current().block_on(index.transaction(move |transaction| {
+                    store(transaction, &tenant, &workspace, &revision, &entries)
+                }))
             })
-            .await
+        })
+        .await
+        .map_err(|error| crate::db::internal(format!("an index task stopped: {error}")))?
     }
 }
 
@@ -301,7 +307,14 @@ fn links_of(
     file: &ItemFile,
     by_path: &BTreeMap<String, ItemId>,
 ) -> Vec<Link> {
-    let source = ConceptId::parse(path.as_str().trim_end_matches(".md")).ok();
+    // One `.md` comes off, as okf-core's `ConceptId::from_path` takes it: the item at
+    // `x/.md.md` is the concept `x/.md`, whose links resolve from `x/`.
+    let source = ConceptId::parse(
+        path.as_str()
+            .strip_suffix(".md")
+            .unwrap_or_else(|| path.as_str()),
+    )
+    .ok();
     let mut links = Vec::new();
     for (index, line) in file.document.body.lines().enumerate() {
         for link in okf_core::links::extract_links(line) {
@@ -314,6 +327,7 @@ fn links_of(
             });
             links.push(Link {
                 from: file.header.item_id,
+                from_path: path.clone(),
                 to_path: link.target.clone(),
                 to,
                 label: link.text.clone(),
@@ -402,7 +416,11 @@ fn store(
     Ok(())
 }
 
-fn discard(transaction: &Transaction<'_>, tenant: &str, workspace: &str) -> Result<(), ApiError> {
+pub(crate) fn discard(
+    transaction: &Transaction<'_>,
+    tenant: &str,
+    workspace: &str,
+) -> Result<(), ApiError> {
     transaction
         .execute(
             "DELETE FROM index_text WHERE rowid IN
@@ -479,7 +497,7 @@ fn read_links(
 ) -> Result<Vec<Link>, ApiError> {
     let mut statement = connection
         .prepare(&format!(
-            "SELECT source_item, target_path, target_item, label, line FROM index_links
+            "SELECT source_item, source_path, target_path, target_item, label, line FROM index_links
              WHERE tenant_id = ?1 AND workspace_id = ?2 AND revision = ?3 AND {column} = ?4
              ORDER BY rowid"
         ))
@@ -489,18 +507,20 @@ fn read_links(
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
             ))
         })
         .map_err(|error| sql(&error))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| sql(&error))?;
     rows.into_iter()
-        .map(|(from, to_path, to, label, line)| {
+        .map(|(from, from_path, to_path, to, label, line)| {
             Ok(Link {
                 from: from_text!(from.as_str())?,
+                from_path: from_text!(from_path.as_str())?,
                 to_path,
                 to: to.map(|to| from_text!(to.as_str())).transpose()?,
                 label,

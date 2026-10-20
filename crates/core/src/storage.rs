@@ -17,9 +17,10 @@ use okf_jawn_contract::{
     error::{ApiError, ErrorCode},
     history::{BlameResponse, DiffResponse, LogResponse},
     identity::{
-        Digest, ItemId, MutationId, ProposalId, PurgeId, Revision, TenantId, WorkspaceId,
-        WorkspacePath,
+        Digest, ItemId, JobId, MutationId, ProposalId, PurgeId, ReviewId, Revision, TenantId,
+        WorkspaceId, WorkspacePath,
     },
+    import::CleanUpReport,
     item::{ItemDocument, ItemKind, ItemStatus, ItemSummary, TypeDefinition},
     proposal::Change,
     purge::PurgeReport,
@@ -173,6 +174,16 @@ pub enum TreeEdit {
         item_id: ItemId,
         /// New path.
         destination: WorkspacePath,
+        /// Before the move, record the item's path in its frontmatter `aliases`, a list of its
+        /// former workspace paths, oldest first, each once (a naming rule's
+        /// `alias_preservation`): an absent `aliases` becomes a list of that path, a string
+        /// becomes a list of the string and the path, and a list of strings gains the path unless
+        /// it holds it already. Any other value refuses the commit with `InvalidInput` naming
+        /// the item's path, and the value is not written over. `false` writes nothing, and a
+        /// move to the path the item holds records nothing either. The review fingerprint
+        /// leaves `aliases` out (`portable::item_content_digest`), so recording one changes no
+        /// review.
+        keep_alias: bool,
     },
     /// Set an item's OKF status word, its archived flag, or both; `None` leaves one unchanged.
     SetStatus {
@@ -194,6 +205,54 @@ pub enum TreeEdit {
     /// Create a folder together with its maintained `index.md`.
     CreateFolder {
         /// New folder path.
+        folder: WorkspacePath,
+    },
+    /// Move a folder, with every item and file under it, archived items included, to a new path.
+    ///
+    /// Every item under the folder moves as `MoveItem` moves one (no alias is recorded): the
+    /// links and `sources` entries that point at it are rewritten, and so are its own relative
+    /// links. So does every other Markdown file okf-core reads as a concept. Every other file
+    /// under it moves as it is, and the links and frontmatter paths (`sources[].resource`,
+    /// `computation`, `executor.resource`, `attester.resource`) that point at it are rewritten
+    /// to its new path. The files whose links this rewrote are told to the check as `rewritten`
+    /// (`CandidateCheck::check`). A draft is keyed by its item, so it stays with it.
+    ///
+    /// A destination with the folder's collision key but another spelling (`Notes` to `notes`)
+    /// renames the folder: it moves first to a free private folder beside it and then to the
+    /// destination, so a filesystem that holds both spellings as one never sees them at once.
+    /// The private folder is in no commit.
+    ///
+    /// Refused, writing nothing: a reserved folder (`.okf`, `index.md`, `log.md` as any segment,
+    /// in any letter case) or one the tree spells another way, `InvalidInput` on `/folder`; a
+    /// folder the tree does not hold, `NotFound` on `/folder`; a reserved destination, the folder
+    /// itself, a path inside it, or a destination one of whose folders the tree spells another
+    /// way, `InvalidInput` on `/destination`; a destination whose collision key (or a key below
+    /// it) any other file, folder or item holds, or below a file, `Conflict` on `/destination`.
+    ///
+    /// When files that are not items moved (the folder indexes the store regenerates are not
+    /// counted), the commit's warnings end with one `FOLDER_OTHER_FILES` warning saying how many
+    /// (`folder_other_files`).
+    MoveFolder {
+        /// The folder to move.
+        folder: WorkspacePath,
+        /// Its new path.
+        destination: WorkspacePath,
+    },
+    /// Remove a folder with every item and file under it, archived items included; history and
+    /// retained objects stay.
+    ///
+    /// Every item under the folder is removed as `DeleteItem` removes one, with every companion
+    /// file it owns; then every other file under it, and the folder. A draft is keyed by its
+    /// item, so a deleted item's draft is kept as `DeleteItem` keeps it.
+    ///
+    /// Refused, writing nothing: a reserved folder (`.okf`, `index.md`, `log.md` as any segment,
+    /// in any letter case) or one the tree spells another way, `InvalidInput` on `/folder`; a
+    /// folder the tree does not hold, `NotFound` on `/folder`. When files that are not items
+    /// went with it (the folder indexes the store regenerates are not counted), the commit's
+    /// warnings end with one `FOLDER_OTHER_FILES` warning saying how many
+    /// (`folder_files_deleted`).
+    DeleteFolder {
+        /// The folder to remove.
         folder: WorkspacePath,
     },
     /// Create or replace one user-defined type definition.
@@ -304,7 +363,8 @@ pub struct SourceCard {
 pub struct ChangeContext {
     /// Identity for a `Change::Create`, which carries none.
     pub new_item_id: ItemId,
-    /// Rendering role for a `Change::Create`, which carries none.
+    /// Rendering role for a `Change::Create`: the role its `item_kind` names, a note when it
+    /// names none (`ChangeContext::for_change` fills it so).
     pub new_item_kind: ItemKind,
     /// Proposal the change belongs to.
     pub proposal_id: ProposalId,
@@ -366,8 +426,38 @@ pub struct Committed {
     pub revision: Revision,
     /// `true` when that commit already existed and this call wrote nothing.
     pub replayed: bool,
-    /// Findings the candidate check returned; empty on a replay.
+    /// Findings the candidate check returned when the commit was written, followed by what the
+    /// edits themselves report (`FOLDER_OTHER_FILES` of a `TreeEdit::MoveFolder` or a
+    /// `TreeEdit::DeleteFolder`). A replay answers the warnings the store kept with that
+    /// commit, so a retry answers what its first attempt did; for a commit the store kept no
+    /// warnings for it answers the one warning `replay_warnings_unavailable` instead. Warnings
+    /// kept under the same mutation for another attempt's commit are not this commit's, and are
+    /// never answered for it (`VersionStore::commit`).
     pub warnings: Vec<Warning>,
+}
+
+/// The naming rules file as one revision stores it (`VersionStore::rules`).
+#[derive(Debug, Clone)]
+pub struct RulesFile {
+    /// The file's text. Bytes that are not UTF-8 are replaced with U+FFFD
+    /// (`String::from_utf8_lossy`); such a file never reads as rules (`parsed` is an error).
+    pub text: String,
+    /// The stored bytes read as `NamingRules` (YAML, unknown keys refused), or why they do not
+    /// read. Nothing beyond the reader's own checks is applied here: whether the rules can be
+    /// applied is the application's (`conventions::CompiledRules`).
+    pub parsed: Result<NamingRules, RulesParseError>,
+}
+
+/// Why a stored rules file does not read as `NamingRules`: the reader's message, and where in
+/// the file it stopped when it says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RulesParseError {
+    /// The reader's message.
+    pub message: String,
+    /// The 1-based line the reader stopped at; `None` when it names none.
+    pub line: Option<u32>,
+    /// The 1-based column on that line; `None` when it names none.
+    pub column: Option<u32>,
 }
 
 /// One page of a folder at one revision.
@@ -379,6 +469,78 @@ pub struct FolderListing {
     pub folders: Vec<WorkspacePath>,
     /// Continuation cursor, when more entries remain.
     pub next_cursor: Option<String>,
+}
+
+/// Where a page of `VersionStore::committed_files` starts and how much it may hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilePage {
+    /// The path of the last file of the previous page (`CommittedFiles::next_after`); `None`
+    /// starts at the first file.
+    pub after: Option<String>,
+    /// At most this many files; a store answers at least one and at most 500.
+    pub limit: u16,
+    /// The page ends with the first file that takes the bytes of its files past this, so a
+    /// page holds at least one file however large that file is.
+    pub max_bytes: u64,
+}
+
+/// One page of the committed files of a revision (`VersionStore::committed_files`).
+#[derive(Debug, Clone)]
+pub struct CommittedFiles {
+    /// Files in byte order of their paths, each once.
+    pub files: Vec<CommittedFile>,
+    /// The path to pass as `FilePage::after` for the next page; `None` on the last page.
+    pub next_after: Option<String>,
+}
+
+/// One committed file: its path as the tree spells it, its exact bytes, and the item it holds.
+#[derive(Debug, Clone)]
+pub struct CommittedFile {
+    /// The `/`-separated path in the revision's tree.
+    pub path: String,
+    /// The stored bytes, exactly.
+    pub bytes: Vec<u8>,
+    /// The item the file holds; `None` for a file that holds none (a folder `index.md`,
+    /// `log.md`, anything under `.okf/`, a Markdown file without an application header).
+    pub item: Option<CommittedItem>,
+}
+
+/// What a portable export needs of one item file, as `show` answers it at the same revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedItem {
+    /// The item's identity (`ApplicationHeader::item_id`).
+    pub item_id: ItemId,
+    /// Its rendering role (`ApplicationHeader::kind`).
+    pub kind: ItemKind,
+    /// `ItemDocument::content_digest` at this revision: `portable::content_digest` of the
+    /// file's body and properties.
+    pub content_digest: Digest,
+    /// The original a source card names (`ApplicationHeader::source`).
+    pub source: Option<SourceHeader>,
+    /// The conversion record its extraction names (`Extraction::digest`).
+    pub record: Option<Digest>,
+}
+
+/// Every item of one revision with what the naming rules read of it, and every folder
+/// (`VersionStore::tree`).
+#[derive(Debug, Clone)]
+pub struct WorkspaceTree {
+    /// Every item, in path order, archived items and items under a folder whose name starts
+    /// with `.` included.
+    pub items: Vec<TreeItem>,
+    /// Every folder that holds a file, at any depth, in path order: each folder above each file
+    /// of the tree, `.okf` and the folders under it included.
+    pub folders: Vec<WorkspacePath>,
+}
+
+/// One item of a `WorkspaceTree`.
+#[derive(Debug, Clone)]
+pub struct TreeItem {
+    /// The item, summarized as `list` of its folder summarizes it.
+    pub summary: ItemSummary,
+    /// A source card's original file name (`items::SourceHeader::original_name`); `None` for
+    /// every other item.
+    pub original_name: Option<String>,
 }
 
 /// History of a workspace or of one item, newest first.
@@ -424,9 +586,27 @@ pub struct BlameQuery {
 pub trait CandidateCheck: Send + Sync {
     /// Inspect the complete candidate bundle rooted at `root`.
     ///
+    /// `rewritten` names the files of the candidate that the store rewrote on its own while it
+    /// applied the edits, beyond the paths the edits name: the referrers whose links a move
+    /// rewrote (`okf_core::move_concept`), for a `MoveItem` and for a `RestoreItem` that moves
+    /// an item back to its earlier path, of every such move of the commit or the candidate. The
+    /// caller that built the edits cannot know them, so the store reports them here, as
+    /// workspace paths spelled as the tree spells them, in path order and each once; a moved
+    /// item's own old and new path are not among them. A `MoveFolder` moves many items and
+    /// files: the files whose links or frontmatter paths its moves rewrote are named, a file
+    /// under the folder among them at the path the folder move gave it, though the caller knows
+    /// those paths. It names what the store rewrote while
+    /// it applied the edits, not what differs at the end: a file rewritten and then rewritten
+    /// back (the referrer of an item moved away and back by one commit) is named, though its
+    /// bytes end as they began. A referrer a later edit of the same commit removed or moved
+    /// away is left out at the path it no longer has, and so is a rewritten file whose path is
+    /// no `WorkspacePath` (no item has such a path). A check that reports findings only for the
+    /// files a write touched (`conformance::EditCheck`) counts these as touched. Empty when the
+    /// edits moved nothing, and for a candidate no edit produced.
+    ///
     /// # Errors
     /// Returns the error that rejects the write; nothing is committed when this fails.
-    fn check(&self, root: &Path) -> Result<Vec<Warning>, ApiError>;
+    fn check(&self, root: &Path, rewritten: &[WorkspacePath]) -> Result<Vec<Warning>, ApiError>;
 }
 
 /// Versioned workspace content: one Git repository per workspace.
@@ -452,6 +632,15 @@ pub trait VersionStore: Send + Sync {
         folder: Option<&'a WorkspacePath>,
         page: Page,
     ) -> PortFuture<'a, FolderListing>;
+    /// Every item and every folder of `revision` in one pass over its tree, each item file read
+    /// once (`WorkspaceTree`): what the naming rules read to name a selection against the whole
+    /// workspace. Unlike `list`, it includes the items under a folder whose name starts with
+    /// `.`, and it is not paged. `NotFound` only when the revision itself is unknown.
+    fn tree<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+    ) -> PortFuture<'a, WorkspaceTree>;
     /// The item whose path is exactly `path` at `revision`, summarized as `list` of its folder
     /// summarizes it.
     ///
@@ -477,12 +666,17 @@ pub trait VersionStore: Send + Sync {
         revision: &'a Revision,
         path: &'a WorkspacePath,
     ) -> PortFuture<'a, Vec<u8>>;
-    /// Read the naming rules stored in `.okf/rules.yaml`; `None` when no rules were saved.
+    /// Read the naming rules file `.okf/rules.yaml` at `revision`: `None` when no rules were
+    /// saved there; otherwise the file's text and what reading its bytes as `NamingRules` gave
+    /// (`RulesFile`). A file that does not read as rules (a YAML error, an unknown key, bytes
+    /// that are not UTF-8) is answered with its text and the reader's error, never as an error
+    /// of this call: a person or an import wrote it, and `get_rules` gives it back to be
+    /// repaired. `NotFound` only when the revision itself is unknown.
     fn rules<'a>(
         &'a self,
         scope: &'a StorageScope,
         revision: &'a Revision,
-    ) -> PortFuture<'a, Option<NamingRules>>;
+    ) -> PortFuture<'a, Option<RulesFile>>;
     /// Read every user-defined type definition.
     fn types<'a>(
         &'a self,
@@ -504,10 +698,34 @@ pub trait VersionStore: Send + Sync {
     /// (`derive_commit_mutation_id`). When a commit carrying this mutation's trailer
     /// already lies after `expected_head` on the head's history, that commit is returned with
     /// `replayed` set, the check is not run and nothing is written. Otherwise, when the head is
-    /// not `expected_head`, the call fails with `Conflict` and writes nothing.
+    /// not `expected_head` (an `expected_head` the repository does not hold included), the call
+    /// fails with `Conflict` and writes nothing. That refusal carries `ErrorDetail::StaleBase`
+    /// naming the head and no `field`: the caller, which knows its request, names the field.
     ///
-    /// `check` runs once on the staged candidate tree. Its error rejects the commit; its
-    /// warnings are returned in the result.
+    /// `check` runs once on the staged candidate tree, and is told which other files the edits
+    /// made the store rewrite (`CandidateCheck::check`, `rewritten`). Its error rejects the
+    /// commit; its warnings are returned in the result, followed by what the edits report
+    /// (`Committed::warnings`).
+    ///
+    /// The store keeps those warnings, an empty list included, in a record of its own keyed by
+    /// the workspace and the mutation, written before the commit lands, and the record names
+    /// the commit it was kept for. The rule a caller can rely on: a replay answers the warnings
+    /// that commit was given, or says they are unavailable; never another attempt's. A crash
+    /// between that record and the commit leaves a record without a commit; the next attempt
+    /// finds no commit, runs the check again, replaces the record and commits. A replay of a
+    /// commit the store holds no such record for (a commit written before the store kept them,
+    /// one a restore brought from an archive, which carries none, or a record that no longer
+    /// reads) answers the one warning `replay_warnings_unavailable`
+    /// (`REPLAY_WARNINGS_UNAVAILABLE`) and still succeeds: the commit has landed. So does a
+    /// replay of a commit whose record a later attempt replaced: an attempt of the same
+    /// mutation whose `expected_head` is at or after the landed commit does not find it, runs
+    /// its check and keeps its own warnings, and when it then cannot land (the head moved) the
+    /// record is that attempt's. The landed commit is from then on answered with the one
+    /// warning, not with the warnings of an attempt that wrote another tree; what its own check
+    /// gave is no longer held. The records are removed only with their workspace, by
+    /// its purge (`Purger`), so they grow by one for each commit. An item purge is not built;
+    /// when it is, it has to remove the records of the workspace too, because a warning can
+    /// quote a path or a title.
     ///
     /// Refuses, writing nothing, an edit whose path collides with another item (Stage 1b design
     /// section 7) and a caller edit that changes an application header
@@ -537,12 +755,20 @@ pub trait VersionStore: Send + Sync {
     /// with `None`. It is asked only on a resumed attempt, so the walk's cost falls on resumes.
     /// It never asks from one draft's base: a draft saved again after the commit has a base the
     /// commit does not lie after.
+    ///
+    /// The commit is answered as a replay of it by `commit` is: `replayed` set, with the
+    /// warnings the store kept for that commit, or the one warning
+    /// `replay_warnings_unavailable` when it kept none or holds only those of another attempt's
+    /// commit under the mutation. A commit no check ran for and that neither `commit` nor
+    /// `promote_candidate` wrote (the one `Backups::restore_import` writes, a workspace's first)
+    /// has no such record, so it is answered with that one warning; its caller reads the
+    /// revision only.
     fn find_commit<'a>(
         &'a self,
         scope: &'a StorageScope,
         mutation_id: MutationId,
         since: Option<&'a Revision>,
-    ) -> PortFuture<'a, Option<Revision>>;
+    ) -> PortFuture<'a, Option<Committed>>;
     /// Write a proposal candidate commit on top of `changes.base` and retain it at
     /// `refs/okf-jawn/proposals/<proposal id>`. The head does not move.
     ///
@@ -552,21 +778,30 @@ pub trait VersionStore: Send + Sync {
     /// Idempotent on `changes.mutation_id`: when the reference already points at a commit
     /// carrying this mutation's trailer, that revision is returned and nothing is written.
     /// `check` runs on the staged candidate tree exactly as it does for `commit`, and the
-    /// path-collision and application-header refusals of `commit` apply.
+    /// path-collision and application-header refusals of `commit` apply. The candidate is
+    /// answered with the check's findings (`Committed::warnings`), which the store keeps with
+    /// it as it keeps a commit's, so a repeat answers the same findings, `replayed` set (or
+    /// the one warning `replay_warnings_unavailable` when it kept none for that candidate).
+    /// When another write already set the reference, the call fails with a plain `Conflict`: it
+    /// is about no base, so it carries no `StaleBase`.
     fn create_candidate<'a>(
         &'a self,
         scope: &'a StorageScope,
         proposal_id: ProposalId,
         changes: CandidateChanges,
         check: Arc<dyn CandidateCheck>,
-    ) -> PortFuture<'a, Revision>;
+    ) -> PortFuture<'a, Committed>;
     /// Accept a candidate: commit the candidate's exact tree on top of `expected_head`.
     ///
-    /// Fails with `Conflict`, writing nothing, when the head is not `expected_head`, when the
-    /// candidate's parent is not `expected_head`, or when `candidate` is not the revision the
-    /// proposal reference retains. The promoted tree is the tree that was checked when the
-    /// candidate was created, so no check runs here. Idempotent on `promotion.mutation_id`
-    /// exactly as `commit` is.
+    /// Fails with `Conflict`, writing nothing, when the head is not `expected_head` (with
+    /// `ErrorDetail::StaleBase` naming the head and no `field`, as `commit`); when `candidate` is
+    /// not the revision the proposal reference retains (a plain `Conflict`: it is about no base);
+    /// and when the candidate's parent is not `expected_head`, which is then the head, also with
+    /// `StaleBase` naming the head and no `field`: by contract ruling 5 a candidate drafted on a
+    /// base that is not the head is stale. The promoted tree is the tree that was checked when the
+    /// candidate was created, so no check runs here and the result has no warnings. Idempotent
+    /// on `promotion.mutation_id` exactly as `commit` is: the store keeps that empty answer as it
+    /// keeps a commit's warnings, so a replay answers no warnings either.
     fn promote_candidate<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -586,10 +821,13 @@ pub trait VersionStore: Send + Sync {
         scope: &'a StorageScope,
         query: BlameQuery,
     ) -> PortFuture<'a, BlameResponse>;
-    /// The 1-based line of the item file at `revision` on which the item's body starts: the line
-    /// after the frontmatter, or 1 for a file without frontmatter. Lines a diff's patch numbers
-    /// from this line on are body lines `line - start + 1`, the lines a read and a blame cite.
-    /// `NotFound` when no item with that identity is at `revision`.
+    /// The 1-based line of the item file at `revision`, counted in the stored bytes, on which the
+    /// item's body starts: 1 for a file without frontmatter; otherwise the line after the closing
+    /// `---`, or the line after that when it is empty (the one blank line a parse strips). For an
+    /// empty body it is the line where a body would begin, which can be past the end of the file.
+    /// Lines a diff's patch numbers from this line on are body lines `line - start + 1`, the
+    /// lines a read and a blame cite; a line before it is frontmatter. `NotFound` when no item
+    /// with that identity is at `revision`.
     fn body_start<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -611,6 +849,26 @@ pub trait VersionStore: Send + Sync {
         revision: &'a Revision,
         mutation_id: MutationId,
     ) -> PortFuture<'a, ObjectInfo>;
+    /// Every file of `revision`'s tree, a page at a time, in byte order of path: what a
+    /// portable export writes (`JobSpec::ExportWorkspace`).
+    ///
+    /// Every file is answered once with its exact bytes: item files, folder `index.md` files,
+    /// `log.md` and everything under `.okf/`. An item file also carries what `show` would
+    /// answer of it at this revision (`CommittedItem`); which files hold an item is decided as
+    /// `list` decides it. A page holds at most `page.limit` files (clamped to 1..=500) and ends
+    /// with the first file that takes its bytes past `page.max_bytes`; `next_after` names the
+    /// last file answered while more remain.
+    ///
+    /// Reads no draft and no other reference. `NotFound` for a revision this repository does
+    /// not hold or that is not on the accepted line (a proposal candidate, or one a purge
+    /// rewrote away), as `write_history` refuses one. A tree entry that is not a regular file
+    /// (a link, a submodule) is `Internal`: no store edit writes one.
+    fn committed_files<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+        page: FilePage,
+    ) -> PortFuture<'a, CommittedFiles>;
 }
 
 /// A new blank workspace.
@@ -675,8 +933,12 @@ pub trait WorkspaceCatalog: Send + Sync {
     fn open<'a>(&'a self, scope: &'a StorageScope) -> PortFuture<'a, Workspace>;
     /// Replace the name and description.
     ///
-    /// Fails with `Conflict` when the head is not `update.expected_head`. A repeated
-    /// `mutation_id` changes nothing and returns the workspace as the first call left it.
+    /// Fails with `Conflict` when the head is not `update.expected_head`, with
+    /// `ErrorDetail::StaleBase` naming the head and no `field`: the caller names its request's.
+    /// The head is compared and the change made as one step against commits: under the
+    /// workspace's write lock that every commit holds from its own head comparison to its new
+    /// head, so no commit lands between the two (`archive` likewise). A repeated `mutation_id`
+    /// changes nothing and returns the workspace as the first call left it.
     fn update<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -685,8 +947,12 @@ pub trait WorkspaceCatalog: Send + Sync {
     ) -> PortFuture<'a, Workspace>;
     /// Archive the workspace and set `archived_at`; its history, objects and records stay.
     ///
-    /// Fails with `Conflict` when the head is not `archive.expected_head`. A repeated
-    /// `mutation_id` changes nothing and returns the archived workspace.
+    /// Fails with `Conflict` when the head is not `archive.expected_head`, with
+    /// `ErrorDetail::StaleBase` naming the head and no `field`, as `update` does. Fails with
+    /// `Conflict` while an import, redigest or restore job of the workspace is queued or
+    /// running, checked in the archive's own transaction, so an archive and such a job's
+    /// insert (`RecordStore::create_job`) racing end with one of them refused (contract ruling
+    /// 25). A repeated `mutation_id` changes nothing and returns the archived workspace.
     fn archive<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -708,10 +974,116 @@ pub trait WorkspaceCatalog: Send + Sync {
 /// Removes a purge target from every store that holds it; storage implements it, because one
 /// call must own every store it clears (Stage 1b design section 6).
 ///
-/// Both calls are idempotent on the mutation id and resumable after a crash: they return only
-/// when nothing section 6 lists still holds the target, and count the objects kept because a
-/// surviving item still references them.
+/// Purge calls are idempotent on the mutation id and resumable after a crash. A workspace purge
+/// returns only when nothing section 6 lists still holds the workspace, and counts the objects
+/// kept because a surviving workspace or tenant record still references, pends or pins them. A
+/// purge is never cancelled; a failed call is resumed by repeating it with the same mutation
+/// and purge ids. A clean-up pass is resumable under its job id and shares the purge's
+/// reachability sweep, without removing a workspace.
+///
+/// The sweep reads no purge target. A survivor is the tenant itself or a workspace for
+/// which no workspace purge is recorded, in any state. It enumerates the tenant's stored
+/// digest objects, excluding multipart staging and stray files, and keeps every surviving
+/// record/history reference, pending put and running-write pin. Its roots include uploads,
+/// managed archives, written histories, artifacts, job outputs, derived objects, sandbox
+/// capabilities, unfinished restores and every retained Git reference's source appearances
+/// and conversion-record references. A citation alone is not another object-store root.
+/// Unreadable surviving records or history refuse the pass before any object is removed,
+/// naming the survivor by identity. Counts of removed objects are exact across resumes;
+/// counts kept include objects the purge target never referenced.
+///
+/// What the caller must do:
+///
+/// - Record the purge first (`RecordStore::create_purge`), and only then call the purger.
+/// - Before the first call, cancel every queued or running job of the target workspace and
+///   wait until none is running (the drain). Running is the store's state: a job the drain
+///   cancelled is `cancelled` at once, though its attempt may still be inside a storage call,
+///   and each write that attempt then makes to the workspace is one of those refused below; a
+///   sealed restore is never cancelled, so while its attempt runs, its import, which storage
+///   does not refuse, is waited for. From the moment the purge is recorded storage
+///   refuses to create, retry or claim a job of the workspace (`RecordStore::create_job`,
+///   `retry_job`, `claim_job`, each with `Conflict` naming the purge; a refused claim leaves
+///   the job as it is, for the caller to cancel), but it cannot stop a job that already runs.
+///   A job past its point of no return (a restore that sealed itself, `RecordStore::seal`)
+///   refuses its cancellation: the drain waits for it to finish instead. A workspace archive
+///   and a written history check the refusal before and again under the
+///   workspace's lock, and store their files as workspace-scoped puts: a pending put is
+///   recorded before the bytes are retained, and their record lands it, so a stop before the
+///   record leaves bytes the objects step sweeps. An import copies its rows without the
+///   refusal; it runs only in a sealed restore, which the drain waits for. Ingest's purge job
+///   handler is this caller.
+///
+/// What storage guarantees on its own, from the moment the purge is recorded and after the
+/// purge completes:
+///
+/// - Every write scoped to the target workspace listed here is refused with `Conflict` naming
+///   the purge, checked inside the write's own SQLite transaction: new jobs, job retries and
+///   claims, drafts (save, discard), upload slots, upload content, upload completions (also
+///   checked before anything is read, so a completion after the purge is refused rather than
+///   answered `NotFound`), upload consumptions, one upload or a batch (`UploadStore::consume`
+///   and `consume_batch`, each checked before anything is read as well), artifacts, job
+///   completions, derived objects, receipts, reviews,
+///   proposals (insert, update), comments, confirmations (create, consume), sandbox
+///   capabilities and catalog changes. Commits, candidates and promotions are refused under the
+///   workspace's write lock, so a write in flight lands before the refusal or is refused.
+///   The purge need not read its target's records or history to discover objects.
+///   Every content-bearing write a
+///   conversion makes is among these: its object puts, its commits, its derived objects and its
+///   job completion. Events are not refused: an event carries identities only. Job
+///   cancellation is never refused because of the purge (only a sealed job's, by its seal).
+/// - A workspace-scoped object put (`BlobStore::put`, an upload completion, an import) pins
+///   the object for as long as the write runs and then, in one transaction, checks the refusal
+///   again and records a durable pending put, before it retains the object. Apart from the
+///   purge of its own workspace, which clears it, a pending put is deleted only in the
+///   transaction of a record of the workspace that names the object (a commit's or a
+///   candidate's just after it landed). What a record deletes is what the stored record names:
+///   a write answered by an earlier record (a replayed artifact, commit or candidate) deletes
+///   only the pending puts of objects that record names, and an import only those of the
+///   archive objects its restored history and rows name, or a conversion record among them
+///   names. So a put whose record never lands (a failed or cancelled job, a failed retain, a
+///   refused record write, a crash, a replay of a record that names different bytes) keeps its
+///   pending put, which has no lifetime. Tenant-level archive writes have a tenant-level
+///   pending put tied to their mutation; the transaction of their tenant record lands it.
+/// - Before the purge deletes the target's objects it waits until no write of the target that
+///   pinned is still running, for at most ten minutes; after that the call fails with
+///   `Unavailable` having deleted none of the target's objects (its earlier steps, which remove
+///   the target's managed backups, rows, index entries and repository, may already have run),
+///   and repeating it resumes the purge. It then sweeps every stored candidate of the tenant
+///   against the surviving roots, rather than only objects named by the target. The target's
+///   pending puts are cleared with its records and never keep objects on its behalf.
+/// - Writes to other workspaces of the tenant continue during the purge. An object is deleted
+///   only when no durable reference the purge read names it (another workspace's pending puts
+///   included) and no other workspace's write pinned it at any moment from the start of that
+///   read until the delete; the watch starts before roots are read, and every later pin joins
+///   its touched set even if the write ends before deletion. Thus an object another workspace
+///   puts and then references while the
+///   purge runs is kept. One exception: a copy of one of the target's workspace archives that
+///   another workspace holds in an upload slot or names in a pending put is no surviving
+///   reference, and the archive goes with the target. A write of another workspace that is
+///   putting the same bytes during the objects step pins them and keeps them, as it keeps any
+///   pinned object. A pending put that never gets a record keeps an identical object of
+///   another workspace's purge, counted as kept, until its own workspace is purged.
+///   A surviving card or history naming the target's archive keeps it; the upload/pending-put
+///   exception does not discard such a reference. Sweeps of one tenant serialize with one
+///   another; writes and sweeps of different tenants remain independent.
+/// - Index entries an indexing of the target stored after the index step are removed by the
+///   index pass the purge runs again after it deleted the repository; an indexing reads and
+///   stores under the workspace's write lock, so a later one finds no repository.
+/// - Managed backups are read again on every attempt and once more before the purge
+///   completes, so a backup written while the purge was unfinished is reached as well.
+///
+/// Pins live in the storage process's memory, and the data directory has one writer process,
+/// so a crash ends every write in flight; what such a write stored is named by its pending put,
+/// which carries it to the next purge of its workspace.
 pub trait Purger: Send + Sync {
+    /// One pass of the reachability sweep a workspace purge's objects step runs, for the
+    /// clean-up job `job`: remove every object of the tenant's store that no surviving
+    /// record, history or pending put names and no running write pins, and the received
+    /// bytes of discarded upload slots a stopped discard left. Run again for the same job
+    /// after a stop, it counts what the stopped attempt removed as removed. Refuses,
+    /// removing nothing, when a surviving workspace's records or history cannot be read,
+    /// naming that workspace by identity.
+    fn clean_up<'a>(&'a self, tenant: &'a TenantId, job: JobId) -> PortFuture<'a, CleanUpReport>;
     /// Remove a workspace: its repository, the objects only it references, its records, index
     /// entries, managed backups and retained exports.
     fn purge_workspace<'a>(
@@ -733,18 +1105,51 @@ pub trait Purger: Send + Sync {
     ) -> PortFuture<'a, PurgeReport>;
 }
 
+/// A workspace archive written into the blob store, and what it left out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrittenArchive {
+    /// Identity and size of the archive's bytes.
+    pub object: ObjectInfo,
+    /// Rows of the workspace's records left out of the archive because they named a managed
+    /// backup or a written history; the archive's manifest holds the same count, and a restore
+    /// of the archive reports it (`RestoreReport::rows_left_out`).
+    pub rows_left_out: u32,
+}
+
+/// What a managed object of the tenant is (lifecycle design section 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedKind {
+    /// A workspace archive this store wrote, recorded as an artifact or not.
+    WorkspaceArchive,
+    /// An installation archive this store wrote.
+    InstallationArchive,
+    /// A written history (`VersionStore::write_history`).
+    WrittenHistory,
+}
+
 /// Independently recoverable backups (Stage 1b design section 8); storage implements them.
 ///
 /// The offline backup, the pre-migration backup and the replacement restore are storage
 /// functions the server command and startup call, not ports.
 pub trait Backups: Send + Sync {
-    /// Write a workspace archive into the blob store; the backup handler records it as a
-    /// `WorkspaceBackup` artifact. Idempotent on the mutation id.
+    /// Whether `digest` is one of the tenant's managed backups or written histories, of any
+    /// workspace; `None` for every other object, held or not. An import refuses such an object
+    /// before consuming any upload; a managed archive is restored instead.
+    fn managed_kind<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        digest: &'a Digest,
+    ) -> PortFuture<'a, Option<ManagedKind>>;
+
+    /// Write a workspace archive into the blob store and answer it with the rows it left out;
+    /// the backup handler records it as a `WorkspaceBackup` artifact and its job carries the
+    /// count (`Job::backup`). Idempotent on the mutation id: a repeat answers the archive
+    /// already written, with the count its manifest holds.
     fn write_workspace_archive<'a>(
         &'a self,
         scope: &'a StorageScope,
         mutation_id: MutationId,
-    ) -> PortFuture<'a, ObjectInfo>;
+    ) -> PortFuture<'a, WrittenArchive>;
     /// Write an installation archive (identities, grants, connector records without secrets,
     /// purge records, tenant events; no workspace content) into the tenant's store; the
     /// handler records it as an `InstallationBackup` artifact. Idempotent on the mutation id.
@@ -766,9 +1171,16 @@ pub trait Backups: Send + Sync {
         offset: u64,
         length: u64,
     ) -> PortFuture<'a, ObjectRead>;
+    /// A job-backed import captures its claim once and refuses publication after lease expiry
+    /// or takeover. Imports with no job under the mutation are intentionally not job-fenced.
     /// Import a workspace archive into `scope`. `editors` are the subjects with `write` on
     /// the target, computed by core from `AccessControl`: a draft whose editor is not among them
     /// stays in the archive and is counted as unassigned. Idempotent on the mutation id.
+    ///
+    /// After installing the archive's history it writes one commit on top of the restored head
+    /// carrying `mutation_id` (the restored head's tree, no content change), so
+    /// `VersionStore::find_commit(scope, mutation_id, None)` finds the revision the restore
+    /// produced, on a first or a resumed attempt alike; a repeat writes no second commit.
     fn restore_import<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -778,12 +1190,41 @@ pub trait Backups: Send + Sync {
     ) -> PortFuture<'a, RestoreReport>;
 }
 
+/// The code of the one warning a replayed commit answers when the store holds no warnings for
+/// it (`VersionStore::commit`); see `replay_warnings_unavailable`.
+pub const REPLAY_WARNINGS_UNAVAILABLE: &str = "replay_warnings_unavailable";
+
+/// The code of the one warning a folder move or delete answers when files that are not items
+/// went with the folder (`TreeEdit::MoveFolder`, `TreeEdit::DeleteFolder`); see
+/// `folder_other_files` and `folder_files_deleted`.
+pub const FOLDER_OTHER_FILES: &str = "folder_other_files";
+
+impl ChangeContext {
+    /// The context of `change`, with `new_item_kind` filled from it: the role its `item_kind`
+    /// names, a note when it names none (`Change::created_kind`). A change that creates no item
+    /// leaves it a note, which `TreeEdit::from_change` does not read.
+    #[must_use]
+    pub fn for_change(
+        change: &Change,
+        new_item_id: ItemId,
+        proposal_id: ProposalId,
+        proposer: Provenance,
+    ) -> Self {
+        Self {
+            new_item_id,
+            new_item_kind: change.created_kind().unwrap_or(ItemKind::Note),
+            proposal_id,
+            proposer,
+        }
+    }
+}
+
 impl TreeEdit {
     /// The tree edit a proposed change stands for.
     ///
     /// `context.new_item_id` and `context.new_item_kind` are used only for `Change::Create`,
-    /// which carries neither an identity nor a rendering role; the proposal and proposer only
-    /// for `Change::SupplyExtraction`.
+    /// which carries no identity and whose role the context holds (`ChangeContext::for_change`
+    /// fills it from the change); the proposal and proposer only for `Change::SupplyExtraction`.
     #[must_use]
     pub fn from_change(change: Change, context: &ChangeContext) -> Self {
         match change {
@@ -792,6 +1233,7 @@ impl TreeEdit {
                 type_name,
                 body,
                 properties,
+                item_kind: _,
             } => Self::CreateItem {
                 item_id: context.new_item_id,
                 path,
@@ -816,6 +1258,7 @@ impl TreeEdit {
             } => Self::MoveItem {
                 item_id,
                 destination,
+                keep_alias: false,
             },
             Change::Archive { item_id } => Self::SetStatus {
                 item_id,
@@ -896,6 +1339,75 @@ impl Provenance {
     }
 }
 
+/// The item owning a versioned companion path: its source appearance, accepted supplied text,
+/// or any file under its corrections folder. IDs use the canonical spelling written by the
+/// store; a differently spelled or unrelated path belongs to no item.
+///
+/// Folder conflict checks and item-filtered history share this ownership rule so a change to
+/// an item outside its visible folder is still a change to that item.
+#[must_use]
+pub fn item_companion_owner(path: &str) -> Option<ItemId> {
+    let text = if let Some(file) = path
+        .strip_prefix(".okf/sources/")
+        .or_else(|| path.strip_prefix(".okf/supplied/"))
+    {
+        file.strip_suffix(".json")?
+    } else {
+        path.strip_prefix(".okf/corrections/")?.split_once('/')?.0
+    };
+    let id = uuid::Uuid::parse_str(text).ok()?;
+    (id.to_string() == text).then_some(ItemId(id))
+}
+
+/// The one warning a replayed commit answers in place of warnings the store does not hold for
+/// it, saying `why` (`VersionStore::commit`). A version store, real or fake, answers a replay
+/// with exactly this, so a caller sees one code whatever store it runs over.
+#[must_use]
+pub fn replay_warnings_unavailable(why: &str) -> Warning {
+    Warning {
+        code: REPLAY_WARNINGS_UNAVAILABLE.to_owned(),
+        message: format!(
+            "the commit landed on an earlier attempt, and the warnings its check gave then are \
+             not available: {why}"
+        ),
+        location: None,
+    }
+}
+
+/// The one warning that `count` files that are not items went with a folder: moved with it to
+/// `at` (`TreeEdit::MoveFolder`). It names the folder where the files are now, so a person can
+/// find them; the store adds it to the commit's warnings (`Committed::warnings`) only when
+/// `count` is not zero.
+#[must_use]
+pub fn folder_other_files(at: &WorkspacePath, count: usize) -> Warning {
+    Warning {
+        code: FOLDER_OTHER_FILES.to_owned(),
+        message: format!(
+            "{} moved with the folder to {}",
+            not_items(count),
+            at.as_str()
+        ),
+        location: Some(at.as_str().to_owned()),
+    }
+}
+
+/// The one warning that `count` files that are not items were deleted with the folder `folder`
+/// (`TreeEdit::DeleteFolder`), naming it; added to the commit's warnings only when `count` is
+/// not zero. The revisions before the delete still hold them.
+#[must_use]
+pub fn folder_files_deleted(folder: &WorkspacePath, count: usize) -> Warning {
+    let verb = if count == 1 { "was" } else { "were" };
+    Warning {
+        code: FOLDER_OTHER_FILES.to_owned(),
+        message: format!(
+            "{} {verb} deleted with the folder {}",
+            not_items(count),
+            folder.as_str()
+        ),
+        location: Some(folder.as_str().to_owned()),
+    }
+}
+
 /// Attach the caller's effective permissions onto a workspace summary.
 #[must_use]
 pub fn workspace_with_permissions(
@@ -928,6 +1440,21 @@ pub fn derive_commit_mutation_id(mutation_id: MutationId, ordinal: u32) -> Mutat
     MutationId(derived_uuid(b"commit", mutation_id, ordinal))
 }
 
+/// Stable identity of a commit attempt's retained base-revision record, separate from the
+/// commit and catalog mutations. Its tenant/workspace scope matches the warning record's key;
+/// the same mutation in another workspace must retain its own base. Lifecycle ruling Q1 counts
+/// these records without reopening target Git.
+#[must_use]
+pub fn derive_commit_base_mutation_id(scope: &StorageScope, mutation_id: MutationId) -> MutationId {
+    let mut hasher = Sha256::new();
+    hasher.update(b"okf-jawn derived identity\0commit_base\0");
+    // A fixed-length tenant hash keeps the tuple unambiguous for every valid tenant string.
+    hasher.update(Sha256::digest(scope.tenant_id.as_str().as_bytes()));
+    hasher.update(scope.workspace_id.0.as_bytes());
+    hasher.update(mutation_id.0.as_bytes());
+    MutationId(version_8(hasher.finalize().into()))
+}
+
 /// The identity of the workspace created under one mutation.
 ///
 /// Derived, not allocated, so a creation that crashed after its repository was written and
@@ -947,6 +1474,25 @@ pub fn derive_proposal_id(mutation_id: MutationId) -> ProposalId {
     ProposalId(derived_uuid(b"proposal", mutation_id, 0))
 }
 
+/// The identity of the comment written under one mutation (`add_comment`, and the reason a
+/// `decline_proposal` records).
+///
+/// A resumed attempt derives the same identity, so a handler can tell the comment its first
+/// attempt wrote from every other comment of the proposal.
+#[must_use]
+pub fn derive_comment_id(mutation_id: MutationId) -> String {
+    derived_uuid(b"comment", mutation_id, 0).to_string()
+}
+
+/// The identity of the review recorded under one mutation.
+///
+/// A resumed attempt derives the same identity, so it finds among the item's reviews the one its
+/// first attempt recorded.
+#[must_use]
+pub fn derive_review_id(mutation_id: MutationId) -> ReviewId {
+    ReviewId(derived_uuid(b"review", mutation_id, 0))
+}
+
 /// The identity of the purge recorded under one mutation.
 ///
 /// Derived, not allocated, so the tenant job that carries the purge out can name it in its
@@ -954,6 +1500,44 @@ pub fn derive_proposal_id(mutation_id: MutationId) -> ProposalId {
 #[must_use]
 pub fn derive_purge_id(mutation_id: MutationId) -> PurgeId {
     PurgeId(derived_uuid(b"purge", mutation_id, 0))
+}
+
+/// The identity under which a purge's drain cancels one job of the purged workspace
+/// (`RecordStore::cancel_job`; the `Purger` caller's duty).
+///
+/// Derived from the purge job's mutation and the cancelled job, so a resumed purge cancels each
+/// job under the identity its first attempt used, and the store makes no second transition.
+#[must_use]
+pub fn derive_drain_mutation_id(purge_mutation: MutationId, job: JobId) -> MutationId {
+    let mut hasher = Sha256::new();
+    hasher.update(b"okf-jawn derived identity\0");
+    hasher.update(b"drain\0");
+    hasher.update(purge_mutation.0.as_bytes());
+    hasher.update(job.0.as_bytes());
+    MutationId(version_8(hasher.finalize().into()))
+}
+
+/// The identity under which a discarded upload asks for the tenant's clean-up.
+///
+/// Derived from the discard mutation with its own label, so a resumed request asks under
+/// the same identity and never shares a commit or drain cancellation's identity.
+#[must_use]
+pub fn derive_clean_up_mutation_id(discard: MutationId) -> MutationId {
+    let mut hasher = Sha256::new();
+    hasher.update(b"okf-jawn derived identity\0");
+    hasher.update(b"clean_up\0");
+    hasher.update(discard.0.as_bytes());
+    MutationId(version_8(hasher.finalize().into()))
+}
+
+/// `count` files that are not items, in words: "1 file that is not an item", "3 files that are
+/// not items".
+fn not_items(count: usize) -> String {
+    if count == 1 {
+        "1 file that is not an item".to_owned()
+    } else {
+        format!("{count} files that are not items")
+    }
 }
 
 /// A version-8 UUID from SHA-256 of a label, a mutation identity and a count.
@@ -964,7 +1548,11 @@ fn derived_uuid(label: &[u8], mutation_id: MutationId, ordinal: u32) -> uuid::Uu
     hasher.update(b"\0");
     hasher.update(mutation_id.0.as_bytes());
     hasher.update(ordinal.to_be_bytes());
-    let hash: [u8; 32] = hasher.finalize().into();
+    version_8(hasher.finalize().into())
+}
+
+/// The version-8 UUID of the first sixteen bytes of a hash.
+fn version_8(hash: [u8; 32]) -> uuid::Uuid {
     let mut bytes = [0_u8; 16];
     for (target, source) in bytes.iter_mut().zip(hash) {
         *target = source;

@@ -5,8 +5,10 @@
 //! returns `None` (already claimed, finished or cancelled) is dropped without effect. The
 //! handler runs only under the lease `claim_job` returned, and writes completion through it. A
 //! handler that returns `Err` is at fault as a worker, and the runtime records the failure
-//! through the same lease, as retryable, then announces it as a `job_updated` event (the
-//! failure is a durable job write ingest makes).
+//! through the same lease, retryable unless its code is `invalid_input`, `forbidden`,
+//! `unsupported` or `not_implemented` (a request no retry can change), then announces it as a
+//! `job_updated` event (the failure is a durable job write ingest makes). A workspace purge
+//! records its own failure first, always retryable, so this classing never reaches it.
 //!
 //! Reconciliation runs at start and then on every sweep: `expire_leases()` releases the claims
 //! of attempts that died, and `pending_jobs()` re-delivers every unfinished job. A job already
@@ -177,8 +179,13 @@ pub async fn run_one(
     handler: &dyn JobHandler,
     job: JobId,
 ) -> Result<bool, ApiError> {
-    let Some(claimed) = records.claim_job(job).await? else {
-        return Ok(false);
+    // A claim refused with `Conflict` names a recorded purge of the job's workspace: the job is
+    // skipped, not a fault, and stays for the purge's caller to cancel (`RecordStore::claim_job`).
+    let claimed = match records.claim_job(job).await {
+        Ok(Some(claimed)) => claimed,
+        Ok(None) => return Ok(false),
+        Err(error) if error.code == ErrorCode::Conflict => return Ok(false),
+        Err(error) => return Err(error),
     };
     if let Err(error) = handler.handle(&claimed).await {
         let retryable = !matches!(
@@ -189,7 +196,7 @@ pub async fn run_one(
                 | ErrorCode::NotImplemented
         );
         let _failed = records
-            .fail_job(claimed.lease.clone(), error.message, retryable)
+            .fail_job(claimed.lease.clone(), error, retryable)
             .await?;
         announce_job(events, &claimed).await?;
     }

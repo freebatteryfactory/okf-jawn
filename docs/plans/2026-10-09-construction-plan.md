@@ -750,14 +750,14 @@ from the lanes or the composed server.
 
 ### Owner (product behaviour)
 
-- **O1. `ingest-locates-unlocated-items`: does the product bound the distance?** ingest asks before
+- **O1. `ingest-locates-unlocated-items`: does the product bound the distance? Decided 2026-10-17: no bound, the default below; the gate text says so.** ingest asks before
   it builds the gate. Recommended default: no bound. Every location found through the text layer
   is recorded as `inferred`, and SPEC section 5 says the interface never presents an inferred
   location with the certainty of a direct one. The contract carries no distance, so a bound could
   only drop locations. Revisit if acceptance finds a wrong placement that readers rely on.
   Recording the decision changes the gate text pinned at `tests/foundation/records.test.mjs:261`,
   which ends "open until this gate is built", in the same change.
-- **O2. Charts over approved agent-supplied text, or human-corrected text.** These are refused
+- **O2. Charts over approved agent-supplied text, or human-corrected text. Decided 2026-10-17: keep refusing, the default below.** These are refused
   today: `views::materialize` returns `DatasetUnavailable` (R5). Recommended default: keep
   refusing. The refusal is that chart's own alert, and it says why: the source's shown text is
   not the converter's, and whether it was corrected or supplied by an agent. A dataset is read
@@ -772,7 +772,7 @@ from the lanes or the composed server.
   - macOS: a supervisor watchdog. It samples the child's memory every 50 to 100 ms through a
     crate with a safe API, kills the child at the cap, and records the window as
     `Failure(MemoryLimit)` / `not_converted` pages. [inferred: macOS enforces no address-space
-    limit] **Owner to confirm that the watchdog counts as the hard cap on macOS.**
+    limit] **Decided 2026-10-17: the watchdog counts as the hard cap on macOS.**
 - **O4. How a construction gate is recorded as closed.** The status vocabulary is closed
   (`tests/foundation/records.test.mjs:272`), and statuses are never typed. Recommended default: no
   status change during construction; the evidence is the lane log and the merge commit's
@@ -825,6 +825,102 @@ from the lanes or the composed server.
   - In Wave 0 the integration owner amends the receipts of `cli-mcp-stdio-relay` and of
     `application-operations` (its CLI part) to name both commands. `records.test.mjs` pins neither
     today.
+- **I6. Uploads use no upload library.** Decided at workspace-ui M2: the four `@uppy/*` packages
+  the foundation listed are removed from `ui/package.json`. Read in the installed sources, they
+  do not fit the rules the workspace runs under:
+  - `@uppy/xhr-upload` makes its own requests, with its own retries and timer, outside the one
+    request transport every call of the UI goes through (credentials, CSRF, refusals, retry keys).
+    It sends one request a file; an upload here is three operations with a digest and a length
+    check.
+  - `@uppy/dashboard` ships a visual system of its own, and the `Uppy` instance is a third state
+    store beside the two the UI has.
+  - `getDroppedFiles`, the one function that was used for a while, gives up the whole walk of a
+    dropped folder at the first file it cannot read and then lists the folder as a file.
+
+  The walk of a drop is `ui/src/features/imports/files.ts`, on the browsers' entry API, with
+  stated bounds. Resumable uploads across a browser restart were never promised by the XHR
+  plugin either. Putting the library back is a manifest change and a vendor note.
+
+### Carried items (from the Wave 1 review loops)
+
+Findings that were judged not load-bearing at merge, each with its home. They are recorded here so they live in the repository and do not depend on any working notes.
+
+**Carry-over sweep: one package after storage M2 merges, before core M1.3, through the full review loop.**
+
+- **R-I15.** The Timeline cursor carries the tip that the first page resolved. Today a Snapshot landing between pages of an `at: latest` Timeline can repeat a commit on the next page. The cursor is opaque, so the contract does not change.
+- **N1.** A Rewind whose only difference is in companion files (`.okf/sources/<id>.json`, `.okf/supplied/<id>.json`, `.okf/corrections/<id>/`) is refused today. The item comparison must count companions.
+- **R-I14.** A Rewind that restores a deleted item at an older path relinks its referrers from the item's last path before the delete.
+- **Test gaps the reviewers left open:**
+  - a Rewind with an item listed twice, and the occupied temporary path;
+  - the temporary directory's cleanup;
+  - a link cited from a source card;
+  - the `/upload_ids` field of an invalid card path;
+  - the event-failure hook in the ingest fakes;
+  - a second import of the same archive under another mutation, after the first stopped past its restore commit, is refused (storage F1 review, mutant MT);
+  - the export-only picture fallback in the ingest child, which today would write docling's PNG for a JPEG;
+  - a landing clears only its own pending put, not every pending put of the workspace (storage P1 review, mutant MCLEAR);
+  - a kept export's artifact descriptor survives the job-artifact scrub (storage pass-3 review, mutant MKEPTART).
+- **`FormatHasNoLocator`** for an unmatched picture in a pageless format, which today records `NotLocatedByConverter`.
+- **A managed backup is never imported as a source document.** The archive writer refuses a card whose original is a backup or written-history object, because such a card can never be restored or read. So ingest's import refuses, with `InvalidInput`, to convert an upload whose digest is one of the tenant's managed archives or written histories. A restore's own upload stays allowed.
+- **A backup taken during an import keeps the upload usable.** Running jobs are not archived. So an upload consumed only by a job the archive drops is archived as completed and unconsumed, and the import can be run again after a restore.
+- **What a failed replacement restore leaves.** Some failures are found only by the copy, such as a key collision between two archives of one set. These leave the installation rows and the earlier workspaces written. Each such check either moves into the read-only pre-check, or the `restore` doc states what is left, and a test shows that a rerun completes.
+- **One local tenant id.** Storage and server use the contract's `LOCAL_TENANT_ID` (`"local"`, Batch C) wherever production code names the local tenant; no other literal remains.
+- **Purge and backup outcomes reach the caller.** Today the rows an archive leaves out for naming a backup (`rows_left_out`) and the files a purge could not read (`unread`) are recorded only in the manifest and in the purge plan. Carry both through the core port and the contract's reports. Also carry `purge_progress` in the installation archive, so a replacement restore keeps the `unread` list.
+- **Git errors name no machine path.** libgit2 messages passed up through `git()` include the data-directory path, and they reach an administrator in an `Unavailable`. Remove the data-directory prefix from surfaced Git errors, keeping the workspace id.
+
+**With their features.**
+
+- **Asset retention (ingest M2, its main body).** Done in #21.
+- **Archives written before a schema change restore (a standing rule; the fixtures landed with records schema 3).** `crates/storage/tests/fixtures/archives/records-schema-2/` holds a workspace archive and an installation archive written by the build before the change, and `crates/storage/tests/archive_fixtures.rs` restores them on every build, by replacement and by import. Every later change to the records schema, the archive format or a stored shape first writes its own fixtures with the kept writer (`write_archive_fixtures`, run as its doc says, before the change) and keeps every earlier set restoring.
+- **Restored View bindings (core M1.6, with the View file layout). Closed by the layout (core M1.6 rulings, E1; contract batch 3):** a View's file names no workspace (a saved View binds only to its own), so an archive imported into a workspace with another id needs no rewrite and the restore commit stays "same tree, no content change". The test remains: a View restored into another id validates and opens with `get_view` (core M1.6 phase 2).
+- **The purge job drains first (core M1.4, with the purge operation).** The `Purger` caller duty requires cancelling and draining the target workspace's jobs before the first call. The purge job's handler in ingest, which is the purger's caller, must therefore:
+  - list the workspace's queued and running jobs;
+  - cancel each, under a mutation id derived per job;
+  - wait, bounded, until none is running, failing retryable past the bound;
+  - only then call `purge_workspace`.
+
+  Nothing creates a purge until M1.4's purge operation.
+- **WebKit keyboard reach (the desktop launcher, Wave 3).** By default, WebKit leaves links out of the Tab order, and a page cannot change that. So the macOS launcher's web view sets `tabFocusesLinks`, and the Wave 3 keyboard journey runs in that launcher (workspace-ui M1 review, N12).
+- **Byte transfers, sign-ins and connector events (core M1.4).** These come from server M1 (S3 to S5). The server holds no operation behaviour, so core provides:
+  - a `transfers` module over `Ports`: `upload_content`, `download_object`, `download_artifact` and `download_tenant_artifact`, which return a `Download` (media type, total size, offset, length, body) and record a `Forbidden` as `permission_denied`, as dispatch does;
+  - `ApplicationService::record_sign_in(principal)` (stage-1b design section 7);
+  - `connector_issued` and `connector_revoked` recorded in the `create_connector` and `revoke_connector` handlers.
+
+  Server M1 binds the byte routes against a trait of the same shape until then.
+- **Stored shapes are versioned (a standing rule for every lane).** The search indexer and the read path parse a stored card through the strict contract type, and so does every other stored-file reader. Any contract change to the shape of a file stored in Git (an appearance, a conversion record, a correction) therefore bumps the data-format version and ships a migration that rewrites older files. A restore refuses an archive of another version (storage B1-R round-4 re-review, N-16).
+- **Deployment settings (server M2).** `deploy/.env.example` gains `OKF_SANDBOX_ORIGIN`, `OKF_ALLOWED_HOSTS` (defaulting to the authority of `OKF_PUBLIC_ORIGIN`) and `OKF_UI_DIR`.
+- **The CSRF cookie name in the UI (workspace-ui M2).** The generated client sends `x-okf-csrf`. workspace-ui reads the `okf-csrf` cookie name from generated output, or from one constant whose test checks it against the OpenAPI document.
+- **Screen readers on the tree (the Wave 3 accessibility check).** The tree's scrolling list is an unnamed `group` tab stop that forwards focus to the active row. Check how NVDA and VoiceOver announce it.
+- **R-I11 (core M1.4, with the cancel operation).** A point-of-no-return seal on `RecordStore`: `cancel_job` refuses with `Conflict` once a restore has called `restore_import`. Until M1.4, no production path cancels a running job.
+- **The purge removes by reachability (sweep 2a; owner decision 2026-10-14).** Today a purge reads the target's own history to learn which objects it named; a file of it that cannot be read leaves the objects only that file named, and the purge completes. That falls short of SPEC section 8, and SPEC is not changed to match. The rebuild: remove everything the target owns except what a surviving item still references, never reading the target; if a survivor's own records cannot be read, the purge does not complete (`PurgeState::Failed`, naming the survivor by identity) and resumes once that is repaired. Its builder first states how objects and their references are laid out, and its test is a target with an unreadable history file whose objects are all gone after the purge.
+- **Kept commit warnings (carry-over sweep part 2b, its reviews).**
+  - A landed commit's warnings are lost for good once a later attempt of the same mutation checks and fails to land (it then answers `replay_warnings_unavailable`). Within one process every writer holds the workspace's lock, so this needs a crash or a head moved outside the application.
+  - `commit_warnings` grows by one row per checked commit and is trimmed only by a workspace purge. An import keeps O(N) warnings for N cards.
+  - An import's commits and a redigest's are checked over the files they write, through the composition's real check; nothing composes ingest over real storage with the real check in one test.
+- **The MCP server's image blocks and refusal events (mcp-execution follow-up review).**
+  - An image is shown when its bytes begin with the signature of its served type. That is a check of the first bytes, not proof that the whole file is that image.
+  - The first sixteen characters of the base64 text are decoded by hand, because `crates/mcp` has no base64 dependency. The dependency joins the next manifest batch (with server M2's), and the hand decoder goes then.
+  - A caller in a workspace's tenant can add `permission_denied` events to that workspace's log by naming it in a request its route refuses. Nothing bounds how fast, here or in core's dispatch, which does the same for HTTP. The bound belongs with the ingress limits of server M2.
+- **The mutation ledger after a purge (carry-over sweep, part 2).** A purge empties the ledger rows of its workspace (PR #20). Still open, each stated in the storage and core headers:
+  - a live row completed before records schema 2 records no workspace and keeps its response until it expires;
+  - a row whose `complete` lands after the purge's last pass over the rows keeps its response;
+  - an emptied row keeps its idempotency key and the digest of its request, from which a guessed text could be confirmed;
+  - a refused retry of an emptied row restarts that row's seven days;
+  - a pre-migration copy taken later carries the first two with it, and a copy does not expire;
+  - a `mutations` table that lacks a column the purge reads is skipped without a report.
+
+  The design to weigh: a terminal "purged" row state that keeps no digest and is refused by `begin` itself, and a purge check inside `complete`'s own transaction.
+- **An installation archive is tracked before it is kept (carry-over sweep, part 2; PR #20 last bot pass).** `backup_installation` publishes the archive to the object store and then records it. A process that stops in between leaves a blob that no `backup_archives`, artifact or pending-put row names, and a retry publishes another. The workspace path records a pending put first; the tenant path must do the same, or reconcile the staged digest on retry. Its test: stop after the publish, retry, and find one archive and no unnamed blob.
+- **A resumed purge reports what it removed (carry-over sweep, part 2; PR #20 last bot pass).** If a purge stops after deleting objects and before it records the objects step, the retry finds them absent and counts each as kept because another workspace shares it. The durable purge record can then claim no removals. Keep the counts with the step's progress, or tell "already removed by this purge" from "kept because shared". Its test: stop mid-step, resume, and compare the record with what was removed.
+- **The command line and the stdio relay (CLI follow-up before the Wave 3 harness).** The carried repairs below are implemented on this branch. Final-revision native checks, CI and the connected server journey still govern integration and acceptance.
+  - **Windows standard-handle inheritance (C1).** The owner-approved `SetHandleInformation` call clears inheritance on the relay's standard handles before it starts the server. The native regression failed against the earlier binary with stdout held for 30.265 seconds, then passed against the corrected build (one test, 2.60 seconds total). `xtask source-policy` confines the exception to this one Windows call site. Final-branch CI and the real-server Wave 3 journey remain required.
+  - **Request memory (C2).** The relay reads only the fields it needs and skips the rest with `IgnoredAny`, forwarding the original bytes. The inherited process-memory regression measures the largest permitted line against a 64 MiB bound; its recorded observation was 27 MiB. Answers retain their separate one-pass budget.
+  - **Stalled output (C3).** A line waiting on a stream that makes no progress is bounded at 120 seconds even while input remains open. The relay exits nonzero; the bound also applies to diagnostics.
+  - **Abnormal exchange (C4).** A request whose exchange unwinds receives a JSON-RPC internal error for its id. This relies on unwinding; an aborting process cannot send a response.
+  - **Oversized incomplete input (C5).** EOF after the input limit is exceeded reports the size violation.
+  - **Bounded diagnostics (C6).** Method names are bounded and control, invisible and bidirectional characters are escaped.
+  - **Credentials (C7).** Relay connector credentials use the issuing service's lowercase-letter, digit and underscore alphabet. Operation bearer tokens follow the separately ruled `b64token` alphabet. Both refuse square brackets.
+  - **Nothing here ran against a real `okf-jawn-server`.** The launcher and the transport are injected (I5); the real start is the Wave 3 harness. On Windows a refused loopback connection takes about two seconds to report, so the wait after a launch can reach about two minutes.
 
 ## 7. Risks by wave
 

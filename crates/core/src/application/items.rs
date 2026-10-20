@@ -2,30 +2,33 @@
 //! immediate commits SPEC section 8 names (create, move, archive or status, delete, a folder,
 //! a type).
 //!
-//! Reads resolve their selector once (`shared::resolve`) and never see a draft, except that
+//! Reads resolve their selector once (`shared::resolve`; a listing's later pages read the
+//! revision its first page resolved, `shared::resolve_page`) and never see a draft, except that
 //! `get_item` adds the caller's own draft, read for the authenticated subject and nobody else
 //! (dispatch has already refused it on every route that is not a human session). Every
 //! returned `ItemDocument` carries the server's content digest. Writes refuse a caller's
 //! application header before any port is touched (`items::refuse_supplied_header`,
 //! `items::refuse_header_in_type`) and commit through `shared::commit` with the edit check:
 //! OKF conformance refuses, and the validator's warnings and OKF lint about the files the write
-//! touched come back as warnings.
+//! touched come back as warnings; the files whose links a move rewrote are touched, and the
+//! store names them to the check.
 
 use okf_jawn_contract::common::MutationResult;
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::extraction::ExtractionFilter;
 use okf_jawn_contract::identity::{At, WorkspacePath};
 use okf_jawn_contract::item::{
-    CreateFolderRequest, CreateItemRequest, DeleteItemRequest, GetItemRequest, ItemDocument,
-    ItemKind, ItemSummary, ListItemsRequest, ListItemsResponse, ListTypesRequest,
+    CreateFolderRequest, CreateItemRequest, CreatedItem, DeleteItemRequest, GetItemRequest,
+    ItemDocument, ItemKind, ItemSummary, ListItemsRequest, ListItemsResponse, ListTypesRequest,
     ListTypesResponse, MoveItemRequest, SetLifecycleRequest, SetTypeRequest,
 };
 
 use super::ApplicationService;
 use super::shared::{
-    Touched, Write, commit, commit_with_receipt, invalid, mutation_id, resolve,
+    Touched, Write, commit_with_receipt, invalid, mutation_id, next_page, resolve, resolve_page,
     with_content_digest, workspace_scope,
 };
+use super::views::{ViewFields, check_view_write, created_properties};
 use crate::context::OperationContext;
 use crate::echo::bounded;
 use crate::items::{refuse_header_in_type, refuse_supplied_header};
@@ -40,11 +43,22 @@ use crate::storage::{TreeEdit, derive_item_id};
 /// findable through search with `include_archived`.
 ///
 /// The filters apply to the page the store returned, so a filtered page may hold fewer items
-/// than asked; its continuation is the store's. Child folders are listed either way.
+/// than asked; its continuation is the store's position in that listing. Child folders are
+/// listed either way.
+///
+/// A continuation lists the revision its first page resolved (`shared::resolve_page`), so a
+/// write that lands between two pages of a listing at `latest` neither repeats nor skips an
+/// entry. Whether a listing is a current one is decided once, on its first page (at `latest`:
+/// it is; at a named revision: when that revision is the head then), and its cursor carries the
+/// answer: every later page hides or shows archived items as the first page did, whatever the
+/// head is by then and whether the later page is sent with `latest` or with the listing's
+/// revision (any other revision is refused).
 ///
 /// # Errors
-/// Returns `InvalidInput` on `/folder` for a folder that is not a workspace path, the typed
-/// `NotFound` of an invalidated revision, or any port error.
+/// Returns `InvalidInput` on `/folder` for a folder that is not a workspace path, on
+/// `/page/cursor` for a cursor that is not this operation's (see `shared::resolve_page`) or one that continues a read of
+/// another revision than `at` names; the typed `NotFound` of an invalidated revision; or any
+/// port error.
 pub(super) async fn list_items(
     service: &ApplicationService,
     context: &OperationContext,
@@ -56,16 +70,33 @@ pub(super) async fn list_items(
     } else {
         Some(WorkspacePath::try_from(request.folder).map_err(|error| invalid(error.0, "/folder"))?)
     };
-    let revision = resolve(service, &scope, &request.at).await?;
+    let continued = request.page.cursor.is_some();
+    let (revision, page, carried) = resolve_page(
+        service,
+        &scope,
+        context.operation,
+        &request.at,
+        request.page,
+    )
+    .await?;
     let ports = service.ports();
-    // `latest` is the head by resolution; a named revision is current when it is the head now.
-    let current = match &request.at {
-        At::Latest => true,
-        At::Revision { .. } => ports.versions.head(&scope).await? == revision,
+    let current = match (continued, carried, &request.at) {
+        // A later page: what the first page decided.
+        (true, Some(current), _) => current,
+        (true, None, _) => {
+            return Err(invalid(
+                "the cursor was not issued by a listing",
+                "/page/cursor",
+            ));
+        }
+        // `latest` is the head by resolution; a named revision is current when it is the head
+        // now.
+        (false, _, At::Latest) => true,
+        (false, _, At::Revision { .. }) => ports.versions.head(&scope).await? == revision,
     };
     let listing = ports
         .versions
-        .list(&scope, &revision, folder.as_ref(), request.page.into())
+        .list(&scope, &revision, folder.as_ref(), page)
         .await?;
     let items = listing
         .items
@@ -78,6 +109,12 @@ pub(super) async fn list_items(
         })
         .collect();
     Ok(ListItemsResponse {
+        next_cursor: next_page(
+            context.operation,
+            &revision,
+            listing.next_cursor,
+            Some(current),
+        )?,
         revision,
         items,
         folders: listing
@@ -85,7 +122,6 @@ pub(super) async fn list_items(
             .iter()
             .map(|folder| folder.as_str().to_owned())
             .collect(),
-        next_cursor: listing.next_cursor,
     })
 }
 
@@ -114,40 +150,52 @@ pub(super) async fn get_item(
     Ok(document)
 }
 
-/// Create a note at a new path in one commit and return it as committed.
+/// Create a note or a View at a new path in one commit and return it as committed, with the
+/// commit's receipt and the findings of its check (`CreatedItem`); a resumed attempt answers the
+/// first attempt's receipt and the findings the store kept for the commit.
 ///
 /// A source card comes only from an upload or an import, so `kind: source` is refused. A View
-/// is refused as not implemented until its file layout lands with `get_view` (construction plan
-/// M1.6), because a saved View is validated before it is written.
+/// is checked before it is written (`views::check_view_write`), with the properties the store
+/// will write: the request's, `type` and `title` set from the request.
 ///
 /// # Errors
-/// Returns `InvalidInput` on `/kind` for a source, `NotImplemented` for a View, `InvalidInput`
-/// on `/properties/okf_jawn` for a supplied application header, or any error of the commit.
+/// Returns `InvalidInput` on `/kind` for a source, `InvalidInput` on `/properties/okf_jawn` for
+/// a supplied application header, a View's refusal on `/title` or `/body`, or any error of the
+/// commit.
 pub(super) async fn create_item(
     service: &ApplicationService,
     context: &OperationContext,
     request: CreateItemRequest,
-) -> Result<ItemDocument, ApiError> {
-    match request.kind {
-        ItemKind::Note => {}
-        ItemKind::Source => {
-            return Err(invalid(
-                "a source card is made only by an upload or an import",
-                "/kind",
-            ));
-        }
-        ItemKind::View => {
-            return Err(ApiError::new(
-                ErrorCode::NotImplemented,
-                "creating a View is not implemented in this build",
-            )
-            .with_field("/kind"));
-        }
+) -> Result<CreatedItem, ApiError> {
+    if request.kind == ItemKind::Source {
+        return Err(invalid(
+            "a source card is made only by an upload or an import",
+            "/kind",
+        ));
     }
     refuse_supplied_header(&request.properties, "/properties")?;
+    if request.kind == ItemKind::View {
+        let stored = created_properties(
+            &request.properties,
+            &request.type_name,
+            Some(&request.title),
+        );
+        check_view_write(
+            service,
+            &workspace_scope(context)?,
+            &stored,
+            &request.body,
+            ViewFields {
+                title: "/title",
+                body: "/body",
+                item: None,
+            },
+        )
+        .await?;
+    }
     let item_id = derive_item_id(mutation_id(context)?, 0);
     let created = request.path.clone();
-    let committed = commit(
+    let committed = commit_with_receipt(
         service,
         context,
         Write {
@@ -171,13 +219,18 @@ pub(super) async fn create_item(
     )
     .await?;
     let scope = workspace_scope(context)?;
-    with_content_digest(
+    let item = with_content_digest(
         service
             .ports()
             .versions
             .show(&scope, &committed.revision, item_id)
             .await?,
-    )
+    )?;
+    Ok(CreatedItem {
+        item,
+        receipt_id: Some(committed.receipt_id),
+        warnings: committed.warnings,
+    })
 }
 
 /// Move an item and rewrite the links that point at it, in one commit.
@@ -195,7 +248,8 @@ pub(super) async fn move_item(
         Write {
             base: request.base_revision,
             message: format!("Move to {}", request.destination.as_str()),
-            // The referrers whose links the move rewrites are not counted (R-I12).
+            // The old and the new path. The referrers whose links the move rewrites are the
+            // store's to name: it reports them to the check, which counts them as touched.
             touched: Touched {
                 paths: vec![request.destination.clone()],
                 items: vec![request.item_id],
@@ -204,6 +258,7 @@ pub(super) async fn move_item(
             edits: vec![TreeEdit::MoveItem {
                 item_id: request.item_id,
                 destination: request.destination,
+                keep_alias: false,
             }],
             item: Some(request.item_id),
         },

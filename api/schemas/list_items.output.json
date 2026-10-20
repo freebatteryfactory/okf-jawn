@@ -74,7 +74,7 @@
         },
         {
           "const": "view",
-          "description": "A source-bound declarative visual artifact.",
+          "description": "A source-bound declarative visual artifact. Its file is an OKF concept: the `title`\nproperty, then a body that is the View's description as Markdown followed by exactly one\nfenced code block whose info string is `json okf-jawn-view`, holding `schema_version`, `mode`,\n`grammar`, `bindings` (without `workspace_id`, `locations` or `materialized`, which the\nserver derives), `spec` and `charts`; the block ends the body.",
           "type": "string"
         }
       ]
@@ -201,10 +201,11 @@
       ]
     },
     "WorkspacePath": {
-      "maxLength": 4096,
+      "description": "A relative path inside one workspace, in Unicode NFC, with `/` between segments. At most 4096 bytes in UTF-8: a character takes one to four.",
       "minLength": 1,
       "pattern": "^[^/\\\\:<>\"|?*\\x00-\\x1f]+(/[^/\\\\:<>\"|?*\\x00-\\x1f]+)*$",
-      "type": "string"
+      "type": "string",
+      "x-max-utf8-bytes": 4096
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

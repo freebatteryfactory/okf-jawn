@@ -4,7 +4,8 @@
 //! call is received completely into a private file before it is appended, so a call that would
 //! pass the limit or the announced size appends nothing. `complete` retains the bytes in the
 //! blob store only when their length and SHA-256 match; `consume` marks a complete upload as the
-//! input of exactly one job.
+//! input of exactly one job, and `consume_batch` marks several for one job in one transaction,
+//! all or none (an import's uploads), refused while a purge names the workspace.
 //!
 //! One transfer writes an upload at a time: a concurrent `put_content` or `complete` on the same
 //! upload is refused as `Conflict`, never interleaved into the same `.incoming` or `.part` file.
@@ -12,23 +13,34 @@
 //! a resume (`get`, `put_content`, `complete`), always under the upload's claim, so a crash
 //! between the append and the record update never makes a resent chunk duplicate bytes. A `get`
 //! while a transfer holds the claim reads the record as it is and writes nothing.
+//!
+//! Discard replaces an unconsumed, unreserved slot with its scoped replay tombstone in one
+//! immediate transaction, then removes its two private files. The blocking worker owns the
+//! writer claim through both stages, including when the awaiting caller is dropped. Failure
+//! to unlink is an error after the durable tombstone; the same mutation retries that unlink.
+//! Completed object bytes remain for tenant cleanup, never deleted by discard itself.
 
 use std::collections::HashSet;
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::{Digest, JobId, MutationId, UploadId};
+use okf_jawn_contract::import::UploadListState;
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{ByteReader, ObjectInfo, StorageScope};
-use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
+use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadRecord, UploadStore};
 use rusqlite::{Connection, OptionalExtension, params};
 use tokio::io::AsyncReadExt as _;
 
 use crate::blobs::{LocalBlobs, file_reader};
 use crate::data::io_error;
-use crate::db::{Db, conflict, json, not_found, scope_key, sql, to_i64, to_u64};
+use crate::db::{
+    Db, conflict, cursor, json, not_found, page_limit, paged, scope_key, sql, to_i64, to_u64,
+};
+use crate::purge::guard;
+use crate::puts;
 use crate::seam;
 
 /// `UploadStore` over the records database and the blob store.
@@ -169,6 +181,32 @@ impl SqliteUploads {
             .await
     }
 
+    async fn discard_slot(
+        &self,
+        scope: &StorageScope,
+        upload: UploadId,
+        mutation: MutationId,
+    ) -> Result<UploadRecord, ApiError> {
+        guard::refuse_scope(&self.db, scope).await?;
+        let writing = self.writers.claim(upload)?;
+        let (tenant, workspace) = scope_key(scope);
+        let directory = self.directory.clone();
+        self.db
+            .call(move |connection| {
+                // This worker, not its awaiting async caller, keeps the claim until both the
+                // commit and unlink have finished. An aborted request cannot free it early.
+                let _writing = writing;
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(|error| sql(&error))?;
+                let prior = discard_record(&transaction, &tenant, &workspace, upload, mutation)?;
+                transaction.commit().map_err(|error| sql(&error))?;
+                remove_discarded_parts(&directory, upload)?;
+                Ok(prior)
+            })
+            .await
+    }
+
     async fn append(
         &self,
         scope: &StorageScope,
@@ -176,6 +214,7 @@ impl SqliteUploads {
         mut body: ByteReader,
         limit: u64,
     ) -> Result<UploadRecord, ApiError> {
+        guard::refuse_scope(&self.db, scope).await?;
         let _writing = self.writers.claim(upload)?;
         let record = self.reconciled(scope, upload).await?;
         if record.object.is_some() {
@@ -212,10 +251,12 @@ impl SqliteUploads {
                 .map_err(|error| io_error("write", &incoming, &error))?;
         }
         drop(file);
-        append_file(&incoming, &self.part(upload))?;
+        let part = self.part(upload);
+        append_file(&incoming, &part)?;
         let _ = std::fs::remove_file(&incoming);
         let (tenant, workspace) = scope_key(scope);
-        self.db
+        let recorded = self
+            .db
             .transaction(move |transaction| {
                 transaction
                     .execute(
@@ -223,9 +264,28 @@ impl SqliteUploads {
                         params![to_i64(total)?, upload.0.to_string()],
                     )
                     .map_err(|error| sql(&error))?;
+                guard::refuse(transaction, &tenant, &workspace)?;
                 read(transaction, &tenant, &workspace, upload)?.ok_or_else(|| not_found("upload"))
             })
-            .await
+            .await;
+        // A purge recorded while the body arrived refuses the count; the part file this call
+        // appended to may have been recreated after the purge removed the workspace's upload
+        // files, so it is removed here. Any other failure keeps it: a resumed transfer
+        // reconciles the count from the file.
+        if let Err(error) = &recorded
+            && guard::is_refusal(error)
+        {
+            std::fs::remove_file(&part)
+                .or_else(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        Ok(())
+                    } else {
+                        Err(error)
+                    }
+                })
+                .map_err(|error| io_error("remove", &part, &error))?;
+        }
+        recorded
     }
 
     async fn finish(
@@ -234,28 +294,35 @@ impl SqliteUploads {
         upload: UploadId,
         sha256: Digest,
     ) -> Result<UploadRecord, ApiError> {
+        // Refused with the purge's `Conflict` before anything is read, during a purge and after
+        // it completed (when the upload's row is gone); checked again by the put before the
+        // part is read, after its pin is taken, and inside the record's transaction.
+        guard::refuse_scope(&self.db, scope).await?;
         let _writing = self.writers.claim(upload)?;
         let record = self.reconciled(scope, upload).await?;
         if let Some(object) = &record.object {
             if object.digest == sha256 {
                 return Ok(record);
             }
-            return Err(conflict("this upload was completed with another digest"));
+            return Err(conflict("this upload was completed with another digest")
+                .with_detail(mismatch(&record, Some(false))));
         }
         if record.received_bytes != record.expected_size {
             return Err(conflict(format!(
                 "received {} bytes of the {} announced",
                 record.received_bytes, record.expected_size
-            )));
+            ))
+            .with_detail(mismatch(&record, None)));
         }
         if record
             .expected_sha256
             .as_ref()
             .is_some_and(|announced| *announced != sha256)
         {
-            return Err(conflict(
-                "the digest differs from the one announced for this upload",
-            ));
+            return Err(
+                conflict("the digest differs from the one announced for this upload")
+                    .with_detail(mismatch(&record, Some(false))),
+            );
         }
         let part = self.part(upload);
         let body = if record.expected_size == 0 {
@@ -263,14 +330,30 @@ impl SqliteUploads {
         } else {
             file_reader(Some(part.clone()), 0, record.expected_size)
         };
-        let object = self
+        // Pinned until this write ends, and recorded as a pending put until the upload's record
+        // names the object; a failed record write leaves the pending put, so a purge of the
+        // workspace deletes the bytes.
+        // The store refuses bytes whose digest is not `sha256` with `Conflict`, retaining nothing:
+        // every byte was received, and the digest does not match.
+        let (object, pinned) = self
             .blobs
-            .put_for(&scope.tenant_id, body, record.expected_size, Some(sha256))
-            .await?;
+            .put_pinned(scope, body, record.expected_size, Some(sha256))
+            .await
+            .map_err(|error| {
+                if error.code == ErrorCode::Conflict && error.detail.is_none() {
+                    error.with_detail(mismatch(&record, Some(false)))
+                } else {
+                    error
+                }
+            })?;
         let (tenant, workspace) = scope_key(scope);
         let stored = self
             .db
             .transaction(move |transaction| {
+                // Checked first, so a purge recorded before the transaction began refuses the
+                // record with the purge's `Conflict` also once the purge's rows step removed this
+                // upload's row (which the read below would otherwise answer as not found).
+                guard::refuse(transaction, &tenant, &workspace)?;
                 transaction
                     .execute(
                         "UPDATE uploads SET object_digest = ?1, object_size = ?2
@@ -282,15 +365,36 @@ impl SqliteUploads {
                         ],
                     )
                     .map_err(|error| sql(&error))?;
-                read(transaction, &tenant, &workspace, upload)?.ok_or_else(|| not_found("upload"))
+                let stored = read(transaction, &tenant, &workspace, upload)?
+                    .ok_or_else(|| not_found("upload"))?;
+                // The stored record lands the object it names.
+                if let Some(named) = &stored.object {
+                    puts::land(transaction, &tenant, &workspace, [&named.digest])?;
+                }
+                // And last, so nothing written in the transaction itself before it lets a
+                // purge through (`purge::guard`).
+                guard::refuse(transaction, &tenant, &workspace)?;
+                Ok(stored)
             })
-            .await?;
+            .await;
+        // The write ends only now that the transaction has ended, committed or rolled back.
+        pinned.end()?;
+        let stored = stored?;
         let _ = std::fs::remove_file(&part);
         Ok(stored)
     }
 }
 
 impl UploadStore for SqliteUploads {
+    fn discard<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        upload: UploadId,
+        mutation_id: MutationId,
+    ) -> PortFuture<'a, UploadRecord> {
+        Box::pin(self.discard_slot(scope, upload, mutation_id))
+    }
+
     fn create<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -299,6 +403,17 @@ impl UploadStore for SqliteUploads {
     ) -> PortFuture<'a, UploadRecord> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
+            guard::refuse(transaction, &tenant, &workspace)?;
+            let discarded: bool = transaction
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM discarded_uploads WHERE created_by = ?1)",
+                    [mutation_id.0.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(|error| sql(&error))?;
+            if discarded {
+                return Err(conflict("the slot this request opened was discarded"));
+            }
             let id: UploadId = new_id!()?;
             transaction
                 .execute(
@@ -346,6 +461,55 @@ impl UploadStore for SqliteUploads {
         Box::pin(self.look(scope, upload))
     }
 
+    fn list<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        query: UploadQuery,
+    ) -> PortFuture<'a, UploadPage> {
+        let (tenant, workspace) = scope_key(scope);
+        Box::pin(self.db.call(move |connection| {
+            let after = cursor(query.page.cursor.as_deref())?;
+            let limit = page_limit(query.page.limit);
+            // Newest first by the row's insertion order; the cursor is the last row's `rowid`.
+            let state = match query.state {
+                None => "1",
+                Some(UploadListState::Incomplete) => "object_digest IS NULL",
+                Some(UploadListState::Waiting) => {
+                    "object_digest IS NOT NULL AND consumed_by IS NULL"
+                }
+                Some(UploadListState::Consumed) => "consumed_by IS NOT NULL",
+            };
+            let rows: Vec<(i64, String)> = {
+                let mut statement = connection
+                    .prepare(&format!(
+                        "SELECT rowid, upload_id FROM uploads
+                         WHERE tenant_id = ?1 AND workspace_id = ?2 AND (?3 IS NULL OR rowid < ?3)
+                             AND {state}
+                         ORDER BY rowid DESC LIMIT ?4"
+                    ))
+                    .map_err(|error| sql(&error))?;
+                statement
+                    .query_map(
+                        params![tenant, workspace, after, limit.saturating_add(1)],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(|error| sql(&error))?
+                    .collect::<Result<_, _>>()
+                    .map_err(|error| sql(&error))?
+            };
+            let (ids, next_cursor) = paged(rows, limit);
+            let mut items = Vec::with_capacity(ids.len());
+            for id in ids {
+                let upload: UploadId = from_text!(id.as_str())?;
+                items.push(
+                    read(connection, &tenant, &workspace, upload)?
+                        .ok_or_else(|| not_found("upload"))?,
+                );
+            }
+            Ok(UploadPage { items, next_cursor })
+        }))
+    }
+
     fn put_content<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -373,6 +537,10 @@ impl UploadStore for SqliteUploads {
     ) -> PortFuture<'a, UploadRecord> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
+            // The purge refusal the batch applies, in the transaction of the read and the
+            // mark and before either: an upload of a purged workspace is refused naming the
+            // purge, never marked and never answered `NotFound` for the row the purge removed.
+            guard::refuse(transaction, &tenant, &workspace)?;
             let record = read(transaction, &tenant, &workspace, upload)?
                 .ok_or_else(|| not_found("upload"))?;
             if record.object.is_none() {
@@ -399,6 +567,134 @@ impl UploadStore for SqliteUploads {
             }
         }))
     }
+
+    /// One immediate transaction: the purge refusal, then every upload read and checked in the
+    /// order given, and only then every one not yet `job`'s marked. A refusal returns before
+    /// the first mark, so a refused batch has written nothing whether or not the transaction is
+    /// rolled back.
+    fn consume_batch<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        uploads: &'a [UploadId],
+        job: JobId,
+    ) -> PortFuture<'a, Vec<UploadRecord>> {
+        let (tenant, workspace) = scope_key(scope);
+        let uploads = uploads.to_vec();
+        Box::pin(self.db.transaction(move |transaction| {
+            // Checked first, so a batch after the purge's rows step is refused naming the
+            // purge and not answered `NotFound` for the rows that step removed.
+            guard::refuse(transaction, &tenant, &workspace)?;
+            let mut records = Vec::with_capacity(uploads.len());
+            for upload in &uploads {
+                let record = read(transaction, &tenant, &workspace, *upload)?
+                    .ok_or_else(|| not_found("upload"))?;
+                if record.object.is_none() {
+                    return Err(ApiError::new(
+                        ErrorCode::InvalidInput,
+                        format!(
+                            "upload {} is not complete; no upload of the batch was taken",
+                            upload.0
+                        ),
+                    ));
+                }
+                if record.consumed_by.is_some_and(|consumer| consumer != job) {
+                    return Err(conflict(format!(
+                        "upload {} was already taken by another job; no upload of the batch \
+                         was taken",
+                        upload.0
+                    )));
+                }
+                records.push(record);
+            }
+            for record in &mut records {
+                if record.consumed_by.is_none() {
+                    transaction
+                        .execute(
+                            "UPDATE uploads SET consumed_by = ?1 WHERE upload_id = ?2",
+                            params![job.0.to_string(), record.id.0.to_string()],
+                        )
+                        .map_err(|error| sql(&error))?;
+                    record.consumed_by = Some(job);
+                }
+            }
+            Ok(records)
+        }))
+    }
+}
+
+/// Replace a slot with its replay occurrence atomically with purge/job-reservation checks.
+fn discard_record(
+    connection: &Connection,
+    tenant: &str,
+    workspace: &str,
+    upload: UploadId,
+    mutation: MutationId,
+) -> Result<UploadRecord, ApiError> {
+    guard::refuse(connection, tenant, workspace)?;
+    let prior = read_record(
+        connection,
+        "SELECT upload_id, filename, relative_path, expected_size, expected_sha256,
+             supplied_by, created_at, received_bytes, object_digest, object_size, NULL
+         FROM discarded_uploads WHERE mutation_id = ?1 AND tenant_id = ?2 AND workspace_id = ?3",
+        params![mutation.0.to_string(), tenant, workspace],
+    )?;
+    if let Some(prior) = prior {
+        return if prior.id == upload {
+            Ok(prior)
+        } else {
+            Err(conflict("this mutation discarded another upload"))
+        };
+    }
+    let record = read(connection, tenant, workspace, upload)?.ok_or_else(|| not_found("upload"))?;
+    if let Some(job) = record.consumed_by {
+        return Err(conflict(format!(
+            "a job took this upload (job {}); it cannot be discarded",
+            job.0
+        )));
+    }
+    let reservation: Option<String> = connection
+        .query_row(
+            "SELECT job_id FROM jobs WHERE tenant_id = ?1 AND workspace_id = ?2
+             AND state IN ('queued', 'running')
+             AND (json_extract(spec, '$.upload_id') = ?3
+                  OR EXISTS (SELECT 1 FROM json_each(spec, '$.upload_ids') WHERE value = ?3))
+             ORDER BY rowid LIMIT 1",
+            params![tenant, workspace, upload.0.to_string()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| sql(&error))?;
+    if let Some(job) = reservation {
+        return Err(conflict(format!(
+            "a queued or running job reserves this upload (job {job}); it cannot be discarded"
+        )));
+    }
+    connection
+        .execute(
+            "INSERT INTO discarded_uploads (
+                 upload_id, tenant_id, workspace_id, mutation_id, created_by, discarded_at,
+                 filename, relative_path, expected_size, expected_sha256, supplied_by, created_at,
+                 received_bytes, object_digest, object_size)
+             SELECT upload_id, tenant_id, workspace_id, ?2, mutation_id, ?3,
+                 filename, relative_path, expected_size, expected_sha256, supplied_by, created_at,
+                 received_bytes, object_digest, object_size
+             FROM uploads WHERE upload_id = ?1 AND tenant_id = ?4 AND workspace_id = ?5",
+            params![
+                upload.0.to_string(),
+                mutation.0.to_string(),
+                seam::now()?.as_str(),
+                tenant,
+                workspace
+            ],
+        )
+        .map_err(|error| sql(&error))?;
+    connection
+        .execute(
+            "DELETE FROM uploads WHERE upload_id = ?1 AND tenant_id = ?2 AND workspace_id = ?3",
+            params![upload.0.to_string(), tenant, workspace],
+        )
+        .map_err(|error| sql(&error))?;
+    Ok(record)
 }
 
 fn read(
@@ -407,32 +703,41 @@ fn read(
     workspace: &str,
     upload: UploadId,
 ) -> Result<Option<UploadRecord>, ApiError> {
-    let found = connection
-        .query_row(
-            "SELECT upload_id, filename, relative_path, expected_size, expected_sha256,
+    read_record(
+        connection,
+        "SELECT upload_id, filename, relative_path, expected_size, expected_sha256,
                  supplied_by, created_at, received_bytes, object_digest, object_size, consumed_by
-             FROM uploads WHERE upload_id = ?1 AND tenant_id = ?2 AND workspace_id = ?3",
-            params![upload.0.to_string(), tenant, workspace],
-            |row| {
-                Ok((
-                    (
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, String>(5)?,
-                    ),
-                    (
-                        row.get::<_, String>(6)?,
-                        row.get::<_, i64>(7)?,
-                        row.get::<_, Option<String>>(8)?,
-                        row.get::<_, Option<i64>>(9)?,
-                        row.get::<_, Option<String>>(10)?,
-                    ),
-                ))
-            },
-        )
+         FROM uploads WHERE upload_id = ?1 AND tenant_id = ?2 AND workspace_id = ?3",
+        params![upload.0.to_string(), tenant, workspace],
+    )
+}
+
+/// Decode the same preserved occurrence from either the live row or its discard tombstone.
+fn read_record(
+    connection: &Connection,
+    query: &str,
+    parameters: impl rusqlite::Params,
+) -> Result<Option<UploadRecord>, ApiError> {
+    let found = connection
+        .query_row(query, parameters, |row| {
+            Ok((
+                (
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                ),
+                (
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                ),
+            ))
+        })
         .optional()
         .map_err(|error| sql(&error))?;
     let Some((
@@ -467,6 +772,19 @@ fn read(
     }))
 }
 
+/// Missing files are already cleaned; every other unlink failure must remain retryable.
+fn remove_discarded_parts(directory: &std::path::Path, upload: UploadId) -> Result<(), ApiError> {
+    for extension in ["part", "incoming"] {
+        let path = directory.join(format!("{}.{extension}", upload.0));
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error("remove", &path, &error)),
+        }
+    }
+    Ok(())
+}
+
 /// Append the whole of `from` to `to`, creating `to` when absent, and sync it.
 fn append_file(from: &std::path::Path, to: &std::path::Path) -> Result<(), ApiError> {
     let mut source = std::fs::File::open(from).map_err(|error| io_error("read", from, &error))?;
@@ -490,4 +808,15 @@ fn append_file(from: &std::path::Path, to: &std::path::Path) -> Result<(), ApiEr
     target
         .sync_all()
         .map_err(|error| io_error("sync", to, &error))
+}
+
+/// The typed detail of a completion refused because the upload's bytes do not match what was
+/// announced: both lengths, and whether the digest matched (`None` when the length already
+/// differs, so the digest was not compared).
+fn mismatch(record: &UploadRecord, digest_matches: Option<bool>) -> ErrorDetail {
+    ErrorDetail::UploadMismatch {
+        expected_bytes: record.expected_size.to_string(),
+        received_bytes: record.received_bytes.to_string(),
+        digest_matches,
+    }
 }

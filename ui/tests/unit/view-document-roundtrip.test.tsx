@@ -7,7 +7,15 @@
  * real render of that data produces: a row's cells, a chart mark per row, the source's words.
  */
 
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+  RouterProvider,
+} from '@tanstack/react-router';
 import { render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import type { ReactNode } from 'react';
 import type { TopLevelSpec } from 'vega-lite';
 import { describe, expect, it } from 'vitest';
 import metricsDatasetFixture from '../../../tests/fixtures/views/present-metrics.dataset.json';
@@ -21,10 +29,16 @@ import {
   zReadItemResponse,
   zViewDocument,
 } from '../../src/api/generated/zod.gen';
-import { BindingsContext, type ResolvedPresentation } from '../../src/features/views/Bindings';
+import {
+  BindingsContext,
+  type ResolvedPresentation,
+  type SourceLink,
+} from '../../src/features/views/Bindings';
 import { Layout, prepareSpec } from '../../src/features/views/Layout';
 import { datasetRecords, PresentView, parseDataset } from '../../src/features/views/PresentView';
-import { SavedView } from '../../src/features/views/SavedView';
+import { SavedView, type SavedViewProps } from '../../src/features/views/SavedView';
+import { parseViewFile } from '../../src/features/views/view-file';
+import { serverToolData } from '../../src/mcp-apps/view-data';
 
 /** The source the committed dataset cites, as the generated schema reads it. */
 const fixtureSource = zDataset.parse(metricsDatasetFixture).source;
@@ -168,7 +182,9 @@ describe('ViewDocument json-render round-trip', { timeout: TEST_TIMEOUT_MS }, ()
     // SourceExcerpt: the path and revision of the source it was given, and its words as rendered Markdown.
     expect(only('header strong', excerpt).textContent).toBe('fixtures/qualification-source.md');
     expect(only('header code', excerpt).textContent).toBe(source.source.revision);
-    expect(only('h1', excerpt).textContent).toBe('Qualification source');
+    // Under the Stack's h2, the source's `#` is an h3: the page's outline skips no level.
+    expect(only('h3', excerpt).textContent).toBe('Qualification source');
+    expect(excerpt.querySelector('h1, h2')).toBeNull();
     expect(only('p', excerpt).textContent).toBe(
       'Contract-valid ReadItemResponse fixture for the MCP Apps harness.',
     );
@@ -246,10 +262,10 @@ describe('the Dataset the views read', () => {
         },
       ],
     });
-    const callTool = async () => ({
+    const data = serverToolData(async () => ({
       structuredContent: zReadItemResponse.parse(sourceReadItemFixture),
-    });
-    render(<PresentView response={refused} callTool={callTool} />);
+    }));
+    render(<PresentView response={refused} data={data} />);
     await waitFor(() =>
       expect(screen.getByRole('alert').textContent).toBe(`Dataset unavailable: ${message}`),
     );
@@ -300,11 +316,13 @@ async function presentMany(datasets: Record<string, unknown>) {
   fixture.charts = [
     {
       chart: { kind: 'named', name: 'metrics_chart' },
-      status: { status: 'ready', bindings: Object.keys(datasets) },
+      // What the server reports: the chart's spec reads `metrics` alone, whichever binding a
+      // component showing it cites.
+      status: { status: 'ready', bindings: ['metrics'] },
     },
   ];
   const response = zPresentResponse.parse(fixture);
-  const callTool = async (name: string, input: Record<string, unknown>) => {
+  const data = serverToolData(async ({ name, arguments: input }) => {
     if (name === 'show')
       return { structuredContent: zReadItemResponse.parse(sourceReadItemFixture) };
     const binary = served.get(String(input.object)) ?? '';
@@ -318,8 +336,8 @@ async function presentMany(datasets: Record<string, unknown>) {
         total_size: String(binary.length),
       },
     };
-  };
-  return render(<PresentView response={response} callTool={callTool} />);
+  });
+  return render(<PresentView response={response} data={data} />);
 }
 
 /** PresentView resolving one dataset behind `metrics`. */
@@ -516,9 +534,22 @@ describe('a dataset read from another source than its binding cites is stale', (
   });
 });
 
+/** A failure notice's way home is a router link, so a refusal that offers one renders in a router. */
+async function routed(element: ReactNode) {
+  const router = createRouter({
+    routeTree: createRootRoute({ component: () => element }),
+    history: createMemoryHistory({ initialEntries: ['/somewhere'] }),
+  });
+  render(<RouterProvider router={router} />);
+  await screen.findByRole('alert');
+}
+
 describe('a saved View reopens with the server as the source of truth', () => {
   const saved = zPresentResponse.parse(presentResponseFixture);
-  const noTools = async () => ({ isError: true, content: [{ type: 'text', text: 'no host' }] });
+  const noTools = serverToolData(async () => ({
+    isError: true,
+    content: [{ type: 'text', text: 'no host' }],
+  }));
 
   /** The generated client, with only its transport replaced: what resolve-view answers, and what it was asked. */
   function server(status: number, body: unknown) {
@@ -543,20 +574,65 @@ describe('a saved View reopens with the server as the source of truth', () => {
   const ids = {
     workspaceId: 'aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff',
     itemId: '11111111-2222-4333-8444-555555555555',
-  };
+    at: { kind: 'revision', revision: '0123456789abcdef0123456789abcdef01234567' },
+  } satisfies Partial<SavedViewProps>;
 
-  it('asks the server to resolve the pinned View, never to refresh it', async () => {
+  it('asks the server to resolve the View at the revision its caller pins, never to refresh it', async () => {
     const { client, asked } = server(200, { ...saved, resolved_bindings: [] });
-    render(<SavedView {...ids} callTool={noTools} client={client} />);
+    render(<SavedView {...ids} data={noTools} client={client} />);
     expect(await screen.findByRole('heading', { name: 'Six-component catalog' })).toBeTruthy();
     expect(asked).toHaveLength(1);
     expect(asked[0]?.url).toBe('http://okf.test/api/views/resolve-view');
     expect(asked[0]?.body).toEqual({
       workspace_id: ids.workspaceId,
       item_id: ids.itemId,
-      at: { kind: 'latest' },
+      at: ids.at,
       refresh_live: false,
     });
+  });
+
+  it('asks again at the revision its caller pins next, and never shows the earlier answer', async () => {
+    const later = {
+      kind: 'revision',
+      revision: '89abcdef0123456789abcdef0123456789abcdef',
+    } as const;
+    const asked: unknown[] = [];
+    const client = createClient({
+      baseUrl: 'http://okf.test',
+      fetch: Object.assign(
+        async (input: URL | RequestInfo, init?: RequestInit) => {
+          const body = (await new Request(input, init).json()) as { at: { revision: string } };
+          asked.push(body.at);
+          const title = `Board at ${body.at.revision.slice(0, 7)}`;
+          const spec = {
+            root: 'root',
+            elements: { root: { type: 'Stack', props: { title }, children: [] } },
+          };
+          return new Response(
+            JSON.stringify({ ...saved, view: { ...saved.view, spec }, resolved_bindings: [] }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        },
+        { preconnect: () => {} },
+      ),
+    });
+    const view = render(<SavedView {...ids} data={noTools} client={client} />);
+    expect(await screen.findByRole('heading', { name: 'Board at 0123456' })).toBeTruthy();
+    view.rerender(<SavedView {...ids} at={later} data={noTools} client={client} />);
+    expect(screen.queryByRole('heading', { name: 'Board at 0123456' })).toBeNull();
+    expect(await screen.findByRole('heading', { name: 'Board at 89abcde' })).toBeTruthy();
+    expect(asked).toEqual([ids.at, later]);
+  });
+
+  it('asks once for a selector its caller gives again as a new object of the same value', async () => {
+    const { client, asked } = server(200, { ...saved, resolved_bindings: [] });
+    const view = render(<SavedView {...ids} at={{ ...ids.at }} data={noTools} client={client} />);
+    expect(await screen.findByRole('heading', { name: 'Six-component catalog' })).toBeTruthy();
+    view.rerender(<SavedView {...ids} at={{ ...ids.at }} data={noTools} client={client} />);
+    view.rerender(<SavedView {...ids} at={{ ...ids.at }} data={noTools} client={client} />);
+    await new Promise((done) => setTimeout(done, 50));
+    expect(asked).toHaveLength(1);
+    expect(screen.getByRole('heading', { name: 'Six-component catalog' })).toBeTruthy();
   });
 
   it("shows the server's failed chart status as that chart's alert, beside the View's text", async () => {
@@ -571,7 +647,7 @@ describe('a saved View reopens with the server as the source of truth', () => {
       ],
     };
     const { client } = server(200, diagnosed);
-    render(<SavedView {...ids} callTool={noTools} client={client} />);
+    render(<SavedView {...ids} data={noTools} client={client} />);
     expect(await screen.findByRole('heading', { name: 'Six-component catalog' })).toBeTruthy();
     const chart = screen.getByRole('heading', { name: 'Metrics chart' }).closest('section');
     expect(chart?.querySelector('[role="alert"]')?.textContent).toBe(
@@ -579,31 +655,85 @@ describe('a saved View reopens with the server as the source of truth', () => {
     );
   });
 
-  it("shows the server's refusal as the reopen's alert, with its own message", async () => {
+  it("shows the server's refusal in the standing failure notice, with its own message", async () => {
     const { client } = server(404, {
       code: 'not_found',
       message: 'no saved View at that item',
     });
-    render(<SavedView {...ids} callTool={noTools} client={client} />);
-    expect((await screen.findByRole('alert')).textContent).toBe('no saved View at that item');
+    await routed(<SavedView {...ids} data={noTools} client={client} />);
+    const alert = await screen.findByRole('alert');
+    expect(within(alert).getByText('Reopening this View: This could not be found.')).toBeTruthy();
+    expect(alert.textContent).toContain('The service said: no saved View at that item');
+    // A View that is not there offers the way back to its workspace, not a retry.
+    expect(within(alert).getByRole('link', { name: 'Go to this workspace' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
   });
 
   it('refuses a body the generated schema does not read, rather than drawing it', async () => {
     const { client } = server(200, { view: 'not a view' });
-    render(<SavedView {...ids} callTool={noTools} client={client} />);
-    expect((await screen.findByRole('alert')).textContent).toBe(
-      'The server returned a View this client cannot read.',
-    );
+    render(<SavedView {...ids} data={noTools} client={client} />);
+    const alert = await screen.findByRole('alert');
+    expect(
+      within(alert).getByText(
+        'Reopening this View: The server returned a View this client cannot read.',
+      ),
+    ).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Six-component catalog' })).toBeNull();
+  });
+
+  it('offers a retry that keeps the notice until the View answers, then moves focus to it', async () => {
+    const asked: unknown[] = [];
+    const answers = [
+      { status: 500, body: { code: 'internal', message: 'the store was busy' } },
+      { status: 200, body: { ...saved, resolved_bindings: [] } },
+    ];
+    const client = createClient({
+      baseUrl: 'http://okf.test',
+      fetch: Object.assign(
+        async (input: URL | RequestInfo, init?: RequestInit) => {
+          asked.push(await new Request(input, init).json());
+          const { status, body } = answers[Math.min(asked.length, answers.length) - 1] ?? {
+            status: 500,
+            body: {},
+          };
+          return new Response(JSON.stringify(body), {
+            status,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        },
+        { preconnect: () => {} },
+      ),
+    });
+    render(<SavedView {...ids} data={noTools} client={client} />);
+    const alert = await screen.findByRole('alert');
+    expect(
+      within(alert).getByText('Reopening this View: Something went wrong in the service.'),
+    ).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    const title = await screen.findByRole('heading', { name: 'Six-component catalog view' });
+    expect(asked).toHaveLength(2);
+    expect(asked.at(1)).toEqual(asked.at(0));
+    // The notice is gone (the View's own alerts for its unread sources are another matter).
+    expect(screen.queryByText(/^Reopening this View:/)).toBeNull();
+    // Keyboard focus was on the retry button; it is now on the View that took the notice's place.
+    const focused = document.activeElement;
+    expect(focused).not.toBe(document.body);
+    expect(focused?.contains(title)).toBe(true);
   });
 });
 
 describe('a saved View follows the ids it was asked for', () => {
   const saved = zPresentResponse.parse(presentResponseFixture);
-  const noTools = async () => ({ isError: true, content: [{ type: 'text', text: 'no host' }] });
+  const noTools = serverToolData(async () => ({
+    isError: true,
+    content: [{ type: 'text', text: 'no host' }],
+  }));
   const first = {
     workspaceId: 'aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff',
     itemId: '11111111-2222-4333-8444-555555555555',
-  };
+    at: { kind: 'latest' },
+  } satisfies Partial<SavedViewProps>;
   const second = { ...first, itemId: '99999999-2222-4333-8444-555555555555' };
 
   /** A client whose answer for each item is released by the test, so a request can stay pending. */
@@ -619,7 +749,7 @@ describe('a saved View follows the ids it was asked for', () => {
             root: 'root',
             elements: { root: { type: 'Stack', props: { title }, children: [] } },
           };
-          const view = { ...saved.view, title, spec };
+          const view = { ...saved.view, title: `View: ${title}`, spec };
           return new Response(JSON.stringify({ ...saved, view, resolved_bindings: [] }), {
             status: 200,
             headers: { 'Content-Type': 'application/json' },
@@ -637,19 +767,19 @@ describe('a saved View follows the ids it was asked for', () => {
 
   it('stops showing the previous View at once when the ids change, while the new one is pending', async () => {
     const { client, release } = gated();
-    const view = render(<SavedView {...first} callTool={noTools} client={client} />);
+    const view = render(<SavedView {...first} data={noTools} client={client} />);
     (await released(release, first.itemId))('Board of the first');
     expect(await screen.findByRole('heading', { name: 'Board of the first' })).toBeTruthy();
-    view.rerender(<SavedView {...second} callTool={noTools} client={client} />);
+    view.rerender(<SavedView {...second} data={noTools} client={client} />);
     expect(screen.queryByRole('heading', { name: 'Board of the first' })).toBeNull();
     expect(screen.getByRole('status').textContent).toMatch(/Reopening/);
   });
 
   it('never renders a late answer for ids that are no longer asked for', async () => {
     const { client, release } = gated();
-    const view = render(<SavedView {...first} callTool={noTools} client={client} />);
+    const view = render(<SavedView {...first} data={noTools} client={client} />);
     const lateFirst = await released(release, first.itemId);
-    view.rerender(<SavedView {...second} callTool={noTools} client={client} />);
+    view.rerender(<SavedView {...second} data={noTools} client={client} />);
     (await released(release, second.itemId))('Board of the second');
     expect(await screen.findByRole('heading', { name: 'Board of the second' })).toBeTruthy();
     lateFirst('Board of the first');
@@ -658,24 +788,516 @@ describe('a saved View follows the ids it was asked for', () => {
     expect(screen.getByRole('heading', { name: 'Board of the second' })).toBeTruthy();
   });
 
-  it('shows a fixed sentence when the refusal has no message', async () => {
-    for (const body of [{ code: 'not_found' }, { code: 'not_found', message: '  ' }]) {
-      const client = createClient({
-        baseUrl: 'http://okf.test',
-        fetch: Object.assign(
-          async () =>
-            new Response(JSON.stringify(body), {
-              status: 404,
-              headers: { 'Content-Type': 'application/json' },
-            }),
-          { preconnect: () => {} },
-        ),
-      });
-      const view = render(<SavedView {...first} callTool={noTools} client={client} />);
-      expect((await screen.findByRole('alert')).textContent).toBe(
-        'The server refused to open the View.',
-      );
-      view.unmount();
+  /** A client whose every answer is a 404 with this body. */
+  const refusingWith = (body: unknown) =>
+    createClient({
+      baseUrl: 'http://okf.test',
+      fetch: Object.assign(
+        async () =>
+          new Response(JSON.stringify(body), {
+            status: 404,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        { preconnect: () => {} },
+      ),
+    });
+
+  it('shows a fixed sentence when the refusal is not an error the service describes', async () => {
+    const view = render(
+      <SavedView {...first} data={noTools} client={refusingWith({ code: 'not_found' })} />,
+    );
+    const alert = await screen.findByRole('alert');
+    expect(
+      within(alert).getByText('Reopening this View: The server refused to open the View.'),
+    ).toBeTruthy();
+    expect(alert.textContent).not.toContain('The service said');
+    view.unmount();
+  });
+
+  it("shows the code's own words, and no empty quotation, when the service's message is blank", async () => {
+    await routed(
+      <SavedView
+        {...first}
+        data={noTools}
+        client={refusingWith({ code: 'not_found', message: '  ' })}
+      />,
+    );
+    const alert = await screen.findByRole('alert');
+    expect(within(alert).getByText('Reopening this View: This could not be found.')).toBeTruthy();
+    expect(alert.textContent).not.toContain('The service said');
+  });
+});
+
+describe('a View says how its data was read, under it', () => {
+  const presented = zPresentResponse.parse(presentResponseFixture);
+  const refusing = serverToolData(async () => ({
+    isError: true,
+    content: [{ type: 'text', text: 'not read here' }],
+  }));
+  const revision = presented.resolved_bindings[0]?.source.revision ?? '';
+
+  async function regionOf(response: typeof presented) {
+    render(<PresentView response={response} data={refusing} />);
+    return screen.findByRole('region', { name: "Where this View's data comes from" });
+  }
+  const texts = (nodes: HTMLElement[]) => nodes.map((node) => node.textContent);
+
+  it('names each source and the revision it is shown at, for a pinned View', async () => {
+    const region = await regionOf(presented);
+    expect(within(region).getByText(/^Pinned:/).textContent).toBe(
+      'Pinned: each source is shown at the revision this View cites, and does not refresh.',
+    );
+    const read = within(region).getByRole('list', { name: 'Sources read' });
+    expect(texts(within(read).getAllByRole('listitem'))).toEqual([
+      `venue: fixtures/qualification-source.md at revision ${revision}`,
+      `metrics: fixtures/qualification-metrics.json at revision ${revision}`,
+    ]);
+    // A pinned View names no as-of time: its inputs are the cited revisions.
+    expect(region.querySelector('time')).toBeNull();
+    expect(within(region).queryByRole('list', { name: 'Warnings' })).toBeNull();
+  });
+
+  it('names the as-of time and each resolved revision, for a live View', async () => {
+    const later = '89abcdef0123456789abcdef0123456789abcdef';
+    const live = {
+      ...presented,
+      view: { ...presented.view, mode: 'live' as const },
+      resolved_bindings: presented.resolved_bindings.map((binding) => ({
+        ...binding,
+        source: { ...binding.source, revision: later },
+      })),
+      as_of: '2026-10-05T12:00:00.000Z',
+    };
+    const region = await regionOf(live);
+    const said = within(region).getByText(/^Live:/);
+    expect(said.textContent).toMatch(
+      /^Live: each source is shown at the revision it resolved to as of .+\.$/,
+    );
+    expect(said.querySelector('time')?.getAttribute('datetime')).toBe('2026-10-05T12:00:00.000Z');
+    const read = within(region).getByRole('list', { name: 'Sources read' });
+    expect(texts(within(read).getAllByRole('listitem'))).toEqual([
+      `venue: fixtures/qualification-source.md at revision ${later}`,
+      `metrics: fixtures/qualification-metrics.json at revision ${later}`,
+    ]);
+  });
+
+  it('shows every warning in plain words with the server message as sent, naming its binding by location', async () => {
+    const warned = {
+      ...presented,
+      warnings: [
+        {
+          code: 'dataset_unavailable',
+          message: 'binding metrics: no text',
+          location: '/bindings/1',
+        },
+        { code: 'newer_source', message: 'the head differs', location: '/bindings/0' },
+        { code: 'source_removed', message: 'the item is gone', location: '/bindings/1' },
+        { code: 'live_resolution', message: 'resolved at the current head' },
+        { code: 'unknown_unit', message: 'EUR names no column', location: '/bindings/1' },
+        { code: 'some_future_code', message: 'a new note', location: '/bindings/9' },
+      ],
+    };
+    const region = await regionOf(warned);
+    const warnings = within(region).getByRole('list', { name: 'Warnings' });
+    expect(texts(within(warnings).getAllByRole('listitem'))).toEqual([
+      'metrics: its data could not be read, so what draws from it is not shown. The server said: “binding metrics: no text”',
+      'venue: its source has changed since the revision this View cites. The View still shows that revision: newer data is an observation, not proof that the View is wrong. The server said: “the head differs”',
+      'metrics: its source is no longer in the workspace. The View still shows the revision it cites. The server said: “the item is gone”',
+      'This View: its sources were read as the workspace stands now, and a review never covers live data. The server said: “resolved at the current head”',
+      'metrics: a unit it declares names no column of its data. The server said: “EUR names no column”',
+      'This View (/bindings/9): the server noted “some_future_code”. The server said: “a new note”',
+    ]);
+  });
+});
+
+/**
+ * The one parser of a View file, against the examples of core M1.6's own reader
+ * (crates/core/src/views/layout.rs, PR #48 at 8ce63d81): the same files, the same refusals, the
+ * same JSON Pointers.
+ */
+describe('a View file reads as its title, its description and its one block', () => {
+  const workspace = 'aaaaaaaa-bbbb-4ccc-8ddd-000000000001';
+  const titled = { title: 'Pipeline throughput', type: 'Dashboard' };
+  const stored = () => ({
+    schema_version: 1,
+    mode: 'pinned',
+    grammar: 'json_render',
+    bindings: [
+      {
+        name: 'report',
+        source: {
+          item_id: '22222222-3333-4444-8555-666666666666',
+          path: 'reports/pipeline-pdf.md',
+          revision: '0123456789abcdef0123456789abcdef01234567',
+          digest: 'b'.repeat(64),
+          selection: { kind: 'pages', range: { start: 3, end: 3 } },
+        },
+        units: { Documents: 'count' },
+        transforms: [],
+      },
+      {
+        name: 'venue',
+        source: {
+          item_id: '11111111-2222-4333-8444-555555555555',
+          path: 'notes/venue.md',
+          revision: '0123456789abcdef0123456789abcdef01234567',
+          selection: { kind: 'all' },
+        },
+        units: {},
+        transforms: [],
+      },
+    ],
+    spec: { root: 'root', elements: {} },
+    charts: { stages: { data: { name: 'report' }, mark: 'bar' } },
+  });
+  const block = (value: unknown = stored()) => JSON.stringify(value, null, 2);
+  const body = (prose: string, text = block()) =>
+    `${prose}\`\`\`json okf-jawn-view\n${text}\n\`\`\`\n`;
+  const read = (text: string, properties: Record<string, unknown> = titled) =>
+    parseViewFile({ properties, body: text }, workspace);
+  /** The refusal of a file that must not read, or a failed expectation. */
+  function refusal(text: string, properties?: Record<string, unknown>) {
+    const result = read(text, properties);
+    if (result.ok) throw new Error('the file read as a View');
+    return result;
+  }
+  /** The stored block with its first binding (or that binding's source) edited. */
+  function edited(
+    change: (binding: Record<string, unknown>, source: Record<string, unknown>) => void,
+  ) {
+    const value = stored();
+    const binding = value.bindings[0] as unknown as Record<string, unknown>;
+    change(binding, binding.source as Record<string, unknown>);
+    return body('', block(value));
+  }
+
+  it('reads the title property, the prose before the block and the block, in the given workspace', () => {
+    const result = read(body('Two lines\nof prose\n\n\n'));
+    if (!result.ok) throw new Error(result.message);
+    expect(zViewDocument.parse(result.document)).toStrictEqual(result.document);
+    expect(result.document.title).toBe('Pipeline throughput');
+    expect(result.document.description).toBe('Two lines\nof prose');
+    expect(result.document.bindings.map((binding) => binding.source.workspace_id)).toEqual([
+      workspace,
+      workspace,
+    ]);
+    for (const binding of result.document.bindings) {
+      expect(Object.hasOwn(binding, 'materialized')).toBe(false);
+      expect(Object.hasOwn(binding.source, 'locations')).toBe(false);
     }
+    expect(result.document.bindings[0]?.source.digest).toBe('b'.repeat(64));
+    expect(Object.keys(result.document.charts ?? {})).toEqual(['stages']);
+    const bare = read(body(''));
+    expect(bare.ok && bare.document.description).toBe('');
+    // The same file in another workspace binds there and differs in nothing else.
+    const other = 'aaaaaaaa-bbbb-4ccc-8ddd-000000000002';
+    const elsewhere = parseViewFile(
+      { properties: titled, body: body('Two lines\nof prose\n\n\n') },
+      other,
+    );
+    if (!elsewhere.ok) throw new Error(elsewhere.message);
+    expect(
+      elsewhere.document.bindings.every((binding) => binding.source.workspace_id === other),
+    ).toBe(true);
+    expect(elsewhere.document.spec).toStrictEqual(result.document.spec);
+  });
+
+  it('reads a CRLF file as its LF spelling', () => {
+    const lf = body('Prose\n\n');
+    expect(read(lf.replaceAll('\n', '\r\n'))).toStrictEqual(read(lf));
+  });
+
+  it('keeps a fence of another info string in the prose as prose', () => {
+    const prose = 'An example:\n\n```js\nconsole.log(1);\n```\n\n';
+    const result = read(body(prose));
+    if (!result.ok) throw new Error(result.message);
+    expect(result.document.description).toBe('An example:\n\n```js\nconsole.log(1);\n```');
+  });
+
+  it('refuses a body without exactly one block that ends it', () => {
+    const one = body('');
+    expect(refusal('Only prose.\n')).toMatchObject({ problem: 'no_block', pointer: null });
+    expect(refusal('Only prose.\n').message).toMatch(/ends with one/);
+    const twice = refusal(`${one}\n${one}`);
+    expect(twice.problem).toBe('two_blocks');
+    expect(twice.message).toMatch(/2 okf-jawn-view blocks/);
+    const trailing = refusal(`${one}More prose.\n`);
+    expect(trailing.problem).toBe('not_last');
+    expect(trailing.message).toMatch(/must end the body/);
+    const open = refusal(`\`\`\`json okf-jawn-view\n${block()}\n`);
+    expect(open.problem).toBe('not_closed');
+    expect(open.message).toMatch(/not closed/);
+  });
+
+  it('reads only the exact opening line: a block of another info string is no View block', () => {
+    for (const marker of [
+      '```json',
+      '```JSON okf-jawn-view',
+      ' ```json okf-jawn-view',
+      '````json okf-jawn-view',
+      '~~~json okf-jawn-view',
+      '```json okf-jawn-view extra',
+    ]) {
+      const refused = refusal(`${marker}\n${block()}\n\`\`\`\n`);
+      expect(refused.problem, marker).toBe('no_block');
+    }
+  });
+
+  it('counts the marker quoted inside a fence of the prose as a second block', () => {
+    const quoted = refusal(body('~~~\n```json okf-jawn-view\n~~~\n\n'));
+    expect(quoted.problem).toBe('two_blocks');
+    expect(quoted.message).toMatch(/2 okf-jawn-view blocks/);
+  });
+
+  it('refuses a block that repeats a key, where it repeats', () => {
+    const top = block().replace('"mode": "pinned",', '"mode": "pinned",\n  "mode": "live",');
+    const repeated = refusal(body('', top));
+    expect(repeated).toMatchObject({ problem: 'repeated_key', pointer: null });
+    expect(repeated.message).toMatch(/`mode` is repeated/);
+    const inner = block().replace('"units": {}', '"units": { "a": "x", "a": "y" }');
+    expect(refusal(body('', inner))).toMatchObject({
+      problem: 'repeated_key',
+      pointer: '/bindings/1/units',
+    });
+  });
+
+  it("refuses JSON nested deeper than core reads as not JSON, at core's own limit, never throwing", () => {
+    // Core reads the block with serde_json, which refuses the 128th array or object nested in one
+    // another, the block's own object the first: core's `view_from` reads 127 and refuses 128 with
+    // "the View block is not JSON: recursion limit exceeded" and no field.
+    const nested = (depth: number) => {
+      // `spec` is the second level; the arrays in it are the rest.
+      const arrays = depth - 1;
+      const text = block({ ...stored(), spec: 'NESTED' }).replace(
+        '"NESTED"',
+        `${'['.repeat(arrays)}${']'.repeat(arrays)}`,
+      );
+      return body('', text);
+    };
+    expect(read(nested(127)).ok).toBe(true);
+    const refused = refusal(nested(128));
+    expect(refused).toMatchObject({ problem: 'not_json', pointer: null });
+    expect(refused.message).toMatch(/not JSON.*127/);
+    expect(refusal(nested(100_000))).toMatchObject({ problem: 'not_json', pointer: null });
+  });
+
+  it('refuses a derived field by name, and an unknown field, at its pointer', () => {
+    const named: Array<
+      [
+        string,
+        string,
+        RegExp,
+        (binding: Record<string, unknown>, source: Record<string, unknown>) => void,
+      ]
+    > = [
+      [
+        'workspace_id',
+        '/bindings/0/source/workspace_id',
+        /own workspace/,
+        (_, source) => {
+          source.workspace_id = [];
+        },
+      ],
+      [
+        'locations',
+        '/bindings/0/source/locations',
+        /derived/,
+        (_, source) => {
+          source.locations = [];
+        },
+      ],
+      [
+        'materialized',
+        '/bindings/0/materialized',
+        /resolved/,
+        (binding) => {
+          binding.materialized = [];
+        },
+      ],
+    ];
+    for (const [key, pointer, gist, change] of named) {
+      const refused = refusal(edited(change));
+      expect(refused, key).toMatchObject({ problem: 'schema', pointer });
+      expect(refused.message, key).toMatch(gist);
+    }
+    expect(refusal(body('', block({ ...stored(), theme: 'dark' })))).toMatchObject({
+      problem: 'schema',
+      pointer: '/theme',
+    });
+  });
+
+  it('refuses a title that is absent or not a string', () => {
+    expect(refusal(body(''), {}).pointer).toBe('/title');
+    expect(refusal(body(''), { title: 2024 }).pointer).toBe('/title');
+  });
+
+  it('refuses a later version for its version, before its fields', () => {
+    const refused = refusal(body('', block({ ...stored(), schema_version: 2, theme: 'dark' })));
+    expect(refused).toMatchObject({ problem: 'version', pointer: '/schema_version' });
+    expect(refused.message).toMatch(/version 2/);
+  });
+
+  it('refuses a missing or mistyped field at its pointer, and a block that is not JSON', () => {
+    const { mode: _mode, ...modeless } = stored();
+    expect(refusal(body('', block(modeless)))).toMatchObject({
+      problem: 'schema',
+      pointer: '/mode',
+    });
+    const path = edited((_, source) => {
+      source.path = 'notes/<venue>.md';
+    });
+    expect(refusal(path)).toMatchObject({ problem: 'schema', pointer: '/bindings/0/source/path' });
+    const notJson = refusal(body('', '{ "schema_version": 1,'));
+    expect(notJson.problem).toBe('not_json');
+    expect(notJson.message).toMatch(/not JSON/);
+  });
+});
+
+describe('a json_render View shows its own title and description, as a vega_lite View does', () => {
+  it('names the View above its composition', async () => {
+    const presented = zPresentResponse.parse(presentResponseFixture);
+    const refusing = serverToolData(async () => ({ isError: true, content: [] }));
+    render(<PresentView response={presented} data={refusing} />);
+    expect(
+      await screen.findByRole('heading', { name: 'Six-component catalog view', level: 2 }),
+    ).toBeTruthy();
+    expect(screen.getByText(presented.view.description)).toBeTruthy();
+    // The composition's own Stack title is still there, under the View's.
+    expect(screen.getByRole('heading', { name: 'Six-component catalog' })).toBeTruthy();
+  });
+
+  it("draws its description as Markdown, a heading in it below the View's title", async () => {
+    const presented = zPresentResponse.parse(presentResponseFixture);
+    const described = {
+      ...presented,
+      view: {
+        ...presented.view,
+        description: '# Scope\n\nRevenue **grew** in 2025.\n\nA second paragraph.',
+      },
+    };
+    const refusing = serverToolData(async () => ({ isError: true, content: [] }));
+    const { container } = render(<PresentView response={described} data={refusing} />);
+    const title = await screen.findByRole('heading', {
+      name: 'Six-component catalog view',
+      level: 2,
+    });
+    const view = title.closest('section');
+    expect(view).not.toBeNull();
+    // A `#` in the description is an h3 under the View's h2, never an h1 above it.
+    expect(screen.getByRole('heading', { name: 'Scope', level: 3 })).toBeTruthy();
+    expect(container.querySelector('h1')).toBeNull();
+    expect(view?.querySelector('strong')?.textContent).toBe('grew');
+    expect(screen.getByText('A second paragraph.').tagName).toBe('P');
+    expect(view?.textContent).not.toContain('**');
+    expect(view?.textContent).not.toContain('# Scope');
+  });
+});
+
+describe('a dataset the server could not produce says why under its table', () => {
+  it("shows the dataset_unavailable warning's message, as sent, in the table's own alert", async () => {
+    const presented = zPresentResponse.parse(presentResponseFixture);
+    const message = "binding metrics: the source's shown text is not the converter's";
+    const unproduced = {
+      ...presented,
+      resolved_bindings: presented.resolved_bindings.map(
+        ({ materialized: _dropped, ...binding }) => binding,
+      ),
+      charts: [
+        {
+          chart: { kind: 'named' as const, name: 'metrics_chart' },
+          status: {
+            status: 'failed' as const,
+            reason: 'dataset_unavailable' as const,
+            binding: 'metrics',
+            message: "the source's shown text is not the converter's",
+          },
+        },
+      ],
+      warnings: [{ code: 'dataset_unavailable', message, location: '/bindings/1' }],
+    };
+    const data = serverToolData(async () => ({
+      structuredContent: zReadItemResponse.parse(sourceReadItemFixture),
+    }));
+    const { container } = render(<PresentView response={unproduced} data={data} />);
+    const columns = await waitFor(() => {
+      const found = container.querySelector('.view-columns');
+      if (found === null) throw new Error('the columns are not drawn yet');
+      return found as HTMLElement;
+    });
+    expect(within(columns).getByRole('alert').textContent).toBe(
+      `Dataset unavailable: metrics: ${message}`,
+    );
+  });
+});
+
+describe("a View's sources open where its host links them, at the revision they were read", () => {
+  const presented = zPresentResponse.parse(presentResponseFixture);
+  const refusing = serverToolData(async () => ({
+    isError: true,
+    content: [{ type: 'text', text: 'not read here' }],
+  }));
+  /** The host's link: here, an anchor naming the item and revision it opens. */
+  const sourceLink: SourceLink = (source, label) => (
+    <a href={`#open/${source.item_id}@${source.revision}`}>{label}</a>
+  );
+  const opened = (links: HTMLElement[]) =>
+    links.map((link) => [link.textContent, link.getAttribute('href')]);
+
+  it('links each source read, and each source the View lists, through the host', async () => {
+    render(<PresentView response={presented} data={refusing} sourceLink={sourceLink} />);
+    const region = await screen.findByRole('region', {
+      name: "Where this View's data comes from",
+    });
+    const read = within(region).getByRole('list', { name: 'Sources read' });
+    expect(opened(within(read).getAllByRole('link'))).toEqual(
+      presented.resolved_bindings.map((binding) => [
+        `${binding.source.path} at revision ${binding.source.revision}`,
+        `#open/${binding.source.item_id}@${binding.source.revision}`,
+      ]),
+    );
+    // The binding's name stays text beside its link.
+    expect(within(read).getAllByRole('listitem')[0]?.textContent).toMatch(/^venue: /);
+    // The View's own SourceList links each binding it names the same way.
+    const listed = screen
+      .getAllByRole('link')
+      .filter((link) => !region.contains(link))
+      .map((link) => link.textContent);
+    expect(listed).toEqual(
+      presented.resolved_bindings.map(
+        (binding) => `${binding.source.path} @ ${binding.source.revision}`,
+      ),
+    );
+  });
+
+  it('shows them as text, as before, when the host gives no link', async () => {
+    render(<PresentView response={presented} data={refusing} />);
+    await screen.findByRole('region', { name: "Where this View's data comes from" });
+    expect(screen.queryAllByRole('link')).toEqual([]);
+  });
+
+  it('is given the link by a saved View', async () => {
+    const client = createClient({
+      baseUrl: 'http://okf.test',
+      fetch: Object.assign(
+        async () =>
+          new Response(JSON.stringify(presented), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        { preconnect: () => {} },
+      ),
+    });
+    render(
+      <SavedView
+        workspaceId="aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff"
+        itemId="11111111-2222-4333-8444-555555555555"
+        at={{ kind: 'revision', revision: '0123456789abcdef0123456789abcdef01234567' }}
+        data={refusing}
+        client={client}
+        sourceLink={sourceLink}
+      />,
+    );
+    const read = await screen.findByRole('list', { name: 'Sources read' });
+    expect(within(read).getAllByRole('link')).toHaveLength(presented.resolved_bindings.length);
   });
 });

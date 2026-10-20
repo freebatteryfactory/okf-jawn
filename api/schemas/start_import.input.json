@@ -81,7 +81,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Convert finalized uploads into source cards in the user-selected folder.",
+  "description": "Convert finalized uploads into source cards in the user-selected folder.\n\n`upload_ids` holds between one and `MAX_IMPORT_UPLOADS` uploads (`check_rules`): a longer\nlist is `too_large` on `/upload_ids`, an empty one `invalid_input` on `/upload_ids`, and an\nupload listed twice `invalid_input` on `/upload_ids/<index of the second>`.",
   "properties": {
     "apply_naming_rules": {
       "description": "Apply the explicit workspace conventions after preview acceptance.",
@@ -89,7 +89,7 @@
     },
     "base_revision": {
       "$ref": "#/$defs/Revision",
-      "description": "Exact revision on which this change is based; stale writes conflict."
+      "description": "The revision the import was prepared against; card names are chosen there. It must be\na revision of the workspace. A head that moved since does not refuse the import. A card\npath taken since fails the job, which is not retried."
     },
     "destination": {
       "description": "Relative destination folder; empty for root.",
@@ -111,10 +111,12 @@
       "description": "Converter settings; absent means the deployment's defaults, resolved into the job at\nacceptance so a retry converts with the same settings."
     },
     "upload_ids": {
-      "description": "Completed upload slots.",
+      "description": "Completed upload slots, each listed once.",
       "items": {
         "$ref": "#/$defs/UploadId"
       },
+      "maxItems": 5000,
+      "minItems": 1,
       "type": "array"
     },
     "workspace_id": {

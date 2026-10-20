@@ -2,18 +2,18 @@
 .el .ds Aq '
 .TH okf-jawn-purge_workspace 1  "purge_workspace " 
 .SH NAME
-okf\-jawn\-purge_workspace \- Permanently remove a workspace\*(Aqs originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge.
+okf\-jawn\-purge_workspace \- Permanently remove a workspace\*(Aqs originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request returns the purge: an unfinished one resumed, a completed one as it is.
 .SH SYNOPSIS
-\fBokf\-jawn purge_workspace\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBokf\-jawn purge_workspace\fR [\fB\-\-json\fR] [\fB\-\-server\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
-Permanently remove a workspace\*(Aqs originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge.
+Permanently remove a workspace\*(Aqs originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request returns the purge: an unfinished one resumed, a completed one as it is.
 .SH OPTIONS
 .TP
-\fB\-\-server\fR [default: http://127.0.0.1:7711]
-
+\fB\-\-json\fR \fI<JSON>\fR [default: {}]
+The operation\*(Aqs JSON input: inline, @file, or \- for standard input
 .TP
-\fB\-\-json\fR [default: {}]
-JSON request, @file, or \- for stdin
+\fB\-\-server\fR \fI<URL>\fR [default: http://127.0.0.1:7711]
+The service address: HTTPS, or HTTP for a loopback address
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

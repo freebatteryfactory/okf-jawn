@@ -18,7 +18,17 @@ schemars.workspace = true
 tokio.workspace = true
 sha2.workspace = true
 uuid.workspace = true
+# The naming rules (core::conventions) format dates with `time` format descriptions, version 3,
+# which need `formatting`: the workspace entry states it.
 time.workspace = true
+# Which items a naming rule names: a glob over the workspace path (character-based; matched on
+# collision keys, since its own case folding is ASCII only).
+glob.workspace = true
+# Words and letter case of a name: `split` on space, `-` and `_` only, and `Pattern::mutate`.
+convert_case.workspace = true
+# Dates and version suffixes recognised in a name.
+regex.workspace = true
+unicode-normalization.workspace = true
 base64.workspace = true
 # Conformance and lint are application policy. Call validate_bundle / lint_bundle from
 # application operations; do not move this responsibility into storage or ingest.

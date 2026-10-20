@@ -64,7 +64,11 @@ use check::{TestResult, err_of, some};
 struct OkfConformance;
 
 impl CandidateCheck for OkfConformance {
-    fn check(&self, root: &Path) -> Result<Vec<Warning>, ApiError> {
+    fn check(
+        &self,
+        root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
         let bundle = okf_core::Bundle::load(root)
             .map_err(|error| ApiError::new(ErrorCode::InvalidInput, error.to_string()))?;
         let report = okf_validator::validate_bundle(&bundle);
@@ -190,11 +194,8 @@ async fn version_writes(
         .find_commit(scope, mutation_id, Some(&base))
         .await?
     {
-        return Ok(Committed {
-            revision: found,
-            replayed: true,
-            warnings: Vec::new(),
-        });
+        // Found as a replay of it is answered: with the warnings the store kept.
+        return Ok(found);
     }
     let committed = versions.commit(scope, changes, Arc::clone(&check)).await?;
     let candidate = versions
@@ -210,7 +211,8 @@ async fn version_writes(
             },
             check,
         )
-        .await?;
+        .await?
+        .revision;
     versions
         .promote_candidate(
             scope,
@@ -311,7 +313,7 @@ async fn purge_and_backup_calls(
     backups
         .restore_import(
             scope,
-            archive.digest,
+            archive.object.digest,
             mutation_id,
             vec!["user_1".to_owned()],
         )
@@ -386,6 +388,7 @@ fn job_specs() -> Result<Vec<JobSpec>, Box<dyn Error>> {
             workspace_id: WorkspaceId(Uuid::from_u128(1)),
             item_id: ItemId(Uuid::from_u128(10)),
         },
+        JobSpec::CleanUp,
     ])
 }
 
@@ -414,6 +417,7 @@ async fn record_store_calls(
     let job_scope = JobScope::Workspace(scope.clone());
     let job = records.create_job(&job_scope, new_job).await?;
     records.get_job(&job_scope, job.id).await?;
+    records.job_mutation(&job_scope, job.id).await?;
     let page = Page {
         cursor: None,
         limit: 50,
@@ -428,12 +432,18 @@ async fn record_store_calls(
                 item_ids: Vec::new(),
                 artifact: None,
                 restore: None,
+                backup: None,
+                clean_up: None,
                 outputs: Vec::new(),
                 warnings: Vec::new(),
             })
             .await?;
         records
-            .fail_job(claimed.lease, "converter stopped".to_owned(), true)
+            .fail_job(
+                claimed.lease,
+                ApiError::new(ErrorCode::Unavailable, "converter stopped"),
+                true,
+            )
             .await?;
     }
     records.cancel_job(&job_scope, mutation_id, job.id).await?;
@@ -641,7 +651,9 @@ async fn proposal_calls(
             },
         )
         .await?;
-    let updated = proposals.update(scope, read).await?;
+    let updated = proposals
+        .update(scope, mutation_id, read, ProposalStatus::Open)
+        .await?;
     proposals
         .add_comment(scope, mutation_id, updated.id, comment)
         .await?;
@@ -677,9 +689,10 @@ async fn upload_calls(
         .put_content(scope, slot.id, body, slot.expected_size)
         .await?;
     let complete = uploads.complete(scope, slot.id, sha256).await?;
-    uploads
-        .consume(scope, complete.id, JobId(Uuid::from_u128(7)))
-        .await
+    let job = JobId(Uuid::from_u128(7));
+    // An import takes its uploads as one batch; a restore takes its one archive alone.
+    let _batch: Vec<UploadRecord> = uploads.consume_batch(scope, &[complete.id], job).await?;
+    uploads.consume(scope, complete.id, job).await
 }
 
 async fn event_calls(
@@ -696,6 +709,9 @@ async fn event_calls(
         connector_id: None,
         actor: None,
         operation: None,
+        transport: None,
+        proposal_id: None,
+        count: None,
     };
     let workspace = EventScope::Workspace(scope.clone());
     events.append(&workspace, None, progress.clone()).await?;
@@ -806,6 +822,8 @@ async fn artifact_calls(
             item_ids: Vec::new(),
             artifact: Some(record.id),
             restore: None,
+            backup: None,
+            clean_up: None,
             outputs: vec![record.object.digest.clone()],
             warnings: Vec::new(),
         })
@@ -934,6 +952,7 @@ fn a_proposed_change_becomes_the_matching_tree_edit() -> TestResult {
             type_name: "Note".to_owned(),
             body: "# Plan\n".to_owned(),
             properties: BTreeMap::new(),
+            item_kind: None,
         },
         &view,
     );
@@ -956,7 +975,8 @@ fn a_proposed_change_becomes_the_matching_tree_edit() -> TestResult {
     );
     assert!(matches!(
         moved,
-        TreeEdit::MoveItem { item_id, destination } if item_id == existing && destination == path
+        TreeEdit::MoveItem { item_id, destination, keep_alias: false }
+            if item_id == existing && destination == path
     ));
     let edited = TreeEdit::from_change(
         Change::Edit {
@@ -987,10 +1007,48 @@ fn a_proposed_change_becomes_the_matching_tree_edit() -> TestResult {
     Ok(())
 }
 
+fn create_change(item_kind: Option<ItemKind>) -> Result<Change, Box<dyn Error>> {
+    Ok(Change::Create {
+        path: WorkspacePath::try_from("notes/v.md".to_owned())?,
+        type_name: "Note".to_owned(),
+        body: "# V\n".to_owned(),
+        properties: BTreeMap::new(),
+        item_kind,
+    })
+}
+
+/// Ruling 29: a proposed create names its new item's role in `item_kind`, a note when it names
+/// none, and the change's context carries that role into the tree edit.
+#[test]
+fn a_change_context_takes_the_new_items_role_from_its_change() -> TestResult {
+    let item = ItemId(Uuid::from_u128(10));
+    let proposal = ProposalId(Uuid::from_u128(12));
+    for (named, role) in [
+        (None, ItemKind::Note),
+        (Some(ItemKind::Note), ItemKind::Note),
+        (Some(ItemKind::View), ItemKind::View),
+    ] {
+        let change = create_change(named)?;
+        let context = ChangeContext::for_change(&change, item, proposal, initiator());
+        assert_eq!(context.new_item_kind, role);
+        assert!(matches!(
+            TreeEdit::from_change(change, &context),
+            TreeEdit::CreateItem { item_id, kind, .. } if item_id == item && kind == role
+        ));
+    }
+    let archive = Change::Archive {
+        item_id: ItemId(Uuid::from_u128(11)),
+    };
+    assert_eq!(archive.created_kind(), None);
+    let context = ChangeContext::for_change(&archive, item, proposal, initiator());
+    assert_eq!(context.new_item_kind, ItemKind::Note);
+    Ok(())
+}
+
 #[test]
 fn a_candidate_check_rejects_a_tree_it_cannot_load() -> TestResult {
     let check: Arc<dyn CandidateCheck> = Arc::new(OkfConformance);
-    let error = err_of(check.check(Path::new("no-such-okf-jawn-candidate-directory")))?;
+    let error = err_of(check.check(Path::new("no-such-okf-jawn-candidate-directory"), &[]))?;
     assert_eq!(error.code, ErrorCode::InvalidInput);
     Ok(())
 }
@@ -1086,7 +1144,8 @@ fn every_job_spec_reports_its_kind_and_survives_storage() -> TestResult {
             JobKind::ExportView,
             JobKind::BackupInstallation,
             JobKind::PurgeWorkspace,
-            JobKind::PurgeItem
+            JobKind::PurgeItem,
+            JobKind::CleanUp
         ]
     ));
     for spec in &specs {
@@ -1134,6 +1193,12 @@ fn a_commit_is_built_from_a_claimed_job_alone() -> TestResult {
             item_ids: Vec::new(),
             artifact: None,
             restore: None,
+            backup: None,
+            clean_up: None,
+            created_at: None,
+            started_at: None,
+            finished_at: None,
+            retryable: None,
         },
         mutation_id,
         initiator: initiator(),
@@ -1339,6 +1404,7 @@ fn a_page_of_comments_keeps_its_order_and_cursor() -> TestResult {
             text: "Why this figure?".to_owned(),
             created_at: instant("2026-10-05T00:00:00.000Z")?,
             invalidated_by: None,
+            source: None,
         }],
         next_cursor: Some("after-c1".to_owned()),
     };

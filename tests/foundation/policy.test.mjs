@@ -12,8 +12,18 @@ const tools=JSON.parse(await readFile(join(root,'api/mcp-tools.json'),'utf8')).t
 const byId=new Map(operations.map(o=>[o.id,o]));
 const exposed=operations.filter(o=>o.alias);
 // Owner decision: a model tool whose name is not in this list needs a new decision, not a new row.
-const approvedModelTools=['ls','grep','show','log','diff','blame','sources','links','propose','catalog','present','workspaces'];
+const approvedModelTools=['ls','grep','show','log','diff','blame','sources','links','propose','catalog','present','workspaces','rules'];
 const humanOnly=['approve','review','admin'];
+
+test('the CLI handle exception retains every other workspace lint and requires documented single-operation unsafe blocks',async()=>{
+ const workspace=Bun.TOML.parse(await readFile(join(root,'Cargo.toml'),'utf8')).workspace.lints;
+ const cli=Bun.TOML.parse(await readFile(join(root,'crates/cli/Cargo.toml'),'utf8')).lints;
+ assert.deepEqual(cli,{
+  rust:{...workspace.rust,unsafe_code:'allow'},
+  clippy:{...workspace.clippy,undocumented_unsafe_blocks:'deny',multiple_unsafe_ops_per_block:'deny'},
+ });
+ assert.equal(workspace.rust.unsafe_code,'forbid');
+});
 
 test('complete operation surface has unique canonical identifiers and paths',()=>{
  assert.ok(operations.length>0,'api/operations.json is empty');
@@ -65,6 +75,29 @@ test('core composes ports only and never depends on concrete adapter crates',asy
  const manifest=await readFile(join(root,'crates/core/Cargo.toml'),'utf8');
  for(const crate of ['okf-jawn-storage','okf-jawn-ingest','okf-jawn-server','okf-jawn-mcp','okf-jawn-cli'])assert.doesNotMatch(manifest,new RegExp(crate),crate);
 });
+/** A Rust source up to its unit-test module: `#[cfg(test)]` on the line before `mod tests`, which AGENTS.md puts last in the file. What follows is test code. */
+const beforeTests=source=>{const at=source.search(/^#\[cfg\(test\)\]\r?\nmod tests\b/m);return at<0?source:source.slice(0,at);};
+test('the code before a unit-test module is all of a file but its tests',()=>{
+ const file='use std::io;\nfn a() {}\n\n#[cfg(test)]\nmod tests {\n    use std::fs;\n}\n';
+ assert.equal(beforeTests(file),'use std::io;\nfn a() {}\n\n');
+ assert.equal(beforeTests('fn a() {}\n'),'fn a() {}\n');
+ // A `#[cfg(test)]` on anything but the test module does not end the scan.
+ assert.equal(beforeTests('#[cfg(test)]\nfn helper() {}\nfn b() { std::fs::write(); }\n').includes('std::fs'),true);
+});
+test('core writes no file: no source under crates/core/src names std::fs, tempfile or temp_dir',async()=>{
+ // crates/core/src/application/shared.rs: "This service runs no check of its own on a replay and writes no file." Ports do the IO.
+ // Unit tests may stage a directory to check a function against (`conformance.rs`), so a file is read up to its test module.
+ const sources=(await files(root)).filter(f=>f.startsWith('crates/core/src/')&&f.endsWith('.rs'));
+ assert.ok(sources.length>20,`the scan read only ${sources.length} core sources`);
+ // `std::fs` also as a grouped import (`use std::{fs, io}`), which never spells the two words together.
+ const named=[['std::fs',/\bstd::fs\b/],['std::fs',/\bstd::\{[^}]*\bfs\b/],['tempfile',/\btempfile\b/],['temp_dir',/\btemp_dir\b/]];
+ const found=[];
+ for(const file of sources){
+  const source=beforeTests(await readFile(join(root,file),'utf8'));
+  for(const [name,pattern] of named)if(pattern.test(source))found.push(`${file} names ${name}`);
+ }
+ assert.deepEqual(found,[],'the application service writes no file; file access belongs to a port\'s adapter');
+});
 test('test-support applications are included only by test targets',async()=>{
  for(const file of (await files(root)).filter(f=>f.endsWith('.rs'))){
   const normalized=file.replaceAll('\\','/');
@@ -85,7 +118,13 @@ test('canceled product runtimes are not imported as application dependencies',as
 });
 test('CLI, UI, browser tests and examples agree on the local service endpoint',async()=>{
  for(const file of ['crates/cli/src/lib.rs','ui/vite.config.ts','ui/playwright.config.ts','deploy/.env.example']){
-  const source=await readFile(join(root,file),'utf8');
+  let source=await readFile(join(root,file),'utf8');
+  if(file==='deploy/.env.example'){
+   // The sandbox is a separate origin/listener (SPEC 11), not another application endpoint.
+   assert.match(source,/^OKF_SANDBOX_BIND=127\.0\.0\.1:7712\r?$/m);
+   assert.match(source,/^OKF_SANDBOX_ORIGIN=http:\/\/127\.0\.0\.1:7712\r?$/m);
+   source=source.split(/\r?\n/).filter(line=>!/^OKF_SANDBOX_(?:BIND|ORIGIN)=/.test(line)).join('\n');
+  }
   assert.match(source,/127\.0\.0\.1:7711/,file);
   assert.doesNotMatch(source,/127\.0\.0\.1:(?!7711\b)\d+/,file);
  }

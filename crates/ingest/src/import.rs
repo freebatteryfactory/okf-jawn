@@ -3,13 +3,31 @@
 //!
 //! Import:
 //! 1. Each upload must be complete and taken by no other job, and its file name must give a
-//!    card path; only once every upload of the request passes is each consumed by this job,
-//!    so a refused batch consumes none. An upload another job took refuses the job for good.
+//!    card path; only once every upload of the request passes are they consumed by this job, as
+//!    one batch the store takes whole or not at all (`UploadStore::consume_batch`), so a
+//!    refused batch consumes none. An upload another job took refuses the job for good.
 //! 2. Each card is named `conventions::source_card_name` of its file name, with the
-//!    numbered-suffix rule (`report-pdf-2.md`) against the destination folder at the base
-//!    revision and against the other cards of the job.
+//!    numbered-suffix rule (`conventions::numbered_source_card_name`: `report-pdf-2.md`, the
+//!    number after the extension marker) against the destination folder at the base revision
+//!    and against the other cards of the job. Both fit one path segment: the stem is
+//!    shortened and the tail kept whole, so a long name is never refused for its length.
+//!    With `apply_naming_rules`, each card is named by the workspace naming rules saved at the
+//!    base revision instead, through core's one naming function
+//!    (`okf_jawn_core::conventions::name_new_item`, which `preview_names` names through too),
+//!    against every item and folder of the whole tree at the base (a destination can name any
+//!    folder) and the job's own cards; a collision never fails the import (a `suffix` rule
+//!    numbers the ruled name, any other falls back to the name without rules). No rules saved:
+//!    the cards are named without them and the completion says so (`NAMING_RULES_ABSENT`).
+//!    Rules that cannot be read or applied fail the job for good, `InvalidInput` on
+//!    `/apply_naming_rules`, before any upload is consumed. The naming warnings join the
+//!    completion's, located at the card's path.
 //! 3. All cards are committed first with outcome `pending`, through `portable::ImportCheck`
-//!    (the injected `CandidateCheck`, then OKF lint of the imported files).
+//!    (the injected `CandidateCheck`, then OKF lint of the imported files) over every card's
+//!    path. A commit's check reports what that commit wrote: each card's own commit (step 4)
+//!    is checked over that card's path only, so an import of N cards completes with each
+//!    commit's findings once (at most N from the pending commit and one card's from each card
+//!    commit, for one finding a card), and no commit's kept warnings hold more than the
+//!    pending commit's.
 //! 4. Each source is converted window by window (`windows_of(page_count, window_pages)`); each
 //!    window's export and assets are retained, the windows are assembled
 //!    (`record::assemble`), the record is retained, and the card is replaced with the
@@ -21,8 +39,9 @@
 //! it writes, an import commit asks `VersionStore::find_commit` whether an earlier attempt
 //! already wrote it after the job's base revision; if so it is replayed and nothing is written
 //! again, whatever order the store searches in. A replayed commit keeps the warnings its check
-//! returned: storage gives none back on a replay, so the same check runs again over the
-//! replayed commit's tree, and the completion does not depend on where an attempt died.
+//! returned: the store kept them when the commit was written and gives them back with the
+//! commit it finds (R-I10), so the completion does not depend on where an attempt died, and a
+//! replay runs no check.
 //!
 //! An import does not conflict with unrelated edits (SPEC: "Create, move, delete, import ...
 //! remain immediate commits"; integration-owner ruling R-I8). Each commit is written on the
@@ -48,7 +67,9 @@
 //! A redigest writes one commit, under ordinal 0, by the same rule against its base revision
 //! (R-I8 extended): replayed when an earlier attempt wrote it, refused (not retried) only when
 //! the item was deleted or its original changed since the base, and otherwise written onto the
-//! head's version of the card, keeping its path, title, properties and supplied text.
+//! head's version of the card, keeping its path, title, properties and supplied text. Its check
+//! is a card commit's (`card_check`): it reports the card it writes, at the head's path, not
+//! the whole workspace.
 //!
 //! Every commit the job lands, written now or replayed (the pending commit, each card's commit,
 //! the redigest's commit), is indexed and announced as `changed` under its own derived
@@ -65,19 +86,17 @@
 //! left to finish it (review N10), until it is redigested.
 //!
 //! Construction limitations, stated rather than hidden:
-//! - `apply_naming_rules: true` fails as `NotImplemented`: core has no function that names a
-//!   new card under the workspace rules (request R-I4).
 //! - Redigest of only the unconverted pages (`pages: Some`) fails as `NotImplemented`: the
 //!   retained record cannot give back the previous text of each window (request R-I5).
 //! - The type name of a new source card is `SOURCE_CARD_TYPE`; no SPEC sentence fixes it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use okf_jawn_contract::common::{PageRange, Warning};
-use okf_jawn_contract::conventions::source_card_name;
+use okf_jawn_contract::conventions::{NamingRules, source_card_name};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::EventKind;
 use okf_jawn_contract::extraction::{
@@ -87,6 +106,7 @@ use okf_jawn_contract::identity::{Digest, ItemId, Revision, UploadId, WorkspaceP
 use okf_jawn_contract::import::JobState;
 use okf_jawn_contract::item::ItemDocument;
 use okf_jawn_contract::source::{SourceAppearance, SourceName};
+use okf_jawn_core::conventions::{CompiledRules, Subject, TakenPaths, name_new_item};
 use okf_jawn_core::conversion::{
     Conversion, ConversionInput, ConversionRecord, ConvertedDocument, PageCount, RetainedAsset,
 };
@@ -95,8 +115,8 @@ use okf_jawn_core::items::without_header;
 use okf_jawn_core::jobs::ClaimedJob;
 use okf_jawn_core::portable::ImportCheck;
 use okf_jawn_core::storage::{
-    CandidateCheck, CommitChanges, Committed, LocalSource, Page, SourceCard, StorageScope,
-    TreeEdit, derive_commit_mutation_id, derive_item_id,
+    CandidateCheck, CommitChanges, Committed, LocalSource, SourceCard, StorageScope, TreeEdit,
+    derive_commit_mutation_id, derive_item_id,
 };
 
 use crate::handler::{Attempt, Done, HandlerPorts, Renewed, announce_commit, job_event, renewing};
@@ -145,11 +165,12 @@ enum Landed {
     Kept(String),
 }
 
-/// What one commit writes, given the head it is written on.
+/// What one commit writes, given the head it is written on, and so what its check reports.
 enum Writes<'a> {
-    /// These edits, whatever the head holds.
-    Edits(Vec<TreeEdit>),
-    /// This card, onto the head's version of its item, by `rule` against the item at `since`.
+    /// These edits, whatever the head holds, checked by this check.
+    Edits(Vec<TreeEdit>, Arc<dyn CandidateCheck>),
+    /// This card, onto the head's version of its item, by `rule` against the item at `since`;
+    /// checked over the card as written there (`card_check`).
     Card {
         /// The card as the job would write it.
         card: &'a SourceCard,
@@ -180,14 +201,9 @@ pub const MAX_RETAINED_OUTPUT_BYTES: u64 = 1 << 30;
 /// deleted the pending card meanwhile.
 pub const CARD_NOT_WRITTEN: &str = "import_card_not_written";
 
-/// How many entries one folder listing asks for.
-const LIST_PAGE: u16 = 500;
-
-/// The file name of a folder's maintained index, a Markdown file of the bundle.
-const MAINTAINED_INDEX: &str = "index.md";
-
-/// The workspace's change log at the root, a Markdown file of the bundle.
-const CHANGE_LOG: &str = "log.md";
+/// The completion warning of an import that applies the naming rules when none are saved at its
+/// base: the cards are named without them.
+pub const NAMING_RULES_ABSENT: &str = "naming_rules_absent";
 
 /// How many times one import commit reads the head again after it moved under the write,
 /// before the attempt gives up as retryable.
@@ -200,19 +216,17 @@ pub(crate) async fn import(
     scope: &StorageScope,
     request: ImportRequest<'_>,
 ) -> Result<Done, ApiError> {
-    if request.apply_naming_rules {
-        return Err(ApiError::new(
-            ErrorCode::NotImplemented,
-            "naming rules at import wait for core's rule function (request R-I4); import without them",
-        ));
-    }
-    // Conflict from the batch check (an upload another job took, or took meanwhile) refuses
-    // the job for good, like a collision: retrying it meets the same refusal.
-    let cards = match pending_cards(ports, attempt.claimed, scope, &request).await {
-        Ok(cards) => cards,
+    // Conflict from the batch check (an upload another job took, or took meanwhile, or a purge
+    // that names the workspace) refuses the job for good, like a collision: retrying it meets
+    // the same refusal.
+    let (cards, naming) = match pending_cards(ports, attempt.claimed, scope, &request).await {
+        Ok(named) => named,
         Err(error) if error.code == ErrorCode::Conflict => return Ok(refused_as(error)),
         Err(error) => return Err(error),
     };
+    // A commit's check reports what that commit wrote (review N2): the pending commit writes
+    // every card, so its check is over every card's path; each card's own commit is checked
+    // over that card's path only (`card_check`).
     let check: Arc<dyn CandidateCheck> = Arc::new(ImportCheck::new(
         Arc::clone(&ports.check),
         cards.iter().map(|(card, _)| card.path.clone()).collect(),
@@ -229,8 +243,8 @@ pub(crate) async fn import(
                 .iter()
                 .map(|(card, _)| TreeEdit::WriteSourceCard(Box::new(card.clone())))
                 .collect(),
+            check,
         ),
-        Arc::clone(&check),
     )
     .await?
     {
@@ -241,16 +255,17 @@ pub(crate) async fn import(
     let pending_revision = pending.revision.clone();
     let mut done = Done {
         revision: Some(pending.revision),
-        warnings: pending.warnings,
+        warnings: naming,
         ..Done::default()
     };
+    done.warnings.extend(pending.warnings);
     let total = u32::try_from(cards.len()).unwrap_or(u32::MAX);
     for ((mut card, local), ordinal) in cards.into_iter().zip(1_u32..) {
         let file_name = observed_name(&card);
         // A card an earlier attempt already committed is not converted again: the completion
         // takes its commit and the outputs its committed extraction references.
         let item = Some(card.item_id);
-        let replay = replayed(ports, attempt, scope, (base, ordinal), item, &check);
+        let replay = replayed(ports, attempt, scope, (base, ordinal), item);
         if let Some(committed) = replay.await? {
             let resumed = (card.item_id, committed, Vec::new());
             take_committed(ports, attempt, scope, resumed, &mut done).await?;
@@ -270,17 +285,7 @@ pub(crate) async fn import(
                 since: &pending_revision,
                 rule: Blocked::AnyChange,
             };
-            match commit(
-                ports,
-                attempt,
-                scope,
-                (base, ordinal),
-                message,
-                writes,
-                Arc::clone(&check),
-            )
-            .await?
-            {
+            match commit(ports, attempt, scope, (base, ordinal), message, writes).await? {
                 Landed::Committed(committed) => {
                     let landed = (card.item_id, committed, converted.outputs);
                     take_committed(ports, attempt, scope, landed, &mut done).await?;
@@ -303,6 +308,24 @@ pub(crate) async fn import(
     }
     announce_imported(ports, attempt.claimed, scope, &done).await?;
     Ok(done)
+}
+
+/// The check of a commit that writes `card` alone, an import's converted card or a redigest's:
+/// the injected conformance check and OKF lint, reported for that card's file only
+/// (`portable::ImportCheck`). `card` is the card as written onto the head, so its path is the
+/// one the commit writes: an import's card at the path its pending commit gave it (a card a
+/// person moved meanwhile is not written at all, `Blocked::AnyChange`), a redigest's at the
+/// head's path of the item. Such a commit also writes the card's appearance record under
+/// `.okf/`, the regenerated folder indexes and the log, none of them a concept, so the card is
+/// all it is told. The workspace's other files are files of the candidate too, but this commit
+/// does not write them: an import of N cards completes with each commit's findings once, not
+/// with all N cards' on each of its N + 1 commits, and a redigest with the findings of its card,
+/// not of the whole workspace.
+fn card_check(ports: &HandlerPorts, card: &SourceCard) -> Arc<dyn CandidateCheck> {
+    Arc::new(ImportCheck::new(
+        Arc::clone(&ports.check),
+        vec![card.path.clone()],
+    ))
 }
 
 /// Append `imported` once, under the job's own mutation, with the last revision, when the
@@ -400,44 +423,73 @@ fn refused_as(error: ApiError) -> Done {
 /// Every upload of the request is read and checked, and every card path derived, before any
 /// upload is consumed. An incomplete upload refuses the batch (`InvalidInput`), so does one
 /// another job consumed (`Conflict`), and so does a file name that gives no workspace path
-/// (`InvalidInput` on `/upload_ids`); then no upload of the batch is consumed, so another job
-/// may still take the good ones. Only then is each consumed by this job. The race that remains
-/// is another job consuming an upload between this check and the consume: that is a
-/// concurrent import of the same upload, which `consume` already refuses with `Conflict`.
+/// (`InvalidInput`); each refusal names its upload as `/upload_ids/<index>`. Then no upload of
+/// the batch is consumed, so another job may still take the good ones. Only then are they
+/// consumed by this job, all in one call (`UploadStore::consume_batch`, one transaction: all of
+/// them or none). Another job that consumed one of them between this check and that call is a
+/// concurrent import of the same upload: the store refuses the whole batch with `Conflict` and
+/// marks none, so two imports that share uploads never hold some of them each (R-I13).
+///
+/// The card paths are chosen before anything is consumed, with the naming rules when the
+/// request applies them (`ruled_paths`), and answered beside the cards with the warnings naming
+/// them gave.
 async fn pending_cards(
     ports: &HandlerPorts,
     claimed: &ClaimedJob,
     scope: &StorageScope,
     request: &ImportRequest<'_>,
-) -> Result<Vec<(SourceCard, LocalSource)>, ApiError> {
+) -> Result<(Vec<(SourceCard, LocalSource)>, Vec<Warning>), ApiError> {
     let job = claimed.lease.job_id;
     let mut sources = Vec::new();
-    for upload_id in request.upload_ids {
+    for (index, upload_id) in request.upload_ids.iter().enumerate() {
+        let field = format!("/upload_ids/{index}");
         let upload = ports.uploads.get(scope, *upload_id).await?;
         let object = upload.object.clone().ok_or_else(|| {
             ApiError::new(
                 ErrorCode::InvalidInput,
                 "an upload to import is not complete",
             )
-            .with_field("/upload_ids")
+            .with_field(field.clone())
         })?;
+        if let Some(kind) = ports
+            .backups
+            .managed_kind(&scope.tenant_id, &object.digest)
+            .await?
+        {
+            use okf_jawn_core::storage::ManagedKind;
+            let label = match kind {
+                ManagedKind::WorkspaceArchive => "workspace archive",
+                ManagedKind::InstallationArchive => "installation archive",
+                ManagedKind::WrittenHistory => "written history",
+            };
+            return Err(ApiError::new(
+                ErrorCode::InvalidInput,
+                format!("upload {index} is a {label} this installation wrote; restore it instead of importing it"),
+            ).with_field(field));
+        }
         if upload.consumed_by.is_some_and(|consumer| consumer != job) {
             return Err(ApiError::new(
                 ErrorCode::Conflict,
                 "an upload to import was already taken by another job",
             )
-            .with_field("/upload_ids"));
+            .with_field(field));
         }
         sources.push((upload, object));
     }
-    let mut taken = taken_keys(ports, scope, request.base_revision, request.destination).await?;
-    let paths = sources
+    let names: Vec<&str> = sources
         .iter()
-        .map(|(upload, _object)| free_path(request.destination, &upload.filename, &mut taken))
-        .collect::<Result<Vec<_>, _>>()?;
-    for (upload, _object) in &sources {
-        let _consumed = ports.uploads.consume(scope, upload.id, job).await?;
-    }
+        .map(|(upload, _object)| upload.filename.as_str())
+        .collect();
+    let (paths, naming) = if request.apply_naming_rules {
+        ruled_paths(ports, scope, request, &names).await?
+    } else {
+        (
+            unruled_paths(ports, scope, request, &names).await?,
+            Vec::new(),
+        )
+    };
+    let batch: Vec<UploadId> = sources.iter().map(|(upload, _object)| upload.id).collect();
+    let _consumed = ports.uploads.consume_batch(scope, &batch, job).await?;
     let mut cards = Vec::new();
     for ((ordinal, (upload, object)), path) in (0_u32..).zip(&sources).zip(paths) {
         let local = ports.blobs.materialize(scope, &object.digest).await?;
@@ -468,7 +520,124 @@ async fn pending_cards(
             local,
         ));
     }
-    Ok(cards)
+    Ok((cards, naming))
+}
+
+/// Name cards without saved rules using the same full-tree occupancy checks as ruled imports.
+/// An item cannot become a destination folder, even when rules are disabled or absent.
+async fn unruled_paths(
+    ports: &HandlerPorts,
+    scope: &StorageScope,
+    request: &ImportRequest<'_>,
+    names: &[&str],
+) -> Result<Vec<WorkspacePath>, ApiError> {
+    let rules = CompiledRules::compile(
+        &NamingRules {
+            schema_version: 1,
+            rules: Vec::new(),
+        },
+        "",
+    )?;
+    let (paths, _warnings) = paths_by_rules(ports, scope, request, names, &rules).await?;
+    Ok(paths)
+}
+
+/// The card paths of `names` under the naming rules saved at the import's base, and the
+/// warnings naming them gave (the module header, step 2). Each card's path without rules is
+/// its subject (`destination/source_card_name`), of type `SOURCE_CARD_TYPE`, with its file
+/// name as the original's; the taken paths keep items distinct from folders and retain folder
+/// spelling, over the whole tree at the base and every card named before it. An item cannot
+/// become a destination folder: such a rule falls back before any upload is consumed.
+///
+/// # Errors
+/// Returns `InvalidInput` on `/apply_naming_rules` for rules that do not read or that this
+/// build cannot apply (their first problem), `InvalidInput` on `/upload_ids/<index>` for a file
+/// name that gives no workspace path, on `/destination` when the unruled path itself cannot
+/// use a folder (before any upload is consumed), or any port error.
+async fn ruled_paths(
+    ports: &HandlerPorts,
+    scope: &StorageScope,
+    request: &ImportRequest<'_>,
+    names: &[&str],
+) -> Result<(Vec<WorkspacePath>, Vec<Warning>), ApiError> {
+    let base = request.base_revision;
+    let Some(file) = ports.versions.rules(scope, base).await? else {
+        let paths = unruled_paths(ports, scope, request, names).await?;
+        return Ok((
+            paths,
+            vec![Warning {
+                code: NAMING_RULES_ABSENT.to_owned(),
+                message: "no naming rules are saved at the import's base, so the cards are \
+                          named without them"
+                    .to_owned(),
+                location: None,
+            }],
+        ));
+    };
+    let unusable = |why: String| {
+        ApiError::new(
+            ErrorCode::InvalidInput,
+            format!("the naming rules saved at the import's base cannot be applied: {why}"),
+        )
+        .with_field("/apply_naming_rules")
+    };
+    let saved = file.parsed.map_err(|error| unusable(error.message))?;
+    let rules = CompiledRules::compile(&saved, "").map_err(|error| match error.field {
+        Some(field) => unusable(format!("{field}: {}", error.message)),
+        None => unusable(error.message),
+    })?;
+    paths_by_rules(ports, scope, request, names, &rules).await
+}
+
+/// Reserve each new card against all items and folders before consuming any upload.
+async fn paths_by_rules(
+    ports: &HandlerPorts,
+    scope: &StorageScope,
+    request: &ImportRequest<'_>,
+    names: &[&str],
+    rules: &CompiledRules,
+) -> Result<(Vec<WorkspacePath>, Vec<Warning>), ApiError> {
+    let tree = ports.versions.tree(scope, request.base_revision).await?;
+    let mut taken = TakenPaths::new(&tree.items, &tree.folders);
+    let mut paths = Vec::new();
+    let mut warnings = Vec::new();
+    for (index, name) in names.iter().enumerate() {
+        let field = format!("/upload_ids/{index}");
+        let unruled = card_path(request.destination, &source_card_name(name), name, &field)?;
+        let chosen = name_new_item(
+            rules,
+            &Subject {
+                path: &unruled,
+                type_name: SOURCE_CARD_TYPE,
+                original_name: Some(name),
+            },
+            &mut taken,
+        )?;
+        paths.push(chosen.path);
+        warnings.extend(chosen.warnings);
+    }
+    Ok((paths, warnings))
+}
+
+/// The workspace path of a card named `card` in `destination`, for the upload named `name`;
+/// `InvalidInput` on `field` when it gives none.
+fn card_path(
+    destination: Option<&WorkspacePath>,
+    card: &str,
+    name: &str,
+    field: &str,
+) -> Result<WorkspacePath, ApiError> {
+    let full = match destination {
+        Some(folder) => format!("{}/{card}", folder.as_str()),
+        None => card.to_owned(),
+    };
+    WorkspacePath::from_supplied(&full).map_err(|error| {
+        ApiError::new(
+            ErrorCode::InvalidInput,
+            format!("the file name {name:?} gives no workspace path: {error}"),
+        )
+        .with_field(field)
+    })
 }
 
 /// Run a `Redigest` job: convert the source again and replace its card.
@@ -488,15 +657,8 @@ pub(crate) async fn redigest(
         ));
     }
     // A redigest an earlier attempt already committed is not converted again.
-    if let Some(committed) = replayed(
-        ports,
-        attempt,
-        scope,
-        (base_revision, 0),
-        Some(item_id),
-        &ports.check,
-    )
-    .await?
+    if let Some(committed) =
+        replayed(ports, attempt, scope, (base_revision, 0), Some(item_id)).await?
     {
         return Ok(Done {
             outputs: committed_outputs(ports, attempt, scope, &committed.revision, item_id).await?,
@@ -553,7 +715,6 @@ pub(crate) async fn redigest(
         (base_revision, 0),
         format!("Redigest {}: {}", card.title, outcome_word(&converted)),
         writes,
-        Arc::clone(&ports.check),
     )
     .await?;
     let refusal = |message: String| Done {
@@ -850,7 +1011,7 @@ async fn retain(
 /// the card's rule blocks. A head that moved before the write is read again, at most
 /// `HEAD_RACES` times. A `Conflict` while the head stood still is the store refusing these
 /// edits, a real collision: `Landed::Refused`. A commit that lands, either way, is indexed and
-/// announced.
+/// announced. A card is checked over the card as written onto the head read (`card_check`).
 async fn commit(
     ports: &HandlerPorts,
     attempt: &Attempt<'_>,
@@ -858,20 +1019,22 @@ async fn commit(
     (base, ordinal): (&Revision, u32),
     message: String,
     writes: Writes<'_>,
-    check: Arc<dyn CandidateCheck>,
 ) -> Result<Landed, ApiError> {
     let claimed = attempt.claimed;
     let item = written_item(&writes);
-    if let Some(committed) = replayed(ports, attempt, scope, (base, ordinal), item, &check).await? {
+    if let Some(committed) = replayed(ports, attempt, scope, (base, ordinal), item).await? {
         return Ok(Landed::Committed(committed));
     }
     for _race in 0..HEAD_RACES {
         let head = ports.versions.head(scope).await?;
-        let edits = match &writes {
-            Writes::Edits(edits) => edits.clone(),
+        let (edits, check) = match &writes {
+            Writes::Edits(edits, check) => (edits.clone(), Arc::clone(check)),
             Writes::Card { card, since, rule } => {
                 match onto_head(ports, scope, &head, card, since, *rule).await? {
-                    Ok(card) => vec![TreeEdit::WriteSourceCard(Box::new(card))],
+                    Ok(card) => {
+                        let check = card_check(ports, &card);
+                        (vec![TreeEdit::WriteSourceCard(Box::new(card))], check)
+                    }
                     Err(why) => return Ok(Landed::Kept(why)),
                 }
             }
@@ -883,7 +1046,7 @@ async fn commit(
             (head.clone(), ordinal),
             message.clone(),
             edits,
-            Arc::clone(&check),
+            check,
         )
         .await;
         match written {
@@ -915,126 +1078,28 @@ async fn commit(
 }
 
 /// The `ordinal`-th commit of the job when an earlier attempt already wrote it after `base`,
-/// with the warnings its check returned then. Storage returns no warnings on a replay, so the
-/// same check is run again over the replayed commit's tree (`checked_again`): the completion's
-/// warnings do not depend on where an attempt died. A replayed commit is indexed and announced
-/// again, naming `item`, which has no second effect.
+/// answered as the store answers a replay: with the warnings it kept when that attempt committed
+/// (`VersionStore::find_commit`), so the completion's warnings do not depend on where an attempt
+/// died. No check runs here. A replayed commit is indexed and announced again, naming `item`,
+/// which has no second effect.
 async fn replayed(
     ports: &HandlerPorts,
     attempt: &Attempt<'_>,
     scope: &StorageScope,
     (base, ordinal): (&Revision, u32),
     item: Option<ItemId>,
-    check: &Arc<dyn CandidateCheck>,
 ) -> Result<Option<Committed>, ApiError> {
     let claimed = attempt.claimed;
     let mutation_id = derive_commit_mutation_id(claimed.mutation_id, ordinal);
-    let Some(revision) = ports
+    let Some(found) = ports
         .versions
         .find_commit(scope, mutation_id, Some(base))
         .await?
     else {
         return Ok(None);
     };
-    announce_commit(ports, claimed, scope, &revision, mutation_id, item).await?;
-    let again = checked_again(ports, scope, &revision, Arc::clone(check));
-    let warnings = renewed(ports, attempt, again).await?;
-    Ok(Some(Committed {
-        revision,
-        replayed: true,
-        warnings,
-    }))
-}
-
-/// Run `check` over the tree of `revision`, materialized from the store in a temporary
-/// directory: every item file, each folder's maintained `index.md` and the root `log.md`,
-/// which are the Markdown files of the bundle the check reads (storage's side records under
-/// `.okf/` are not Markdown and no OKF check reads them). This is the candidate tree the
-/// check saw when storage wrote that commit. It reads the whole tree, so its caller runs it
-/// under the heartbeat.
-async fn checked_again(
-    ports: &HandlerPorts,
-    scope: &StorageScope,
-    revision: &Revision,
-    check: Arc<dyn CandidateCheck>,
-) -> Result<Vec<Warning>, ApiError> {
-    let staging = tempfile::tempdir()
-        .map_err(|error| fault(&format!("a staging directory was refused: {error}")))?;
-    let mut folders: Vec<Option<WorkspacePath>> = vec![None];
-    while let Some(folder) = folders.pop() {
-        let mut cursor = None;
-        loop {
-            let listing = ports
-                .versions
-                .list(
-                    scope,
-                    revision,
-                    folder.as_ref(),
-                    Page {
-                        cursor: cursor.take(),
-                        limit: LIST_PAGE,
-                    },
-                )
-                .await?;
-            for item in &listing.items {
-                let bytes = ports
-                    .versions
-                    .read_file(scope, revision, &item.path)
-                    .await?;
-                stage(staging.path(), &item.path, &bytes)?;
-            }
-            folders.extend(listing.folders.into_iter().map(Some));
-            match listing.next_cursor {
-                Some(next) => cursor = Some(next),
-                None => break,
-            }
-        }
-        let index = match &folder {
-            Some(folder) => format!("{}/{MAINTAINED_INDEX}", folder.as_str()),
-            None => MAINTAINED_INDEX.to_owned(),
-        };
-        stage_if_present(ports, scope, revision, staging.path(), index).await?;
-    }
-    stage_if_present(
-        ports,
-        scope,
-        revision,
-        staging.path(),
-        CHANGE_LOG.to_owned(),
-    )
-    .await?;
-    tokio::task::spawn_blocking(move || check.check(staging.path()))
-        .await
-        .map_err(|error| fault(&format!("the replayed commit's check stopped: {error}")))?
-}
-
-/// Stage the versioned file at `path` of `revision`, when the tree holds one.
-async fn stage_if_present(
-    ports: &HandlerPorts,
-    scope: &StorageScope,
-    revision: &Revision,
-    root: &Path,
-    path: String,
-) -> Result<(), ApiError> {
-    let path = WorkspacePath::try_from(path)
-        .map_err(|error| fault(&format!("a maintained file has no workspace path: {error}")))?;
-    match ports.versions.read_file(scope, revision, &path).await {
-        Ok(bytes) => stage(root, &path, &bytes),
-        Err(error) if error.code == ErrorCode::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-/// Write one file of a staged tree; small files, written in place (the workspace tokio has no
-/// `fs` feature).
-fn stage(root: &Path, path: &WorkspacePath, bytes: &[u8]) -> Result<(), ApiError> {
-    let file = root.join(path.as_str());
-    let unwritable =
-        |error: std::io::Error| fault(&format!("{} could not be staged: {error}", path.as_str()));
-    if let Some(folder) = file.parent() {
-        std::fs::create_dir_all(folder).map_err(unwritable)?;
-    }
-    std::fs::write(&file, bytes).map_err(unwritable)
+    announce_commit(ports, claimed, scope, &found.revision, mutation_id, item).await?;
+    Ok(Some(found))
 }
 
 /// `card` written onto the head's version of its item, or why it must not be written: the item
@@ -1122,7 +1187,7 @@ fn same_item(now: &ItemDocument, then: &ItemDocument) -> bool {
 fn written_item(writes: &Writes<'_>) -> Option<ItemId> {
     match writes {
         Writes::Card { card, .. } => Some(card.item_id),
-        Writes::Edits(edits) => match edits.as_slice() {
+        Writes::Edits(edits, _check) => match edits.as_slice() {
             [TreeEdit::WriteSourceCard(card)] => Some(card.item_id),
             _ => None,
         },
@@ -1153,70 +1218,6 @@ async fn commit_on(
             check,
         )
         .await
-}
-
-/// The collision keys of every item and folder in the destination at the base revision.
-async fn taken_keys(
-    ports: &HandlerPorts,
-    scope: &StorageScope,
-    revision: &Revision,
-    destination: Option<&WorkspacePath>,
-) -> Result<BTreeSet<String>, ApiError> {
-    let mut taken = BTreeSet::new();
-    let mut cursor = None;
-    loop {
-        let listing = ports
-            .versions
-            .list(
-                scope,
-                revision,
-                destination,
-                Page {
-                    cursor: cursor.take(),
-                    limit: LIST_PAGE,
-                },
-            )
-            .await?;
-        taken.extend(listing.items.iter().map(|item| item.path.collision_key()));
-        taken.extend(listing.folders.iter().map(WorkspacePath::collision_key));
-        match listing.next_cursor {
-            Some(next) => cursor = Some(next),
-            None => return Ok(taken),
-        }
-    }
-}
-
-/// The card path for `file_name` in `destination`, with the numbered-suffix rule against the
-/// keys already taken; the chosen key is taken too.
-fn free_path(
-    destination: Option<&WorkspacePath>,
-    file_name: &str,
-    taken: &mut BTreeSet<String>,
-) -> Result<WorkspacePath, ApiError> {
-    let name = source_card_name(file_name);
-    let stem = name.strip_suffix(".md").unwrap_or(&name).to_owned();
-    for number in 1_u32.. {
-        let candidate = if number == 1 {
-            name.clone()
-        } else {
-            format!("{stem}-{number}.md")
-        };
-        let full = match destination {
-            Some(folder) => format!("{}/{candidate}", folder.as_str()),
-            None => candidate,
-        };
-        let path = WorkspacePath::from_supplied(&full).map_err(|error| {
-            ApiError::new(
-                ErrorCode::InvalidInput,
-                format!("the file name {file_name:?} gives no workspace path: {error}"),
-            )
-            .with_field("/upload_ids")
-        })?;
-        if taken.insert(path.collision_key()) {
-            return Ok(path);
-        }
-    }
-    Err(fault("no numbered name was free"))
 }
 
 /// The media type of an occurrence, detected from its bytes, else from its extension.

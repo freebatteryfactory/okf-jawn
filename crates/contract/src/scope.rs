@@ -31,17 +31,19 @@ use crate::history::{BlameRequest, CommitRequest, DiffRequest, LogRequest, Resto
 use crate::identity::{IdempotencyKey, WorkspaceId};
 use crate::import::{
     CancelJobRequest, CompleteUploadRequest, CorrectDigestRequest, CreateUploadRequest,
-    GetJobRequest, GetTenantJobRequest, ListJobsRequest, ListTenantJobsRequest, RedigestRequest,
-    RetryJobRequest, StartImportRequest,
+    DiscardUploadRequest, GetJobRequest, GetTenantJobRequest, GetUploadRequest, ListJobsRequest,
+    ListTenantJobsRequest, ListUploadsRequest, RedigestRequest, RetryJobRequest,
+    StartImportRequest,
 };
 use crate::item::{
-    CreateFolderRequest, CreateItemRequest, DeleteItemRequest, DiscardDraftRequest, GetItemRequest,
-    ItemStatus, ListDraftsRequest, ListItemsRequest, ListTypesRequest, MoveItemRequest,
-    SaveDraftRequest, SetLifecycleRequest, SetTypeRequest,
+    CreateFolderRequest, CreateItemRequest, CreatedItem, DeleteFolderRequest, DeleteItemRequest,
+    DiscardDraftRequest, GetItemRequest, ItemStatus, ListDraftsRequest, ListItemsRequest,
+    ListTypesRequest, MoveFolderRequest, MoveItemRequest, SaveDraftRequest, SetLifecycleRequest,
+    SetTypeRequest, check_item_text,
 };
 use crate::proposal::{
     AcceptProposalRequest, AddCommentRequest, DeclineProposalRequest, GetProposalRequest,
-    ListProposalsRequest, OpenProposalRequest, ProposalKind,
+    ListCommentsRequest, ListProposalsRequest, OpenProposalRequest, ProposalKind,
 };
 use crate::purge::{GetPurgeRequest, PurgeItemRequest, PurgeWorkspaceRequest};
 use crate::read::{CreateSandboxCapabilityRequest, ReadItemRequest};
@@ -86,8 +88,10 @@ macro_rules! workspace_keyed {
 }
 
 macro_rules! tenant_admin_keyed {
-    ($($request:ty),* $(,)?) => {
+    ($($request:ty => $workspace:literal),* $(,)?) => {
         $(impl RequestScope for $request {
+            const RESPONSE_WORKSPACE: Option<&'static str> = Some($workspace);
+
             fn targets(&self) -> Vec<Target> {
                 vec![Target::Deployment(Permission::Admin)]
             }
@@ -153,8 +157,32 @@ pub trait RequestScope {
     /// Replay behaviour for this operation's completed mutations.
     const REPLAY: ReplayPolicy = ReplayPolicy::StoredResponse;
 
+    /// JSON pointer into the response to the one workspace a mutation authorized at the tenant
+    /// is about (the workspace it creates, or a purge's target); `None` for every other
+    /// request. The mutation ledger records that workspace when the mutation completes, so a
+    /// purge of it reaches the stored response by identity, never by its text, except for the
+    /// two purge operations, whose rows are kept (their response is the purge record). A
+    /// response in which the pointer finds nothing names no workspace (a tenant job's absent
+    /// `workspace_id`). A response that names workspaces only in a list (a connector's grants)
+    /// names no one workspace and declares none.
+    const RESPONSE_WORKSPACE: Option<&'static str> = None;
+
     /// Every resource that must be authorized, first the one named by the table permission.
     fn targets(&self) -> Vec<Target>;
+
+    /// A completed mutation's stored response, in the shape this build answers.
+    ///
+    /// The mutation ledger keeps a response for its retention, and a restored archive brings
+    /// older ones, so the response of an operation whose answer changed shape is read here from
+    /// the shape it was stored in. Every other response is answered as stored: a type that only
+    /// gained optional fields reads its earlier bodies as they are (the general rule for stored
+    /// wire types).
+    ///
+    /// # Errors
+    /// Returns `Internal` when the stored body is in no shape this operation ever answered.
+    fn replayed(stored: serde_json::Value) -> Result<serde_json::Value, ApiError> {
+        Ok(stored)
+    }
 
     /// Caller-chosen retry identity; present exactly when the request is a mutation.
     fn idempotency_key(&self) -> Option<&IdempotencyKey>;
@@ -162,10 +190,12 @@ pub trait RequestScope {
     /// Refuse a decoded request that breaks a rule its wire schema cannot state.
     ///
     /// Dispatch calls this before any grant lookup or handler, so the refusal does not depend
-    /// on who asks. Most requests have no such rule.
+    /// on who asks. Most requests have no such rule. A request carrying an item's text refuses
+    /// one longer than `item::MAX_ITEM_TEXT_BYTES` here.
     ///
     /// # Errors
-    /// Returns `InvalidInput` naming the offending field.
+    /// Returns `InvalidInput`, or `TooLarge` for an item text, an upload's name or an import's
+    /// list of uploads over its bound, naming the offending field as a JSON Pointer.
     fn check_rules(&self) -> Result<(), ApiError> {
         Ok(())
     }
@@ -198,11 +228,11 @@ workspace_read!(
     BlameRequest,
     ListProposalsRequest,
     GetProposalRequest,
+    ListCommentsRequest,
     ListReviewsRequest,
     GetJobRequest,
     ListJobsRequest,
     GetRulesRequest,
-    PreviewNamesRequest,
     GetAttentionRequest,
     GetViewRequest,
     ResolveViewRequest,
@@ -213,22 +243,20 @@ workspace_read!(
 workspace_keyed!(Write:
     UpdateWorkspaceRequest,
     ExportWorkspaceRequest,
-    CreateItemRequest,
-    SaveDraftRequest,
     DiscardDraftRequest,
     MoveItemRequest,
     DeleteItemRequest,
     CreateFolderRequest,
+    MoveFolderRequest,
+    DeleteFolderRequest,
     SetTypeRequest,
     CommitRequest,
     RestoreRequest,
-    CreateUploadRequest,
     CompleteUploadRequest,
-    StartImportRequest,
+    DiscardUploadRequest,
     RetryJobRequest,
     CancelJobRequest,
     RedigestRequest,
-    CorrectDigestRequest,
     SetRulesRequest,
     ApplyNamesRequest,
     ExportViewRequest,
@@ -243,9 +271,9 @@ workspace_keyed!(Admin:
 );
 
 tenant_admin_keyed!(
-    PurgeWorkspaceRequest,
-    PurgeItemRequest,
-    BackupInstallationRequest,
+    PurgeWorkspaceRequest => "/target/workspace_id",
+    PurgeItemRequest => "/target/workspace_id",
+    BackupInstallationRequest => "/workspace_id",
 );
 
 tenant_admin_read!(
@@ -264,6 +292,8 @@ authenticated!(
 );
 
 impl RequestScope for CreateWorkspaceRequest {
+    const RESPONSE_WORKSPACE: Option<&'static str> = Some("/id");
+
     fn targets(&self) -> Vec<Target> {
         vec![Target::Deployment(Permission::Admin)]
     }
@@ -319,9 +349,125 @@ impl RequestScope for OpenProposalRequest {
     fn idempotency_key(&self) -> Option<&IdempotencyKey> {
         Some(&self.idempotency_key)
     }
-    /// A supply proposal holds only supply changes, each for a different item.
+    /// A supply proposal holds only supply changes, each for a different item, no change
+    /// carries an item text over the bound, and no `create` change names the `source` role.
     fn check_rules(&self) -> Result<(), ApiError> {
-        ProposalKind::of(&self.changes).map(|_| ())
+        ProposalKind::of(&self.changes)?;
+        for (index, change) in self.changes.iter().enumerate() {
+            let pointer = format!("/changes/{index}");
+            change.check_text(&pointer)?;
+            change.check_kind(&pointer)?;
+        }
+        Ok(())
+    }
+}
+
+impl RequestScope for CreateItemRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Write)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        Some(&self.idempotency_key)
+    }
+    /// A creation answered before `CreatedItem` existed was stored as its `ItemDocument` alone
+    /// (`CreatedItem::from_stored`).
+    fn replayed(stored: serde_json::Value) -> Result<serde_json::Value, ApiError> {
+        let unreadable = |error: serde_json::Error| {
+            ApiError::new(
+                ErrorCode::Internal,
+                format!("a stored create_item answer is in no shape this build reads: {error}"),
+            )
+        };
+        CreatedItem::from_stored(stored)
+            .and_then(serde_json::to_value)
+            .map_err(unreadable)
+    }
+    fn check_rules(&self) -> Result<(), ApiError> {
+        check_item_text(&self.body, "/body")
+    }
+}
+
+impl RequestScope for SaveDraftRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Write)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        Some(&self.idempotency_key)
+    }
+    fn check_rules(&self) -> Result<(), ApiError> {
+        check_item_text(&self.body, "/body")
+    }
+}
+
+impl RequestScope for CorrectDigestRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Write)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        Some(&self.idempotency_key)
+    }
+    fn check_rules(&self) -> Result<(), ApiError> {
+        check_item_text(&self.corrected_markdown, "/corrected_markdown")
+    }
+}
+
+impl RequestScope for CreateUploadRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Write)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        Some(&self.idempotency_key)
+    }
+    /// A name within its byte bound, and a `filename` that gives its source card a path.
+    fn check_rules(&self) -> Result<(), ApiError> {
+        self.check_names()
+    }
+}
+
+/// A read that needs `write`: a slot's file name is the uploader's business until it is
+/// imported.
+impl RequestScope for GetUploadRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Write)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        None
+    }
+}
+
+/// A read that needs `write`, as `get_upload` does.
+impl RequestScope for ListUploadsRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Write)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        None
+    }
+}
+
+impl RequestScope for StartImportRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Write)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        Some(&self.idempotency_key)
+    }
+    /// Between one and `import::MAX_IMPORT_UPLOADS` uploads, each listed once.
+    fn check_rules(&self) -> Result<(), ApiError> {
+        self.check_uploads()
+    }
+}
+
+impl RequestScope for PreviewNamesRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Read)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        None
+    }
+    /// An `items` selection names at least one item.
+    fn check_rules(&self) -> Result<(), ApiError> {
+        self.selection.check("/selection")
     }
 }
 

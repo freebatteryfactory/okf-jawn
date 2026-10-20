@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::error::ErrorCode;
 use okf_jawn_contract::identity::{Digest, ItemId, Revision, TenantId, Timestamp};
 use okf_jawn_contract::proposal::{Comment, Proposal, ProposalStatus};
@@ -15,7 +16,9 @@ use okf_jawn_core::confirmations::{ConfirmationConsume, ConfirmationCreate, Conf
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::proposals::{ProposalFilter, ProposalStore};
 use okf_jawn_core::sandbox::{SandboxCapabilityStore, SandboxMint, token_hash};
-use okf_jawn_core::storage::{Page, StorageScope};
+use okf_jawn_core::storage::{
+    NewWorkspace, Page, Provenance, StorageScope, WorkspaceCatalog, WorkspaceUpdate,
+};
 use okf_jawn_storage::Storage;
 use serde_json::json;
 
@@ -396,6 +399,50 @@ async fn confirmation_single_use_is_consumed_by_one_mutation_only() -> TestResul
     Ok(())
 }
 
+/// An expired confirmation is refused even to the mutation that consumed it, as
+/// `ConfirmationStore::consume`'s doc says (review probe P3): before its expiry that mutation
+/// consumes it again; after it, the same mutation is refused `Conflict` "expired", and another
+/// mutation `Conflict` "already used".
+#[tokio::test]
+async fn confirmation_single_use_expires_even_for_the_mutation_that_consumed_it() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let confirmations = storage.confirmations();
+    let workspace = scope(1)?;
+    let issued = confirmations
+        .create(&workspace, uuid!(20)?, challenge(FUTURE)?)
+        .await?;
+    for _ in 0..2 {
+        confirmations
+            .consume(&workspace, uuid!(21)?, presented(issued.id)?)
+            .await?;
+    }
+    // Its expiry passes: the stored expiry is written directly, as only time would move it.
+    let changed = rusqlite::Connection::open(storage.data().records_path())?.execute(
+        "UPDATE confirmations SET expires_at = ?1 WHERE confirmation_id = ?2",
+        [
+            "2020-01-01T00:00:00.000Z".to_owned(),
+            issued.id.0.to_string(),
+        ],
+    )?;
+    assert_eq!(changed, 1);
+    let error = err_of(
+        confirmations
+            .consume(&workspace, uuid!(21)?, presented(issued.id)?)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    assert!(error.message.contains("expired"), "{}", error.message);
+    let error = err_of(
+        confirmations
+            .consume(&workspace, uuid!(22)?, presented(issued.id)?)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    assert!(error.message.contains("already used"), "{}", error.message);
+    Ok(())
+}
+
 #[tokio::test]
 async fn confirmation_single_use_refuses_another_revision_digest_action_or_target() -> TestResult {
     let directory = tempfile::tempdir()?;
@@ -556,7 +603,9 @@ async fn proposals_and_comments_are_unique_on_their_mutation_and_page() -> TestR
     assert_eq!(rest.next_cursor, None);
     let mut declined = first.clone();
     declined.status = ProposalStatus::Declined;
-    proposals.update(&workspace, declined).await?;
+    proposals
+        .update(&workspace, uuid!(54)?, declined, ProposalStatus::Open)
+        .await?;
     let open = proposals
         .list(
             &workspace,
@@ -596,6 +645,387 @@ async fn proposals_and_comments_are_unique_on_their_mutation_and_page() -> TestR
             .await,
     )?;
     assert_eq!(error.code, ErrorCode::NotFound);
+    Ok(())
+}
+
+/// The stored status of proposal `id` in `workspace`.
+async fn stored_status(
+    storage: &Storage,
+    workspace: &StorageScope,
+    id: u32,
+) -> Fallible<ProposalStatus> {
+    Ok(storage.proposals().get(workspace, uuid!(id)?).await?.status)
+}
+
+/// `ProposalStore::update` is a compare-and-set on the stored status: written only from the
+/// expected status, refused with `Conflict` and nothing written otherwise, a no-op when the
+/// mutation that wrote the stored record writes it again, and `NotFound` for a proposal the
+/// workspace does not hold.
+#[tokio::test]
+async fn a_proposal_status_change_is_written_only_from_the_expected_status() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let proposals = storage.proposals();
+    let workspace = scope(1)?;
+    proposals
+        .insert(&workspace, uuid!(70)?, proposal(71, &ProposalStatus::Open)?)
+        .await?;
+    let declined = proposals
+        .update(
+            &workspace,
+            uuid!(72)?,
+            proposal(71, &ProposalStatus::Declined)?,
+            ProposalStatus::Open,
+        )
+        .await?;
+    assert_eq!(declined.status, ProposalStatus::Declined);
+    // From `open` again: the stored status is `declined`, so nothing is written.
+    let error = err_of(
+        proposals
+            .update(
+                &workspace,
+                uuid!(73)?,
+                proposal(71, &ProposalStatus::Accepted)?,
+                ProposalStatus::Open,
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    assert_eq!(
+        stored_status(&storage, &workspace, 71).await?,
+        ProposalStatus::Declined
+    );
+    // A retry of the decline: the stored record again under its mutation, accepted whatever
+    // was expected.
+    let again = proposals
+        .update(
+            &workspace,
+            uuid!(72)?,
+            proposal(71, &ProposalStatus::Declined)?,
+            ProposalStatus::Open,
+        )
+        .await?;
+    assert_eq!(again.status, ProposalStatus::Declined);
+    // The same status with another field is a change, and the status is not the expected one.
+    let mut retitled = proposal(71, &ProposalStatus::Declined)?;
+    retitled.title = "another title".to_owned();
+    let error = err_of(
+        proposals
+            .update(
+                &workspace,
+                uuid!(72)?,
+                retitled.clone(),
+                ProposalStatus::Open,
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    assert_eq!(
+        proposals.get(&workspace, uuid!(71)?).await?.title,
+        "proposal 71"
+    );
+    // From the stored status it is written.
+    let written = proposals
+        .update(&workspace, uuid!(74)?, retitled, ProposalStatus::Declined)
+        .await?;
+    assert_eq!(written.title, "another title");
+    assert_eq!(
+        proposals.get(&workspace, uuid!(71)?).await?.title,
+        "another title"
+    );
+    let error = err_of(
+        proposals
+            .update(
+                &scope(2)?,
+                uuid!(75)?,
+                proposal(71, &ProposalStatus::Accepted)?,
+                ProposalStatus::Declined,
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::NotFound, "{error}");
+    Ok(())
+}
+
+/// A proposal record shaped as `open_proposal` stores one (review probe P2): an edit whose
+/// properties nest unsorted keys, non-ASCII and escaped text, floats, `-0.0`, nulls and `1e21`;
+/// a create; and kept warnings.
+fn rich_proposal(id: u32, status: &ProposalStatus) -> Fallible<Proposal> {
+    let mut rich = proposal(id, status)?;
+    rich.changes = serde_json::from_value(json!([
+        {
+            "kind": "edit",
+            "item_id": uuid_text(3),
+            "body": "Zürich: \"quoted\"\n\ttab \\ backslash \u{1F642}",
+            "properties": {
+                "zeta": { "b": 1.5, "a": [null, -0.0, 1e21, "ü"] },
+                "alpha": null,
+                "title": "Ünïcode \u{2028} line"
+            }
+        },
+        {
+            "kind": "create",
+            "path": "notes/new.md",
+            "type_name": "Note",
+            "body": "# New\n",
+            "properties": { "title": "New", "description": "A new note." }
+        }
+    ]))?;
+    rich.warnings = serde_json::from_value(json!([
+        {
+            "code": "okf_validator_info",
+            "message": "link target does not resolve to a concept in the bundle: gone.md",
+            "location": "notes/new.md"
+        }
+    ]))?;
+    Ok(rich)
+}
+
+/// Review N3 (fix round 1, F4): two declines of one open proposal by different mutations write
+/// the same record, and the second is refused, because only the mutation that wrote a change
+/// may write it again as a retry; a retry of the first answers its result. The record is shaped
+/// as `open_proposal` stores one, so the retry is told by the stored text of a real record.
+#[tokio::test]
+async fn of_two_identical_status_changes_by_different_mutations_the_second_is_refused() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let proposals = storage.proposals();
+    let workspace = scope(1)?;
+    let open = proposals
+        .insert(
+            &workspace,
+            uuid!(80)?,
+            rich_proposal(81, &ProposalStatus::Open)?,
+        )
+        .await?;
+    // Both declines read the proposal open, and each writes it declined.
+    let declined = Proposal {
+        status: ProposalStatus::Declined,
+        ..open
+    };
+    let first = proposals
+        .update(
+            &workspace,
+            uuid!(82)?,
+            declined.clone(),
+            ProposalStatus::Open,
+        )
+        .await?;
+    let error = err_of(
+        proposals
+            .update(
+                &workspace,
+                uuid!(83)?,
+                declined.clone(),
+                ProposalStatus::Open,
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    // The first decline, retried under its mutation, answers its result.
+    let again = proposals
+        .update(
+            &workspace,
+            uuid!(82)?,
+            declined.clone(),
+            ProposalStatus::Open,
+        )
+        .await?;
+    assert_eq!(serde_json::to_value(&again)?, serde_json::to_value(&first)?);
+    // The second, retried, is refused again; the stored record is the first decline's.
+    let error = err_of(
+        proposals
+            .update(
+                &workspace,
+                uuid!(83)?,
+                declined.clone(),
+                ProposalStatus::Open,
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    assert_eq!(
+        serde_json::to_value(proposals.get(&workspace, uuid!(81)?).await?)?,
+        serde_json::to_value(&declined)?
+    );
+    Ok(())
+}
+
+/// Review probe P7, first half (R1-N3): a status change under a mutation that already holds
+/// another `workspace_mutations` row, here a catalog change's, cannot keep its writer, so it is
+/// refused `Internal` and rolled back: the proposal stays `open`, and the catalog's retry still
+/// answers the workspace it changed. Dispatch never gives two requests one mutation; this pins
+/// the guard that fails closed if one did.
+#[tokio::test]
+async fn a_status_change_under_a_catalog_changes_mutation_is_rolled_back() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let tenant = TenantId::try_from("local".to_owned())?;
+    let author = Provenance {
+        subject: "ana".to_owned(),
+        route: AccessRoute::LocalOwner,
+        client_id: None,
+    };
+    let created = storage
+        .catalog()
+        .create(
+            &tenant,
+            uuid!(90)?,
+            NewWorkspace {
+                name: "Research".to_owned(),
+                description: "Field notes".to_owned(),
+                creator: author.clone(),
+            },
+        )
+        .await?;
+    let workspace = StorageScope {
+        tenant_id: tenant,
+        workspace_id: created.id,
+    };
+    let renamed = WorkspaceUpdate {
+        expected_head: created.head.clone(),
+        name: "Renamed".to_owned(),
+        description: "New".to_owned(),
+        author,
+    };
+    let shared = uuid!(91)?;
+    storage
+        .catalog()
+        .update(&workspace, shared, renamed.clone())
+        .await?;
+    let proposals = storage.proposals();
+    let mut open = proposal(92, &ProposalStatus::Open)?;
+    open.workspace_id = created.id;
+    let open = proposals.insert(&workspace, uuid!(93)?, open).await?;
+    let error = err_of(
+        proposals
+            .update(
+                &workspace,
+                shared,
+                Proposal {
+                    status: ProposalStatus::Declined,
+                    ..open
+                },
+                ProposalStatus::Open,
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Internal, "{error}");
+    assert_eq!(
+        stored_status(&storage, &workspace, 92).await?,
+        ProposalStatus::Open,
+        "rolled back"
+    );
+    let again = storage
+        .catalog()
+        .update(&workspace, shared, renamed)
+        .await?;
+    assert_eq!(again.name, "Renamed");
+    Ok(())
+}
+
+/// An accept and a decline of one open proposal: whichever is written first, the other is
+/// refused with `Conflict` and the stored status is the first one's.
+///
+/// Storage's records database is one connection behind a mutex, and each update runs in its own
+/// IMMEDIATE transaction, so two updates are serialized, never truly concurrent: what this pins
+/// is a compare-and-set that holds in either order, not a race inside a transaction. Each order
+/// is driven explicitly first. Then 300 rounds spawn the two updates at once and assert that
+/// each round wrote exactly one; which one comes first there is the store's choice, which the
+/// test neither controls nor counts on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_status_changes_racing_from_open_write_one_and_refuse_the_other() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let workspace = scope(1)?;
+    for (id, first, second) in [
+        (1990_u32, ProposalStatus::Accepted, ProposalStatus::Declined),
+        (1991_u32, ProposalStatus::Declined, ProposalStatus::Accepted),
+    ] {
+        let proposals = storage.proposals();
+        proposals
+            .insert(&workspace, uuid!(id)?, proposal(id, &ProposalStatus::Open)?)
+            .await?;
+        proposals
+            .update(
+                &workspace,
+                uuid!(id.saturating_add(1000))?,
+                proposal(id, &first)?,
+                ProposalStatus::Open,
+            )
+            .await?;
+        let error = err_of(
+            proposals
+                .update(
+                    &workspace,
+                    uuid!(id.saturating_add(2000))?,
+                    proposal(id, &second)?,
+                    ProposalStatus::Open,
+                )
+                .await,
+        )?;
+        assert_eq!(error.code, ErrorCode::Conflict, "{first:?} first: {error}");
+        assert_eq!(stored_status(&storage, &workspace, id).await?, first);
+    }
+    let (mut accepted_wins, mut declined_wins) = (0_u32, 0_u32);
+    for round in 0..300_u32 {
+        let id = round.saturating_add(2000);
+        storage
+            .proposals()
+            .insert(&workspace, uuid!(id)?, proposal(id, &ProposalStatus::Open)?)
+            .await?;
+        let (to_accept, to_decline) = (storage.proposals(), storage.proposals());
+        let (accept_scope, decline_scope) = (workspace.clone(), workspace.clone());
+        let accepted = proposal(id, &ProposalStatus::Accepted)?;
+        let declined = proposal(id, &ProposalStatus::Declined)?;
+        let (accepting, declining) = (
+            uuid!(id.saturating_add(1000))?,
+            uuid!(id.saturating_add(2000))?,
+        );
+        let accept = async move {
+            to_accept
+                .update(&accept_scope, accepting, accepted, ProposalStatus::Open)
+                .await
+        };
+        let decline = async move {
+            to_decline
+                .update(&decline_scope, declining, declined, ProposalStatus::Open)
+                .await
+        };
+        let (accept, decline) = if round % 2 == 0 {
+            let decline = tokio::spawn(decline);
+            (tokio::spawn(accept), decline)
+        } else {
+            let accept = tokio::spawn(accept);
+            (accept, tokio::spawn(decline))
+        };
+        let (accept, decline) = tokio::join!(accept, decline);
+        let winner = match (accept?, decline?) {
+            (Ok(_), Err(error)) => {
+                assert_eq!(error.code, ErrorCode::Conflict, "round {round}: {error}");
+                accepted_wins = accepted_wins.saturating_add(1);
+                ProposalStatus::Accepted
+            }
+            (Err(error), Ok(_)) => {
+                assert_eq!(error.code, ErrorCode::Conflict, "round {round}: {error}");
+                declined_wins = declined_wins.saturating_add(1);
+                ProposalStatus::Declined
+            }
+            (accept, decline) => {
+                return Err(format!(
+                    "round {round}: exactly one change must win: {accept:?} and {decline:?}"
+                )
+                .into());
+            }
+        };
+        assert_eq!(
+            stored_status(&storage, &workspace, id).await?,
+            winner,
+            "round {round}"
+        );
+    }
+    assert_eq!(accepted_wins.saturating_add(declined_wins), 300);
     Ok(())
 }
 

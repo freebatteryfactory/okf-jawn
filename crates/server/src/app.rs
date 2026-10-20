@@ -1,0 +1,186 @@
+//! The application origin's service: every route, the fallbacks and the guarding layers, in one
+//! place, so the order of the layers is reviewed once.
+//!
+//! From the outside in:
+//! 1. the `Host` guard: a request naming a host this service does not answer for (in its `Host`
+//!    header or in its request target), naming none, or carrying two `Host` headers is refused
+//!    before anything else, which defeats DNS rebinding; loopback grants nothing;
+//! 2. constrained CORS (`tower_http::cors`): only the configured origins, never credentials, so a
+//!    page of another origin can at most present a bearer token it already holds, and by default
+//!    no other origin is allowed at all;
+//! 3. the identity middleware, which also refuses a cookie request from another origin and a
+//!    cookie mutation without its double-submit token, and records the refusal;
+//! 4. cross-origin protection (`tower_http::csrf`, on `Sec-Fetch-Site` and `Origin`) for every
+//!    request that is not `GET`, `HEAD` or `OPTIONS`, trusting only the configured CORS origins;
+//! 5. the routes, then the UI's pages for a path no route claims, else the JSON fallbacks.
+//!
+//! Every layer wraps the merged router with its fallbacks, so it also runs for an unknown path.
+//! The sandbox origin is a separate service (`sandbox`), never merged into this one.
+
+use std::future::Future;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use axum::Router;
+use axum::extract::{Request, State};
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, RANGE};
+use axum::http::{HeaderName, HeaderValue, Method};
+use axum::middleware::{self, Next};
+use axum::response::Response;
+use okf_jawn_contract::access::CSRF_HEADER;
+use okf_jawn_contract::error::{ApiError, ErrorCode};
+use tokio::net::TcpListener;
+use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::csrf::{CsrfLayer, ProtectionError};
+
+use crate::config::HostedConfig;
+use crate::errors::{error_response, with_fallbacks, wrong_method};
+use crate::hosts::names_only;
+use crate::identity::{Identity, identify};
+use crate::{BoundApplication, assets, operation_routes, public};
+
+/// Everything the application origin's service is built from.
+pub struct ServiceParts {
+    /// The application and dispatch's ports.
+    pub bound: BoundApplication,
+    /// The identity middleware's state.
+    pub identity: Identity,
+    /// The `Host` values this service answers (`host:port`, compared exactly, ASCII case
+    /// insensitive); never empty.
+    pub hosts: Vec<String>,
+    /// The hosted settings, when hosted; they publish the protected-resource metadata.
+    pub hosted: Option<HostedConfig>,
+    /// Origins, other than the service's own, whose pages may call it with a bearer token;
+    /// usually empty. A cookie request is never accepted from them.
+    pub cors_origins: Vec<String>,
+    /// The UI's build output, served for every path no route claims; `None` serves no page.
+    pub ui_dir: Option<PathBuf>,
+    /// The sandbox origin the pages may frame (their policy's `frame-src`); `None` frames
+    /// nothing.
+    pub sandbox_origin: Option<String>,
+    /// Extra routes mounted beside the operations, already bound to their own state: the MCP
+    /// endpoint, the session routes and the declared non-JSON transports.
+    pub extra: Router,
+}
+
+/// The `Host` values a service answers.
+#[derive(Clone)]
+struct Hosts(Arc<Vec<String>>);
+
+/// How a refused cross-origin request is answered.
+type Refusal = fn(ProtectionError) -> Response;
+
+/// Build the application origin's service.
+///
+/// # Errors
+/// Returns `InvalidInput` naming `hosts` when the host list is empty (an empty list would answer
+/// any `Host`) or holds an empty or spaced entry, naming `cors_origins` for an entry that is not
+/// an `http` or `https` origin, and naming `sandbox_origin` when it is not an origin.
+pub fn service(parts: ServiceParts) -> Result<Router, ApiError> {
+    if parts.hosts.is_empty() {
+        return Err(ApiError::new(
+            ErrorCode::InvalidInput,
+            "The service needs at least one host it answers for",
+        )
+        .with_field("hosts"));
+    }
+    // An empty entry would match a request that names an empty host.
+    if parts
+        .hosts
+        .iter()
+        .any(|host| host.is_empty() || host.chars().any(char::is_whitespace))
+    {
+        return Err(ApiError::new(
+            ErrorCode::InvalidInput,
+            "No host the service answers for may be empty or hold whitespace",
+        )
+        .with_field("hosts"));
+    }
+    let routes = operation_routes(parts.bound)
+        .merge(public::routes(parts.hosted.as_ref()))
+        .merge(parts.extra);
+    let routes = match parts.ui_dir {
+        Some(directory) => routes
+            .fallback_service(assets::pages(&directory, parts.sandbox_origin.as_deref())?)
+            .method_not_allowed_fallback(wrong_method),
+        None => with_fallbacks(routes),
+    };
+    Ok(routes
+        .layer(cross_origin_protection(&parts.cors_origins)?)
+        .layer(middleware::from_fn_with_state(parts.identity, identify))
+        .layer(constrained_cors(&parts.cors_origins)?)
+        .layer(middleware::from_fn_with_state(
+            Hosts(Arc::new(parts.hosts)),
+            guard_host,
+        )))
+}
+
+/// Serve `router` on `listener` until `shutdown` resolves, then stop accepting and let the
+/// requests in flight finish.
+///
+/// # Errors
+/// Returns the listener's I/O error.
+pub async fn serve(
+    listener: TcpListener,
+    router: Router,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown)
+        .await
+}
+
+/// `tower_http`'s cross-origin protection, trusting `origins` and answering in `ApiError` JSON.
+fn cross_origin_protection(origins: &[String]) -> Result<CsrfLayer<Refusal>, ApiError> {
+    let mut layer = CsrfLayer::new();
+    for origin in origins {
+        layer = layer
+            .add_trusted_origin(origin)
+            .map_err(|_| invalid_origin())?;
+    }
+    Ok(layer.with_rejection_response(cross_origin_refusal as Refusal))
+}
+
+/// CORS for exactly `origins`: no wildcard and no credentials.
+fn constrained_cors(origins: &[String]) -> Result<CorsLayer, ApiError> {
+    let allowed = origins
+        .iter()
+        .map(|origin| HeaderValue::from_str(origin).map_err(|_| invalid_origin()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(CorsLayer::new()
+        .allow_origin(AllowOrigin::list(allowed))
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+        .allow_headers([
+            AUTHORIZATION,
+            CONTENT_TYPE,
+            RANGE,
+            HeaderName::from_static(CSRF_HEADER),
+        ]))
+}
+
+fn cross_origin_refusal(_error: ProtectionError) -> Response {
+    error_response(ApiError::new(
+        ErrorCode::Forbidden,
+        "A request from another origin may not change state",
+    ))
+}
+
+fn invalid_origin() -> ApiError {
+    ApiError::new(
+        ErrorCode::InvalidInput,
+        "A CORS origin must be an http or https origin with no path",
+    )
+    .with_field("cors_origins")
+}
+
+/// Refuse a request whose `Host` is not one this service answers for.
+async fn guard_host(State(hosts): State<Hosts>, request: Request, next: Next) -> Response {
+    if names_only(&request, &hosts.0) {
+        next.run(request).await
+    } else {
+        error_response(ApiError::new(
+            ErrorCode::Forbidden,
+            "This service does not answer for that host",
+        ))
+    }
+}

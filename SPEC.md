@@ -106,7 +106,7 @@ Every non-read mutation carries a durable MutationId under an idempotency key sc
 
 ## 9. MCP, MCP Apps and WebMCP
 
-rmcp owns the outward protocol. Model tools cover workspace discovery, listing, search, reading, links, sources, log, diff, attribution, optional propose, catalog and present. The `workspaces` tool lists the workspaces the connection may see, each with its head revision; an agent pins later reads to that revision. App-only byte retrieval is separately marked. Permissions apply independently of visibility hints, tool names and HTTP methods.
+rmcp owns the outward protocol. Model tools cover workspace discovery, listing, search, reading, links, sources, log, diff, attribution, naming rules, optional propose, catalog and present. The `workspaces` tool lists the workspaces the connection may see, each with its head revision; an agent pins later reads to that revision. App-only byte retrieval is separately marked. Permissions apply independently of visibility hints, tool names and HTTP methods.
 
 Generate MCP schemas and annotations from the declared operation semantics. Return supported text/image/resource-link and structured content through SDK constructors. No generated annotation is an access-control mechanism. Keep tools usable with a textual fallback when a host cannot display an App.
 

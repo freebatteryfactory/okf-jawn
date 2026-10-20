@@ -1,24 +1,40 @@
 /**
  * Turn whatever an operation threw into a plain-language failure with the action it allows.
  *
- * The generated client throws the server's `ApiError` body when the call fails. Anything else
- * (a network error, a non-JSON answer) means the service was not reached. `not_implemented` is
- * a failure like any other: it reads "not available in this build" and is never shown as a
- * success, an empty result or a silent nothing. The message table is keyed by every
- * `ErrorCode`, so a new code fails type checking until it has words.
+ * The generated client throws the server's `ApiError` body when the call fails. A request that went
+ * unanswered for the client's bounded wait (`app/api-client.ts`) timed out; one the person stopped
+ * says so, and that it may have been carried out all the same. Anything else (a
+ * network error, a non-JSON answer) means the service was not reached. `not_implemented` is a
+ * failure like any other: it reads "not available in this build" and is never shown as a success,
+ * an empty result or a silent nothing. The message table is keyed by every `ErrorCode`, so a new
+ * code fails type checking until it has words.
+ *
+ * A typed detail (ruling 5) says more than its code, and its words say so with the action it
+ * allows: `stale_base` names the head the request was compared with, and offers to show that
+ * version (`show-head`); `workspace_archived` says when, and that nothing can be changed until it is
+ * unarchived; `upload_mismatch` says what the slot holds against what was announced. A refusal's
+ * `field` is a JSON Pointer into the request (`/base_revision`, `/rules/0/glob`).
  */
 import type { z } from 'zod';
-import type { ErrorCode } from '../../api/generated/types.gen';
+import type { ErrorCode, Revision } from '../../api/generated/types.gen';
 import { zApiError } from '../../api/generated/zod.gen';
+import { RequestStopped, RequestTimedOut } from '../../app/api-client';
+import { formatInstant } from '../../lib/instant';
 
 export type ApiFailure = z.infer<typeof zApiError>;
 
-export type Failure = { kind: 'api'; error: ApiFailure } | { kind: 'unreachable'; detail: string };
+export type Failure =
+  | { kind: 'api'; error: ApiFailure }
+  | { kind: 'timed_out'; seconds: number }
+  | { kind: 'stopped' }
+  | { kind: 'unreachable'; detail: string };
 
 /** What the person can do about a failure. */
 export type FailureAction =
   | { kind: 'retry'; label: string }
   | { kind: 'home'; label: string }
+  /** Show the workspace at `head`, the version the service compared the request with. */
+  | { kind: 'show-head'; label: string; head: Revision }
   | { kind: 'none' };
 
 export interface FailureMessage {
@@ -110,6 +126,9 @@ const UNREACHABLE: FailureMessage = {
 const zApiErrorWithoutDetail = zApiError.omit({ detail: true });
 
 export function classifyFailure(thrown: unknown): Failure {
+  if (thrown instanceof RequestTimedOut)
+    return { kind: 'timed_out', seconds: thrown.waitedMs / 1000 };
+  if (thrown instanceof RequestStopped) return { kind: 'stopped' };
   const parsed = zApiError.safeParse(thrown);
   if (parsed.success) return { kind: 'api', error: parsed.data };
   const undetailed = zApiErrorWithoutDetail.safeParse(thrown);
@@ -120,10 +139,50 @@ export function classifyFailure(thrown: unknown): Failure {
 
 export function messageFor(failure: Failure): FailureMessage {
   if (failure.kind === 'unreachable') return UNREACHABLE;
+  if (failure.kind === 'timed_out') {
+    return {
+      title: 'The workspace service did not answer in time.',
+      advice: `No answer came within ${failure.seconds} seconds. Try again.`,
+      action: RETRY,
+    };
+  }
+  if (failure.kind === 'stopped') {
+    return {
+      title: 'You stopped this before the service answered.',
+      advice: 'Whether the service carried it out is not known. Try again to make sure.',
+      action: RETRY,
+    };
+  }
   const base = MESSAGES[failure.error.code];
   const detail = failure.error.detail;
   if (detail?.kind === 'in_progress') {
     return { ...base, advice: `Try again in ${detail.retry_after} seconds.` };
+  }
+  if (detail?.kind === 'stale_base') {
+    return {
+      title: 'The workspace changed since the version this was made on.',
+      advice: `It now holds revision ${detail.head.slice(0, 10)}. Show that version, check what you did, then do it again.`,
+      action: {
+        kind: 'show-head',
+        label: `Show revision ${detail.head.slice(0, 10)}`,
+        head: detail.head,
+      },
+    };
+  }
+  if (detail?.kind === 'workspace_archived') {
+    const when = formatInstant(detail.archived_at) ?? detail.archived_at;
+    return {
+      title: 'This workspace is archived.',
+      advice: `It was archived on ${when}: nothing in it can be changed until it is unarchived. It can still be read.`,
+      action: { kind: 'none' },
+    };
+  }
+  if (detail?.kind === 'upload_mismatch') {
+    return {
+      title: 'What the service holds does not match this file.',
+      advice: mismatchWords(detail),
+      action: { kind: 'none' },
+    };
   }
   if (detail?.kind === 'invalidated') {
     return {
@@ -137,12 +196,30 @@ export function messageFor(failure: Failure): FailureMessage {
   return base;
 }
 
+/** What an upload's slot holds against what was announced (`upload_mismatch`), in words. */
+export function mismatchWords(detail: {
+  expected_bytes: string;
+  received_bytes: string;
+  digest_matches?: boolean | null | undefined;
+}): string {
+  if (detail.expected_bytes !== detail.received_bytes) {
+    return `It was announced with ${detail.expected_bytes} bytes and holds ${detail.received_bytes}.`;
+  }
+  return detail.digest_matches === false
+    ? `It holds the ${detail.expected_bytes} bytes announced, but they do not have the file's SHA-256 hash.`
+    : `It holds the ${detail.expected_bytes} bytes announced.`;
+}
+
 /** Codes a repeat of the same request can cure without anyone changing anything. */
 const TRANSIENT: ReadonlySet<ErrorCode> = new Set(['unavailable', 'in_progress']);
 
-/** Query retry policy: retry once only what may pass by itself; never a refusal or a gap. */
+/**
+ * Query retry policy: retry once only what may pass by itself; never a refusal or a gap. A request
+ * that timed out is not repeated by itself: the person has waited the bounded wait once already.
+ */
 export function shouldRetry(failureCount: number, thrown: unknown): boolean {
   if (failureCount >= 1) return false;
   const failure = classifyFailure(thrown);
+  if (failure.kind === 'timed_out' || failure.kind === 'stopped') return false;
   return failure.kind === 'unreachable' || TRANSIENT.has(failure.error.code);
 }

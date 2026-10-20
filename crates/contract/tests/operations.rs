@@ -4,8 +4,9 @@ use std::collections::BTreeSet;
 use std::error::Error;
 
 use okf_jawn_contract::access::Permission;
+use okf_jawn_contract::import::JobKind;
 use okf_jawn_contract::metadata::{OperationInfo, OperationName, operations};
-use okf_jawn_contract::operations::{DRAFT_BEARING, HUMAN_SESSION_ONLY};
+use okf_jawn_contract::operations::{DRAFT_BEARING, HUMAN_SESSION_ONLY, LOCAL_OWNER_ONLY};
 use schemars::{JsonSchema, generate::SchemaSettings};
 use serde_json::Value;
 
@@ -43,7 +44,7 @@ const EXPECTED_HUMAN_SESSION_ONLY: &[&str] = &[
     "purge_item",
 ];
 /// Contract types that hold a draft or its content.
-const DRAFT_TYPES: &[&str] = &["Draft", "DraftContent"];
+const DRAFT_TYPES: &[&str] = &["Draft", "DraftContent", "DraftRow"];
 /// Contract types named `Draft…` that hold no draft content, each with why. A new `Draft…` type
 /// must be added here or to `DRAFT_TYPES`.
 const DRAFT_NAMED_NOT_DRAFT: &[(&str, &str)] = &[(
@@ -53,7 +54,7 @@ const DRAFT_NAMED_NOT_DRAFT: &[(&str, &str)] = &[(
 /// Operations whose schemas name a draft type but which never carry a draft, each with why.
 const DRAFT_SCHEMA_EXEMPT: &[(&str, &str)] = &[(
     "create_item",
-    "Its response is an ItemDocument, whose optional `draft` field is how get_item returns the      caller's draft. A created item is an immediate commit with a fresh identity, so no draft      of it can exist: the create_item handler must return `draft: None` on every route.",
+    "Its response holds an ItemDocument (CreatedItem.item), whose optional `draft` field is how get_item returns the      caller's draft. A created item is an immediate commit with a fresh identity, so no draft      of it can exist: the create_item handler must return `draft: None` on every route.",
 )];
 
 /// Operations that destroy or overwrite user state, in table order.
@@ -63,7 +64,9 @@ const DESTRUCTIVE: &[&str] = &[
     "discard_draft",
     "delete_item",
     "purge_item",
+    "delete_folder",
     "restore_items",
+    "discard_upload",
     "apply_names",
     "revoke_connector",
 ];
@@ -93,6 +96,7 @@ const MODEL_TOOLS: &[&str] = &[
     "diff",
     "blame",
     "propose",
+    "rules",
     "present",
     "catalog",
 ];
@@ -123,9 +127,9 @@ fn declared(id: &str) -> Result<OperationInfo, Box<dyn Error>> {
 }
 
 #[test]
-fn the_surface_is_77_operations_12_model_tools_and_1_app_tool() {
+fn the_surface_is_83_operations_13_model_tools_and_1_app_tool() {
     let table = operations();
-    assert_eq!(table.len(), 77);
+    assert_eq!(table.len(), 83);
     let model: Vec<&str> = table
         .iter()
         .filter(|operation| operation.visibility == "model")
@@ -261,6 +265,29 @@ fn no_new_operation_is_an_agent_tool() -> Result<(), Box<dyn Error>> {
         );
         assert_eq!(operation.permission, Permission::Admin, "{id}");
     }
+    // Contract batch 2: six rows, none of them an agent tool.
+    for (id, permission) in [
+        ("get_upload", Permission::Write),
+        ("list_uploads", Permission::Write),
+        ("discard_upload", Permission::Write),
+        ("move_folder", Permission::Write),
+        ("delete_folder", Permission::Write),
+        ("list_comments", Permission::Read),
+    ] {
+        let operation = declared(id)?;
+        assert!(
+            operation.alias.is_empty() && operation.visibility.is_empty(),
+            "{id} is not an MCP tool"
+        );
+        assert_eq!(operation.permission, permission, "{id}");
+    }
+    // The one existing row the owner admitted as a model tool (2026-10-14; SPEC section 9:
+    // "Model tools cover ... naming rules"): agents read the rules their paths are judged by.
+    let rules = declared("get_rules")?;
+    assert_eq!(
+        (rules.alias, rules.visibility, rules.permission),
+        ("rules", "model", Permission::Read)
+    );
     Ok(())
 }
 
@@ -384,6 +411,105 @@ fn snapshot_states_the_per_item_precondition() -> Result<(), Box<dyn Error>> {
     assert!(commit.description.contains("since its draft's base"));
     assert!(!commit.description.contains("unchanged base"));
     Ok(())
+}
+
+#[test]
+fn the_local_owner_only_list_is_exactly_the_connector_operations() -> Result<(), Box<dyn Error>> {
+    let listed: Vec<&str> = LOCAL_OWNER_ONLY.iter().map(|name| name.as_str()).collect();
+    assert_eq!(
+        listed,
+        ["create_connector", "list_connectors", "revoke_connector"]
+    );
+    for id in listed {
+        let operation = declared(id)?;
+        assert!(operation.alias.is_empty(), "{id} is not an MCP tool");
+        assert_eq!(operation.permission, Permission::Admin, "{id}");
+        assert!(operation.description.contains("Local owner only"), "{id}");
+    }
+    Ok(())
+}
+
+/// `OperationInfo` states, for every row, the job it starts and its membership of each list,
+/// as `OperationName` answers them, so the generated metadata is the lists.
+#[test]
+fn operation_info_states_the_job_it_starts_and_its_lists() -> Result<(), Box<dyn Error>> {
+    let table = operations();
+    assert_eq!(table.len(), OperationName::ALL.len());
+    for (info, name) in table.iter().zip(OperationName::ALL) {
+        assert_eq!(info.id, name.as_str());
+        assert_eq!(info.rules.starts_job, name.starts_job(), "{}", info.id);
+        assert_eq!(
+            info.rules.human_session_only,
+            name.human_session_only(),
+            "{}",
+            info.id
+        );
+        assert_eq!(
+            info.rules.local_owner_only,
+            name.local_owner_only(),
+            "{}",
+            info.id
+        );
+        assert_eq!(
+            info.rules.allowed_while_archived,
+            name.allowed_while_archived(),
+            "{}",
+            info.id
+        );
+    }
+    for kind in JobKind::ALL {
+        let starter = declared(kind.started_by().as_str())?;
+        assert_eq!(starter.rules.starts_job, Some(*kind), "{kind:?}");
+    }
+    let starters: Vec<&str> = table
+        .iter()
+        .filter(|info| info.rules.starts_job.is_some())
+        .map(|info| info.id)
+        .collect();
+    assert_eq!(starters.len(), JobKind::ALL.len(), "{starters:?}");
+    assert_eq!(
+        declared("retry_job")?.rules.starts_job,
+        None,
+        "a retry queues a job again"
+    );
+    let human: Vec<&str> = table
+        .iter()
+        .filter(|info| info.rules.human_session_only)
+        .map(|info| info.id)
+        .collect();
+    assert_eq!(human, EXPECTED_HUMAN_SESSION_ONLY);
+    Ok(())
+}
+
+/// The job kind declared after `kind`, `None` after the last: an exhaustive match, so a kind
+/// added to `JobKind` does not compile here until it is placed in the declaration order.
+const fn declared_after(kind: JobKind) -> Option<JobKind> {
+    match kind {
+        JobKind::Import => Some(JobKind::Redigest),
+        JobKind::Redigest => Some(JobKind::ExportWorkspace),
+        JobKind::ExportWorkspace => Some(JobKind::BackupWorkspace),
+        JobKind::BackupWorkspace => Some(JobKind::RestoreWorkspace),
+        JobKind::RestoreWorkspace => Some(JobKind::RebuildIndex),
+        JobKind::RebuildIndex => Some(JobKind::ExportView),
+        JobKind::ExportView => Some(JobKind::BackupInstallation),
+        JobKind::BackupInstallation => Some(JobKind::PurgeWorkspace),
+        JobKind::PurgeWorkspace => Some(JobKind::PurgeItem),
+        JobKind::PurgeItem => Some(JobKind::CleanUp),
+        JobKind::CleanUp => None,
+    }
+}
+
+/// Review N9: `JobKind::ALL` holds every kind, each once, in declaration order. The kinds are
+/// walked from the first through `declared_after`, which names every kind by an exhaustive match,
+/// so the list is checked against the enum itself, not against its own length.
+#[test]
+fn job_kind_all_holds_every_kind_in_declaration_order() {
+    let mut every = vec![JobKind::Import];
+    while let Some(next) = every.last().copied().and_then(declared_after) {
+        assert!(!every.contains(&next), "{next:?} is walked twice");
+        every.push(next);
+    }
+    assert_eq!(every.as_slice(), JobKind::ALL);
 }
 
 okf_jawn_contract::for_each_operation!(schema_names);

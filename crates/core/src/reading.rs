@@ -9,8 +9,10 @@
 //!
 //! The same module holds the other checks a read makes before it answers: a named revision is
 //! checked against the revision map a purge wrote (`check_revision`), and a citation's
-//! locations are computed from the conversion record (`cited_locations`) and filled or
-//! compared (`fill_locations`); a saved View keeps none (`strip_locations`).
+//! locations are computed from the conversion record (`cited_locations`,
+//! `citation_locations`) and filled or compared (`fill_locations`); a citation a request asks
+//! the server to keep is checked whole by `check_citation`; a saved View keeps none
+//! (`strip_locations`).
 
 use std::collections::BTreeMap;
 
@@ -23,6 +25,7 @@ use okf_jawn_contract::{
     error::{ApiError, ErrorCode, ErrorDetail},
     extraction::{Extraction, TextOrigin},
     identity::{Digest, ItemId, Revision, WorkspacePath},
+    item::ItemDocument,
     read::{AssetRole, OutlineEntry, OutlineEntryKind, Selection},
     source::{
         SourceAppearance, SourceLocation, SourceLocator, SourceReference, UncitedReason,
@@ -403,6 +406,172 @@ pub fn strip_locations(view: &mut ViewDocument) {
     for binding in &mut view.bindings {
         binding.source.locations.clear();
     }
+}
+
+/// Whether the document's shown text is the converter's, and the outline of that text: the
+/// record's for converter text, pulldown-cmark's otherwise.
+#[must_use]
+pub fn shown_outline(
+    document: &ItemDocument,
+    record: Option<&ConversionRecord>,
+) -> (bool, Vec<OutlineEntry>) {
+    let converter_text = record.is_some()
+        && document.source.as_ref().is_some_and(|source| {
+            source.extraction.text_origin == TextOrigin::Converter && !source.extraction.corrected
+        });
+    let outline = match (record, converter_text) {
+        (Some(record), true) => record.outline.clone(),
+        _ => markdown_outline(&document.body),
+    };
+    (converter_text, outline)
+}
+
+/// The locations the server computes for a citation of `digest` with the selection `located`
+/// (a section already resolved to its lines) of an item whose appearance is `appearance`
+/// (Stage 1b design section 2: from item, revision, digest and selection).
+///
+/// - A citation of a source card's text, by its conversion record's digest (or by no digest
+///   when the card has no record), locates the selection in the original (`cited_locations`).
+/// - A citation of one of the record's retained images is that image's own location.
+/// - Every other citation (a note, the original, a structured export, a derived object) has
+///   none.
+#[must_use]
+pub fn computed_locations(
+    appearance: Option<&SourceAppearance>,
+    record: Option<&ConversionRecord>,
+    digest: Option<&Digest>,
+    located: &Selection,
+) -> Vec<SourceLocation> {
+    let Some(appearance) = appearance else {
+        return Vec::new();
+    };
+    if digest == appearance.extraction.digest.as_ref() {
+        return cited_locations(&appearance.extraction, record, located);
+    }
+    record
+        .and_then(|record| {
+            record
+                .assets
+                .iter()
+                .find(|asset| Some(&asset.digest) == digest)
+        })
+        .map(|asset| vec![asset.location.clone()])
+        .unwrap_or_default()
+}
+
+/// The conversion record a source appearance names, if it names one.
+///
+/// # Errors
+/// Returns any error of reading the record (`read_conversion_record`).
+pub async fn appearance_record(
+    blobs: &dyn BlobStore,
+    scope: &StorageScope,
+    appearance: Option<&SourceAppearance>,
+) -> Result<Option<ConversionRecord>, ApiError> {
+    match appearance.and_then(|appearance| appearance.extraction.digest.as_ref()) {
+        Some(digest) => Ok(Some(read_conversion_record(blobs, scope, digest).await?)),
+        None => Ok(None),
+    }
+}
+
+/// The locations the server computes for `source`, a citation of `document`, read through the
+/// blob store: the ones a response carries for the same citation (`computed_locations`).
+///
+/// The conversion record is read only when the citation is not of the original, and a section
+/// is resolved to its lines through the outline of the shown text (`shown_outline`), as
+/// `read_item` resolves it. `at` is the JSON Pointer of the citation in the request.
+///
+/// # Errors
+/// Returns `NotFound` on `{at}/selection/heading` for a section the text does not have,
+/// `InvalidInput` there for an ambiguous one, or any port error.
+pub async fn citation_locations(
+    blobs: &dyn BlobStore,
+    scope: &StorageScope,
+    document: &ItemDocument,
+    source: &SourceReference,
+    at: &str,
+) -> Result<Vec<SourceLocation>, ApiError> {
+    let Some(appearance) = document.source.as_ref() else {
+        return Ok(Vec::new());
+    };
+    if source.digest.as_ref() == Some(&appearance.object) {
+        return Ok(Vec::new());
+    }
+    let record = appearance_record(blobs, scope, Some(appearance)).await?;
+    let located = match &source.selection {
+        Selection::Section { heading } if source.digest == appearance.extraction.digest => {
+            let (_, outline) = shown_outline(document, record.as_ref());
+            Selection::Lines {
+                range: section_lines(&outline, heading)
+                    .map_err(|error| error.with_field(format!("{at}/selection/heading")))?,
+            }
+        }
+        other => other.clone(),
+    };
+    Ok(computed_locations(
+        Some(appearance),
+        record.as_ref(),
+        source.digest.as_ref(),
+        &located,
+    ))
+}
+
+/// A citation a request asks the server to keep (a comment's, a review's, a View binding's),
+/// checked as every citation is: its revision against the revision map first
+/// (`check_revision`), then its item at that revision, its path as that revision holds the
+/// item, its digest, when it names one, as an object of that item revision
+/// (`authorize_object`), and its locations by the citation rule (`fill_locations`: omitted, the
+/// server fills them; present, they must equal the computed ones). Answers the checked citation
+/// and the cited item's document. The caller passes the scope of the citation's own workspace,
+/// and `at`, the JSON Pointer of the citation in its request (`/source`).
+///
+/// # Errors
+/// Returns the typed `NotFound` of an invalidated revision, `NotFound` for an item the revision
+/// does not hold, `InvalidInput` on `{at}/path` for a path that is not the item's there,
+/// `NotFound` on `{at}/digest` for a digest that is none of the revision's objects,
+/// `InvalidInput` on `{at}/locations` for supplied locations that are not the computed ones,
+/// the section refusals of `citation_locations`, or any port error.
+pub async fn check_citation(
+    versions: &dyn VersionStore,
+    blobs: &dyn BlobStore,
+    records: &dyn RecordStore,
+    scope: &StorageScope,
+    mut source: SourceReference,
+    at: &str,
+) -> Result<(SourceReference, ItemDocument), ApiError> {
+    check_revision(records, scope, &source.revision).await?;
+    let document = versions
+        .show(scope, &source.revision, source.item_id)
+        .await?;
+    if document.summary.path != source.path {
+        return Err(ApiError::new(
+            ErrorCode::InvalidInput,
+            "the cited path is not the item's path at the cited revision",
+        )
+        .with_field(format!("{at}/path")));
+    }
+    if let Some(digest) = source.digest.as_ref() {
+        authorize_object(
+            versions,
+            blobs,
+            records,
+            scope,
+            source.item_id,
+            &source.revision,
+            digest,
+        )
+        .await
+        .map_err(|error| {
+            if error.code == ErrorCode::NotFound {
+                error.with_field(format!("{at}/digest"))
+            } else {
+                error
+            }
+        })?;
+    }
+    let computed = citation_locations(blobs, scope, &document, &source, at).await?;
+    fill_locations(&mut source, computed, at)?;
+    Ok((source, document))
 }
 
 /// The page a direct or inferred location lies on.

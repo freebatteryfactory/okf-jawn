@@ -9,33 +9,38 @@
 import { type Spec, type UIElement, validateSpec } from '@json-render/core';
 import { defineRegistry, JSONUIProvider, Renderer } from '@json-render/react';
 import { SourceExcerpt } from '../documents/SourceExcerpt';
-import { useBindings } from './Bindings';
+import { linked, useBindings } from './Bindings';
 import { Chart } from './Chart';
 import { catalog } from './catalog';
 import { DataTable } from './DataTable';
 import { type RawElement, rawSpecSchema, repeatSchema, slotsSchema } from './spec-schema';
 
+/** Why a binding has no table: the dataset this browser refused, else what the server said. */
 function refusal(bindings: ReturnType<typeof useBindings>, name: string): string {
-  const why = bindings.datasetErrors?.get(name);
+  const why = bindings.datasetErrors?.get(name) ?? bindings.datasetWarnings?.get(name);
   return why ? `: ${why}` : '';
 }
 
 /**
  * Why one chart cannot be drawn, or undefined when nothing known stands in its way. The chart's own
  * failure comes first (a specification compile rejects, a status the server reports failed), then
- * the binding it cites: not resolved at all, or a dataset that was refused.
+ * each binding it reads: not resolved at all, or a dataset that was refused.
  */
 function chartFailure(
   bindings: ReturnType<typeof useBindings>,
-  binding: string,
+  reads: readonly string[],
   chart: string,
 ): string | undefined {
   const own = bindings.chartErrors?.get(chart);
   if (own !== undefined) return own;
   if (!bindings.charts.has(chart)) return `Chart "${chart}" has no specification in this View.`;
-  if (!bindings.bindings.has(binding))
-    return `Unknown binding "${binding}": the chart cites a binding this View does not resolve.`;
-  return bindings.datasetErrors?.get(binding);
+  for (const binding of reads) {
+    if (!bindings.bindings.has(binding))
+      return `Unknown binding "${binding}": the chart cites a binding this View does not resolve.`;
+    const refused = bindings.datasetErrors?.get(binding);
+    if (refused !== undefined) return refused;
+  }
+  return undefined;
 }
 
 const { registry } = defineRegistry(catalog, {
@@ -51,8 +56,9 @@ const { registry } = defineRegistry(catalog, {
       const bindings = useBindings();
       const source = bindings.sources.get(props.binding);
       const why = bindings.sourceErrors?.get(props.binding);
+      // Under the Stack's h2 and the View's: the source's own `#` is drawn as an h3.
       return source ? (
-        <SourceExcerpt result={source} />
+        <SourceExcerpt result={source} headingLevel={3} />
       ) : (
         <p role="alert">
           Source binding unavailable: {props.binding}
@@ -74,14 +80,25 @@ const { registry } = defineRegistry(catalog, {
     },
     Chart: ({ props }) => {
       const bindings = useBindings();
-      const rows = bindings.tables.get(props.binding);
+      // The binding the component cites, and every one the server says the chart reads.
+      const reads = [
+        ...new Set([props.binding, ...(bindings.chartBindings?.get(props.chart) ?? [])]),
+      ];
+      const datasets = reads.flatMap((name) => {
+        const rows = bindings.tables.get(name);
+        return rows ? [{ name, rows }] : [];
+      });
       const spec = bindings.charts.get(props.chart);
-      const failure = chartFailure(bindings, props.binding, props.chart);
+      const failure = chartFailure(bindings, reads, props.chart);
       return (
         <section>
           <h3>{props.title}</h3>
-          {failure === undefined && rows && spec ? (
-            <Chart spec={spec} rows={rows} bindingName={props.binding} />
+          {failure === undefined && spec && datasets.length === reads.length ? (
+            <Chart
+              spec={spec}
+              datasets={datasets}
+              derived={bindings.derivedDatasets?.get(props.chart)}
+            />
           ) : (
             <p role="alert">{failure ?? 'Resolved chart data or specification unavailable.'}</p>
           )}
@@ -96,7 +113,13 @@ const { registry } = defineRegistry(catalog, {
             const entry = context.bindings.get(name);
             return (
               <li key={name}>
-                {entry ? `${entry.source.path} @ ${entry.source.revision}` : `Unresolved: ${name}`}
+                {entry
+                  ? linked(
+                      context.sourceLink,
+                      entry.source,
+                      `${entry.source.path} @ ${entry.source.revision}`,
+                    )
+                  : `Unresolved: ${name}`}
               </li>
             );
           })}

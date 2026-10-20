@@ -10,7 +10,7 @@
 #[path = "../../../tests/support/check.rs"]
 mod check;
 #[path = "support/records.rs"]
-mod records;
+pub mod records;
 
 mod job_runtime {
     use std::sync::{Arc, Mutex};
@@ -80,13 +80,18 @@ mod job_runtime {
                                 item_ids: Vec::new(),
                                 artifact: None,
                                 restore: None,
+                                backup: None,
+                                clean_up: None,
                                 outputs: Vec::new(),
                                 warnings: Vec::new(),
                             })
                             .await?;
                         Ok(())
                     }
-                    Action::Fail => Err(ApiError::new(ErrorCode::Internal, "the worker broke")),
+                    Action::Fail => {
+                        Err(ApiError::new(ErrorCode::Internal, "the worker broke")
+                            .with_field("/spec"))
+                    }
                     Action::Abandon => Ok(()),
                 }
             })
@@ -204,6 +209,22 @@ mod job_runtime {
     }
 
     #[tokio::test]
+    async fn a_claim_refused_for_a_recorded_purge_is_skipped_not_a_fault() -> TestResult {
+        let (records, handler, id) = setup(|_| Action::Complete)?;
+        records.purge_workspace_of(id)?;
+        let events = FakeEvents::default();
+        assert!(!run_one(records.as_ref(), &events, handler.as_ref(), id).await?);
+        // Nothing ran, nothing was failed or announced, and the job is left for the purge's
+        // caller to cancel.
+        assert_eq!(handler.attempts()?, Vec::<u32>::new());
+        let entry = records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Queued);
+        assert_eq!(entry.failures, Vec::<(String, bool)>::new());
+        assert_eq!(events.appended()?, Vec::new());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_handler_fault_is_recorded_as_a_retryable_failure_through_its_lease() -> TestResult {
         let (records, handler, id) = setup(|_| Action::Fail)?;
         let events = FakeEvents::default();
@@ -211,6 +232,15 @@ mod job_runtime {
         let entry = records.entry(id)?;
         assert_eq!(entry.job.state, JobState::Failed);
         assert_eq!(entry.failures, [("the worker broke".to_owned(), true)]);
+        // The handler's error is kept as it gave it, its field included.
+        assert_eq!(
+            entry
+                .job
+                .error
+                .as_ref()
+                .and_then(|error| error.field.as_deref()),
+            Some("/spec")
+        );
         // The failure it wrote is announced, in the job's workspace log, with no mutation.
         let JobScope::Workspace(scope) = entry.scope else {
             return Err("a workspace job was expected".into());

@@ -7,11 +7,13 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::health::{
     DependencyStatus, HealthRequest, ReadinessRequest, ReadinessResponse,
 };
+use okf_jawn_contract::import::DEFAULT_MAX_UPLOAD_BYTES;
 use okf_jawn_contract::metadata::OperationName;
+use okf_jawn_core::application::ApplicationConfig;
 use okf_jawn_core::ports::Application;
 
 use crate::check::{TestResult, err_of, some};
-use crate::fixture::{ALICE, SANDBOX_ORIGIN, World, alice, context};
+use crate::fixture::{ALICE, SANDBOX_ORIGIN, World, alice, config, context};
 
 fn dependency(name: &str, ready: bool) -> DependencyStatus {
     DependencyStatus {
@@ -123,5 +125,33 @@ async fn get_session_returns_the_principal_and_needs_csrf_only_in_a_browser_sess
     assert_eq!(session.principal.subject, "agent");
     assert_eq!(session.principal.route, AccessRoute::McpDelegation);
     assert!(!session.csrf_required);
+    Ok(())
+}
+
+/// Ruling 4: the session reports the limits the deployment applies: its own upload limit, the
+/// contract's default unless it set another, and the contract's body and text bounds.
+#[tokio::test]
+async fn get_session_reports_the_deployments_limits() -> TestResult {
+    let caller = alice(OperationName::GetSession, None)?;
+    let session = World::new()?.service.get_session(&caller, Empty {}).await?;
+    assert_eq!(
+        session.limits.upload_bytes,
+        DEFAULT_MAX_UPLOAD_BYTES.to_string()
+    );
+    assert_eq!(session.limits.request_body_bytes, 16_777_216);
+    assert_eq!(session.limits.item_text_bytes, 8_388_608);
+    let small = World::with_config(ApplicationConfig {
+        max_upload_bytes: 1024,
+        ..config()
+    })?;
+    let session = small.service.get_session(&caller, Empty {}).await?;
+    assert_eq!(session.limits.upload_bytes, "1024");
+    let Err(refused) = World::with_config(ApplicationConfig {
+        max_upload_bytes: 0,
+        ..config()
+    }) else {
+        return Err("a deployment that allows no upload bytes must be refused".into());
+    };
+    assert!(refused.to_string().contains("some bytes"), "{refused}");
     Ok(())
 }

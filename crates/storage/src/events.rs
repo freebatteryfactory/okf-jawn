@@ -1,10 +1,12 @@
 //! The event logs (`EventLog`) over SQLite: one per workspace and one per tenant.
 //!
-//! The row sequence is the event cursor. An append with a `MutationId` carries a replay key
-//! (the mutation and the event's own content) in a unique column, so an identical notification
-//! under one mutation is appended once. An append to a workspace the tenant does not hold, one
-//! never created or one whose purge completed, is recorded in the tenant's log: it never creates
-//! or revives a row for that workspace.
+//! The row sequence is the event cursor. Each event gets its permanent key (`event_key`, a fresh
+//! UUID) once, here, when it is first appended; archives and restores copy it verbatim, so the
+//! event keeps one name in every installation it travels to. An append with a `MutationId`
+//! carries a replay key (the mutation and the event's own content) in a unique column, so an
+//! identical notification under one mutation is appended once. An append to a workspace the
+//! tenant does not hold, one never created or one whose purge completed, is recorded in the
+//! tenant's log: it never creates or revives a row for that workspace.
 
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::events::{Event, ListEventsResponse};
@@ -49,10 +51,13 @@ impl EventLog for SqliteEvents {
                 connector_id: event.connector_id,
                 actor: event.actor,
                 operation: event.operation,
+                transport: event.transport,
+                proposal_id: event.proposal_id,
+                count: event.count,
             };
             let replay_key = mutation_id
                 .map(|mutation| {
-                    let content = serde_json::json!({
+                    let mut content = serde_json::json!({
                         "workspace_id": record.workspace_id,
                         "kind": record.kind,
                         "revision": record.revision,
@@ -62,17 +67,28 @@ impl EventLog for SqliteEvents {
                         "actor": record.actor,
                         "operation": record.operation,
                     });
+                    // Named only when present, so an event that names neither keeps the replay
+                    // key an earlier build gave it, and a resumed attempt appends no duplicate.
+                    if let Some(fields) = content.as_object_mut() {
+                        if let Some(proposal) = record.proposal_id {
+                            fields.insert("proposal_id".to_owned(), serde_json::json!(proposal));
+                        }
+                        if let Some(count) = record.count {
+                            fields.insert("count".to_owned(), serde_json::json!(count));
+                        }
+                    }
                     format!("{}/{content}", mutation.0)
                 })
                 .map(|key| format!("{tenant}/{key}"));
             let inserted = transaction
                 .execute(
-                    "INSERT INTO events (tenant_id, workspace_id, replay_key, record)
-                     VALUES (?1, ?2, ?3, ?4) ON CONFLICT (replay_key) DO NOTHING",
+                    "INSERT INTO events (tenant_id, workspace_id, replay_key, event_key, record)
+                     VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (replay_key) DO NOTHING",
                     params![
                         tenant,
                         workspace,
                         replay_key,
+                        seam::new_key(),
                         serde_json::to_string(&record).map_err(|error| json(&error))?
                     ],
                 )

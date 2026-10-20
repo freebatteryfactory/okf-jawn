@@ -6,16 +6,19 @@
         {
           "const": "reject",
           "description": "Require an explicit decision.",
+          "title": "Ask for a decision",
           "type": "string"
         },
         {
           "const": "suffix",
           "description": "Add a deterministic suffix.",
+          "title": "Add a number",
           "type": "string"
         },
         {
           "const": "keep_existing",
           "description": "Keep the original name and report the collision.",
+          "title": "Keep the existing name",
           "type": "string"
         }
       ]
@@ -26,21 +29,25 @@
         {
           "const": "ymd",
           "description": "Year, month, day.",
+          "title": "Year, month, day",
           "type": "string"
         },
         {
           "const": "mdy",
           "description": "Month, day, year.",
+          "title": "Month, day, year",
           "type": "string"
         },
         {
           "const": "dmy",
           "description": "Day, month, year.",
+          "title": "Day, month, year",
           "type": "string"
         },
         {
           "const": "reject_ambiguous",
           "description": "Require unambiguous dates or a human choice.",
+          "title": "Ask when unclear",
           "type": "string"
         }
       ]
@@ -51,16 +58,19 @@
         {
           "const": "preserve",
           "description": "Leave the extension unchanged.",
+          "title": "Keep",
           "type": "string"
         },
         {
           "const": "lowercase",
           "description": "Lower-case the extension.",
+          "title": "Lower case",
           "type": "string"
         },
         {
           "const": "strip",
           "description": "Drop the extension from the normalized note path (never from originals).",
+          "title": "Remove",
           "type": "string"
         }
       ]
@@ -76,31 +86,37 @@
         {
           "const": "preserve",
           "description": "Preserve case.",
+          "title": "Keep as written",
           "type": "string"
         },
         {
           "const": "lower",
           "description": "Lower case.",
+          "title": "Lower case",
           "type": "string"
         },
         {
           "const": "upper",
           "description": "Upper case.",
+          "title": "Upper case",
           "type": "string"
         },
         {
           "const": "title",
           "description": "Title case.",
+          "title": "Title case",
           "type": "string"
         },
         {
           "const": "snake",
           "description": "Snake case.",
+          "title": "Snake case",
           "type": "string"
         },
         {
           "const": "kebab",
           "description": "Kebab case.",
+          "title": "Kebab case",
           "type": "string"
         }
       ]
@@ -111,26 +127,32 @@
       "properties": {
         "alias_preservation": {
           "description": "When true, preserve existing path aliases while renaming the primary path.",
+          "title": "Keep old paths as aliases",
           "type": "boolean"
         },
         "case": {
           "$ref": "#/$defs/LetterCase",
-          "description": "Case transformation."
+          "description": "Case transformation.",
+          "title": "Letter case"
         },
         "collision": {
           "$ref": "#/$defs/CollisionPolicy",
-          "description": "Collision behavior."
+          "description": "Collision behavior.",
+          "title": "When names collide"
         },
         "date_format": {
           "description": "Explicit output format.",
+          "title": "Date format",
           "type": "string"
         },
         "date_order": {
           "$ref": "#/$defs/DateOrder",
-          "description": "Declared incoming date convention."
+          "description": "Declared incoming date convention.",
+          "title": "Date order"
         },
         "destination": {
           "description": "Relative destination template.",
+          "title": "Destination folder",
           "type": [
             "string",
             "null"
@@ -138,26 +160,32 @@
         },
         "extension_policy": {
           "$ref": "#/$defs/ExtensionPolicy",
-          "description": "How the filename extension is transformed on normalized notes."
+          "description": "How the filename extension is transformed on normalized notes.",
+          "title": "File extension"
         },
         "glob": {
           "description": "Match against the supplied relative path.",
+          "title": "Applies to paths",
           "type": "string"
         },
         "prefix": {
           "description": "Optional literal prefix.",
+          "title": "Prefix",
           "type": "string"
         },
         "separator": {
           "description": "Word separator.",
+          "title": "Word separator",
           "type": "string"
         },
         "strip_version_suffix": {
           "description": "Remove filename suffixes only from normalized notes, never originals.",
+          "title": "Remove version suffixes",
           "type": "boolean"
         },
         "suffix": {
           "description": "Optional literal suffix applied to the normalized base name.",
+          "title": "Suffix",
           "type": [
             "string",
             "null"
@@ -165,6 +193,7 @@
         },
         "type_name": {
           "description": "Optional OKF type selector.",
+          "title": "Applies to type",
           "type": [
             "string",
             "null"
@@ -194,12 +223,14 @@
           "items": {
             "$ref": "#/$defs/NamingRule"
           },
+          "title": "Rules",
           "type": "array"
         },
         "schema_version": {
           "description": "Format version; this release emits 1.",
           "format": "uint32",
           "minimum": 0,
+          "title": "Format version",
           "type": "integer"
         }
       },

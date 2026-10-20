@@ -11,7 +11,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openWorkspaceQueryKey } from '../../src/api/generated/@tanstack/react-query.gen';
 import type { ItemSummary } from '../../src/api/generated/types.gen';
-import { fail, type Json, mockApi, ok } from './support/api';
+import { fail, type Json, mockApi, ok, type Reply } from './support/api';
 import {
   explorerHandlers,
   HEAD,
@@ -19,6 +19,7 @@ import {
   NOTE,
   noteSummary,
   OLD,
+  OTHER,
   otherSummary,
   readResponse,
   renderAt,
@@ -138,6 +139,81 @@ describe('the "latest version" is the latest the server resolved for that reques
     await waitFor(() =>
       expect(focused?.textContent).toContain(`reading revision ${NEW.slice(0, 10)}`),
     );
+  });
+
+  // The reader is keyed by its tab: once the person has gone to another, this one is gone.
+  describe('when the reader is gone before the latest version answers', () => {
+    /** The note pinned at OLD beside a tab of the plan; the at-latest read answers when told. */
+    async function readingLatest() {
+      const latest: { answer?: () => void } = {};
+      const api = mockApi(
+        explorerHandlers({
+          [OPEN]: headMovesOn(),
+          [READ]: (body) => {
+            if (body.item_id !== NOTE || (body.at as Json).kind !== 'latest') {
+              return body.item_id === NOTE
+                ? readAt()(body)
+                : ok(readResponse(otherSummary, 'Text of Plan'));
+            }
+            return new Promise<Reply>((resolve) => {
+              latest.answer = () => resolve(readAt()(body));
+            });
+          },
+        }),
+      );
+      // The signal of every read the page sends, in order.
+      const signals: Array<AbortSignal | undefined> = [];
+      const inner = globalThis.fetch;
+      vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+        const sent = input instanceof Request ? input : null;
+        const path = new URL(sent === null ? String(input) : sent.url, 'http://x').pathname;
+        if (path === READ) signals.push(init?.signal ?? sent?.signal);
+        return inner(input, init);
+      });
+      const view = renderAt(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+      await screen.findByRole('tab', { name: 'Meeting notes', selected: true });
+      const tree = await screen.findByRole('tree', { name: 'Folders' });
+      await userEvent.click(await within(tree).findByRole('treeitem', { name: /Plan/ }));
+      await screen.findByRole('tab', { name: 'Plan', selected: true });
+      await userEvent.click(screen.getByRole('tab', { name: 'Meeting notes' }));
+      const button = await screen.findByRole('button', { name: 'Read the latest version' });
+      const before = signals.length;
+      act(() => button.focus());
+      await userEvent.keyboard('{Enter}');
+      await waitFor(() => expect(latest.answer).toBeDefined());
+      const answer = () => latest.answer?.();
+      return { ...view, api, answer, asked: () => signals.at(before) };
+    }
+
+    it('leaves the pane on the tab the person chose, with focus where they put it, and aborts the read', async () => {
+      const { router, answer, asked } = await readingLatest();
+      expect(asked()?.aborted).toBe(false);
+      const plan = screen.getByRole('tab', { name: 'Plan' });
+      await userEvent.click(plan);
+      await waitFor(() => expect(router.state.location.pathname).toBe(`/w/${WS}/i/${OTHER}`));
+      await screen.findByRole('article', { name: 'Plan' });
+      // The reader that asked is gone: its request does not go on.
+      expect(asked()?.aborted).toBe(true);
+      act(() => plan.focus());
+      act(() => answer());
+      await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+      expect(router.state.location.pathname).toBe(`/w/${WS}/i/${OTHER}`);
+      expect(router.state.location.search).toEqual({});
+      expect(screen.getByRole('tab', { name: 'Plan', selected: true })).toBeTruthy();
+      expect(document.activeElement).toBe(plan);
+    });
+
+    it('moves nothing when the answer had arrived as the reader went', async () => {
+      const { router, answer, unmount } = await readingLatest();
+      // The answer is in, and before the page has acted on it the reader is taken away.
+      act(() => {
+        answer();
+        unmount();
+      });
+      await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+      expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`);
+      expect(router.state.location.search).toEqual({ rev: OLD });
+    });
   });
 
   it('shows a failed latest read, and keeps the pinned revision', async () => {

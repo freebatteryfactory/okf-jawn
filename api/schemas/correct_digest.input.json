@@ -49,8 +49,9 @@
       "description": "Exact revision on which this change is based; stale writes conflict."
     },
     "corrected_markdown": {
-      "description": "Corrected text kept separate from generated text.",
-      "type": "string"
+      "description": "Corrected text kept separate from generated text.\nAt most 8388608 bytes in UTF-8: a character takes one to four.",
+      "type": "string",
+      "x-max-utf8-bytes": 8388608
     },
     "digest": {
       "$ref": "#/$defs/Digest",

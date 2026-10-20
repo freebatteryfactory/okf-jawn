@@ -258,7 +258,7 @@ test('the Docling gate accepts no failure, its PDF crate is the fork the owner d
  // What the two rules cannot do is said where the lane reads it: in its gates and in its own rules.
  const detectorLimits="The detector has two known limits: it flags real text of the placeholder's shape that stands after a space (`/B747`, `/v100`, `/tmp123`), and it misses a placeholder glued to a preceding character (`x/g12`). A signal from the library that a glyph had no Unicode is preferred to this detector as soon as the library gives one";
  assert.ok(construction['ingest-flags-undecodable-text'].meaning.endsWith(detectorLimits),'ingest-flags-undecodable-text does not state the detector\'s two known limits');
- assert.match(construction['ingest-locates-unlocated-items'].meaning,/The rule does not guarantee that the box it finds is the item's own: that file states the two known wrong placements \(LOCATE_LIMITS\).*without applying a threshold\. Whether the product bounds that distance is the owner's decision, open until this gate is built$/);
+ assert.match(construction['ingest-locates-unlocated-items'].meaning,/The rule does not guarantee that the box it finds is the item's own: that file states the two known wrong placements \(LOCATE_LIMITS\).*without applying a threshold\. The owner decided on 2026-10-17 \(O1\) that the product applies no bound: every location found through the text layer is recorded as inferred$/);
  assert.match(docling.covers,/It does not prove that a box found through the text layer is the item's own \(the receipt states the rule's two known wrong placements, and records each such item's distance to the item whose page was searched as a measurement with no threshold\)/);
  const ingestRules=await read('crates/ingest/AGENTS.md');
  assert.ok(ingestRules.includes(`${detectorLimits}.`),'crates/ingest/AGENTS.md does not state the detector\'s two known limits');
@@ -330,15 +330,15 @@ test('a ci gate names a job of the workflow by its check name, and that job runs
   }
  }
  // What clean-checkout-rerun says of the caches is what the workflow configures: the cargo cache
- // falls back to any cargo cache of the runner OS, the Bun cache has no fallback.
+ // falls back to a cargo cache of the runner OS and architecture, the Bun cache has no fallback.
  const cleanCheckout=gates.find(gate=>gate.id==='clean-checkout-rerun');
  const caches=Bun.YAML.parse(await read('.github/workflows/ci.yml')).jobs.foundation.steps.filter(step=>step.uses?.startsWith('actions/cache@')).map(step=>step.with);
  const cargoCache=caches.find(cache=>/^target$/m.test(cache.path)),bunCache=caches.find(cache=>cache.path.includes('~/.bun/install/cache'));
- assert.equal(cargoCache.key,"cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}");
- assert.equal(cargoCache['restore-keys'].trim(),'cargo-${{ runner.os }}-');
+ assert.equal(cargoCache.key,"cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}");
+ assert.equal(cargoCache['restore-keys'].trim(),'cargo-${{ runner.os }}-${{ runner.arch }}-');
  assert.equal(bunCache.key,"bun-${{ runner.os }}-${{ hashFiles('.bun-version', 'bun.lock') }}");
  assert.equal(bunCache['restore-keys'],undefined);
- assert.match(cleanCheckout.covers,/restored from a cache keyed on rust-toolchain\.toml and Cargo\.lock, with a fallback to the newest cargo cache of the same runner OS when none has that key, so `target` can come from another lockfile state/);
+ assert.match(cleanCheckout.covers,/restored from a cache keyed on rust-toolchain\.toml and Cargo\.lock, with a fallback to the newest cargo cache of the same runner OS and architecture when none has that key, so `target` can come from another lockfile state/);
  assert.match(cleanCheckout.covers,/Bun's install cache is keyed on \.bun-version and bun\.lock and has no fallback\./);
  assert.doesNotMatch(cleanCheckout.covers,/caches keyed on the lockfiles/);
  // "and the checkout" in deterministic-foundation is held by a workflow step that is no dev.mjs
@@ -387,10 +387,37 @@ test('the deployment example declares and describes every image the compose file
  const required=[...(await read('deploy/compose.yaml')).matchAll(/\$\{([A-Z_]+):\?/g)].map(match=>match[1]);
  const images=[...(await read('deploy/Dockerfile')).matchAll(/^ARG ([A-Z_]+)$/gm)].map(match=>match[1]);
  assert.ok(required.length>0&&images.length>0);
- for(const name of new Set([...required,...images]))assert.match(example,new RegExp(`^${name}=`,'m'),`deploy/.env.example does not declare ${name}`);
+ for(const name of new Set([...required,...images])){
+  // Local mode trusts no proxy by default; hosted Compose requires an explicit ingress list.
+  const prefix=name==='OKF_TRUSTED_PROXIES'?'# ':'';
+  assert.match(example,new RegExp(`^${prefix}${name}=`,'m'),`deploy/.env.example does not declare ${name}`);
+ }
  const described=name=>example.split(/\r?\n/).find(line=>line.startsWith(`# ${name}:`))??'';
  for(const name of images)assert.ok(described(name).length>0,`${name} has no description`);
  assert.match(described('BUN_IMAGE'),/\.bun-version/,'BUN_IMAGE must be described the way compose.yaml and the Dockerfile require it');
+});
+test('the application image ships the three connected binaries and requires existing read-only converter models',async()=>{
+ const docker=await read('deploy/Dockerfile');
+ const compose=await read('deploy/compose.yaml');
+ // Construction plan section 4 requires server, CLI and conversion child together.
+ for(const [pkg,bin,runtime] of [['okf-jawn-server','okf-jawn-server',true],['okf-jawn-cli','okf-jawn',false],['okf-jawn-ingest','okf-jawn-convert',true]]){
+  const build=docker.split(/\r?\n/).find(line=>line.startsWith('RUN cargo build ')&&line.includes(`--package ${pkg} `));
+  assert.ok(build,`missing build for ${pkg}`);
+  assert.ok(build.includes(`--bin ${bin}`),`wrong binary for ${pkg}`);
+  if(runtime)assert.match(build,/--features runtime\b/,`${pkg} must enable its runtime`);
+  assert.ok(docker.includes(`/workspace/target/release/${bin} /app/${bin}`),`missing runtime ${bin}`);
+ }
+ assert.match(docker,/EXPOSE 7711 7712/,'both configured listeners belong to the image');
+ assert.match(compose,/DOCLING_RS_MODELS_DIR: \/opt\/docling\/models/);
+ assert.match(compose,/source: \$\{DOCLING_MODELS_DIR:\?/,'the operator must supply the qualified model directory');
+ assert.match(compose,/target: \/opt\/docling\/models\s+read_only: true\s+bind:\s+create_host_path: false/,'a typo must not create an empty model directory');
+});
+test('the fresh data volume is populated with runtime-user ownership before switching users',async()=>{
+ const docker=await read('deploy/Dockerfile');
+ // SPEC section 12: the non-root hosted process must be able to create its persistent store.
+ assert.match(docker,/RUN mkdir -p \/runtime-data/);
+ assert.match(docker,/COPY --from=application-build --chown=65532:65532 \/runtime-data \/data/);
+ assert.ok(docker.indexOf('--chown=65532:65532 /runtime-data /data')<docker.indexOf('USER 65532:65532'));
 });
 test('README states the generated counts and tool names, and neither prose file remembers a number',async()=>{
  const readme=await read('README.md'),agents=await read('AGENTS.md');

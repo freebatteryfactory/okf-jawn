@@ -11,26 +11,61 @@
 //! backup of the whole installation (every workspace archive and the installation archive) is
 //! written by `Backups` in storage M2 and joins this step there.
 
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use rusqlite::{Connection, OpenFlags};
 use rusqlite_migration::Migrations;
 
-use crate::data::{DataDir, io_error};
+use crate::data::{DataDir, RECORDS_FILE, io_error};
+use crate::schema;
 use crate::seam;
 
 /// An opened database at the latest schema version.
+///
+/// The connection is reachable only by borrowing it from this value, which borrows the locked
+/// `DataDir`, so no connection that `migrate_database` opened outlives the single-writer lock:
+///
+/// ```compile_fail
+/// # use okf_jawn_storage::{data::DataDir, format::migrate_database, schema};
+/// # fn main() -> Result<(), okf_jawn_contract::error::ApiError> {
+/// let data = DataDir::open(std::path::Path::new("data"))?;
+/// let migrated = migrate_database(&data, "records.sqlite", &schema::RECORDS)?;
+/// drop(data); // the lock is released while the connection is still borrowed
+/// let deleted = migrated.connection().execute_batch("DELETE FROM jobs");
+/// # drop(deleted);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug)]
-pub struct Migrated {
+pub struct Migrated<'data> {
     /// Connection to the migrated database.
-    pub connection: Connection,
+    connection: Connection,
+    /// The locked directory the database belongs to, borrowed for the connection's life.
+    data: PhantomData<&'data DataDir>,
     /// Schema version found before migrating; 0 for a new database.
     pub from: usize,
     /// Schema version after migrating.
     pub to: usize,
     /// The verified backup written before an upgrade, if one ran.
     pub backup: Option<PathBuf>,
+}
+
+/// A records-specific preparation of the verified copy before its source is migrated.
+type PrepareBackup = fn(&Path, usize) -> Result<(), ApiError>;
+
+impl Migrated<'_> {
+    /// The connection, borrowed: it lives no longer than the locked directory.
+    #[must_use]
+    pub const fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    /// The connection, for a store that keeps its own share of the lock (`Db::new`).
+    pub(crate) fn into_connection(self) -> Connection {
+        self.connection
+    }
 }
 
 /// Open the database `file` of the locked `data` directory and bring it to the latest step of
@@ -44,11 +79,32 @@ pub struct Migrated {
 /// `Unavailable` when the backup cannot be written or checked (nothing is migrated then);
 /// `Internal` when a step fails (the transaction rolls back) or the migrated result does not
 /// verify (the backup is kept and named).
-pub fn migrate_database(
-    data: &DataDir,
+pub fn migrate_database<'data>(
+    data: &'data DataDir,
     file: &str,
     migrations: &Migrations<'_>,
-) -> Result<Migrated, ApiError> {
+) -> Result<Migrated<'data>, ApiError> {
+    migrate_with_backup(data, file, migrations, None)
+}
+
+/// Migrate records after sanitizing the one pre-schema5 copy (lifecycle ruling9).
+/// Generic/index migrations keep their original copy behavior.
+pub(crate) fn migrate_records(data: &DataDir) -> Result<Migrated<'_>, ApiError> {
+    migrate_with_backup(
+        data,
+        RECORDS_FILE,
+        &schema::RECORDS,
+        Some(sanitize_before_v5),
+    )
+}
+
+/// The shared migration transaction, with an optional preparation only of its new copy.
+fn migrate_with_backup<'data>(
+    data: &'data DataDir,
+    file: &str,
+    migrations: &Migrations<'_>,
+    prepare_backup: Option<PrepareBackup>,
+) -> Result<Migrated<'data>, ApiError> {
     let path = data.root().join(file);
     let path = path.as_path();
     let backups = data.pre_migration_path();
@@ -68,7 +124,11 @@ pub fn migrate_database(
         .pending_migrations(&connection)
         .map_err(|error| migration_error(path, &error))?;
     let backup = if pending > 0 && from > 0 {
-        Some(back_up(&connection, path, from, backups)?)
+        let copy = back_up(&connection, path, from, backups)?;
+        if let Some(prepare) = prepare_backup {
+            prepare(&copy, from)?;
+        }
+        Some(copy)
     } else {
         None
     };
@@ -82,10 +142,31 @@ pub fn migrate_database(
         .into();
     Ok(Migrated {
         connection,
+        data: PhantomData,
         from,
         to,
         backup,
     })
+}
+
+/// Whether an existing database holds a schema that `migrations` would upgrade.
+///
+/// # Errors
+/// Returns `Unavailable` or `Internal` when its version cannot be read. Nothing is written.
+pub fn needs_upgrade(path: &Path, migrations: &Migrations<'_>) -> Result<bool, ApiError> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| open_error(path, &error))?;
+    let from: usize = migrations
+        .current_version(&connection)
+        .map_err(|error| migration_error(path, &error))?
+        .into();
+    let pending = migrations
+        .pending_migrations(&connection)
+        .map_err(|error| migration_error(path, &error))?;
+    Ok(from > 0 && pending > 0)
 }
 
 /// Refuse, through a read-only connection, a database newer than `migrations`.
@@ -143,21 +224,53 @@ fn back_up(
     connection
         .execute("VACUUM INTO ?1", [target_text])
         .map_err(|error| backup_error(&target, &error.to_string()))?;
-    let copy = Connection::open_with_flags(&target, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| backup_error(&target, &error.to_string()))?;
+    verify_copy(&target, from)?;
+    Ok(target)
+}
+
+/// Check the copy both before and after records-only sanitation; its released schema stays.
+fn verify_copy(target: &Path, from: usize) -> Result<(), ApiError> {
+    let copy = Connection::open_with_flags(target, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| backup_error(target, &error.to_string()))?;
     let integrity: String = copy
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-        .map_err(|error| backup_error(&target, &error.to_string()))?;
+        .map_err(|error| backup_error(target, &error.to_string()))?;
     let version: i64 = copy
         .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(|error| backup_error(&target, &error.to_string()))?;
+        .map_err(|error| backup_error(target, &error.to_string()))?;
     if integrity != "ok" || usize::try_from(version).ok() != Some(from) {
         return Err(backup_error(
-            &target,
+            target,
             &format!("the copy did not verify (integrity {integrity}, version {version})"),
         ));
     }
-    Ok(target)
+    Ok(())
+}
+
+/// Empty recorded purged-workspace request digests in this newly written pre-V5 copy only.
+/// No installation predates schema2 (ruling9); older released fixtures and later copies are
+/// unchanged. Secure deletion plus VACUUM removes old cell/free-page bytes as well as SQL values.
+fn sanitize_before_v5(target: &Path, from: usize) -> Result<(), ApiError> {
+    if !(2..=4).contains(&from) {
+        return Ok(());
+    }
+    let copy = Connection::open_with_flags(target, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|error| backup_error(target, &error.to_string()))?;
+    copy.execute_batch(
+        "PRAGMA secure_delete = ON;
+         BEGIN IMMEDIATE;
+         UPDATE mutations SET state = 'released', response = NULL, digest = ''
+         WHERE state IN ('completed', 'released')
+           AND operation NOT IN ('purge_workspace', 'purge_item')
+           AND EXISTS (SELECT 1 FROM purges
+               WHERE purges.tenant_id = mutations.tenant_id
+                 AND purges.target_key = 'workspace/' || mutations.workspace_id);
+         COMMIT;
+         VACUUM;",
+    )
+    .map_err(|error| backup_error(target, &error.to_string()))?;
+    drop(copy);
+    verify_copy(target, from)
 }
 
 /// Check the migrated database: nothing pending, intact, no dangling reference.

@@ -36,10 +36,6 @@
     "@tanstack/react-router": "1.170.41",
     "@tanstack/react-table": "9.2.4",
     "@tanstack/react-virtual": "3.14.13",
-    "@uppy/core": "6.2.0",
-    "@uppy/dashboard": "6.0.0",
-    "@uppy/react": "6.0.0",
-    "@uppy/xhr-upload": "6.0.0",
     "clsx": "2.1.1",
     "cytoscape": "3.34.3",
     "lucide-react": "1.50.0",
@@ -56,6 +52,7 @@
     "vega-embed": "7.3.0",
     "vega-interpreter": "2.3.2",
     "vega-lite": "6.4.3",
+    "yaml": "2.9.1",
     "zod": "4.6.5",
     "zustand": "5.0.15"
   },

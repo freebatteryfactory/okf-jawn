@@ -15,7 +15,11 @@ pub enum ItemKind {
     Note,
     /// An appearance of immutable source bytes.
     Source,
-    /// A source-bound declarative visual artifact.
+    /// A source-bound declarative visual artifact. Its file is an OKF concept: the `title`
+    /// property, then a body that is the View's description as Markdown followed by exactly one
+    /// fenced code block whose info string is `json okf-jawn-view`, holding `schema_version`, `mode`,
+    /// `grammar`, `bindings` (without `workspace_id`, `locations` or `materialized`, which the
+    /// server derives), `spec` and `charts`; the block ends the body.
     View,
 }
 
@@ -78,9 +82,11 @@ pub struct ItemDocument {
     /// All user and OKF properties; unknown extension values are retained. The server-owned
     /// application header appears under `APP_HEADER_KEY`.
     pub properties: std::collections::BTreeMap<String, serde_json::Value>,
-    /// SHA-256 of the item's body and properties without the server-owned header, keys sorted.
-    /// It is the value a confirmation and a review cite, so a client never computes it; the
-    /// server computes it with `okf_jawn_core::portable::item_content_digest`.
+    /// SHA-256 of the item's body and properties without the server-owned header and without the
+    /// `aliases` property, keys sorted: a rename that records the old path in `aliases` does not
+    /// change it, so it keeps a review's coverage. It is the value a confirmation and a review
+    /// cite, so a client never computes it; the server computes it with
+    /// `okf_jawn_core::portable::item_content_digest`.
     pub content_digest: crate::identity::Digest,
     /// Source occurrence metadata when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,7 +106,10 @@ pub struct Draft {
     pub editor: String,
     /// Head revision the draft is based on; a Snapshot conflicts if the item changed since.
     pub base_revision: crate::identity::Revision,
-    /// Digest of the drafted body and properties.
+    /// Digest of the drafted body and every property but the server-owned header, `aliases`
+    /// included, keys sorted. Unlike `ItemDocument::content_digest`, any edit changes it, one to
+    /// `aliases` alone included: it tells whether a draft is still the content a Snapshot
+    /// committed.
     pub content_digest: crate::identity::Digest,
     /// Time of the latest save.
     pub saved_at: crate::identity::Timestamp,
@@ -179,7 +188,8 @@ pub struct CreateItemRequest {
     pub type_name: String,
     /// Built-in role.
     pub kind: ItemKind,
-    /// Markdown content.
+    /// Markdown content. At most 8388608 bytes in UTF-8: a character takes one to four.
+    #[schemars(extend("x-max-utf8-bytes" = MAX_ITEM_TEXT_BYTES))]
     pub body: String,
     /// Preserved extension properties.
     pub properties: std::collections::BTreeMap<String, serde_json::Value>,
@@ -187,10 +197,29 @@ pub struct CreateItemRequest {
     pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
+/// A created item, with the receipt of its commit and the findings of the commit's check.
+///
+/// A creation answered before this type existed is kept in the mutation ledger as the
+/// `ItemDocument` alone; a repeat of it answers that document here with no findings and no
+/// receipt (`CreatedItem::from_stored`), since the build that answered it recorded none.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreatedItem {
+    /// The item as committed.
+    pub item: ItemDocument,
+    /// Durable application operation receipt; absent only on the repeat of a creation answered
+    /// before its receipt was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_id: Option<crate::identity::ReceiptId>,
+    /// Non-fatal issues recorded during the operation.
+    pub warnings: Vec<crate::common::Warning>,
+}
+
 /// Save the caller's draft; always succeeds even when the head has moved.
 ///
-/// The first save takes the item's head revision as its base. Later saves keep the draft's
-/// base unless `base_revision` equals the current head, which is the explicit rebase.
+/// The first save records `base_revision`, the revision the editor saw, as the draft's base;
+/// the item must exist at that revision. Later saves keep the draft's base unless
+/// `base_revision` equals the current head, which is the explicit rebase.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SaveDraftRequest {
@@ -200,7 +229,8 @@ pub struct SaveDraftRequest {
     pub item_id: crate::identity::ItemId,
     /// Revision the editor saw; equal to the current head to rebase after resolving a conflict.
     pub base_revision: crate::identity::Revision,
-    /// Drafted Markdown body.
+    /// Drafted Markdown body. At most 8388608 bytes in UTF-8: a character takes one to four.
+    #[schemars(extend("x-max-utf8-bytes" = MAX_ITEM_TEXT_BYTES))]
     pub body: String,
     /// Complete preserved property map.
     pub properties: std::collections::BTreeMap<String, serde_json::Value>,
@@ -218,15 +248,28 @@ pub struct ListDraftsRequest {
     pub page: crate::common::PageRequest,
 }
 
-/// The caller's drafts, without other editors' drafts.
+/// The caller's drafts, without other editors' drafts, each with its item's summary.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListDraftsResponse {
-    /// Draft metadata.
-    pub items: Vec<Draft>,
+    /// The head at which the items were read.
+    pub revision: crate::identity::Revision,
+    /// The drafts, most recently saved first.
+    pub items: Vec<DraftRow>,
     /// Continuation cursor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+}
+
+/// One draft and its item.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DraftRow {
+    /// Draft metadata.
+    pub draft: Draft,
+    /// The item as it is at `revision`; absent when the item does not exist there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<ItemSummary>,
 }
 
 /// Remove the caller's own draft of one item.
@@ -308,6 +351,60 @@ pub struct CreateFolderRequest {
     pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
+/// Move a folder, with everything in it, in one committed change.
+///
+/// Archived items in the folder move with it and are counted. A draft of a moved item stays
+/// with its item. Every moved item's links are rewritten as `move_item` does, and the rewritten
+/// files are told to the check. A folder changed since `base_revision` is a `conflict` with
+/// `ErrorDetail::StaleBase` on `/base_revision`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MoveFolderRequest {
+    /// Workspace whose permissions and storage scope apply.
+    pub workspace_id: crate::identity::WorkspaceId,
+    /// Exact revision on which this change is based; a folder changed since conflicts.
+    pub base_revision: crate::identity::Revision,
+    /// The folder to move.
+    pub folder: crate::identity::WorkspacePath,
+    /// Its new relative path.
+    pub destination: crate::identity::WorkspacePath,
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
+}
+
+/// Delete a folder, with everything in it, in one committed change.
+///
+/// Archived items in the folder are deleted with it and are counted. A draft of a deleted item
+/// is kept as a deleted item's draft is. A folder changed since `base_revision` is a `conflict`
+/// with `ErrorDetail::StaleBase` on `/base_revision`; a folder that does not exist is
+/// `not_found`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteFolderRequest {
+    /// Workspace whose permissions and storage scope apply.
+    pub workspace_id: crate::identity::WorkspaceId,
+    /// Exact revision on which this change is based; a folder changed since conflicts.
+    pub base_revision: crate::identity::Revision,
+    /// The folder to delete.
+    pub folder: crate::identity::WorkspacePath,
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
+}
+
+/// The commit a folder move or delete made.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FolderResult {
+    /// New committed workspace revision.
+    pub revision: crate::identity::Revision,
+    /// Durable application operation receipt.
+    pub receipt_id: crate::identity::ReceiptId,
+    /// Non-fatal issues recorded during the operation.
+    pub warnings: Vec<crate::common::Warning>,
+    /// Items moved or deleted, archived ones included.
+    pub items: u32,
+}
+
 /// A user-defined type schema and UI hints.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -354,3 +451,56 @@ pub struct SetTypeRequest {
 
 /// The frontmatter key of the application-owned header every item file carries.
 pub const APP_HEADER_KEY: &str = "okf_jawn";
+
+/// The largest Markdown or body text of one item in a write request: 8 MiB of UTF-8.
+///
+/// It bounds every write field that carries a whole item's text or a proposal's item text:
+/// `body` of `create_item` and `save_draft`, `body` of a proposal's `create` and `edit` changes,
+/// `markdown` of its `supply_extraction` changes, and `corrected_markdown` of `correct_digest`.
+/// Each field's published schema states it as `x-max-utf8-bytes`, never as `maxLength`, which
+/// JSON Schema counts in characters; `check_rules` counts the bytes and refuses a longer text as
+/// `too_large`, naming the field.
+/// The request body as a whole is bounded by `transport::MAX_REQUEST_BODY_BYTES`.
+pub const MAX_ITEM_TEXT_BYTES: usize = 8 * 1024 * 1024;
+
+impl CreatedItem {
+    /// A `create_item` answer as the mutation ledger stored it, in this build's shape.
+    ///
+    /// A body in the shape answered before `CreatedItem` existed, the `ItemDocument` alone (it
+    /// has no `item` key), is that document with no findings and no receipt: the build that
+    /// answered it recorded none. A body in this shape is read as it is.
+    ///
+    /// # Errors
+    /// Returns the decoding error of a body in neither shape.
+    pub fn from_stored(stored: serde_json::Value) -> Result<Self, serde_json::Error> {
+        if stored.get("item").is_some() {
+            return serde_json::from_value(stored);
+        }
+        Ok(Self {
+            item: serde_json::from_value(stored)?,
+            receipt_id: None,
+            warnings: Vec::new(),
+        })
+    }
+}
+
+/// Refuse an item text longer than [`MAX_ITEM_TEXT_BYTES`] UTF-8 bytes.
+///
+/// `field` is the JSON Pointer of the text inside its request, such as `/body` or
+/// `/changes/0/markdown`.
+///
+/// # Errors
+/// Returns `TooLarge` on `field` when `text` is longer than the bound.
+pub fn check_item_text(text: &str, field: &str) -> Result<(), crate::error::ApiError> {
+    if text.len() <= MAX_ITEM_TEXT_BYTES {
+        return Ok(());
+    }
+    Err(crate::error::ApiError::new(
+        crate::error::ErrorCode::TooLarge,
+        format!(
+            "The text is {} bytes; one item's text is at most {MAX_ITEM_TEXT_BYTES} bytes",
+            text.len()
+        ),
+    )
+    .with_field(field))
+}

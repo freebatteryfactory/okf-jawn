@@ -52,6 +52,34 @@
       ],
       "type": "object"
     },
+    "Limits": {
+      "additionalProperties": false,
+      "description": "The limits a deployment applies to what a client sends.",
+      "properties": {
+        "item_text_bytes": {
+          "description": "The most UTF-8 bytes of one item's text in a write (`item::MAX_ITEM_TEXT_BYTES`).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "request_body_bytes": {
+          "description": "The most bytes of one JSON request body (`transport::MAX_REQUEST_BODY_BYTES`).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "upload_bytes": {
+          "description": "The most bytes of one upload, as a decimal string (a 64-bit value); `create_upload`\nrefuses a larger `size` as `too_large` on `/size` when the slot is opened.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "upload_bytes",
+        "request_body_bytes",
+        "item_text_bytes"
+      ],
+      "type": "object"
+    },
     "Permission": {
       "description": "Application capabilities checked on every operation.",
       "oneOf": [
@@ -144,8 +172,12 @@
   "description": "Current identity and capability summary without credentials.",
   "properties": {
     "csrf_required": {
-      "description": "Browser writes require a same-origin anti-CSRF token.",
+      "description": "Browser writes require a same-origin anti-CSRF token: the double-submit pair published\nas the `csrfCookie` (or, over https, `csrfCookieHttps`) and `csrfHeader` security\nschemes.",
       "type": "boolean"
+    },
+    "limits": {
+      "$ref": "#/$defs/Limits",
+      "description": "The limits this deployment applies, so a client can check before it sends."
     },
     "principal": {
       "$ref": "#/$defs/Principal",
@@ -154,7 +186,8 @@
   },
   "required": [
     "principal",
-    "csrf_required"
+    "csrf_required",
+    "limits"
   ],
   "title": "SessionResponse",
   "type": "object"

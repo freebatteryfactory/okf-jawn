@@ -11,15 +11,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use okf_jawn_contract::access::AccessRoute;
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::common::Warning;
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::{ItemId, MutationId, Revision, TenantId, WorkspacePath};
 use okf_jawn_contract::item::{ItemKind, ItemStatus};
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::mutations::{BeginOutcome, MutationKey, MutationStore};
 use okf_jawn_core::storage::{
-    BlobStore, CandidateChanges, CandidateCheck, CommitChanges, LogQuery, NewWorkspace, Page,
-    Promotion, Provenance, StorageScope, TreeEdit, VersionStore, WorkspaceArchive,
-    WorkspaceCatalog, WorkspaceUpdate,
+    BlobStore, CandidateChanges, CandidateCheck, CommitChanges, Committed, LogQuery, NewWorkspace,
+    Page, Promotion, Provenance, REPLAY_WARNINGS_UNAVAILABLE, StorageScope, TreeEdit, VersionStore,
+    WorkspaceArchive, WorkspaceCatalog, WorkspaceUpdate,
 };
 use okf_jawn_storage::Storage;
 use serde_json::json;
@@ -35,6 +36,9 @@ macro_rules! uuid {
 }
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
+
+/// A stored shape of an item file the serializer does not write.
+type Shape = fn(&str) -> String;
 
 /// A check that accepts every candidate and counts how often it ran.
 #[derive(Default)]
@@ -56,8 +60,35 @@ struct Interloper {
     moved_to: std::sync::Mutex<Option<git2::Oid>>,
 }
 
+/// A check that, while a candidate is staged, sets the candidate's proposal reference to the head
+/// as another write of the same proposal would (another handle on the same repository).
+struct SetsTheReference {
+    repository: std::path::PathBuf,
+    reference: String,
+}
+
+/// A check that accepts every candidate with the warnings it was made with, and counts its runs.
+struct Warns {
+    warnings: Vec<Warning>,
+    runs: AtomicUsize,
+}
+
+/// A check that moves the head as `Interloper` does and then accepts with its warnings: the
+/// staged commit passes its check and cannot land.
+struct WarnsAsTheHeadMoves {
+    interloper: Interloper,
+    warnings: Vec<Warning>,
+}
+
+/// The closing `---` of a stored file's frontmatter, followed by `\n`.
+const CLOSING: &str = "\n---\n";
+
 impl CandidateCheck for Counting {
-    fn check(&self, root: &Path) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
+    fn check(
+        &self,
+        root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
         self.runs.fetch_add(1, Ordering::SeqCst);
         assert!(root.is_dir(), "the check reads a staged directory");
         Ok(Vec::new())
@@ -65,13 +96,21 @@ impl CandidateCheck for Counting {
 }
 
 impl CandidateCheck for Refusing {
-    fn check(&self, _root: &Path) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
+    fn check(
+        &self,
+        _root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
         Err(ApiError::new(ErrorCode::InvalidInput, "not conformant"))
     }
 }
 
 impl CandidateCheck for NamingStagedFile {
-    fn check(&self, root: &Path) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
+    fn check(
+        &self,
+        root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
         Err(ApiError::new(
             ErrorCode::InvalidInput,
             format!("{}/notes/x.md is not conformant", root.display()),
@@ -80,7 +119,11 @@ impl CandidateCheck for NamingStagedFile {
 }
 
 impl CandidateCheck for Interloper {
-    fn check(&self, _root: &Path) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
+    fn check(
+        &self,
+        _root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
         let fault = |error: git2::Error| ApiError::new(ErrorCode::Internal, error.to_string());
         let repository = git2::Repository::open_bare(&self.repository).map_err(fault)?;
         let head = repository.refname_to_id("refs/heads/main").map_err(fault)?;
@@ -101,6 +144,53 @@ impl CandidateCheck for Interloper {
             *slot = Some(moved);
         }
         Ok(Vec::new())
+    }
+}
+
+impl CandidateCheck for SetsTheReference {
+    fn check(
+        &self,
+        _root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
+        let fault = |error: git2::Error| ApiError::new(ErrorCode::Internal, error.to_string());
+        let repository = git2::Repository::open_bare(&self.repository).map_err(fault)?;
+        let head = repository.refname_to_id("refs/heads/main").map_err(fault)?;
+        repository
+            .reference(&self.reference, head, false, "another write")
+            .map_err(fault)?;
+        Ok(Vec::new())
+    }
+}
+
+impl Warns {
+    fn of(warnings: Vec<Warning>) -> Self {
+        Self {
+            warnings,
+            runs: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl CandidateCheck for Warns {
+    fn check(
+        &self,
+        _root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        Ok(self.warnings.clone())
+    }
+}
+
+impl CandidateCheck for WarnsAsTheHeadMoves {
+    fn check(
+        &self,
+        root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
+        self.interloper.check(root, &[])?;
+        Ok(self.warnings.clone())
     }
 }
 
@@ -248,7 +338,10 @@ async fn mutation_crash_reconcile_retry_returns_the_first_commit_and_writes_no_s
         key: uuid!(90)?,
     };
     let digest = okf_jawn_contract::identity::Digest::try_from("a".repeat(64))?;
-    let BeginOutcome::New(lease) = ledger.begin(&key, &digest).await? else {
+    let BeginOutcome::New(lease) = ledger
+        .begin(&key, &digest, Some(scope.workspace_id))
+        .await?
+    else {
         return Err("expected a new mutation".into());
     };
     let item: ItemId = uuid!(10)?;
@@ -273,7 +366,10 @@ async fn mutation_crash_reconcile_retry_returns_the_first_commit_and_writes_no_s
     // The process dies here: `MutationStore::complete` is never written. The lease runs out.
     let connection = rusqlite::Connection::open(storage.data().records_path())?;
     connection.execute("UPDATE mutations SET lease_expires_ms = 0", [])?;
-    let BeginOutcome::Abandoned { lease: resumed } = ledger.begin(&key, &digest).await? else {
+    let BeginOutcome::Abandoned { lease: resumed } = ledger
+        .begin(&key, &digest, Some(scope.workspace_id))
+        .await?
+    else {
         return Err("expected the crashed mutation to resume".into());
     };
     assert_eq!(resumed.mutation_id, lease.mutation_id);
@@ -311,7 +407,8 @@ async fn mutation_crash_reconcile_retry_returns_the_first_commit_and_writes_no_s
     );
     let found = versions
         .find_commit(&scope, lease.mutation_id, Some(&initial))
-        .await?;
+        .await?
+        .map(|found| found.revision);
     assert_eq!(found, Some(first.revision));
     Ok(())
 }
@@ -372,6 +469,13 @@ async fn mutation_crash_reconcile_commit_carries_the_trailer_and_a_moved_head_co
             .await,
     )?;
     assert_eq!(error.code, ErrorCode::Conflict);
+    // Ruling 5: the refusal names the head the expected one was compared with.
+    assert_eq!(
+        error.detail.as_deref(),
+        Some(&ErrorDetail::StaleBase {
+            head: versions.head(&scope).await?
+        })
+    );
     assert!(
         staging_is_empty(&storage)?,
         "staging is removed after every call"
@@ -456,6 +560,46 @@ async fn draft_per_editor_second_snapshot_conflicts_after_the_first() -> TestRes
     Ok(())
 }
 
+/// The case-folded refusals of `a_commit_is_staged_checked_and_refused_whole`, on a tree that
+/// holds `notes/Plan.md`. A file whose path folds onto it collides (`Conflict`). Under
+/// storage-paths ruling S2, a folder the tree spells another way (`Notes/plan.md`) is refused
+/// first, as `InvalidInput` naming the tree's spelling; before the ruling it was `Conflict`.
+async fn case_folded_paths_are_refused(
+    versions: &okf_jawn_storage::GitVersions,
+    scope: &StorageScope,
+    created: &Revision,
+) -> TestResult {
+    let respelled = err_of(
+        versions
+            .commit(
+                scope,
+                changes(22, created, vec![note(uuid!(11)?, "Notes/plan.md", "B")?])?,
+                Arc::new(Counting::default()),
+            )
+            .await,
+    )?;
+    assert_eq!(respelled.code, ErrorCode::InvalidInput, "{respelled}");
+    assert!(
+        respelled.message.contains("the folder is spelled notes/"),
+        "{respelled}"
+    );
+    let collision = err_of(
+        versions
+            .commit(
+                scope,
+                changes(22, created, vec![note(uuid!(11)?, "notes/plan.md", "B")?])?,
+                Arc::new(Counting::default()),
+            )
+            .await,
+    )?;
+    assert_eq!(
+        collision.code,
+        ErrorCode::Conflict,
+        "a case-folded path collides"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_commit_is_staged_checked_and_refused_whole() -> TestResult {
     let directory = tempfile::tempdir()?;
@@ -484,20 +628,7 @@ async fn a_commit_is_staged_checked_and_refused_whole() -> TestResult {
         )
         .await?
         .revision;
-    let collision = err_of(
-        versions
-            .commit(
-                &scope,
-                changes(22, &created, vec![note(uuid!(11)?, "Notes/plan.md", "B")?])?,
-                Arc::new(Counting::default()),
-            )
-            .await,
-    )?;
-    assert_eq!(
-        collision.code,
-        ErrorCode::Conflict,
-        "a case-folded path collides"
-    );
+    case_folded_paths_are_refused(&versions, &scope, &created).await?;
     let mut supplied = BTreeMap::new();
     supplied.insert("okf_jawn".to_owned(), json!({ "item_id": uuid_text(12) }));
     let header = err_of(
@@ -712,7 +843,7 @@ async fn find_commit_since_a_revision_the_repository_never_held_is_not_found() -
 #[tokio::test]
 async fn an_expected_head_the_repository_never_held_conflicts() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let (storage, scope, _) = workspace(directory.path()).await?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
     let versions = storage.versions();
     let unknown = Revision::try_from("ab".repeat(20))?;
     let error = err_of(
@@ -725,6 +856,13 @@ async fn an_expected_head_the_repository_never_held_conflicts() -> TestResult {
             .await,
     )?;
     assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    // Review N5: a head the repository never held is not the head (`held_head`), so the
+    // refusal names the head as a moved head's does, and leaves the field to the caller.
+    let stale = ErrorDetail::StaleBase {
+        head: initial.clone(),
+    };
+    assert_eq!(error.detail.as_deref(), Some(&stale));
+    assert_eq!(error.field, None);
     let promoted = err_of(
         versions
             .promote_candidate(
@@ -741,6 +879,214 @@ async fn an_expected_head_the_repository_never_held_conflicts() -> TestResult {
             .await,
     )?;
     assert_eq!(promoted.code, ErrorCode::Conflict, "{}", promoted.message);
+    assert_eq!(promoted.detail.as_deref(), Some(&stale));
+    assert_eq!(promoted.field, None);
+    Ok(())
+}
+
+/// A revision of 64 hex characters, which `Revision` accepts and a SHA-1 repository can never
+/// hold.
+fn sha256_revision() -> Fallible<Revision> {
+    Ok(Revision::try_from("ab".repeat(32))?)
+}
+
+/// Assert `error` is the answer to a revision that names no commit here: `NotFound`, never
+/// `Unavailable` (sweep-1 review N5), and no field (the caller names it).
+fn assert_no_such_revision(error: &ApiError, what: &str) {
+    assert_eq!(error.code, ErrorCode::NotFound, "{what}: {}", error.message);
+    assert_eq!(
+        error.message, "No revision with that identity here",
+        "{what}"
+    );
+    assert_eq!(error.field, None, "{what}");
+}
+
+/// Sweep-1 review N5: every read that names a revision of 64 hex characters (`commit_of`)
+/// answers that no such revision is here, as for a 40-character one the repository never held,
+/// never `Unavailable`, which a caller would retry.
+#[tokio::test]
+async fn a_64_hex_revision_a_read_names_is_not_found() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let head = versions
+        .commit(
+            &scope,
+            changes(2, &initial, vec![note(uuid!(10)?, "a.md", "A.\n")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let long = sha256_revision()?;
+    let page = || Page {
+        cursor: None,
+        limit: 10,
+    };
+    let at = path("a.md")?;
+    let item = uuid!(10)?;
+    let diff = |from: &Revision, to: &Revision| okf_jawn_core::storage::DiffQuery {
+        from: from.clone(),
+        to: to.clone(),
+        item_id: None,
+    };
+    let checks: Vec<(&str, Result<(), ApiError>)> = vec![
+        (
+            "list",
+            versions.list(&scope, &long, None, page()).await.map(drop),
+        ),
+        (
+            "item_at_path",
+            versions.item_at_path(&scope, &long, &at).await.map(drop),
+        ),
+        ("show", versions.show(&scope, &long, item).await.map(drop)),
+        (
+            "read_file",
+            versions.read_file(&scope, &long, &at).await.map(drop),
+        ),
+        ("rules", versions.rules(&scope, &long).await.map(drop)),
+        ("types", versions.types(&scope, &long).await.map(drop)),
+        (
+            "correction",
+            versions
+                .correction(
+                    &scope,
+                    &long,
+                    item,
+                    &okf_jawn_contract::identity::Digest::try_from("c".repeat(64))?,
+                )
+                .await
+                .map(drop),
+        ),
+        (
+            "diff from",
+            versions.diff(&scope, diff(&long, &head)).await.map(drop),
+        ),
+        (
+            "diff to",
+            versions.diff(&scope, diff(&head, &long)).await.map(drop),
+        ),
+        (
+            "blame",
+            versions
+                .blame(
+                    &scope,
+                    okf_jawn_core::storage::BlameQuery {
+                        revision: long.clone(),
+                        item_id: item,
+                        lines: okf_jawn_contract::common::TextRange { start: 1, end: 1 },
+                    },
+                )
+                .await
+                .map(drop),
+        ),
+        (
+            "body_start",
+            versions.body_start(&scope, &long, item).await.map(drop),
+        ),
+        (
+            "find_commit since",
+            versions
+                .find_commit(&scope, uuid!(20)?, Some(&long))
+                .await
+                .map(drop),
+        ),
+        (
+            "write_history",
+            versions
+                .write_history(&scope, &long, uuid!(21)?)
+                .await
+                .map(drop),
+        ),
+    ];
+    for (what, result) in checks {
+        assert_no_such_revision(&err_of(result)?, what);
+    }
+    Ok(())
+}
+
+/// Sweep-1 review N5: a write whose expected head, candidate base or promoted candidate is a
+/// revision of 64 hex characters (`oid_of`, the held head among them) answers that no such
+/// revision is here and writes nothing.
+#[tokio::test]
+async fn a_64_hex_revision_a_write_names_is_not_found() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let long = sha256_revision()?;
+    let committed = versions
+        .commit(
+            &scope,
+            changes(20, &long, vec![note(uuid!(10)?, "a.md", "A.")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await;
+    assert_no_such_revision(&err_of(committed)?, "the expected head of a commit");
+    let candidate = versions
+        .create_candidate(
+            &scope,
+            uuid!(50)?,
+            CandidateChanges {
+                mutation_id: uuid!(21)?,
+                base: long.clone(),
+                author: person("agent"),
+                message: "Propose".to_owned(),
+                edits: vec![note(uuid!(11)?, "b.md", "B.")?],
+            },
+            Arc::new(Counting::default()),
+        )
+        .await;
+    assert_no_such_revision(&err_of(candidate)?, "the base of a candidate");
+    let promotion = |expected_head: &Revision, candidate: &Revision| -> Fallible<Promotion> {
+        Ok(Promotion {
+            mutation_id: uuid!(22)?,
+            proposal_id: uuid!(50)?,
+            expected_head: expected_head.clone(),
+            candidate: candidate.clone(),
+            approver: person("ana"),
+            message: "Accept".to_owned(),
+        })
+    };
+    for (what, expected_head, promoted) in [
+        ("the expected head of a promotion", &long, &initial),
+        ("the candidate of a promotion", &initial, &long),
+    ] {
+        let refused = versions
+            .promote_candidate(&scope, promotion(expected_head, promoted)?)
+            .await;
+        assert_no_such_revision(&err_of(refused)?, what);
+    }
+    assert_eq!(versions.head(&scope).await?, initial, "nothing was written");
+    Ok(())
+}
+
+/// Sweep-1 review N5: a continuation whose tip is a revision of 64 hex characters (core's cursor
+/// carries the tip it hands back as the log's tip and the listing's revision) answers that no
+/// such revision is here.
+#[tokio::test]
+async fn a_cursor_whose_tip_is_a_64_hex_revision_is_not_found() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, _) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let long = sha256_revision()?;
+    let page = || Page {
+        cursor: Some("1".to_owned()),
+        limit: 1,
+    };
+    for item_id in [None, Some(uuid!(10)?)] {
+        let continued = versions
+            .log(
+                &scope,
+                LogQuery {
+                    tip: long.clone(),
+                    item_id,
+                    page: page(),
+                },
+            )
+            .await;
+        assert_no_such_revision(&err_of(continued)?, "a log continued from the tip");
+    }
+    let listed = versions.list(&scope, &long, None, page()).await;
+    assert_no_such_revision(&err_of(listed)?, "a listing continued at the tip");
     Ok(())
 }
 
@@ -760,6 +1106,69 @@ async fn a_refusal_never_names_the_server_staging_directory() -> TestResult {
     )?;
     assert_eq!(error.code, ErrorCode::InvalidInput);
     assert_eq!(error.message, "notes/x.md is not conformant");
+    Ok(())
+}
+
+/// Assert that `message` holds no part of the absolute path of the data directory `data`: not
+/// the path in either separator, and none of its components (its drive letter included) as a
+/// segment of the message.
+fn assert_names_no_machine_path(message: &str, data: &Path) {
+    let root = data.to_string_lossy();
+    let forward = root.replace('\\', "/");
+    for whole in [root.as_ref(), forward.as_str()] {
+        assert!(!message.contains(whole), "{whole:?} is in {message:?}");
+    }
+    // A component is looked for as a whole segment of the message, not as a substring: a short
+    // one (`T`, `4f` in a macOS temp root) can occur by chance inside a workspace id or in
+    // libgit2's words.
+    let segments: Vec<&str> = message
+        .split(['/', '\\', ' ', '\'', '"', '`', '(', ')', ',', ';'])
+        .collect();
+    for part in forward.split('/').filter(|part| !part.is_empty()) {
+        assert!(
+            !segments.contains(&part),
+            "{part:?} is a segment of {message:?}"
+        );
+    }
+}
+
+/// Git errors name no machine path (sweep 2a, ruling 10): a commit whose reference move libgit2
+/// refuses (a lock file another writer left on `refs/heads/main`) is the version store's
+/// `Unavailable`, with libgit2's class and code, and names the locked file relative to the data
+/// directory, never by its absolute path, a user name or a drive letter.
+#[tokio::test]
+async fn a_git_failure_names_its_path_relative_to_the_data_directory() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let repository = repository_path(directory.path(), &scope);
+    std::fs::write(repository.join("refs").join("heads").join("main.lock"), b"")?;
+    let error = err_of(
+        storage
+            .versions()
+            .commit(
+                &scope,
+                changes(20, &initial, vec![note(uuid!(10)?, "a.md", "A.")?])?,
+                Arc::new(Counting::default()),
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Unavailable, "{}", error.message);
+    // libgit2's class and code of the failure: `Os` (the lock file is a filesystem fault),
+    // `Locked`.
+    assert!(
+        error
+            .message
+            .starts_with("the version store failed (Os, Locked): "),
+        "{}",
+        error.message
+    );
+    let relative = format!(
+        "repositories/local/{}.git/refs/heads/main.lock",
+        scope.workspace_id.0
+    );
+    assert!(error.message.contains(&relative), "{}", error.message);
+    assert_names_no_machine_path(&error.message, directory.path());
+    assert_eq!(storage.versions().head(&scope).await?, initial);
     Ok(())
 }
 
@@ -790,6 +1199,7 @@ async fn a_move_or_folder_onto_a_reserved_name_is_refused_naming_the_path() -> T
                     vec![TreeEdit::MoveItem {
                         item_id: uuid!(10)?,
                         destination: path("notes/Index.md")?,
+                        keep_alias: false,
                     }],
                 )?,
                 Arc::new(Counting::default()),
@@ -931,6 +1341,7 @@ async fn items_are_shown_listed_moved_with_their_links_and_archived() -> TestRes
                     TreeEdit::MoveItem {
                         item_id: uuid!(11)?,
                         destination: path("plans/b.md")?,
+                        keep_alias: false,
                     },
                     TreeEdit::SetStatus {
                         item_id: uuid!(10)?,
@@ -950,6 +1361,54 @@ async fn items_are_shown_listed_moved_with_their_links_and_archived() -> TestRes
     let plan = versions.show(&scope, &moved, uuid!(11)?).await?;
     assert_eq!(plan.summary.path.as_str(), "plans/b.md");
     history_follows_the_move(&storage.versions(), &scope, &first, &moved).await
+}
+
+/// Ruling 19: a candidate is answered with its check's findings, kept with it, so a repeat of
+/// the mutation answers the same findings (`replayed`) and runs no check.
+#[tokio::test]
+async fn a_candidate_answers_its_checks_findings_and_a_repeat_the_same() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let finding = Warning {
+        code: "missing_description".to_owned(),
+        message: "proposed.md has no description".to_owned(),
+        location: Some("proposed.md".to_owned()),
+    };
+    let check = Arc::new(Warns {
+        warnings: vec![finding.clone()],
+        runs: AtomicUsize::new(0),
+    });
+    let changes = CandidateChanges {
+        mutation_id: uuid!(53)?,
+        base: initial,
+        author: person("agent"),
+        message: "Propose a note".to_owned(),
+        edits: vec![note(uuid!(12)?, "proposed.md", "Proposed.")?],
+    };
+    let first = versions
+        .create_candidate(&scope, uuid!(54)?, changes.clone(), check.clone())
+        .await?;
+    assert!(!first.replayed);
+    assert_eq!(
+        serde_json::to_value(&first.warnings)?,
+        serde_json::to_value([&finding])?
+    );
+    let again = versions
+        .create_candidate(&scope, uuid!(54)?, changes, check.clone())
+        .await?;
+    assert!(again.replayed);
+    assert_eq!(again.revision, first.revision);
+    assert_eq!(
+        serde_json::to_value(&again.warnings)?,
+        serde_json::to_value([&finding])?
+    );
+    assert_eq!(
+        check.runs.load(Ordering::SeqCst),
+        1,
+        "a repeat runs no check"
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -972,7 +1431,8 @@ async fn a_candidate_is_retained_off_the_head_and_promoted_exactly() -> TestResu
             candidate_changes.clone(),
             Arc::new(Counting::default()),
         )
-        .await?;
+        .await?
+        .revision;
     assert_eq!(
         versions.head(&scope).await?,
         initial,
@@ -985,7 +1445,8 @@ async fn a_candidate_is_retained_off_the_head_and_promoted_exactly() -> TestResu
             candidate_changes,
             Arc::new(Counting::default()),
         )
-        .await?;
+        .await?
+        .revision;
     assert_eq!(again, candidate);
     let promotion = Promotion {
         mutation_id: uuid!(52)?,
@@ -999,11 +1460,22 @@ async fn a_candidate_is_retained_off_the_head_and_promoted_exactly() -> TestResu
         .promote_candidate(&scope, promotion.clone())
         .await?;
     assert!(!accepted.replayed);
+    assert!(accepted.warnings.is_empty(), "no check runs at a promotion");
     let replay = versions
         .promote_candidate(&scope, promotion.clone())
         .await?;
     assert!(replay.replayed);
     assert_eq!(replay.revision, accepted.revision);
+    // R-I10: a replayed promotion answers what its first call did, no warning, and not the
+    // warning that none were kept; so does the promotion found by its mutation.
+    assert!(replay.warnings.is_empty(), "{:?}", replay.warnings);
+    let by_mutation = versions.find_commit(&scope, uuid!(52)?, None).await?;
+    let by_mutation = some(by_mutation, "the promotion by its mutation")?;
+    assert!(
+        by_mutation.warnings.is_empty(),
+        "{:?}",
+        by_mutation.warnings
+    );
     let shown = versions
         .show(&scope, &accepted.revision, uuid!(10)?)
         .await?;
@@ -1024,6 +1496,122 @@ async fn a_candidate_is_retained_off_the_head_and_promoted_exactly() -> TestResu
         ErrorCode::Conflict,
         "the head moved since the confirmation"
     );
+    // Review N5: the refusal names the head the expected one was compared with.
+    assert_eq!(
+        stale.detail.as_deref(),
+        Some(&ErrorDetail::StaleBase {
+            head: accepted.revision
+        })
+    );
+    assert_eq!(stale.field, None);
+    Ok(())
+}
+
+/// Ruling R14 (core M1.3a fix round 1): a candidate drafted on a base that is not the head is
+/// stale (contract ruling 5), so its promotion onto the current head is refused with
+/// `StaleBase` naming that head and no field, and nothing lands.
+#[tokio::test]
+async fn a_candidate_not_drafted_on_the_head_is_refused_with_the_head() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let proposal = uuid!(50)?;
+    let candidate = versions
+        .create_candidate(
+            &scope,
+            proposal,
+            CandidateChanges {
+                mutation_id: uuid!(51)?,
+                base: initial.clone(),
+                author: person("agent"),
+                message: "Propose a note".to_owned(),
+                edits: vec![note(uuid!(10)?, "proposed.md", "Proposed.")?],
+            },
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    // Another change lands after the candidate was drafted, so its base is no longer the head.
+    let head = versions
+        .commit(
+            &scope,
+            changes(20, &initial, vec![note(uuid!(11)?, "other.md", "Other.")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let refused = err_of(
+        versions
+            .promote_candidate(
+                &scope,
+                Promotion {
+                    mutation_id: uuid!(52)?,
+                    proposal_id: proposal,
+                    expected_head: head.clone(),
+                    candidate,
+                    approver: person("ana"),
+                    message: "Accept the note".to_owned(),
+                },
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Conflict, "{}", refused.message);
+    assert!(
+        refused.message.contains("not drafted on the current head"),
+        "{}",
+        refused.message
+    );
+    assert_eq!(
+        refused.detail.as_deref(),
+        Some(&ErrorDetail::StaleBase { head: head.clone() })
+    );
+    assert_eq!(refused.field, None);
+    assert_eq!(versions.head(&scope).await?, head, "nothing landed");
+    assert!(
+        versions
+            .find_commit(&scope, uuid!(52)?, None)
+            .await?
+            .is_none()
+    );
+    Ok(())
+}
+
+/// Review N5: a candidate whose proposal's reference another write set while it was staged is
+/// refused with a plain `Conflict`: the refusal is about no base, so it carries no `StaleBase`.
+#[tokio::test]
+async fn a_candidate_whose_reference_another_write_set_meanwhile_is_a_plain_conflict() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let proposal: okf_jawn_contract::identity::ProposalId = uuid!(60)?;
+    let check = Arc::new(SetsTheReference {
+        repository: repository_path(directory.path(), &scope),
+        reference: format!("refs/okf-jawn/proposals/{}", proposal.0),
+    });
+    let refused = err_of(
+        storage
+            .versions()
+            .create_candidate(
+                &scope,
+                proposal,
+                CandidateChanges {
+                    mutation_id: uuid!(61)?,
+                    base: initial.clone(),
+                    author: person("agent"),
+                    message: "Propose a note".to_owned(),
+                    edits: vec![note(uuid!(12)?, "proposed.md", "Proposed.")?],
+                },
+                check,
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Conflict, "{}", refused.message);
+    assert_eq!(
+        refused.message,
+        "this proposal already has a candidate from another write"
+    );
+    assert_eq!(refused.detail, None);
+    assert_eq!(storage.versions().head(&scope).await?, initial);
     Ok(())
 }
 
@@ -1125,7 +1713,8 @@ async fn a_quoted_trailer_line_in_a_message_body_replays_nothing() -> TestResult
     assert_eq!(
         versions
             .find_commit(&scope, uuid!(31)?, Some(&initial))
-            .await?,
+            .await?
+            .map(|found| found.revision),
         None,
         "a quoted line is not the trailer of mutation 31"
     );
@@ -1147,7 +1736,8 @@ async fn a_quoted_trailer_line_in_a_message_body_replays_nothing() -> TestResult
     assert_eq!(
         versions
             .find_commit(&scope, uuid!(30)?, Some(&initial))
-            .await?,
+            .await?
+            .map(|found| found.revision),
         Some(quoting.clone()),
         "the real trailer is still found"
     );
@@ -1232,7 +1822,8 @@ async fn history_is_a_bundle_of_the_accepted_line_that_stock_git_clones() -> Tes
             },
             Arc::new(Counting::default()),
         )
-        .await?;
+        .await?
+        .revision;
     let off_line = err_of(versions.write_history(&scope, &candidate, uuid!(60)?).await)?;
     assert_eq!(
         off_line.code,
@@ -1459,6 +2050,64 @@ async fn the_catalog_creates_once_lists_updates_and_archives() -> TestResult {
     Ok(())
 }
 
+/// Ruling 5: a workspace update or archive whose expected head is not the head is refused with
+/// `StaleBase` naming the head, leaves the field to the caller, and changes nothing.
+#[tokio::test]
+async fn a_workspace_update_or_archive_on_a_moved_head_names_the_head() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let moved = storage
+        .versions()
+        .commit(
+            &scope,
+            changes(20, &initial, vec![note(uuid!(10)?, "a.md", "A")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let catalog = storage.catalog();
+    let updated = err_of(
+        catalog
+            .update(
+                &scope,
+                uuid!(2)?,
+                WorkspaceUpdate {
+                    expected_head: initial.clone(),
+                    name: "Renamed".to_owned(),
+                    description: "New".to_owned(),
+                    author: person("ana"),
+                },
+            )
+            .await,
+    )?;
+    let archived = err_of(
+        catalog
+            .archive(
+                &scope,
+                uuid!(3)?,
+                WorkspaceArchive {
+                    expected_head: initial,
+                    author: person("ana"),
+                },
+            )
+            .await,
+    )?;
+    for error in [&updated, &archived] {
+        assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+        assert_eq!(
+            error.detail.as_deref(),
+            Some(&ErrorDetail::StaleBase {
+                head: moved.clone()
+            })
+        );
+        assert_eq!(error.field, None, "the caller names its request's field");
+    }
+    let shown = catalog.open(&scope).await?;
+    assert_eq!(shown.name, "Research");
+    assert!(shown.archived_at.is_none());
+    Ok(())
+}
+
 /// Commit `message` with mutation `mutation`'s trailer on top of the head straight into the
 /// workspace repository, its committer time `age_seconds` before now, and return it.
 fn commit_aged(
@@ -1528,22 +2177,23 @@ async fn find_commit_with_no_base_searches_the_accepted_line_back_from_the_head(
     assert_eq!(
         versions
             .find_commit(&scope, uuid!(30)?, Some(&base))
-            .await?,
+            .await?
+            .map(|found| found.revision),
         None,
         "searching after a later base cannot see it"
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(30)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(30)?, None).await?),
         Some(first),
         "with no base, a commit older than the draft's base is found"
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(32)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(32)?, None).await?),
         Some(head),
         "the head itself is examined"
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(33)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(33)?, None).await?),
         None,
         "a mutation no commit carries"
     );
@@ -1569,9 +2219,10 @@ async fn find_commit_with_no_base_never_reads_a_proposal_candidate() -> TestResu
             },
             Arc::new(Counting::default()),
         )
-        .await?;
+        .await?
+        .revision;
     assert_eq!(
-        versions.find_commit(&scope, uuid!(51)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(51)?, None).await?),
         None,
         "the candidate carries the trailer but is not on the accepted line"
     );
@@ -1589,12 +2240,12 @@ async fn find_commit_with_no_base_never_reads_a_proposal_candidate() -> TestResu
         )
         .await?;
     assert_eq!(
-        versions.find_commit(&scope, uuid!(51)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(51)?, None).await?),
         None,
         "promotion writes a new commit; the candidate's own stays off the line"
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(52)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(52)?, None).await?),
         Some(accepted.revision)
     );
     Ok(())
@@ -1620,25 +2271,25 @@ async fn find_commit_with_no_base_finds_a_commit_of_any_age_back_to_the_root() -
         .await?
         .revision;
     assert_eq!(
-        versions.find_commit(&scope, uuid!(51)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(51)?, None).await?),
         Some(head)
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(52)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(52)?, None).await?),
         Some(recent)
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(53)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(53)?, None).await?),
         Some(expired),
         "eight days old is found: nothing bounds the walk by time"
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(50)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(50)?, None).await?),
         Some(ancient),
         "four hundred days old is found"
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(1)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(1)?, None).await?),
         Some(initial),
         "the walk reaches the root: the workspace's creation commit"
     );
@@ -1667,7 +2318,8 @@ async fn find_commit_with_no_base_never_follows_a_merge_into_a_candidate() -> Te
             },
             Arc::new(Counting::default()),
         )
-        .await?;
+        .await?
+        .revision;
     let head = versions
         .commit(
             &scope,
@@ -1689,16 +2341,16 @@ async fn find_commit_with_no_base_never_follows_a_merge_into_a_candidate() -> Te
         &[&first, &second],
     )?;
     assert_eq!(
-        versions.find_commit(&scope, uuid!(51)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(51)?, None).await?),
         None,
         "the first-parent walk never reaches the candidate"
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(52)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(52)?, None).await?),
         Some(Revision::try_from(merge.to_string())?)
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(30)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(30)?, None).await?),
         Some(head)
     );
     Ok(())
@@ -1905,6 +2557,795 @@ async fn body_start_maps_the_patch_and_blame_lines_to_the_same_body_line() -> Te
     );
     Ok(())
 }
+
+/// Commit `bytes` at `at` on main straight into the workspace repository, as no store edit
+/// can (an archive restore brings such files), and return the commit.
+fn raw_write(
+    directory: &Path,
+    scope: &StorageScope,
+    at: &str,
+    bytes: &[u8],
+    mutation: u32,
+) -> Fallible<Revision> {
+    let repository = git2::Repository::open_bare(repository_path(directory, scope))?;
+    let parent = repository.find_commit(repository.refname_to_id("refs/heads/main")?)?;
+    let blob = repository.blob(bytes)?;
+    let mut update = git2::build::TreeUpdateBuilder::new();
+    update.upsert(at, blob, git2::FileMode::Blob);
+    let tree = repository.find_tree(update.create_updated(&repository, &parent.tree()?)?)?;
+    let who = git2::Signature::now("raw", "raw@example.invalid")?;
+    let commit = repository.commit(
+        Some("refs/heads/main"),
+        &who,
+        &who,
+        &format!("raw\n\nOkf-Jawn-Mutation: {}\n", uuid_text(mutation)),
+        &tree,
+        &[&parent],
+    )?;
+    Ok(Revision::try_from(commit.to_string())?)
+}
+
+/// Write a note through the store, then store its file again in `shape` and then once more in
+/// `shape` with body line 2 edited, both by raw commits. `body_start` must name the stored
+/// file's line holding the first body line, and blame of body line N must be libgit2's blame
+/// of the stored line `start + N - 1`: line 2 from the edit, lines 1 and 3 from earlier.
+async fn stored_shape_keeps_body_lines(shape: Shape) -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let item: ItemId = uuid!(10)?;
+    let written = versions
+        .commit(
+            &scope,
+            changes(
+                20,
+                &initial,
+                vec![note_with(item, "plan.md", "One.\nTwo.\nThree.", 2)?],
+            )?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let canonical = String::from_utf8(
+        versions
+            .read_file(&scope, &written, &path("plan.md")?)
+            .await?,
+    )?;
+    let reshaped = shape(&canonical);
+    assert_ne!(reshaped, canonical, "the shape changes the stored bytes");
+    raw_write(directory.path(), &scope, "plan.md", reshaped.as_bytes(), 21)?;
+    let edited = shape(&canonical.replacen("\nTwo.\n", "\nTwo, edited.\n", 1));
+    let tip = raw_write(directory.path(), &scope, "plan.md", edited.as_bytes(), 22)?;
+    let start = versions.body_start(&scope, &tip, item).await?;
+    let stored: Vec<&str> = edited.lines().collect();
+    let first = usize::try_from(start)?.saturating_sub(1);
+    assert_eq!(
+        stored.get(first).copied(),
+        Some("One."),
+        "body_start {start} names the first body line: {edited:?}"
+    );
+    let blame = versions
+        .blame(
+            &scope,
+            okf_jawn_core::storage::BlameQuery {
+                revision: tip.clone(),
+                item_id: item,
+                lines: okf_jawn_contract::common::TextRange { start: 1, end: 3 },
+            },
+        )
+        .await?;
+    let repository = git2::Repository::open_bare(repository_path(directory.path(), &scope))?;
+    let mut options = git2::BlameOptions::new();
+    options.newest_commit(git2::Oid::from_str(tip.as_str())?);
+    let raw = repository.blame_file(Path::new("plan.md"), Some(&mut options))?;
+    let texts: Vec<&str> = blame.lines.iter().map(|line| line.text.as_str()).collect();
+    assert_eq!(texts, vec!["One.", "Two, edited.", "Three."]);
+    for blamed in &blame.lines {
+        let file_line = usize::try_from(blamed.line.saturating_add(start).saturating_sub(1))?;
+        let hunk = some(raw.get_line(file_line), "the stored line's blame")?;
+        assert_eq!(
+            blamed.commit.revision.as_str(),
+            hunk.final_commit_id().to_string(),
+            "body line {} is stored line {file_line}",
+            blamed.line
+        );
+        assert_eq!(
+            blamed.commit.revision == tip,
+            blamed.line == 2,
+            "only body line 2 comes from the edit"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn body_start_and_blame_count_a_stored_file_with_no_blank_line_after_its_frontmatter()
+-> TestResult {
+    stored_shape_keeps_body_lines(|text| text.replacen("\n---\n\n", CLOSING, 1)).await
+}
+
+#[tokio::test]
+async fn body_start_and_blame_count_a_stored_file_with_a_comment_in_its_frontmatter() -> TestResult
+{
+    stored_shape_keeps_body_lines(|text| {
+        text.replacen("---\n", "---\n# a comment the serializer drops\n", 1)
+    })
+    .await
+}
+
+#[tokio::test]
+async fn body_start_and_blame_count_a_stored_file_with_crlf_line_endings() -> TestResult {
+    stored_shape_keeps_body_lines(|text| text.replace('\n', "\r\n")).await
+}
+
+/// An empty body: `body_start` names the line where the body would begin (the line after the
+/// closing delimiter), and blame has no body line to attribute.
+#[tokio::test]
+async fn body_start_of_a_stored_file_with_an_empty_body_is_the_line_after_its_frontmatter()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let item: ItemId = uuid!(10)?;
+    let written = versions
+        .commit(
+            &scope,
+            changes(20, &initial, vec![note_with(item, "plan.md", "One.", 2)?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let canonical = String::from_utf8(
+        versions
+            .read_file(&scope, &written, &path("plan.md")?)
+            .await?,
+    )?;
+    let closing = some(canonical.find(CLOSING), "the closing delimiter")?;
+    let frontmatter_only = some(
+        canonical.get(..closing.saturating_add(CLOSING.len())),
+        "the frontmatter",
+    )?;
+    let tip = raw_write(
+        directory.path(),
+        &scope,
+        "plan.md",
+        frontmatter_only.as_bytes(),
+        21,
+    )?;
+    assert_eq!(versions.show(&scope, &tip, item).await?.body, "");
+    let start = versions.body_start(&scope, &tip, item).await?;
+    let stored_lines = u32::try_from(frontmatter_only.lines().count())?;
+    assert_eq!(
+        start,
+        stored_lines.saturating_add(1),
+        "{frontmatter_only:?}"
+    );
+    let error = err_of(
+        versions
+            .blame(
+                &scope,
+                okf_jawn_core::storage::BlameQuery {
+                    revision: tip,
+                    item_id: item,
+                    lines: okf_jawn_contract::common::TextRange { start: 1, end: 1 },
+                },
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::InvalidInput, "{}", error.message);
+    Ok(())
+}
+
+/// The revision of the commit `find_commit` answered, when it found one.
+fn found(answer: Option<Committed>) -> Option<Revision> {
+    answer.map(|found| found.revision)
+}
+
+/// A warning as a check would give it, about the file at `at`.
+fn finding(code: &str, at: &str) -> Warning {
+    Warning {
+        code: code.to_owned(),
+        message: format!("{at} could say more"),
+        location: Some(at.to_owned()),
+    }
+}
+
+/// `warnings` as the wire carries them: `Warning` has no equality.
+fn wire(warnings: &[Warning]) -> Fallible<serde_json::Value> {
+    Ok(serde_json::to_value(warnings)?)
+}
+
+/// The warnings in the row storage keeps for `mutation`'s commit in `scope`, when it keeps one.
+fn kept_row(
+    storage: &Storage,
+    scope: &StorageScope,
+    mutation: u32,
+) -> Fallible<Option<serde_json::Value>> {
+    let connection = rusqlite::Connection::open(storage.data().records_path())?;
+    let mut statement = connection.prepare(
+        "SELECT warnings FROM commit_warnings
+         WHERE tenant_id = ?1 AND workspace_id = ?2 AND mutation_id = ?3",
+    )?;
+    let mut rows = statement.query_map(
+        [
+            scope.tenant_id.as_str().to_owned(),
+            scope.workspace_id.0.to_string(),
+            uuid_text(mutation),
+        ],
+        |row| row.get::<_, String>(0),
+    )?;
+    let text = rows.next().transpose()?;
+    Ok(text.map(|text| serde_json::from_str(&text)).transpose()?)
+}
+
+/// A second workspace of `scope`'s tenant, created under mutation 2, and its head.
+async fn second_workspace(
+    storage: &Storage,
+    scope: &StorageScope,
+) -> Fallible<(StorageScope, Revision)> {
+    let created = storage
+        .catalog()
+        .create(
+            &scope.tenant_id,
+            uuid!(2)?,
+            NewWorkspace {
+                name: "Other".to_owned(),
+                description: String::new(),
+                creator: person("ana"),
+            },
+        )
+        .await?;
+    Ok((
+        StorageScope {
+            tenant_id: scope.tenant_id.clone(),
+            workspace_id: created.id,
+        },
+        created.head,
+    ))
+}
+
+/// R-I10: a replay answers the warnings the first attempt's check gave, whichever call replays
+/// it, and runs no check; and a commit whose check warned of nothing replays with no warning,
+/// not with the unavailable one.
+#[tokio::test]
+async fn a_replayed_commit_answers_the_warnings_its_first_attempt_was_given() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let given = vec![finding("lint_a", "a.md"), finding("lint_b", "a.md")];
+    let edits = || -> Fallible<_> { Ok(vec![note(uuid!(10)?, "a.md", "A")?]) };
+    let first = versions
+        .commit(
+            &scope,
+            changes(20, &initial, edits()?)?,
+            Arc::new(Warns::of(given.clone())),
+        )
+        .await?;
+    assert!(!first.replayed);
+    assert_eq!(wire(&first.warnings)?, wire(&given)?);
+    // The retry's own check would warn of something else, and never runs.
+    let retry = Arc::new(Warns::of(vec![finding("other", "a.md")]));
+    let again = versions
+        .commit(&scope, changes(20, &initial, edits()?)?, retry.clone())
+        .await?;
+    assert!(again.replayed);
+    assert_eq!(again.revision, first.revision);
+    assert_eq!(
+        retry.runs.load(Ordering::SeqCst),
+        0,
+        "a replay runs no check"
+    );
+    assert_eq!(wire(&again.warnings)?, wire(&given)?);
+    for since in [Some(&initial), None] {
+        let answer = versions.find_commit(&scope, uuid!(20)?, since).await?;
+        let answer = some(answer, "the commit by its mutation")?;
+        assert!(answer.replayed, "a found commit is answered as a replay");
+        assert_eq!(answer.revision, first.revision);
+        assert_eq!(wire(&answer.warnings)?, wire(&given)?);
+    }
+    // No warning is an answer too: it replays as no warning.
+    let quiet =
+        || -> Fallible<_> { changes(21, &first.revision, vec![note(uuid!(11)?, "b.md", "B")?]) };
+    let silent = versions
+        .commit(&scope, quiet()?, Arc::new(Counting::default()))
+        .await?;
+    assert!(silent.warnings.is_empty());
+    let silent_again = versions
+        .commit(&scope, quiet()?, Arc::new(Counting::default()))
+        .await?;
+    assert!(silent_again.replayed);
+    assert_eq!(wire(&silent_again.warnings)?, wire(&[])?);
+    Ok(())
+}
+
+/// R-I10: the warnings are kept by workspace as well as by mutation. Two workspaces each hold a
+/// commit under the same mutation identity, and each replays with its own.
+#[tokio::test]
+async fn kept_warnings_belong_to_the_workspace_of_their_commit() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let (other, other_head) = second_workspace(&storage, &scope).await?;
+    let versions = storage.versions();
+    let ours = vec![finding("lint_a", "a.md")];
+    let theirs = vec![finding("lint_c", "a.md")];
+    for (workspace, head, given) in [(&scope, &initial, &ours), (&other, &other_head, &theirs)] {
+        versions
+            .commit(
+                workspace,
+                changes(20, head, vec![note(uuid!(10)?, "a.md", "A")?])?,
+                Arc::new(Warns::of(given.clone())),
+            )
+            .await?;
+    }
+    for (workspace, expected) in [(&scope, &ours), (&other, &theirs)] {
+        let answer = versions.find_commit(workspace, uuid!(20)?, None).await?;
+        let answer = some(answer, "the commit of each workspace")?;
+        assert_eq!(wire(&answer.warnings)?, wire(expected)?);
+    }
+    Ok(())
+}
+
+/// R-I10, a stop after the warnings were kept and before the commit landed: the row stands
+/// without a commit, and the next attempt replaces it and commits. The check moves the head as a
+/// concurrent writer would, so the staged commit is checked, its warnings are kept, and its
+/// landing is refused.
+#[tokio::test]
+async fn warnings_kept_for_a_commit_that_did_not_land_are_replaced_by_the_next_attempt()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let stale = vec![finding("stale", "a.md")];
+    let stranding = Arc::new(WarnsAsTheHeadMoves {
+        interloper: Interloper {
+            repository: repository_path(directory.path(), &scope),
+            moved_to: std::sync::Mutex::new(None),
+        },
+        warnings: stale.clone(),
+    });
+    let edits = || -> Fallible<_> { Ok(vec![note(uuid!(10)?, "a.md", "A")?]) };
+    let refused = err_of(
+        versions
+            .commit(&scope, changes(20, &initial, edits()?)?, stranding)
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Conflict, "{}", refused.message);
+    let moved = versions.head(&scope).await?;
+    assert_ne!(moved, initial, "the head moved under the commit");
+    // Kept before the landing was tried: the row is there, and no commit carries the mutation.
+    assert_eq!(
+        kept_row(&storage, &scope, 20)?,
+        Some(wire(&stale)?),
+        "the warnings were kept before the commit could land"
+    );
+    assert_eq!(
+        found(versions.find_commit(&scope, uuid!(20)?, None).await?),
+        None,
+        "no commit landed"
+    );
+    // The next attempt checks again, on the head as it is now, and its warnings replace the row.
+    let fresh = vec![finding("fresh", "a.md")];
+    let landed = versions
+        .commit(
+            &scope,
+            changes(20, &moved, edits()?)?,
+            Arc::new(Warns::of(fresh.clone())),
+        )
+        .await?;
+    assert!(!landed.replayed);
+    assert_eq!(wire(&landed.warnings)?, wire(&fresh)?);
+    assert_eq!(kept_row(&storage, &scope, 20)?, Some(wire(&fresh)?));
+    let again = versions
+        .commit(
+            &scope,
+            changes(20, &moved, edits()?)?,
+            Arc::new(Counting::default()),
+        )
+        .await?;
+    assert!(again.replayed);
+    assert_eq!(again.revision, landed.revision);
+    assert_eq!(wire(&again.warnings)?, wire(&fresh)?);
+    Ok(())
+}
+
+/// Assert that `replay` is a replay answered with the one warning that the commit's warnings
+/// are not available, whose message holds `why`.
+fn assert_unavailable(replay: &Committed, why: &str) -> TestResult {
+    assert!(replay.replayed);
+    let [only] = replay.warnings.as_slice() else {
+        return Err(format!("not one warning: {:?}", replay.warnings).into());
+    };
+    assert_eq!(only.code, REPLAY_WARNINGS_UNAVAILABLE);
+    assert_eq!(only.code, "replay_warnings_unavailable");
+    assert_eq!(only.location, None);
+    assert!(only.message.contains(why), "{}", only.message);
+    Ok(())
+}
+
+/// R-I10, a commit written before storage kept warnings: the data directory is put back as
+/// records schema 2 left it and opened again, which migrates it. The commit is still there and
+/// has no row, so a replay of it, by `commit` or by `find_commit`, answers the one warning
+/// `replay_warnings_unavailable` and succeeds. So does a commit no check ran for (the
+/// workspace's first), and a row that does not read as warnings.
+#[tokio::test]
+async fn a_replay_of_a_commit_without_kept_warnings_answers_the_one_unavailable_warning()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let edits = || -> Fallible<_> { Ok(vec![note(uuid!(10)?, "a.md", "A")?]) };
+    let first = storage
+        .versions()
+        .commit(
+            &scope,
+            changes(20, &initial, edits()?)?,
+            Arc::new(Warns::of(vec![finding("lint_a", "a.md")])),
+        )
+        .await?;
+    let records = storage.data().records_path();
+    drop(storage);
+    legacy_schema::rebuild(&records, 2)?;
+    let storage = Storage::open(directory.path())?;
+    let versions = storage.versions();
+    assert_eq!(
+        kept_row(&storage, &scope, 20)?,
+        None,
+        "migrated, and no row"
+    );
+    let retry = Arc::new(Counting::default());
+    let again = versions
+        .commit(&scope, changes(20, &initial, edits()?)?, retry.clone())
+        .await?;
+    assert_eq!(again.revision, first.revision);
+    assert_eq!(
+        retry.runs.load(Ordering::SeqCst),
+        0,
+        "a replay runs no check"
+    );
+    assert_unavailable(&again, "kept none")?;
+    let answer = versions.find_commit(&scope, uuid!(20)?, None).await?;
+    assert_unavailable(&some(answer, "the commit")?, "kept none")?;
+    // The workspace's first commit (its creation, mutation 1): no check ever ran for it.
+    let created = versions.find_commit(&scope, uuid!(1)?, None).await?;
+    let created = some(created, "the creation commit")?;
+    assert_eq!(created.revision, initial);
+    assert_unavailable(&created, "kept none")?;
+    // A row that is not a list of warnings is no reason to fail a commit that landed.
+    rusqlite::Connection::open(&records)?.execute(
+        "INSERT INTO commit_warnings (tenant_id, workspace_id, mutation_id, commit_id, warnings)
+         VALUES (?1, ?2, ?3, ?4, '{\"not\": \"a list\"}')",
+        [
+            scope.tenant_id.as_str().to_owned(),
+            scope.workspace_id.0.to_string(),
+            uuid_text(20),
+            first.revision.as_str().to_owned(),
+        ],
+    )?;
+    let unread = versions
+        .commit(
+            &scope,
+            changes(20, &initial, edits()?)?,
+            Arc::new(Counting::default()),
+        )
+        .await?;
+    assert_eq!(unread.revision, first.revision);
+    assert_unavailable(&unread, "could not be read")?;
+    Ok(())
+}
+
+/// The commit the row storage keeps for `mutation` in `scope` names, when it keeps one.
+fn kept_commit(storage: &Storage, scope: &StorageScope, mutation: u32) -> Fallible<Option<String>> {
+    let connection = rusqlite::Connection::open(storage.data().records_path())?;
+    let mut statement = connection.prepare(
+        "SELECT commit_id FROM commit_warnings
+         WHERE tenant_id = ?1 AND workspace_id = ?2 AND mutation_id = ?3",
+    )?;
+    let mut rows = statement.query_map(
+        [
+            scope.tenant_id.as_str().to_owned(),
+            scope.workspace_id.0.to_string(),
+            uuid_text(mutation),
+        ],
+        |row| row.get::<_, String>(0),
+    )?;
+    Ok(rows.next().transpose()?)
+}
+
+/// Review N1: a replay answers the warnings its commit was given, or says they are unavailable;
+/// never another attempt's. A later attempt of a mutation misses the mutation's own commit (its
+/// expected head is that commit), passes its check, keeps its warnings and then cannot land:
+/// the row of the mutation is now that attempt's and names its commit. The one commit that
+/// carries the mutation is the first, and it is answered with the one unavailable warning by
+/// `find_commit` and by `commit`, not with the second attempt's warnings. (Reviewer probe PV6,
+/// adopted with the ruled expectation.)
+#[tokio::test]
+async fn a_later_attempt_that_does_not_land_never_lends_its_warnings_to_the_landed_commit()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let first_given = vec![finding("first", "a.md")];
+    let first_edits = || -> Fallible<_> { Ok(vec![note(uuid!(10)?, "a.md", "A")?]) };
+    let first = versions
+        .commit(
+            &scope,
+            changes(20, &initial, first_edits()?)?,
+            Arc::new(Warns::of(first_given.clone())),
+        )
+        .await?;
+    assert_eq!(
+        kept_commit(&storage, &scope, 20)?.as_deref(),
+        Some(first.revision.as_str()),
+        "the row names the commit it was kept for"
+    );
+    let second_given = vec![finding("second", "b.md")];
+    let stranding = Arc::new(WarnsAsTheHeadMoves {
+        interloper: Interloper {
+            repository: repository_path(directory.path(), &scope),
+            moved_to: std::sync::Mutex::new(None),
+        },
+        warnings: second_given.clone(),
+    });
+    let refused = err_of(
+        versions
+            .commit(
+                &scope,
+                changes(20, &first.revision, vec![note(uuid!(11)?, "b.md", "B")?])?,
+                stranding.clone(),
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Conflict, "{}", refused.message);
+    // The second attempt landed nothing: the head is the concurrent writer's commit, and the
+    // row is the second attempt's, kept for a commit that is not on the line.
+    let interloper = some(
+        *stranding
+            .interloper
+            .moved_to
+            .lock()
+            .map_err(|_| "poisoned")?,
+        "the concurrent commit",
+    )?;
+    assert_eq!(
+        versions.head(&scope).await?.as_str(),
+        interloper.to_string()
+    );
+    assert_eq!(kept_row(&storage, &scope, 20)?, Some(wire(&second_given)?));
+    let stranded = some(kept_commit(&storage, &scope, 20)?, "the row's commit")?;
+    assert_ne!(stranded, first.revision.as_str());
+    assert_ne!(stranded, interloper.to_string());
+    // The commit that carries the mutation is still the first, and it is not answered with
+    // the second attempt's warnings.
+    for since in [Some(&initial), None] {
+        let answer = versions.find_commit(&scope, uuid!(20)?, since).await?;
+        let answer = some(answer, "the first commit")?;
+        assert_eq!(answer.revision, first.revision, "the first commit is found");
+        assert_unavailable(&answer, "another attempt")?;
+    }
+    let retry = Arc::new(Counting::default());
+    let again = versions
+        .commit(
+            &scope,
+            changes(20, &initial, first_edits()?)?,
+            retry.clone(),
+        )
+        .await?;
+    assert_eq!(again.revision, first.revision);
+    assert_eq!(
+        retry.runs.load(Ordering::SeqCst),
+        0,
+        "a replay runs no check"
+    );
+    assert_unavailable(&again, "another attempt")?;
+    Ok(())
+}
+
+/// Review N1, the rule by itself: the row of a mutation is answered only to the commit it
+/// names. The row is pointed at another commit of the workspace (its first) behind the store,
+/// and the commit that carries the mutation is then answered with the unavailable warning;
+/// pointed back, it is answered with its warnings again.
+#[tokio::test]
+async fn a_row_kept_for_another_commit_is_not_answered() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let given = vec![finding("lint_a", "a.md")];
+    let first = versions
+        .commit(
+            &scope,
+            changes(20, &initial, vec![note(uuid!(10)?, "a.md", "A")?])?,
+            Arc::new(Warns::of(given.clone())),
+        )
+        .await?;
+    let point_at = |commit: &Revision| -> Fallible<usize> {
+        Ok(
+            rusqlite::Connection::open(storage.data().records_path())?.execute(
+                "UPDATE commit_warnings SET commit_id = ?1 WHERE mutation_id = ?2",
+                [commit.as_str().to_owned(), uuid_text(20)],
+            )?,
+        )
+    };
+    assert_eq!(point_at(&initial)?, 1, "the row now names another commit");
+    let answer = versions.find_commit(&scope, uuid!(20)?, None).await?;
+    let answer = some(answer, "the commit")?;
+    assert_eq!(answer.revision, first.revision);
+    assert_unavailable(&answer, "another attempt")?;
+    assert_eq!(point_at(&first.revision)?, 1);
+    let answer = versions.find_commit(&scope, uuid!(20)?, None).await?;
+    assert_eq!(wire(&some(answer, "the commit")?.warnings)?, wire(&given)?);
+    Ok(())
+}
+
+/// R-I10: the row is read by its tenant as well as its workspace and mutation. The commit's
+/// own row is moved to another tenant behind the store (same workspace identity, same
+/// mutation), so this tenant holds none, and the commit is answered as having none kept.
+/// (Reviewer probe PV1, adopted.)
+#[tokio::test]
+async fn a_row_of_another_tenant_is_not_answered() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    versions
+        .commit(
+            &scope,
+            changes(20, &initial, vec![note(uuid!(10)?, "a.md", "A")?])?,
+            Arc::new(Warns::of(vec![finding("lint_a", "a.md")])),
+        )
+        .await?;
+    let moved = rusqlite::Connection::open(storage.data().records_path())?.execute(
+        "UPDATE commit_warnings SET tenant_id = 'elsewhere' WHERE mutation_id = ?1",
+        [uuid_text(20)],
+    )?;
+    assert_eq!(moved, 1, "the row now belongs to another tenant");
+    let answer = versions.find_commit(&scope, uuid!(20)?, None).await?;
+    assert_unavailable(&some(answer, "the commit")?, "kept none")?;
+    Ok(())
+}
+
+/// R-I10: the row is written before the commit lands, so a row that cannot be written stops
+/// the commit. The table is dropped behind the store: the commit answers `Internal`, and the
+/// head does not move. (Reviewer probe PV2, adopted.)
+#[tokio::test]
+async fn a_commit_whose_warnings_cannot_be_kept_does_not_land() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    rusqlite::Connection::open(storage.data().records_path())?
+        .execute_batch("DROP TABLE commit_warnings;")?;
+    let refused = err_of(
+        versions
+            .commit(
+                &scope,
+                changes(20, &initial, vec![note(uuid!(10)?, "a.md", "A")?])?,
+                Arc::new(Warns::of(vec![finding("lint_a", "a.md")])),
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Internal, "{}", refused.message);
+    assert_eq!(
+        versions.head(&scope).await?,
+        initial,
+        "the head did not move"
+    );
+    assert_eq!(
+        found(versions.find_commit(&scope, uuid!(20)?, None).await?),
+        None,
+        "no commit carries the mutation"
+    );
+    Ok(())
+}
+
+/// R-I10: the same for a promotion, whose empty answer is kept before its reference moves.
+/// (Reviewer probe PV3, adopted.)
+#[tokio::test]
+async fn a_promotion_whose_answer_cannot_be_kept_does_not_land() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let proposal = uuid!(50)?;
+    let candidate = versions
+        .create_candidate(
+            &scope,
+            proposal,
+            CandidateChanges {
+                mutation_id: uuid!(51)?,
+                base: initial.clone(),
+                author: person("agent"),
+                message: "Propose a note".to_owned(),
+                edits: vec![note(uuid!(10)?, "proposed.md", "Proposed.")?],
+            },
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    rusqlite::Connection::open(storage.data().records_path())?
+        .execute_batch("DROP TABLE commit_warnings;")?;
+    let refused = err_of(
+        versions
+            .promote_candidate(
+                &scope,
+                Promotion {
+                    mutation_id: uuid!(52)?,
+                    proposal_id: proposal,
+                    expected_head: initial.clone(),
+                    candidate,
+                    approver: person("ana"),
+                    message: "Accept the note".to_owned(),
+                },
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Internal, "{}", refused.message);
+    assert_eq!(
+        versions.head(&scope).await?,
+        initial,
+        "the head did not move"
+    );
+    Ok(())
+}
+
+/// R-I10: two attempts of one mutation at once, each with a check that would warn of something
+/// else, 60 rounds. One writes, the other replays it, both answer the writer's warnings, and
+/// the row holds them. The two calls are serial under the workspace's write lock, so this
+/// shows that their answers agree whichever goes first; it does not interleave them.
+/// (Reviewer probe PV4, adopted.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_attempts_of_one_mutation_at_once_answer_one_commit_and_its_warnings() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let mut head = initial;
+    for round in 0..60_u32 {
+        let mutation = 1000_u32.saturating_add(round);
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut calls = Vec::new();
+        for code in ["first", "second"] {
+            let versions = storage.versions();
+            let (scope, barrier) = (scope.clone(), barrier.clone());
+            let given = vec![finding(code, "r.md")];
+            let item: ItemId = uuid!(2000_u32.saturating_add(round))?;
+            let change = changes(
+                mutation,
+                &head,
+                vec![note(item, &format!("r{round}.md"), "R")?],
+            )?;
+            calls.push(tokio::spawn(async move {
+                barrier.wait().await;
+                versions
+                    .commit(&scope, change, Arc::new(Warns::of(given)))
+                    .await
+            }));
+        }
+        let mut answers = Vec::new();
+        for call in calls {
+            answers.push(call.await??);
+        }
+        let writers: Vec<&Committed> = answers.iter().filter(|answer| !answer.replayed).collect();
+        assert_eq!(writers.len(), 1, "round {round}: one attempt wrote");
+        let writer = some(writers.first().copied(), "the writer")?;
+        let first = some(answers.first(), "an answer")?;
+        let second = some(answers.get(1), "an answer")?;
+        assert_eq!(first.revision, second.revision, "round {round}: one commit");
+        assert_eq!(
+            wire(&first.warnings)?,
+            wire(&second.warnings)?,
+            "round {round}: both attempts answer the same warnings"
+        );
+        assert_eq!(
+            kept_row(&storage, &scope, mutation)?,
+            Some(wire(&writer.warnings)?),
+            "round {round}: the row is the writer's"
+        );
+        assert_eq!(
+            kept_commit(&storage, &scope, mutation)?.as_deref(),
+            Some(writer.revision.as_str()),
+            "round {round}: and names the writer's commit"
+        );
+        head = first.revision.clone();
+    }
+    Ok(())
+}
+
+#[path = "support/legacy_schema.rs"]
+mod legacy_schema;
 
 #[path = "../../../tests/support/check.rs"]
 mod check;

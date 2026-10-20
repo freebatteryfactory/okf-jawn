@@ -4,11 +4,26 @@
 //! constructs the real adapters and passes them in through `Ports`, with the deployment's
 //! `ApplicationConfig`; startup wires dependencies and does not hold application behavior. The
 //! `ports::Application` implementation for `ApplicationService` is organized as cohesive child
-//! modules of this one: `items` (folders, items and types), `drafts`, `reads` (`read_item` and
-//! sandbox capabilities), `sources` (citations and object reads), `history` (Timeline, Changes,
-//! Who, Snapshot and Rewind), `navigation` (search, links and the graph) and `status` (health,
-//! readiness and the session), over the shared steps in `shared` (revision resolution, commits,
-//! receipts).
+//! modules of this one: `items` (folders, items and types), `folders` (a folder as a whole: its
+//! move and delete), `drafts`, `reads` (`read_item` and sandbox capabilities), `sources`
+//! (citations and object reads), `history` (Timeline, Changes,
+//! Who, Snapshot and Rewind), `navigation` (search, links and the graph), `proposals`
+//! (proposals, their acceptance and discussion), `reviews` (confirmations and reviews),
+//! `conventions` (the naming rules: reading and saving them, a rename preview and its apply),
+//! `status` (health, readiness and the session), `purges` (recording, resuming and reading
+//! a workspace purge), `workspaces` (the catalog, archive, export, backup and restore),
+//! `events` (receipts and the two event logs), `connectors` (local connector credentials),
+//! `views` (persistent Views: reading, presenting, resolving and exporting them, and the check
+//! every saved-View write runs first),
+//! `uploads` (upload slots), `job_control` (reading jobs, retrying and cancelling them), and
+//! `attention` (advisory workspace observations and index rebuild jobs), and `imports`
+//! (import acceptance, conversion again and corrections),
+//! over the shared steps in `shared` (revision resolution, commits, receipts). Besides the
+//! operations, the service answers dispatch's archive question (`Application::archived_at`)
+//! from its catalog, records a sign-in for the server's session routes
+//! (`ApplicationService::record_sign_in`), and implements the byte transports the server binds
+//! (`transfers::Transfers`, in `transfers`), which authorize themselves since they are not
+//! operations.
 //!
 //! Operations whose part of the construction plan has not landed answer `NotImplemented`,
 //! naming the operation; nothing here claims an operation works that is not built, and no
@@ -21,8 +36,11 @@ use std::str::FromStr as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use okf_jawn_contract::access::Principal;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::identity::{TenantId, WorkspaceId};
+use okf_jawn_contract::extraction::ConversionSettings;
+use okf_jawn_contract::identity::{TenantId, Timestamp, WorkspaceId};
+use okf_jawn_contract::import::DEFAULT_MAX_UPLOAD_BYTES;
 use time::OffsetDateTime;
 
 use crate::access::AccessControl;
@@ -32,7 +50,7 @@ use crate::context::OperationContext;
 use crate::conversion::Converter;
 use crate::credentials::CredentialStore;
 use crate::drafts::DraftStore;
-use crate::events::EventLog;
+use crate::events::{EventLog, record_sign_in};
 use crate::jobs::{JobQueue, RecordStore};
 use crate::mutations::MutationStore;
 use crate::ports::{Application, PortFuture};
@@ -40,9 +58,12 @@ use crate::proposals::ProposalStore;
 use crate::readiness::ReadinessProbe;
 use crate::sandbox::SandboxCapabilityStore;
 use crate::search::SearchIndex;
-use crate::storage::{BlobStore, CandidateCheck, StorageScope, VersionStore, WorkspaceCatalog};
+use crate::storage::{
+    Backups, BlobStore, CandidateCheck, StorageScope, VersionStore, WorkspaceCatalog,
+};
 use crate::uploads::UploadStore;
 
+pub use reviews::CONFIRMATION_TTL;
 pub use sources::MAX_OBJECT_BLOCK;
 
 /// The handler of one operation: its function in a child module, or `pending` while the
@@ -75,6 +96,12 @@ macro_rules! route {
     (delete_item) => {
         items::delete_item
     };
+    (move_folder) => {
+        folders::move_folder
+    };
+    (delete_folder) => {
+        folders::delete_folder
+    };
     (create_folder) => {
         items::create_folder
     };
@@ -95,6 +122,21 @@ macro_rules! route {
     };
     (get_object) => {
         sources::get_object
+    };
+    (get_view) => {
+        views::get_view
+    };
+    (get_catalog) => {
+        views::get_catalog
+    };
+    (present_view) => {
+        views::present_view
+    };
+    (resolve_view) => {
+        views::resolve_view
+    };
+    (export_view) => {
+        views::export_view
     };
     (log_items) => {
         history::log_items
@@ -129,6 +171,150 @@ macro_rules! route {
     (get_session) => {
         status::get_session
     };
+    (list_workspaces) => {
+        workspaces::list_workspaces
+    };
+    (create_workspace) => {
+        workspaces::create_workspace
+    };
+    (open_workspace) => {
+        workspaces::open_workspace
+    };
+    (update_workspace) => {
+        workspaces::update_workspace
+    };
+    (archive_workspace) => {
+        workspaces::archive_workspace
+    };
+    (unarchive_workspace) => {
+        workspaces::unarchive_workspace
+    };
+    (export_workspace) => {
+        workspaces::export_workspace
+    };
+    (backup_workspace) => {
+        workspaces::backup_workspace
+    };
+    (restore_workspace) => {
+        workspaces::restore_workspace
+    };
+    (backup_installation) => {
+        workspaces::backup_installation
+    };
+    (get_receipt) => {
+        events::get_receipt
+    };
+    (list_events) => {
+        events::list_events
+    };
+    (list_tenant_events) => {
+        events::list_tenant_events
+    };
+    (create_connector) => {
+        connectors::create_connector
+    };
+    (list_connectors) => {
+        connectors::list_connectors
+    };
+    (revoke_connector) => {
+        connectors::revoke_connector
+    };
+    (purge_workspace) => {
+        purges::purge_workspace
+    };
+    (get_purge) => {
+        purges::get_purge
+    };
+    (open_proposal) => {
+        proposals::open_proposal
+    };
+    (list_proposals) => {
+        proposals::list_proposals
+    };
+    (get_proposal) => {
+        proposals::get_proposal
+    };
+    (accept_proposal) => {
+        proposals::accept_proposal
+    };
+    (decline_proposal) => {
+        proposals::decline_proposal
+    };
+    (add_comment) => {
+        proposals::add_comment
+    };
+    (list_comments) => {
+        proposals::list_comments
+    };
+    (create_confirmation) => {
+        reviews::create_confirmation
+    };
+    (create_review) => {
+        reviews::create_review
+    };
+    (list_reviews) => {
+        reviews::list_reviews
+    };
+    (get_rules) => {
+        conventions::get_rules
+    };
+    (set_rules) => {
+        conventions::set_rules
+    };
+    (preview_names) => {
+        conventions::preview_names
+    };
+    (apply_names) => {
+        conventions::apply_names
+    };
+    (create_upload) => {
+        uploads::create_upload
+    };
+    (complete_upload) => {
+        uploads::complete_upload
+    };
+    (discard_upload) => {
+        uploads::discard_upload
+    };
+    (get_upload) => {
+        uploads::get_upload
+    };
+    (list_uploads) => {
+        uploads::list_uploads
+    };
+    (get_job) => {
+        job_control::get_job
+    };
+    (list_jobs) => {
+        job_control::list_jobs
+    };
+    (get_tenant_job) => {
+        job_control::get_tenant_job
+    };
+    (list_tenant_jobs) => {
+        job_control::list_tenant_jobs
+    };
+    (retry_job) => {
+        job_control::retry_job
+    };
+    (cancel_job) => {
+        job_control::cancel_job
+    };
+    (get_attention) => {
+        attention::get_attention
+    };
+    (start_import) => {
+        imports::start_import
+    };
+    (redigest_item) => {
+        imports::redigest_item
+    };
+    (correct_digest) => {
+        imports::correct_digest
+    };
+    (rebuild_index) => {
+        attention::rebuild_index
+    };
     ($pending:ident) => {
         pending
     };
@@ -143,6 +329,11 @@ macro_rules! application_operations {
                 -> PortFuture<'a, $response> {
                 Box::pin(route!($id)(self, context, request))
             })*
+
+            fn archived_at<'a>(&'a self, scope: &'a StorageScope)
+                -> PortFuture<'a, Option<Timestamp>> {
+                Box::pin(workspaces::archived_at(self, scope))
+            }
         }
     };
 }
@@ -190,6 +381,10 @@ pub struct Ports {
     pub sandbox: Arc<dyn SandboxCapabilityStore>,
     /// Configured dependency readiness.
     pub readiness: Arc<dyn ReadinessProbe>,
+    /// Workspace and installation archives; the `download_tenant_artifact` transport reads an
+    /// installation archive back through it (`Backups::open_installation_archive`), since the
+    /// blob store is workspace-scoped.
+    pub backups: Arc<dyn Backups>,
 }
 
 /// Deployment settings the operations need beyond the ports.
@@ -206,6 +401,13 @@ pub struct ApplicationConfig {
     pub sandbox_origin: String,
     /// How long a minted sandbox capability resolves; above zero.
     pub sandbox_ttl: Duration,
+    /// The most bytes of one upload; above zero. `ApplicationConfig::new` sets the contract's
+    /// `import::DEFAULT_MAX_UPLOAD_BYTES`, and a deployment may set another. `get_session`
+    /// reports it (`Limits::upload_bytes`).
+    pub max_upload_bytes: u64,
+    /// Conversion settings resolved into an import job when the request supplies none.
+    /// `ApplicationConfig::new` uses the contract's `ConversionSettings::default`.
+    pub conversion_defaults: ConversionSettings,
 }
 
 /// Where the service reads the current instant: the system clock unless a test fixes it
@@ -227,13 +429,25 @@ pub struct ApplicationService {
 type IndexBuilds = Mutex<BTreeMap<(TenantId, WorkspaceId), Arc<tokio::sync::Mutex<()>>>>;
 
 impl ApplicationConfig {
+    /// The settings of a deployment with the default upload limit
+    /// (`import::DEFAULT_MAX_UPLOAD_BYTES`) and contract conversion settings.
+    #[must_use]
+    pub fn new(sandbox_origin: String, sandbox_ttl: Duration) -> Self {
+        Self {
+            sandbox_origin,
+            sandbox_ttl,
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
+            conversion_defaults: ConversionSettings::default(),
+        }
+    }
+
     /// Refuse settings no deployment may run with.
     ///
     /// # Errors
     /// Returns `InvalidInput` naming `sandbox_origin` when it is not an absolute `http` or
     /// `https` origin of a host and an optional port in `1..=65535`, without a path, query,
-    /// fragment or user information, and naming
-    /// `sandbox_ttl` when it is zero.
+    /// fragment or user information, naming `sandbox_ttl` when it is zero, and naming
+    /// `max_upload_bytes` when it is zero, or the conversion settings field that is out of bounds.
     pub fn check(&self) -> Result<(), ApiError> {
         if !is_origin(&self.sandbox_origin) {
             return Err(ApiError::new(
@@ -249,6 +463,14 @@ impl ApplicationConfig {
             )
             .with_field("sandbox_ttl"));
         }
+        if self.max_upload_bytes == 0 {
+            return Err(ApiError::new(
+                ErrorCode::InvalidInput,
+                "an upload must be allowed some bytes",
+            )
+            .with_field("max_upload_bytes"));
+        }
+        self.conversion_defaults.check()?;
         Ok(())
     }
 }
@@ -316,6 +538,16 @@ impl ApplicationService {
     #[must_use]
     pub fn conformance(&self) -> Arc<dyn CandidateCheck> {
         Arc::clone(&self.conformance)
+    }
+
+    /// Append `signed_in` for `principal` to its tenant's log (Stage 1b design section 7), by
+    /// the one rule `events::record_sign_in` holds; the server's session routes record a
+    /// sign-in by that rule too, before they send the session's cookies.
+    ///
+    /// # Errors
+    /// Returns the event log's error; a caller that opened a session undoes and refuses it.
+    pub async fn record_sign_in(&self, principal: &Principal) -> Result<(), ApiError> {
+        record_sign_in(self.ports.events.as_ref(), principal).await
     }
 }
 
@@ -385,11 +617,25 @@ fn is_origin(text: &str) -> bool {
     host_ok && port_ok
 }
 
+mod attention;
+mod connectors;
+mod conventions;
 mod drafts;
+mod events;
+mod folders;
 mod history;
+mod imports;
 mod items;
+mod job_control;
 mod navigation;
+mod proposals;
+mod purges;
 mod reads;
+mod reviews;
 mod shared;
 mod sources;
 mod status;
+mod transfers;
+mod uploads;
+mod views;
+mod workspaces;

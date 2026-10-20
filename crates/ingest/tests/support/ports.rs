@@ -13,8 +13,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use okf_jawn_contract::common::{PageRange, Warning};
-use okf_jawn_contract::conventions::NamingRules;
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::extraction::{ConverterIdentity, FailureReason};
 use okf_jawn_contract::history::{BlameResponse, Commit, DiffResponse, LogResponse};
 use okf_jawn_contract::identity::{
@@ -33,10 +32,11 @@ use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
     Backups, BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges,
-    Committed, DiffQuery, FolderListing, LocalSource, LogQuery, ObjectInfo, ObjectRead, Page,
-    Promotion, Purger, SourceCard, StorageScope, TreeEdit, VersionStore,
+    Committed, CommittedFile, CommittedFiles, DiffQuery, FilePage, FolderListing, LocalSource,
+    LogQuery, ObjectInfo, ObjectRead, Page, Promotion, Purger, RulesFile, SourceCard, StorageScope,
+    TreeEdit, TreeItem, VersionStore, WorkspaceTree, WrittenArchive, replay_warnings_unavailable,
 };
-use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
+use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadRecord, UploadStore};
 
 /// A `VersionStore` that keeps a line of commits and nothing of their trees.
 ///
@@ -48,7 +48,10 @@ use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 /// head is refused with `Conflict`, as storage refuses a path collision. A commit that is
 /// written first runs the caller's check once over a staged directory holding every item of
 /// the candidate tree (the items at the expected head with the edits applied), each rendered
-/// as `read_file` returns it; its error refuses the commit and its warnings are returned.
+/// as a Markdown file of its type, title and body; its error refuses the commit and its warnings are returned, and
+/// kept: a replay, by `commit` or by `find_commit`, answers the warnings kept for that commit,
+/// or the one `replay_warnings_unavailable` warning for a commit none were kept for (a
+/// restore's, someone else's, or any commit once a test called `forget_warnings`).
 ///
 /// Someone else's edit is modelled as a foreign commit (`edit_elsewhere`), which may take a
 /// path, or carry tree edits (`edit_elsewhere_with`: an edit, move or deletion of an item);
@@ -56,8 +59,12 @@ use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 /// another writer racing the handler would.
 ///
 /// `list` lists the items and child folders directly in a folder at a revision, in one page;
-/// `read_file` returns an item's rendered file and answers `NotFound` for any other path (the
-/// fake keeps no folder index or change log).
+/// the handler reads no single file of a committed tree (it rebuilt a replayed commit's warnings
+/// that way before the store kept them), so `read_file` answers `NotImplemented`. A portable
+/// export reads whole trees through `committed_files`, which answers the files a test set for a
+/// revision (`set_tree`) a page at a time, sorted and paged as the port documents; and
+/// `write_history`, which answers the object a test set (`set_history`) and records each call.
+/// Neither tree is derived from the commits: an export test states its tree.
 ///
 /// `show` and `item_at_path` read an item at a revision by replaying, over the items present at the base
 /// (`at_base`), the edits of every commit up to that revision: `WriteSourceCard` writes the
@@ -81,20 +88,61 @@ pub struct FakeVersions {
     pub on_commit: Mutex<Option<CommitHook>>,
     /// Items present at the base revision, before any commit.
     pub at_base: Mutex<Vec<SourceCard>>,
-    /// Awaited once, by the next `read_file`, before it answers (a long tree read).
-    pub read_hold: Mutex<Option<Hold>>,
+    /// The warnings the check gave for each commit this store wrote, by its mutation.
+    pub warnings: Mutex<Vec<(MutationId, Vec<Warning>)>>,
+    /// Every file of the trees `committed_files` reads, by revision, as a test set them
+    /// (`set_tree`); a revision with none set is not on the line.
+    pub trees: Mutex<BTreeMap<ExportTreeKey, Vec<CommittedFile>>>,
+    /// Retained candidate revisions: present in storage, but outside the accepted line.
+    pub candidates: Mutex<Vec<ExportTreeKey>>,
+    /// Every page `committed_files` was asked for, in order.
+    pub file_pages: Mutex<Vec<FilePage>>,
+    /// The object `write_history` answers, as a test set it (`set_history`).
+    pub history: Mutex<Option<ObjectInfo>>,
+    /// First history object returned for a mutation, retained across retries.
+    pub history_writes: Mutex<BTreeMap<MutationId, ObjectInfo>>,
+    /// Every `write_history` call: the revision and the mutation.
+    pub histories: Mutex<Vec<(Revision, MutationId)>>,
+    /// Scoped revisions requested by export enumeration; tests assert the caller's scope.
+    pub file_scopes: Mutex<Vec<StorageScope>>,
+    /// Runs after a page was read, before the handler observes progress (a controlled cancel).
+    pub after_file_page: Mutex<Option<FilePageHook>>,
+    /// The naming rules file every revision holds (`put_rules`); `None` is no rules saved.
+    pub rules: Mutex<Option<RulesFile>>,
 }
+
+/// A version tree is scoped independently from its revision identity.
+pub type ExportTreeKey = (String, WorkspaceId, String);
+/// Controlled callback after a page is answered; it may cancel the running export.
+pub type FilePageHook = Box<dyn Fn(usize) -> Result<(), ApiError> + Send + Sync>;
 
 /// An `UploadStore` holding uploads and recording which job consumed each.
 ///
 /// `consume` encodes the port doc: an incomplete upload is `InvalidInput`, one another job
 /// consumed is `Conflict`, and consuming it again for the same job changes nothing.
+/// `consume_batch` encodes its own (the sentences stand above it): all of the batch, or none.
+///
+/// Both also encode the purge refusal of their port docs, when a test set `purged`:
+/// `consume`'s "Refused with `Conflict` naming the purge, before the upload is read, when a
+/// purge names the workspace", and `consume_batch`'s "Refused with `Conflict` naming the purge,
+/// before any upload is read, when a purge names the workspace". The message is the storage
+/// adapter's (`purge::guard::refuse`): "workspace <id> is purged by purge <id> (<state>);
+/// nothing is written to it". The call is recorded, no upload is read and none is marked.
 #[derive(Default)]
 pub struct FakeUploads {
     /// The slots `get` returns.
     pub records: Mutex<Vec<UploadRecord>>,
-    /// Consumptions asked for: upload and job.
+    /// Uploads marked, by either call: upload and job, each pair once.
     pub consumed: Mutex<Vec<(UploadId, JobId)>>,
+    /// Every `consume_batch` call, refused or not: the uploads as listed, and the job.
+    pub batches: Mutex<Vec<(Vec<UploadId>, JobId)>>,
+    /// Every single `consume` call, refused or not: the upload and the job.
+    pub singles: Mutex<Vec<(UploadId, JobId)>>,
+    /// Another job that consumes this upload just before the next `consume_batch` is applied,
+    /// as a concurrent import landing between a handler's check and its batch would (once).
+    pub taken_before_batch: Mutex<Option<(UploadId, JobId)>>,
+    /// The purge that names the workspace, when one does: every consumption is then refused.
+    pub purged: Mutex<Option<PurgeId>>,
 }
 
 /// A `BlobStore` in memory; `materialize` writes the object into a temporary directory.
@@ -105,6 +153,8 @@ pub struct FakeBlobs {
     pub directory: tempfile::TempDir,
     /// Awaited once, by the next `materialize` of this digest, before it answers.
     pub materialize_hold: Mutex<Option<(Digest, Hold)>>,
+    /// Successful puts, excluding direct fixture insertion.
+    pub puts: Mutex<Vec<ObjectInfo>>,
 }
 
 /// A `Converter` that converts every window of a paginated original, except the windows that
@@ -178,6 +228,8 @@ pub struct FakeSearch {
 pub struct FakeBackups {
     /// The archive every write returns.
     pub archive: ObjectInfo,
+    /// Managed digests stated by the test, scoped to their tenant.
+    pub managed: Mutex<Vec<(TenantId, Digest, okf_jawn_core::storage::ManagedKind)>>,
     /// Writes asked for.
     pub writes: AtomicUsize,
     /// The editors each restore was given.
@@ -196,13 +248,20 @@ pub type Hold = Arc<dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = ()> + Send
 
 /// A `Purger` that returns one report and counts the calls.
 pub struct FakePurger {
+    /// Tenant/job identities of clean-up calls, distinct from purge calls.
+    pub clean_up_calls: Mutex<Vec<(TenantId, JobId)>>,
     /// The report every call returns.
     pub report: PurgeReport,
     /// Calls made.
     pub calls: AtomicUsize,
     /// Awaited as either purge starts (a long purge).
     pub hold: Mutex<Option<Hold>>,
+    /// The failure the next call answers, after its hold, once.
+    pub failure: Mutex<Option<ApiError>>,
 }
+
+/// The rows `FakeBackups` says each workspace archive it writes left out.
+pub const ARCHIVE_ROWS_LEFT_OUT: u32 = 2;
 
 impl Drop for DropCount {
     fn drop(&mut self) {
@@ -246,8 +305,188 @@ impl FakeVersions {
             calls: Mutex::new((0, Vec::new())),
             on_commit: Mutex::new(None),
             at_base: Mutex::new(Vec::new()),
-            read_hold: Mutex::new(None),
+            warnings: Mutex::new(Vec::new()),
+            trees: Mutex::new(BTreeMap::new()),
+            candidates: Mutex::new(Vec::new()),
+            file_pages: Mutex::new(Vec::new()),
+            history: Mutex::new(None),
+            history_writes: Mutex::new(BTreeMap::new()),
+            histories: Mutex::new(Vec::new()),
+            file_scopes: Mutex::new(Vec::new()),
+            after_file_page: Mutex::new(None),
+            rules: Mutex::new(None),
         }
+    }
+
+    /// Every file of the tree of `revision`, which `committed_files` answers (in any order: the
+    /// fake sorts them by path, as the port answers them).
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn set_tree(
+        &self,
+        scope: &StorageScope,
+        revision: &Revision,
+        files: Vec<CommittedFile>,
+    ) -> Result<(), ApiError> {
+        self.trees
+            .lock()
+            .map_err(|_| poisoned())?
+            .insert(export_tree_key(scope, revision), files);
+        Ok(())
+    }
+
+    /// Retain a candidate's bytes without putting it on the accepted line.
+    ///
+    /// # Errors
+    /// Returns when a fixture lock is poisoned.
+    pub fn set_candidate_tree(
+        &self,
+        scope: &StorageScope,
+        revision: &Revision,
+        files: Vec<CommittedFile>,
+    ) -> Result<(), ApiError> {
+        self.set_tree(scope, revision, files)?;
+        self.candidates
+            .lock()
+            .map_err(|_| poisoned())?
+            .push(export_tree_key(scope, revision));
+        Ok(())
+    }
+
+    /// The object `write_history` answers from now on.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn set_history(&self, object: ObjectInfo) -> Result<(), ApiError> {
+        *self.history.lock().map_err(|_| poisoned())? = Some(object);
+        Ok(())
+    }
+
+    /// Every `write_history` call so far: the revision and the mutation.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn histories(&self) -> Result<Vec<(Revision, MutationId)>, ApiError> {
+        self.histories
+            .lock()
+            .map(|calls| calls.clone())
+            .map_err(|_| poisoned())
+    }
+
+    /// Every page `committed_files` was asked for so far.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn file_pages(&self) -> Result<Vec<FilePage>, ApiError> {
+        self.file_pages
+            .lock()
+            .map(|pages| pages.clone())
+            .map_err(|_| poisoned())
+    }
+
+    /// One page of the tree of `revision`, as the port documents it: files in byte order of
+    /// path after `page.after`, at most `page.limit` (clamped to 1..=500), ending with the first
+    /// file that takes the page's bytes past `page.max_bytes`; `NotFound` for a revision not on
+    /// the line (here: one with no tree set).
+    fn page_of(
+        &self,
+        scope: &StorageScope,
+        revision: &Revision,
+        page: &FilePage,
+    ) -> Result<CommittedFiles, ApiError> {
+        self.file_pages
+            .lock()
+            .map_err(|_| poisoned())?
+            .push(page.clone());
+        let key = export_tree_key(scope, revision);
+        if self
+            .candidates
+            .lock()
+            .map_err(|_| poisoned())?
+            .contains(&key)
+        {
+            return Err(ApiError::new(
+                ErrorCode::NotFound,
+                "candidate is not on the accepted line",
+            ));
+        }
+        let mut files = self
+            .trees
+            .lock()
+            .map_err(|_| poisoned())?
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such revision on the line"))?;
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        let limit = usize::from(page.limit.clamp(1, 500));
+        let mut remaining = files
+            .into_iter()
+            .filter(|file| {
+                page.after
+                    .as_deref()
+                    .is_none_or(|after| file.path.as_str() > after)
+            })
+            .peekable();
+        let mut answered = Vec::new();
+        let mut held: u64 = 0;
+        for file in remaining.by_ref() {
+            held = held.saturating_add(u64::try_from(file.bytes.len()).unwrap_or(u64::MAX));
+            answered.push(file);
+            if answered.len() >= limit || held > page.max_bytes {
+                break;
+            }
+        }
+        let next_after = if remaining.peek().is_some() {
+            answered.last().map(|file| file.path.clone())
+        } else {
+            None
+        };
+        Ok(CommittedFiles {
+            files: answered,
+            next_after,
+        })
+    }
+
+    /// Hold `file` as the naming rules file at every revision.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn put_rules(&self, file: RulesFile) -> Result<(), ApiError> {
+        *self.rules.lock().map_err(|_| poisoned())? = Some(file);
+        Ok(())
+    }
+
+    /// Forget the warnings kept for every commit so far, as a store that wrote those commits
+    /// before it kept warnings would hold them.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn forget_warnings(&self) -> Result<(), ApiError> {
+        self.warnings.lock().map_err(|_| poisoned())?.clear();
+        Ok(())
+    }
+
+    /// A commit that already exists, answered as the port documents a replay: "A replay
+    /// answers the warnings the store kept with that commit, so a retry answers what its first
+    /// attempt did; for a commit the store kept no warnings for it answers the one warning
+    /// `replay_warnings_unavailable` instead."
+    fn replay_of(&self, mutation: MutationId, revision: Revision) -> Result<Committed, ApiError> {
+        let warnings = self
+            .warnings
+            .lock()
+            .map_err(|_| poisoned())?
+            .iter()
+            .find(|(kept, _)| *kept == mutation)
+            .map_or_else(
+                || vec![replay_warnings_unavailable("the fake store kept none")],
+                |(_, warnings)| warnings.clone(),
+            );
+        Ok(Committed {
+            revision,
+            replayed: true,
+            warnings,
+        })
     }
 
     /// Someone else commits now; when `path` is given, an item of theirs takes it.
@@ -519,11 +758,7 @@ impl FakeVersions {
             other => other?,
         };
         if let Some(revision) = replay {
-            return Ok(Committed {
-                revision,
-                replayed: true,
-                warnings: Vec::new(),
-            });
+            return self.replay_of(changes.mutation_id, revision);
         }
         // The candidate tree: the items at the expected head with the edits applied.
         let mut candidate = self.items_at(&changes.expected_head).unwrap_or_default();
@@ -535,7 +770,9 @@ impl FakeVersions {
             .last()
             .map_or_else(|| self.head.clone(), |(_, revision)| revision.clone());
         if changes.expected_head != head {
-            return Err(ApiError::new(ErrorCode::Conflict, "the head moved"));
+            // As storage refuses it: `StaleBase` naming the head.
+            return Err(ApiError::new(ErrorCode::Conflict, "the head moved")
+                .with_detail(ErrorDetail::StaleBase { head }));
         }
         let mut holders: Vec<(String, ItemId)> = self.taken.lock().map_err(|_| poisoned())?.clone();
         holders.extend(commits.iter().flat_map(|(earlier, _)| {
@@ -557,6 +794,14 @@ impl FakeVersions {
             }
         }
         let warnings = staged_check(&candidate, check)?;
+        // "The store keeps those warnings, an empty list included, in a record of its own
+        // keyed by the workspace and the mutation, written before the commit lands": so they
+        // are kept here, before the commit is pushed and before the store can die after it.
+        {
+            let mut kept = self.warnings.lock().map_err(|_| poisoned())?;
+            kept.retain(|(mutation, _)| *mutation != changes.mutation_id);
+            kept.push((changes.mutation_id, warnings.clone()));
+        }
         let revision = Revision::try_from(format!("{:040x}", commits.len().saturating_add(1)))
             .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
         commits.push((changes, revision.clone()));
@@ -587,6 +832,109 @@ impl FakeUploads {
             .map(|consumed| consumed.clone())
             .map_err(|_| poisoned())
     }
+
+    /// Every `consume_batch` call so far, refused or not.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn batches(&self) -> Result<Vec<(Vec<UploadId>, JobId)>, ApiError> {
+        self.batches
+            .lock()
+            .map(|batches| batches.clone())
+            .map_err(|_| poisoned())
+    }
+
+    /// Every single `consume` call so far, refused or not.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn singles(&self) -> Result<Vec<(UploadId, JobId)>, ApiError> {
+        self.singles
+            .lock()
+            .map(|singles| singles.clone())
+            .map_err(|_| poisoned())
+    }
+
+    /// The refusal of a consumption in `scope` when a purge names the workspace, as the
+    /// storage adapter words it (`purge::guard::refuse`).
+    fn refuse_purged(&self, scope: &StorageScope) -> Result<(), ApiError> {
+        match *self.purged.lock().map_err(|_| poisoned())? {
+            Some(purge) => Err(ApiError::new(
+                ErrorCode::Conflict,
+                format!(
+                    "workspace {} is purged by purge {} (recorded); nothing is written to it",
+                    scope.workspace_id.0, purge.0
+                ),
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// The port's rule for `consume_batch`, on the fake's records.
+    fn take_batch(
+        &self,
+        scope: &StorageScope,
+        uploads: &[UploadId],
+        job: JobId,
+    ) -> Result<Vec<UploadRecord>, ApiError> {
+        self.batches
+            .lock()
+            .map_err(|_| poisoned())?
+            .push((uploads.to_vec(), job));
+        // "Refused with `Conflict` naming the purge, before any upload is read, when a purge
+        // names the workspace."
+        self.refuse_purged(scope)?;
+        let mut records = self.records.lock().map_err(|_| poisoned())?;
+        let mut consumed = self.consumed.lock().map_err(|_| poisoned())?;
+        if let Some((upload, taker)) = self
+            .taken_before_batch
+            .lock()
+            .map_err(|_| poisoned())?
+            .take()
+            && let Some(record) = records.iter_mut().find(|record| record.id == upload)
+        {
+            record.consumed_by = Some(taker);
+            consumed.push((upload, taker));
+        }
+        // "The uploads are checked in the order given before any is marked, and the first that
+        // cannot be taken refuses the batch, which then marks none: `NotFound` for one the
+        // workspace does not hold, `InvalidInput` for an incomplete one, `Conflict` for one
+        // another job consumed."
+        for upload in uploads {
+            let record = records
+                .iter()
+                .find(|record| record.id == *upload)
+                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such upload"))?;
+            if record.object.is_none() {
+                return Err(ApiError::new(
+                    ErrorCode::InvalidInput,
+                    "an upload of the batch is not complete",
+                ));
+            }
+            if record.consumed_by.is_some_and(|consumer| consumer != job) {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "an upload of the batch was consumed by another job",
+                ));
+            }
+        }
+        // "An upload `job` already consumed stays as it is, so repeating the batch changes
+        // nothing and returns the same records. An upload listed twice is the same upload at
+        // each place it is listed. Returns the records in the order given."
+        let mut taken = Vec::with_capacity(uploads.len());
+        for upload in uploads {
+            let record = records
+                .iter_mut()
+                .find(|record| record.id == *upload)
+                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such upload"))?;
+            record.consumed_by = Some(job);
+            if !consumed.contains(&(*upload, job)) {
+                consumed.push((*upload, job));
+            }
+            taken.push(record.clone());
+        }
+        Ok(taken)
+    }
 }
 
 impl FakeBlobs {
@@ -599,6 +947,7 @@ impl FakeBlobs {
             objects: Mutex::new(BTreeMap::new()),
             directory: tempfile::tempdir()?,
             materialize_hold: Mutex::new(None),
+            puts: Mutex::new(Vec::new()),
         })
     }
 
@@ -629,6 +978,29 @@ impl FakeBlobs {
             .get(digest.as_str())
             .cloned()
             .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such object"))
+    }
+
+    /// Successfully retained puts; fixture insertion never counts as an export write.
+    ///
+    /// # Errors
+    /// Returns when the fixture lock is poisoned.
+    pub fn puts(&self) -> Result<Vec<ObjectInfo>, ApiError> {
+        self.puts
+            .lock()
+            .map(|puts| puts.clone())
+            .map_err(|_| poisoned())
+    }
+
+    /// Remove a fixture object to model a missing reference, without changing a card.
+    ///
+    /// # Errors
+    /// Returns when the fixture lock is poisoned.
+    pub fn forget(&self, digest: &Digest) -> Result<(), ApiError> {
+        self.objects
+            .lock()
+            .map_err(|_| poisoned())?
+            .remove(digest.as_str());
+        Ok(())
     }
 }
 
@@ -685,33 +1057,36 @@ impl VersionStore for FakeVersions {
     fn read_file<'a>(
         &'a self,
         _scope: &'a StorageScope,
-        revision: &'a Revision,
-        path: &'a WorkspacePath,
+        _revision: &'a Revision,
+        _path: &'a WorkspacePath,
     ) -> PortFuture<'a, Vec<u8>> {
-        // Only item files are kept; a folder index or the change log is absent (`NotFound`).
-        let read = self.items_at(revision).and_then(|items| {
-            items
-                .iter()
-                .find(|card| card.path == *path)
-                .map(|card| rendered(card).into_bytes())
-                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such file"))
-        });
-        let hold = self
-            .read_hold
-            .lock()
-            .map(|mut hold| hold.take())
-            .map_err(|_| poisoned());
-        Box::pin(async move {
-            held(hold).await?;
-            read
-        })
+        unused("read_file")
+    }
+    fn tree<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        revision: &'a Revision,
+    ) -> PortFuture<'a, WorkspaceTree> {
+        // The port doc: every item and folder of the revision, in path order; `NotFound` only
+        // for a revision the line does not hold (`items_at`).
+        let tree = self
+            .items_at(revision)
+            .and_then(|items| tree_of(&items, revision));
+        Box::pin(async move { tree })
     }
     fn rules<'a>(
         &'a self,
         _scope: &'a StorageScope,
         _revision: &'a Revision,
-    ) -> PortFuture<'a, Option<NamingRules>> {
-        unused("rules")
+    ) -> PortFuture<'a, Option<RulesFile>> {
+        // The port doc: `None` when no rules were saved; the file's text and its reading
+        // otherwise. The fake holds one file for every revision.
+        let held = self
+            .rules
+            .lock()
+            .map_err(|_| poisoned())
+            .map(|rules| rules.clone());
+        Box::pin(async move { held })
     }
     fn types<'a>(
         &'a self,
@@ -743,8 +1118,12 @@ impl VersionStore for FakeVersions {
         _scope: &'a StorageScope,
         mutation_id: MutationId,
         since: Option<&'a Revision>,
-    ) -> PortFuture<'a, Option<Revision>> {
-        let found = self.found(mutation_id, since);
+    ) -> PortFuture<'a, Option<Committed>> {
+        let found = self.found(mutation_id, since).and_then(|found| {
+            found
+                .map(|revision| self.replay_of(mutation_id, revision))
+                .transpose()
+        });
         Box::pin(async move { found })
     }
     fn create_candidate<'a>(
@@ -753,7 +1132,7 @@ impl VersionStore for FakeVersions {
         _proposal_id: okf_jawn_contract::identity::ProposalId,
         _changes: CandidateChanges,
         _check: Arc<dyn CandidateCheck>,
-    ) -> PortFuture<'a, Revision> {
+    ) -> PortFuture<'a, Committed> {
         unused("create_candidate")
     }
     fn promote_candidate<'a>(
@@ -789,13 +1168,83 @@ impl VersionStore for FakeVersions {
     ) -> PortFuture<'a, BlameResponse> {
         unused("blame")
     }
+    // The port doc: "It holds the commits reachable from `revision` on the accepted line and
+    // nothing else ... Idempotent on `mutation_id`: a repeated id writes nothing and returns the
+    // object the first call wrote." A revision with no tree set is not on the line: `NotFound`.
     fn write_history<'a>(
         &'a self,
-        _scope: &'a StorageScope,
-        _revision: &'a Revision,
-        _mutation_id: MutationId,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+        mutation_id: MutationId,
     ) -> PortFuture<'a, ObjectInfo> {
-        unused("write_history")
+        let written = (|| {
+            self.histories
+                .lock()
+                .map_err(|_| poisoned())?
+                .push((revision.clone(), mutation_id));
+            if !self
+                .trees
+                .lock()
+                .map_err(|_| poisoned())?
+                .contains_key(&export_tree_key(scope, revision))
+            {
+                return Err(ApiError::new(
+                    ErrorCode::NotFound,
+                    "No revision with that identity on the accepted line here",
+                ));
+            }
+            if self
+                .candidates
+                .lock()
+                .map_err(|_| poisoned())?
+                .contains(&export_tree_key(scope, revision))
+            {
+                return Err(ApiError::new(
+                    ErrorCode::NotFound,
+                    "candidate history is not on the accepted line",
+                ));
+            }
+            let mut writes = self.history_writes.lock().map_err(|_| poisoned())?;
+            if let Some(prior) = writes.get(&mutation_id) {
+                return Ok(prior.clone());
+            }
+            let object = self
+                .history
+                .lock()
+                .map_err(|_| poisoned())?
+                .clone()
+                .ok_or_else(|| ApiError::new(ErrorCode::NotImplemented, "no history was set"))?;
+            writes.insert(mutation_id, object.clone());
+            Ok(object)
+        })();
+        Box::pin(async move { written })
+    }
+    // The port doc: "Every file of `revision`'s tree, a page at a time, in byte order of path
+    // ... `NotFound` for a revision this repository does not hold or that is not on the
+    // accepted line" (`page_of`).
+    fn committed_files<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+        page: FilePage,
+    ) -> PortFuture<'a, CommittedFiles> {
+        Box::pin(async move {
+            self.file_scopes
+                .lock()
+                .map_err(|_| poisoned())?
+                .push(scope.clone());
+            let answered = self.page_of(scope, revision, &page)?;
+            let calls = self.file_pages.lock().map_err(|_| poisoned())?.len();
+            if let Some(hook) = self
+                .after_file_page
+                .lock()
+                .map_err(|_| poisoned())?
+                .as_ref()
+            {
+                hook(calls)?;
+            }
+            Ok(answered)
+        })
     }
 }
 
@@ -857,17 +1306,36 @@ impl SearchIndex for FakeSearch {
 }
 
 impl Backups for FakeBackups {
+    fn managed_kind<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        digest: &'a Digest,
+    ) -> PortFuture<'a, Option<okf_jawn_core::storage::ManagedKind>> {
+        Box::pin(async move {
+            Ok(self
+                .managed
+                .lock()
+                .map_err(|_| poisoned())?
+                .iter()
+                .find(|(owner, object, _)| owner == tenant && object == digest)
+                .map(|(_, _, kind)| *kind))
+        })
+    }
+
     fn write_workspace_archive<'a>(
         &'a self,
         _scope: &'a StorageScope,
         _mutation_id: MutationId,
-    ) -> PortFuture<'a, ObjectInfo> {
+    ) -> PortFuture<'a, WrittenArchive> {
         let _previous = self.writes.fetch_add(1, Ordering::SeqCst);
         let archive = self.archive.clone();
         let hold = hold_of(&self.write_hold);
         Box::pin(async move {
             held(hold).await?;
-            Ok(archive)
+            Ok(WrittenArchive {
+                object: archive,
+                rows_left_out: ARCHIVE_ROWS_LEFT_OUT,
+            })
         })
     }
     fn write_installation_archive<'a>(
@@ -911,12 +1379,53 @@ impl Backups for FakeBackups {
                     items: 3,
                     drafts_restored: 1,
                     drafts_unassigned: 1,
+                    rows_left_out: None,
                 })
         })
     }
 }
 
+impl FakePurger {
+    /// Make the next call answer `error`, after its hold, once.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn fail_next(&self, error: ApiError) -> Result<(), ApiError> {
+        *self.failure.lock().map_err(|_| poisoned())? = Some(error);
+        Ok(())
+    }
+
+    /// The failure a test asked of this call, taken.
+    fn failed(&self) -> Result<(), ApiError> {
+        match self.failure.lock().map_err(|_| poisoned())?.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
 impl Purger for FakePurger {
+    fn clean_up<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        job: JobId,
+    ) -> PortFuture<'a, okf_jawn_contract::import::CleanUpReport> {
+        let hold = hold_of(&self.hold);
+        Box::pin(async move {
+            self.clean_up_calls
+                .lock()
+                .map_err(|_| poisoned())?
+                .push((tenant.clone(), job));
+            held(hold).await?;
+            self.failed()?;
+            Ok(okf_jawn_contract::import::CleanUpReport {
+                objects_removed: "18446744073709551616".to_owned(),
+                objects_kept: "7".to_owned(),
+                upload_files_removed: 2,
+            })
+        })
+    }
+
     fn purge_workspace<'a>(
         &'a self,
         _tenant: &'a TenantId,
@@ -929,6 +1438,7 @@ impl Purger for FakePurger {
         let hold = hold_of(&self.hold);
         Box::pin(async move {
             held(hold).await?;
+            self.failed()?;
             Ok(report)
         })
     }
@@ -944,12 +1454,30 @@ impl Purger for FakePurger {
         let hold = hold_of(&self.hold);
         Box::pin(async move {
             held(hold).await?;
+            self.failed()?;
             Ok(report)
         })
     }
 }
 
 impl UploadStore for FakeUploads {
+    /// Remove a slot under its mutation; this handler fixture does not use discards.
+    fn discard<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _upload: UploadId,
+        _mutation_id: MutationId,
+    ) -> PortFuture<'a, UploadRecord> {
+        unused("discard")
+    }
+
+    fn list<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _query: UploadQuery,
+    ) -> PortFuture<'a, UploadPage> {
+        unused("list")
+    }
     fn create<'a>(
         &'a self,
         _scope: &'a StorageScope,
@@ -1000,9 +1528,14 @@ impl UploadStore for FakeUploads {
         job: JobId,
     ) -> PortFuture<'a, UploadRecord> {
         let taken = self
-            .records
+            .singles
             .lock()
+            .map(|mut singles| singles.push((upload, job)))
             .map_err(|_| poisoned())
+            // "Refused with `Conflict` naming the purge, before the upload is read, when a
+            // purge names the workspace."
+            .and_then(|()| self.refuse_purged(scope))
+            .and_then(|()| self.records.lock().map_err(|_| poisoned()))
             .and_then(|mut records| {
                 let record = records
                     .iter_mut()
@@ -1038,6 +1571,15 @@ impl UploadStore for FakeUploads {
             self.get(scope, upload).await
         })
     }
+    fn consume_batch<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        uploads: &'a [UploadId],
+        job: JobId,
+    ) -> PortFuture<'a, Vec<UploadRecord>> {
+        let taken = self.take_batch(scope, uploads, job);
+        Box::pin(async move { taken })
+    }
 }
 
 impl BlobStore for FakeBlobs {
@@ -1057,17 +1599,43 @@ impl BlobStore for FakeBlobs {
             if expected.is_some_and(|expected| expected != object.digest) {
                 return Err(ApiError::new(ErrorCode::Conflict, "digest mismatch"));
             }
+            self.puts
+                .lock()
+                .map_err(|_| poisoned())?
+                .push(object.clone());
             Ok(object)
         })
     }
     fn open<'a>(
         &'a self,
         _scope: &'a StorageScope,
-        _digest: &'a Digest,
-        _offset: u64,
-        _length: u64,
+        digest: &'a Digest,
+        offset: u64,
+        length: u64,
     ) -> PortFuture<'a, ObjectRead> {
-        unused("open")
+        Box::pin(async move {
+            let bytes = self.bytes(digest)?;
+            let object = ObjectInfo {
+                digest: digest.clone(),
+                size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            };
+            let start = usize::try_from(offset)
+                .unwrap_or(usize::MAX)
+                .min(bytes.len());
+            let end = usize::try_from(offset.saturating_add(length))
+                .unwrap_or(usize::MAX)
+                .min(bytes.len());
+            let selected = bytes
+                .get(start..end)
+                .ok_or_else(|| ApiError::new(ErrorCode::Internal, "invalid fake object range"))?
+                .to_vec();
+            Ok(ObjectRead {
+                object,
+                offset,
+                length: u64::try_from(selected.len()).unwrap_or(u64::MAX),
+                body: Box::pin(std::io::Cursor::new(selected)),
+            })
+        })
     }
     fn materialize<'a>(
         &'a self,
@@ -1235,18 +1803,34 @@ impl Converter for FakeConverter {
 }
 
 impl CandidateCheck for AcceptAll {
-    fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
+    fn check(
+        &self,
+        _root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
         Ok(Vec::new())
     }
 }
 
 impl CandidateCheck for RefuseAll {
-    fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
+    fn check(
+        &self,
+        _root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
         Err(ApiError::new(
             ErrorCode::InvalidInput,
             "not a conformant OKF bundle",
         ))
     }
+}
+
+fn export_tree_key(scope: &StorageScope, revision: &Revision) -> ExportTreeKey {
+    (
+        scope.tenant_id.as_str().to_owned(),
+        scope.workspace_id,
+        revision.as_str().to_owned(),
+    )
 }
 
 /// Run `check` once over a staged directory holding every item of the candidate tree, as
@@ -1264,7 +1848,9 @@ fn staged_check(
         }
         std::fs::write(&file, rendered(card)).map_err(internal)?;
     }
-    check.check(staging.path())
+    // "Empty when the edits moved nothing": the commits this fake checks are the handler's,
+    // which write source cards and move no item, so the store rewrites no other file.
+    check.check(staging.path(), &[])
 }
 
 /// An item's file as the fake keeps it: its type and title as frontmatter, then its body.
@@ -1334,6 +1920,7 @@ fn apply_to_items(items: &mut Vec<SourceCard>, edit: &TreeEdit) {
         TreeEdit::MoveItem {
             item_id,
             destination,
+            ..
         } => {
             for item in items.iter_mut().filter(|item| item.item_id == *item_id) {
                 item.path = destination.clone();
@@ -1345,6 +1932,38 @@ fn apply_to_items(items: &mut Vec<SourceCard>, edit: &TreeEdit) {
 }
 
 /// The document `show` returns for a card at a revision.
+/// The tree of `items` at `revision`: each card summarized as `show` summarizes it, with its first
+/// observed name as its original's, in path order, and every folder above them.
+fn tree_of(items: &[SourceCard], revision: &Revision) -> Result<WorkspaceTree, ApiError> {
+    let mut held = Vec::new();
+    let mut folders = std::collections::BTreeSet::new();
+    for card in items {
+        let path = card.path.as_str();
+        folders.extend(
+            path.match_indices('/')
+                .filter_map(|(at, _)| path.get(..at))
+                .map(str::to_owned),
+        );
+        held.push(TreeItem {
+            summary: document_of(card, revision)?.summary,
+            original_name: card
+                .appearance
+                .names
+                .first()
+                .map(|name| name.filename.clone()),
+        });
+    }
+    held.sort_by(|left, right| left.summary.path.as_str().cmp(right.summary.path.as_str()));
+    Ok(WorkspaceTree {
+        items: held,
+        folders: folders
+            .into_iter()
+            .map(WorkspacePath::try_from)
+            .collect::<Result<_, _>>()
+            .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?,
+    })
+}
+
 fn document_of(card: &SourceCard, revision: &Revision) -> Result<ItemDocument, ApiError> {
     let content = serde_json::to_vec(&(&card.body, &card.properties))
         .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;

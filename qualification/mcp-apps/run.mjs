@@ -40,6 +40,7 @@ import { buildRelease } from '../lib/cargo.mjs';
 import { BASIC_HOST, PATCHED_SERVE, SOURCE_RECORD, lsRemoteArgs, patchServe, rawUrl, sourceProblems, sourceRecord, tagCommit } from './lib/basic-host.mjs';
 import { EXIT_REFUSED } from './lib/criteria.mjs';
 import { DOM_SELECTORS, observeView, readAppDom } from './lib/observe.mjs';
+import { measureViewport } from './lib/viewport.mjs';
 import { killProcessTree, spawnGroup, waitForListening } from './lib/process.mjs';
 import { observeProtocol } from './lib/protocol.mjs';
 import { qualify } from './lib/qualify.mjs';
@@ -316,6 +317,7 @@ function playwrightDriver(page, AxeBuilder, toolLog) {
     hostText: () => page.locator('body').innerText(),
     frames: () => page.frames(),
     readFrame: (frame) => frame.evaluate(readAppDom, DOM_SELECTORS).catch(() => null),
+    viewport: measureViewport,
     wait: (ms) => page.waitForTimeout(ms),
     async screenshot(name) {
       const path = join(outDir, `basic-host-${name}.png`);

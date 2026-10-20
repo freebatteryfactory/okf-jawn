@@ -44,7 +44,11 @@ type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 struct Accept;
 
 impl CandidateCheck for Accept {
-    fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
+    fn check(
+        &self,
+        _root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
         Ok(Vec::new())
     }
 }
@@ -104,6 +108,22 @@ fn card(item: u32) -> Fallible<TreeEdit> {
 }
 
 /// A workspace with three notes linking to one another and an unsupported source.
+/// A `changed` event of `revision`, naming nothing else.
+fn changed_at(revision: Revision) -> NewEvent {
+    NewEvent {
+        kind: EventKind::Changed,
+        revision: Some(revision),
+        item_id: None,
+        job_id: None,
+        connector_id: None,
+        actor: None,
+        operation: None,
+        transport: None,
+        proposal_id: None,
+        count: None,
+    }
+}
+
 async fn populated(directory: &Path) -> Fallible<(Storage, StorageScope, Revision)> {
     let storage = Storage::open(directory)?;
     let tenant = TenantId::try_from("local".to_owned())?;
@@ -389,20 +409,84 @@ async fn rebuilding_the_index_never_touches_jobs_reviews_or_receipts() -> TestRe
     Ok(())
 }
 
+/// The replay key of an event joins its proposal and its count: under one mutation, two
+/// events that differ only in the proposal they name, or only in the count they stand for, are
+/// both kept, and an identical one is appended once. An event that names neither keeps the
+/// replay key it had before the two fields existed, so a resumed attempt of a mutation from an
+/// earlier build appends no duplicate.
 #[tokio::test]
-async fn an_event_for_a_workspace_the_tenant_does_not_hold_goes_to_the_tenant_log() -> TestResult {
+async fn events_of_one_mutation_that_differ_in_proposal_or_count_are_each_kept() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let (storage, scope, revision) = populated(directory.path()).await?;
+    let (storage, scope, _revision) = populated(directory.path()).await?;
     let events = storage.events();
-    let changed = NewEvent {
+    let log = EventScope::Workspace(scope.clone());
+    let updated = |proposal: u32, count: Option<u32>| -> Fallible<NewEvent> {
+        Ok(NewEvent {
+            kind: EventKind::ProposalUpdated,
+            revision: None,
+            item_id: None,
+            job_id: None,
+            connector_id: None,
+            actor: None,
+            operation: None,
+            transport: None,
+            proposal_id: Some(uuid!(proposal)?),
+            count,
+        })
+    };
+    let mutation = Some(uuid!(60)?);
+    let first = events.append(&log, mutation, updated(61, None)?).await?;
+    let other_proposal = events.append(&log, mutation, updated(62, None)?).await?;
+    let counted = events.append(&log, mutation, updated(61, Some(3))?).await?;
+    let again = events.append(&log, mutation, updated(61, Some(3))?).await?;
+    assert_ne!(
+        first.id, other_proposal.id,
+        "another proposal is another event"
+    );
+    assert_ne!(first.id, counted.id, "another count is another event");
+    assert_eq!(counted.id, again.id, "an identical event is appended once");
+    assert_eq!(first.proposal_id, Some(uuid!(61)?));
+    assert_eq!(counted.count, Some(3));
+    let plain = NewEvent {
         kind: EventKind::Changed,
-        revision: Some(revision),
+        revision: None,
         item_id: None,
         job_id: None,
         connector_id: None,
         actor: None,
         operation: None,
+        transport: None,
+        proposal_id: None,
+        count: None,
     };
+    let appended = events.append(&log, Some(uuid!(63)?), plain).await?;
+    assert!(appended.proposal_id.is_none() && appended.count.is_none());
+    let connection = rusqlite::Connection::open(storage.data().records_path())?;
+    let keys: Vec<String> = connection
+        .prepare("SELECT replay_key FROM events WHERE replay_key IS NOT NULL ORDER BY seq")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    let plain_key = some(keys.last(), "the plain event's key")?;
+    assert!(
+        !plain_key.contains("proposal_id") && !plain_key.contains("count"),
+        "an event naming neither keeps its earlier key: {plain_key}"
+    );
+    assert!(
+        keys.iter()
+            .filter(|key| key.contains("\"count\":3"))
+            .count()
+            == 1,
+        "{keys:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_event_for_a_workspace_the_tenant_does_not_hold_goes_to_the_tenant_log() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, revision) = populated(directory.path()).await?;
+    let events = storage.events();
+    let changed = changed_at(revision);
     let held = events
         .append(
             &EventScope::Workspace(scope.clone()),

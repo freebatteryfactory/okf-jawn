@@ -49,12 +49,13 @@ pub struct FixtureAccess {
     lookups: AtomicUsize,
 }
 
-/// One ledger row: its identity, the digest it was begun with, the token of its latest grant,
-/// and where it stands.
+/// One ledger row: its identity, the digest it was begun with, the workspace it records, the
+/// token of its latest grant, and where it stands.
 #[derive(Debug, Clone)]
 struct Row {
     mutation_id: MutationId,
     digest: Digest,
+    workspace: Option<WorkspaceId>,
     token: u64,
     phase: Phase,
 }
@@ -400,6 +401,49 @@ impl FixtureMutations {
         };
         Ok(Some(body.clone()))
     }
+
+    /// Replace the response a completed mutation retains with `body`, as a row an earlier build
+    /// stored in an earlier shape of the response reads.
+    ///
+    /// # Errors
+    /// Returns `NotFound` for a mutation that has not completed, or when the lock is poisoned.
+    pub fn store_body_of_an_earlier_build(
+        &self,
+        mutation_id: MutationId,
+        body: Value,
+    ) -> Result<(), ApiError> {
+        let mut ledger = lock(&self.ledger, "mutation ledger")?;
+        let key = ledger
+            .by_id
+            .get(&mutation_id)
+            .cloned()
+            .ok_or_else(unknown_mutation)?;
+        match ledger.by_key.get_mut(&key).map(|row| &mut row.phase) {
+            Some(Phase::Completed { body: stored }) => {
+                *stored = body;
+                Ok(())
+            }
+            _ => Err(unknown_mutation()),
+        }
+    }
+
+    /// The workspace the ledger records for a mutation: what its first `begin` was given, or
+    /// else what its `complete` was given.
+    ///
+    /// # Errors
+    /// Returns `NotFound` for a mutation the ledger never began, or when the lock is poisoned.
+    pub fn recorded_workspace(
+        &self,
+        mutation_id: MutationId,
+    ) -> Result<Option<WorkspaceId>, ApiError> {
+        let ledger = lock(&self.ledger, "mutation ledger")?;
+        let key = ledger
+            .by_id
+            .get(&mutation_id)
+            .ok_or_else(unknown_mutation)?;
+        let row = ledger.by_key.get(key).ok_or_else(unknown_mutation)?;
+        Ok(row.workspace)
+    }
 }
 
 impl Default for FixtureMutations {
@@ -413,6 +457,7 @@ impl MutationStore for FixtureMutations {
         &'a self,
         key: &'a MutationKey,
         digest: &'a Digest,
+        workspace: Option<WorkspaceId>,
     ) -> PortFuture<'a, BeginOutcome> {
         Box::pin(async move {
             self.scripted_failure(LedgerCall::Begin)?;
@@ -428,6 +473,7 @@ impl MutationStore for FixtureMutations {
                     Row {
                         mutation_id: lease.mutation_id,
                         digest: digest.clone(),
+                        workspace,
                         token: lease.token,
                         phase: Phase::Leased { until: lease_until },
                     },
@@ -456,6 +502,7 @@ impl MutationStore for FixtureMutations {
                         Row {
                             mutation_id,
                             digest: row.digest,
+                            workspace: row.workspace,
                             token: lease.token,
                             phase: Phase::Leased { until: lease_until },
                         },
@@ -466,7 +513,12 @@ impl MutationStore for FixtureMutations {
         })
     }
 
-    fn complete(&self, lease: MutationLease, response: Value) -> PortFuture<'_, ()> {
+    fn complete(
+        &self,
+        lease: MutationLease,
+        response: Value,
+        workspace: Option<WorkspaceId>,
+    ) -> PortFuture<'_, ()> {
         Box::pin(async move {
             self.scripted_failure(LedgerCall::Complete)?;
             let mut ledger = lock(&self.ledger, "mutation ledger")?;
@@ -475,6 +527,7 @@ impl MutationStore for FixtureMutations {
                 return Err(lease_lost());
             }
             row.phase = Phase::Completed { body: response };
+            row.workspace = row.workspace.or(workspace);
             Ok(())
         })
     }
@@ -520,6 +573,9 @@ fn wire_event(cursor: usize, scope: &EventScope, event: NewEvent) -> Result<Even
         connector_id: event.connector_id,
         actor: event.actor,
         operation: event.operation,
+        transport: event.transport,
+        proposal_id: event.proposal_id,
+        count: event.count,
     })
 }
 
@@ -608,7 +664,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        FixturePorts, GrantTable, LedgerCall, all_permissions, idempotency_key, tenant, workspace,
+        FixturePorts, GrantTable, LedgerCall, all_permissions, idempotency_key, new_mutation_id,
+        tenant, workspace,
     };
     use crate::check::{TestResult, err_of};
 
@@ -678,24 +735,26 @@ mod tests {
             key: idempotency_key("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")?,
         };
         let digest = digest_of("a")?;
-        let BeginOutcome::New(first) = ledger.begin(&key, &digest).await? else {
+        let home = Some(workspace(HOME)?);
+        let BeginOutcome::New(first) = ledger.begin(&key, &digest, home).await? else {
             return Err("the first begin must be New".into());
         };
         let id = first.mutation_id;
         assert!(matches!(
-            ledger.begin(&key, &digest).await?,
+            ledger.begin(&key, &digest, home).await?,
             BeginOutcome::InProgress { mutation_id, retry_after }
                 if mutation_id == id && retry_after >= 1
         ));
         assert!(matches!(
-            ledger.begin(&key, &digest_of("b")?).await?,
+            ledger.begin(&key, &digest_of("b")?, home).await?,
             BeginOutcome::Conflict {
                 operation: OperationName::CreateItem
             }
         ));
 
         ledger.release(first).await?;
-        let BeginOutcome::Abandoned { lease: second } = ledger.begin(&key, &digest).await? else {
+        let BeginOutcome::Abandoned { lease: second } = ledger.begin(&key, &digest, home).await?
+        else {
             return Err("a released mutation must resume as Abandoned".into());
         };
         assert_eq!(second.mutation_id, id);
@@ -704,30 +763,77 @@ mod tests {
         // The first lease is stale: it can neither end nor complete the second grant.
         ledger.release(first).await?;
         assert!(matches!(
-            ledger.begin(&key, &digest).await?,
+            ledger.begin(&key, &digest, home).await?,
             BeginOutcome::InProgress { mutation_id, .. } if mutation_id == id
         ));
-        let stale = err_of(ledger.complete(first, json!({ "stale": true })).await)?;
+        let stale = err_of(ledger.complete(first, json!({ "stale": true }), None).await)?;
         assert_eq!(stale.code, ErrorCode::Conflict);
         assert_eq!(ledger.stored_body(id)?, None);
 
         ledger.expire_leases()?;
-        let BeginOutcome::Abandoned { lease: third } = ledger.begin(&key, &digest).await? else {
+        let BeginOutcome::Abandoned { lease: third } = ledger.begin(&key, &digest, home).await?
+        else {
             return Err("an expired lease must resume as Abandoned".into());
         };
         assert_eq!(third.mutation_id, id);
         assert_ne!(third.token, second.token);
-        let expired = err_of(ledger.complete(second, json!({ "stale": true })).await)?;
+        let expired = err_of(
+            ledger
+                .complete(second, json!({ "stale": true }), None)
+                .await,
+        )?;
         assert_eq!(expired.code, ErrorCode::Conflict);
 
-        ledger.complete(third, json!({ "done": true })).await?;
+        // `begin` recorded the workspace; a completion naming another does not replace it.
+        let elsewhere = Some(workspace(ELSEWHERE)?);
+        ledger
+            .complete(third, json!({ "done": true }), elsewhere)
+            .await?;
         ledger.release(third).await?;
         assert_eq!(ledger.stored_body(id)?, Some(json!({ "done": true })));
-        let BeginOutcome::Replay(stored) = ledger.begin(&key, &digest).await? else {
+        assert_eq!(ledger.recorded_workspace(id)?, home);
+        let BeginOutcome::Replay(stored) = ledger.begin(&key, &digest, home).await? else {
             return Err("a completed mutation must replay".into());
         };
         assert_eq!(stored.mutation_id, id);
         assert_eq!(stored.body, json!({ "done": true }));
+
+        // A body an earlier build stored is what the next replay reads; a mutation that has not
+        // completed has no body to replace.
+        ledger.store_body_of_an_earlier_build(id, json!({ "earlier": true }))?;
+        let BeginOutcome::Replay(stored) = ledger.begin(&key, &digest, home).await? else {
+            return Err("a completed mutation must replay".into());
+        };
+        assert_eq!(stored.body, json!({ "earlier": true }));
+        let unknown = err_of(
+            ledger.store_body_of_an_earlier_build(new_mutation_id(), json!({ "earlier": true })),
+        )?;
+        assert_eq!(unknown.code, ErrorCode::NotFound);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fixture_ledger_takes_the_workspace_from_complete_when_begin_had_none() -> TestResult {
+        let ports = FixturePorts::new(GrantTable::default());
+        let ledger = ports.mutations.as_ref();
+        let key = MutationKey {
+            tenant_id: tenant("tenant-local")?,
+            subject: "alice".to_owned(),
+            client_id: None,
+            operation: OperationName::CreateWorkspace,
+            key: idempotency_key("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")?,
+        };
+        let BeginOutcome::New(lease) = ledger.begin(&key, &digest_of("a")?, None).await? else {
+            return Err("the first begin must be New".into());
+        };
+        assert_eq!(ledger.recorded_workspace(lease.mutation_id)?, None);
+        let created = Some(workspace(HOME)?);
+        ledger
+            .complete(lease, json!({ "id": HOME }), created)
+            .await?;
+        assert_eq!(ledger.recorded_workspace(lease.mutation_id)?, created);
+        let unknown = err_of(ledger.recorded_workspace(new_mutation_id()))?;
+        assert_eq!(unknown.code, ErrorCode::NotFound);
         Ok(())
     }
 
@@ -746,10 +852,10 @@ mod tests {
         let offline = || ApiError::new(ErrorCode::Unavailable, "ledger offline");
 
         ledger.fail_next(LedgerCall::Begin, offline())?;
-        let refused = err_of(ledger.begin(&key, &digest).await)?;
+        let refused = err_of(ledger.begin(&key, &digest, None).await)?;
         assert_eq!(refused.code, ErrorCode::Unavailable);
         // The failed begin wrote nothing, so the next one starts the mutation.
-        let BeginOutcome::New(lease) = ledger.begin(&key, &digest).await? else {
+        let BeginOutcome::New(lease) = ledger.begin(&key, &digest, None).await? else {
             return Err("the begin after a failed begin must be New".into());
         };
 
@@ -757,15 +863,17 @@ mod tests {
         let refused = err_of(ledger.release(lease).await)?;
         assert_eq!(refused.code, ErrorCode::Unavailable);
         assert!(matches!(
-            ledger.begin(&key, &digest).await?,
+            ledger.begin(&key, &digest, None).await?,
             BeginOutcome::InProgress { .. }
         ));
 
         ledger.fail_next(LedgerCall::Complete, offline())?;
-        let refused = err_of(ledger.complete(lease, json!({ "done": true })).await)?;
+        let refused = err_of(ledger.complete(lease, json!({ "done": true }), None).await)?;
         assert_eq!(refused.code, ErrorCode::Unavailable);
         assert_eq!(ledger.stored_body(lease.mutation_id)?, None);
-        ledger.complete(lease, json!({ "done": true })).await?;
+        ledger
+            .complete(lease, json!({ "done": true }), None)
+            .await?;
         assert_eq!(
             ledger.stored_body(lease.mutation_id)?,
             Some(json!({ "done": true }))

@@ -6,13 +6,25 @@
 //! a repeated id a no-op that returns the prior row. A job's wire `Job` is kept as JSON with its
 //! state, scope and lease in columns; the specification and initiator are kept exactly as
 //! written and handed back unchanged on every claim. The job lease is `JOB_LEASE_SECONDS`.
+//! `create_job` refuses, before it inserts, a job of a workspace a purge names (`purge::guard`)
+//! and an import, redigest or restore job of an archived workspace
+//! (`catalog::refuse_content_job_while_archived`), a repeated id included; `retry_job` refuses
+//! to queue such a job again for an archived workspace by the same check, in its own
+//! transaction. A job its running claim sealed (`seal`, the `sealed` column of records schema 4) refuses its cancellation, in
+//! the cancellation's own transaction, while it is queued or running.
+//!
+//! Tenant clean-up requests first replay their producing mutation, then advance one durable
+//! request generation and share the queued/running job. A pass snapshots the started generation;
+//! its live-claim completion adds removal totals, retains the latest kept count and queues the
+//! same job again when a newer generation still needs a pass. Clearing its sweep accounting
+//! and recording that completion are one transaction.
 
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::events::Receipt;
 use okf_jawn_contract::identity::{
     ArtifactId, Digest, ItemId, JobId, MutationId, PurgeId, ReceiptId, Revision, TenantId,
 };
-use okf_jawn_contract::import::{Job, JobState, ListJobsResponse};
+use okf_jawn_contract::import::{CleanUpReport, Job, JobKind, JobState, ListJobsResponse};
 use okf_jawn_contract::purge::{Purge, PurgeState, PurgeTarget};
 use okf_jawn_contract::review::Review;
 use okf_jawn_core::jobs::{
@@ -21,12 +33,15 @@ use okf_jawn_core::jobs::{
 };
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{ObjectInfo, Page, Provenance, StorageScope};
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
+use crate::catalog;
 use crate::db::{
     Db, conflict, cursor, internal, job_scope_key, json, not_found, page_limit, paged, scope_key,
     sql, to_i64, to_u64,
 };
+use crate::purge::guard;
+use crate::puts;
 use crate::seam;
 
 /// `RecordStore` over the records database.
@@ -90,10 +105,28 @@ impl SqliteRecords {
 impl RecordStore for SqliteRecords {
     fn create_job<'a>(&'a self, scope: &'a JobScope, job: NewJob) -> PortFuture<'a, Job> {
         let scope = scope.clone();
-        Box::pin(
-            self.db
-                .transaction(move |transaction| insert_job(transaction, &scope, &job)),
-        )
+        // A job of a workspace a purge names is refused inside the transaction that would
+        // record it (`purge::guard`), as are its retries and claims: core cancels and drains
+        // the jobs that already run.
+        // An archived workspace accepts no import, redigest or restore job, refused in the same
+        // transaction, so an archive racing this insert is ordered by the database (`catalog`).
+        Box::pin(self.db.transaction(move |transaction| {
+            let (tenant, workspace) = job_scope_key(&scope);
+            if let Some(workspace) = &workspace {
+                guard::refuse(transaction, &tenant, workspace)?;
+                catalog::refuse_content_job_while_archived(
+                    transaction,
+                    &tenant,
+                    workspace,
+                    job.spec.kind(),
+                )?;
+            }
+            if matches!(&job.spec, JobSpec::CleanUp) {
+                create_clean_up(transaction, &scope, &job)
+            } else {
+                insert_job(transaction, &scope, &job)
+            }
+        }))
     }
 
     fn get_job<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, Job> {
@@ -109,6 +142,22 @@ impl RecordStore for SqliteRecords {
                 .optional()
                 .map_err(|error| sql(&error))?;
             decode_job(&record.ok_or_else(|| not_found("job"))?)
+        }))
+    }
+
+    fn job_mutation<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, MutationId> {
+        let (tenant, workspace) = job_scope_key(scope);
+        Box::pin(self.db.call(move |connection| {
+            let mutation: Option<String> = connection
+                .query_row(
+                    "SELECT mutation_id FROM jobs
+                     WHERE job_id = ?1 AND tenant_id = ?2 AND workspace_id IS ?3",
+                    params![job.0.to_string(), tenant, workspace],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| sql(&error))?;
+            from_text!(mutation.ok_or_else(|| not_found("job"))?.as_str())
         }))
     }
 
@@ -186,7 +235,7 @@ impl RecordStore for SqliteRecords {
         )
     }
 
-    fn fail_job(&self, lease: JobLease, message: String, retryable: bool) -> PortFuture<'_, Job> {
+    fn fail_job(&self, lease: JobLease, error: ApiError, retryable: bool) -> PortFuture<'_, Job> {
         Box::pin(self.db.transaction(move |transaction| {
             let row = leased_row(transaction, lease.job_id)?;
             if row.token.as_deref() != Some(lease.token.as_str())
@@ -197,18 +246,41 @@ impl RecordStore for SqliteRecords {
             }
             let mut job = decode_job(&row.record)?;
             job.state = JobState::Failed;
-            let code = if retryable {
-                ErrorCode::Unavailable
-            } else {
-                ErrorCode::Internal
-            };
-            job.error = Some(ApiError::new(code, message));
+            job.error = Some(error);
+            job.retryable = Some(retryable);
+            job.finished_at = Some(seam::now()?);
             write_job(
                 transaction,
                 &job,
                 params![i64::from(retryable)],
                 "retryable = ?3, lease_expires_ms = NULL",
             )?;
+            Ok(job)
+        }))
+    }
+
+    fn seal<'a>(&'a self, lease: &'a JobLease) -> PortFuture<'a, Job> {
+        let lease = lease.clone();
+        Box::pin(self.db.transaction(move |transaction| {
+            let row = leased_row(transaction, lease.job_id)?;
+            if row.token.as_deref() != Some(lease.token.as_str()) {
+                return Err(lost_claim());
+            }
+            let job = decode_job(&row.record)?;
+            // Cancelled first: the cancellation took effect, so the job is not sealed and its
+            // handler stops (the order between the two is this transaction's).
+            if job.state == JobState::Cancelled {
+                return Ok(job);
+            }
+            if job.state != JobState::Running || !row.live() {
+                return Err(lost_claim());
+            }
+            transaction
+                .execute(
+                    "UPDATE jobs SET sealed = 1 WHERE job_id = ?1",
+                    [lease.job_id.0.to_string()],
+                )
+                .map_err(|error| sql(&error))?;
             Ok(job)
         }))
     }
@@ -251,6 +323,9 @@ impl RecordStore for SqliteRecords {
                 ));
             }
             let (tenant, workspace) = job_scope_key(&scope);
+            if let Some(workspace) = &workspace {
+                guard::refuse(transaction, &tenant, workspace)?;
+            }
             let artifact_id: ArtifactId = new_id!()?;
             transaction
                 .execute(
@@ -271,8 +346,14 @@ impl RecordStore for SqliteRecords {
                     ],
                 )
                 .map_err(|error| sql(&error))?;
-            read_artifact(transaction, "mutation_id", &mutation_id.0.to_string())?
-                .ok_or_else(|| internal("an artifact row vanished after its insert"))
+            let stored = read_artifact(transaction, "mutation_id", &mutation_id.0.to_string())?
+                .ok_or_else(|| internal("an artifact row vanished after its insert"))?;
+            // The stored record lands its object: a repeated mutation is answered by the first
+            // record, so a retry that put other bytes keeps their pending put.
+            if let Some(workspace) = &workspace {
+                puts::land(transaction, &tenant, workspace, [&stored.object.digest])?;
+            }
+            Ok(stored)
         }))
     }
 
@@ -326,7 +407,8 @@ impl RecordStore for SqliteRecords {
             let released = transaction
                 .execute(
                     "UPDATE jobs SET state = 'queued', lease_token = NULL, lease_expires_ms = NULL,
-                         lease_expires_at = NULL, record = json_set(record, '$.state', 'queued')
+                         lease_expires_at = NULL,
+                         record = json_remove(json_set(record, '$.state', 'queued'), '$.started_at')
                      WHERE state = 'running' AND lease_expires_ms <= ?1",
                     [seam::now_ms()?],
                 )
@@ -345,6 +427,19 @@ impl RecordStore for SqliteRecords {
         Box::pin(self.db.transaction(move |transaction| {
             insert_purge(transaction, &tenant, mutation_id, &purge)
         }))
+    }
+
+    fn find_purge<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        target: &'a PurgeTarget,
+    ) -> PortFuture<'a, Option<Purge>> {
+        let tenant = tenant.clone();
+        let target_key = target_key(target);
+        Box::pin(
+            self.db
+                .call(move |connection| purge_of_target(connection, &tenant, &target_key)),
+        )
     }
 
     fn get_purge<'a>(&'a self, tenant: &'a TenantId, purge: PurgeId) -> PortFuture<'a, Purge> {
@@ -409,6 +504,23 @@ impl RecordStore for SqliteRecords {
         let (tenant, workspace) = scope_key(scope);
         let revision = revision.as_str().to_owned();
         Box::pin(self.db.call(move |connection| {
+            // A workspace purge invalidates every revision from recording onward, even a
+            // revision never listed by Git or an earlier item-purge mapping with a replacement.
+            let purged: Option<String> = connection
+                .query_row(
+                    "SELECT purge_id FROM purges WHERE tenant_id=?1 AND target_key=?2
+                 ORDER BY state='completed',rowid LIMIT 1",
+                    params![tenant, format!("workspace/{workspace}")],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| sql(&error))?;
+            if let Some(purge) = purged {
+                return Ok(Some(RevisionMapping {
+                    purge_id: from_text!(purge.as_str())?,
+                    replacement: None,
+                }));
+            }
             let found: Option<(String, Option<String>)> = connection
                 .query_row(
                     "SELECT purge_id, replacement FROM revision_map
@@ -438,6 +550,7 @@ impl RecordStore for SqliteRecords {
     ) -> PortFuture<'a, DerivedObject> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
+            guard::refuse(transaction, &tenant, &workspace)?;
             transaction
                 .execute(
                     "INSERT INTO derived_objects (tenant_id, workspace_id, item_id, revision,
@@ -453,7 +566,7 @@ impl RecordStore for SqliteRecords {
                     ],
                 )
                 .map_err(|error| sql(&error))?;
-            read_derived(
+            let stored = read_derived(
                 transaction,
                 &tenant,
                 &workspace,
@@ -461,7 +574,11 @@ impl RecordStore for SqliteRecords {
                 &object.revision,
                 &object.digest,
             )?
-            .ok_or_else(|| internal("a derived object row vanished after its insert"))
+            .ok_or_else(|| internal("a derived object row vanished after its insert"))?;
+            // The digest is part of the row's key, so the stored row names this object even
+            // when it was recorded before.
+            puts::land(transaction, &tenant, &workspace, [&stored.digest])?;
+            Ok(stored)
         }))
     }
 
@@ -489,6 +606,7 @@ impl RecordStore for SqliteRecords {
     ) -> PortFuture<'a, Review> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
+            guard::refuse(transaction, &tenant, &workspace)?;
             let record = serde_json::to_string(&review).map_err(|error| json(&error))?;
             transaction
                 .execute(
@@ -551,6 +669,7 @@ impl RecordStore for SqliteRecords {
     ) -> PortFuture<'a, Receipt> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
+            guard::refuse(transaction, &tenant, &workspace)?;
             let record = serde_json::to_string(&receipt).map_err(|error| json(&error))?;
             let mutation = mutation_id.map(|id| id.0.to_string());
             transaction
@@ -596,6 +715,50 @@ impl RecordStore for SqliteRecords {
     }
 }
 
+/// Replay the producing mutation before incrementing the tenant's requested generation.
+/// A new request is served by the existing queued/running job or a newly inserted one.
+fn create_clean_up(
+    transaction: &Transaction<'_>,
+    scope: &JobScope,
+    request: &NewJob,
+) -> Result<Job, ApiError> {
+    if !request.spec.fits(scope) {
+        return Err(internal("a clean-up job requires tenant scope"));
+    }
+    let prior: Option<String> = transaction
+        .query_row(
+            "SELECT record FROM jobs WHERE mutation_id=?1",
+            [request.mutation_id.0.to_string()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| sql(&error))?;
+    if let Some(prior) = prior {
+        return decode_job(&prior);
+    }
+    let (tenant, _) = job_scope_key(scope);
+    transaction
+        .execute(
+            "INSERT INTO clean_up_requests (tenant_id,requested,started) VALUES (?1,1,0)
+         ON CONFLICT (tenant_id) DO UPDATE SET requested=requested+1",
+            [&tenant],
+        )
+        .map_err(|error| sql(&error))?;
+    let active: Option<String> = transaction
+        .query_row(
+            "SELECT record FROM jobs WHERE tenant_id=?1 AND workspace_id IS NULL
+         AND state IN ('queued','running') AND json_extract(spec,'$.kind')='clean_up'",
+            [&tenant],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| sql(&error))?;
+    match active {
+        Some(active) => decode_job(&active),
+        None => insert_job(transaction, scope, request),
+    }
+}
+
 /// Insert a queued job, or return the job already created under its mutation id.
 fn insert_job(
     transaction: &Transaction<'_>,
@@ -621,6 +784,12 @@ fn insert_job(
         item_ids: Vec::new(),
         artifact: None,
         restore: None,
+        backup: None,
+        clean_up: None,
+        created_at: Some(seam::now()?),
+        started_at: None,
+        finished_at: None,
+        retryable: None,
     };
     let (tenant, workspace) = job_scope_key(scope);
     transaction
@@ -674,16 +843,34 @@ fn claim(transaction: &Transaction<'_>, job_id: JobId) -> Result<Option<ClaimedJ
     let Some((tenant, workspace, record, mutation, initiator, spec, expires_ms)) = found else {
         return Ok(None);
     };
+    // A job of a workspace a purge names is not started: the claim is refused and the job is
+    // left as it is, for core to cancel (`purge::guard`).
+    if let Some(workspace) = &workspace {
+        guard::refuse(transaction, &tenant, workspace)?;
+    }
     let mut job = decode_job(&record)?;
     let now = seam::now_ms()?;
     if job.state == JobState::Running && expires_ms.is_some_and(|expiry| expiry > now) {
         return Ok(None);
     }
     job.state = JobState::Running;
+    job.started_at = Some(seam::now()?);
+    job.finished_at = None;
+    job.retryable = None;
     job.attempt = job
         .attempt
         .checked_add(1)
         .ok_or_else(|| internal("a job's attempt count overflowed"))?;
+    if job.kind == JobKind::CleanUp {
+        // A completion covers at least the requests present at its claim. The collector
+        // refreshes this baseline when it marks roots, so later requests still requeue it.
+        transaction
+            .execute(
+                "UPDATE clean_up_requests SET started=requested WHERE tenant_id=?1",
+                [&tenant],
+            )
+            .map_err(|error| sql(&error))?;
+    }
     let token = seam::hex(&seam::random_bytes::<16>()?);
     let expires_at = seam::later(JOB_LEASE_SECONDS)?;
     write_job(
@@ -718,6 +905,9 @@ fn complete(transaction: &Transaction<'_>, completion: &JobCompletion) -> Result
     {
         return Err(lost_claim());
     }
+    if let Some(workspace) = &row.workspace_id {
+        guard::refuse(transaction, &row.tenant_id, workspace)?;
+    }
     let scope = job_scope(&row.tenant_id, row.workspace_id.as_deref())?;
     let mut job = decode_job(&row.record)?;
     job.artifact = completion
@@ -732,13 +922,28 @@ fn complete(transaction: &Transaction<'_>, completion: &JobCompletion) -> Result
         })
         .transpose()?;
     job.state = JobState::Succeeded;
+    job.finished_at = Some(seam::now()?);
+    job.retryable = None;
     job.progress = 100;
     job.revision.clone_from(&completion.revision);
     job.item_ids.clone_from(&completion.item_ids);
     job.restore.clone_from(&completion.restore);
+    job.backup.clone_from(&completion.backup);
     job.warnings.clone_from(&completion.warnings);
     job.error = None;
-    write_job(transaction, &job, params![], "lease_expires_ms = NULL")?;
+    let lease_fields = if job.kind == JobKind::CleanUp {
+        complete_clean_up(
+            transaction,
+            &row.tenant_id,
+            &mut job,
+            completion.clean_up.as_ref(),
+        )?;
+        "lease_expires_ms = NULL, lease_expires_at = NULL, lease_token = NULL"
+    } else {
+        job.clean_up.clone_from(&completion.clean_up);
+        "lease_expires_ms = NULL"
+    };
+    write_job(transaction, &job, params![], lease_fields)?;
     for digest in &completion.outputs {
         transaction
             .execute(
@@ -747,7 +952,91 @@ fn complete(transaction: &Transaction<'_>, completion: &JobCompletion) -> Result
             )
             .map_err(|error| sql(&error))?;
     }
+    // Every output is stored above (or already was, for this job), so the stored completion
+    // names each one. A completion is never replayed: a repeated one finds the job no longer
+    // running under its claim and is refused before this point.
+    if let Some(workspace) = &row.workspace_id {
+        puts::land(transaction, &row.tenant_id, workspace, &completion.outputs)?;
+    }
     Ok(job)
+}
+
+/// Complete exactly one pass under the already-validated live claim, retaining prior pass
+/// totals and queuing again whenever a newer request was not covered by this pass's mark.
+fn complete_clean_up(
+    transaction: &Transaction<'_>,
+    tenant: &str,
+    job: &mut Job,
+    pass: Option<&CleanUpReport>,
+) -> Result<(), ApiError> {
+    let pass = pass.ok_or_else(|| internal("a clean-up completion has no pass report"))?;
+    let prior = job.clean_up.as_ref();
+    let removed = add_decimal_counts(
+        &pass.objects_removed,
+        prior.map_or("0", |report| report.objects_removed.as_str()),
+    )?;
+    let files = pass
+        .upload_files_removed
+        .checked_add(prior.map_or(0, |report| report.upload_files_removed))
+        .ok_or_else(|| internal("a clean-up file count exceeds its report"))?;
+    job.clean_up = Some(CleanUpReport {
+        objects_removed: removed,
+        objects_kept: pass.objects_kept.clone(),
+        upload_files_removed: files,
+    });
+    let (requested, started): (i64, i64) = transaction
+        .query_row(
+            "SELECT requested,started FROM clean_up_requests WHERE tenant_id=?1",
+            [tenant],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| sql(&error))?;
+    if requested > started {
+        job.state = JobState::Queued;
+        job.started_at = None;
+        job.finished_at = None;
+        job.progress = 0;
+    }
+    transaction
+        .execute(
+            "DELETE FROM sweep_removals WHERE sweep=?1 AND tenant_id=?2",
+            params![format!("clean_up/{}", job.id.0), tenant],
+        )
+        .map_err(|error| sql(&error))?;
+    Ok(())
+}
+
+/// Decimal-string reports have no machine-integer ceiling. Add digits with a single carry;
+/// an absent higher digit is mathematically zero, not an invalid count coerced to a default.
+fn add_decimal_counts(left: &str, right: &str) -> Result<String, ApiError> {
+    if [left, right]
+        .iter()
+        .any(|text| text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err(internal("a clean-up report holds an invalid removal count"));
+    }
+    let mut digits = Vec::with_capacity(left.len().max(right.len()).saturating_add(1));
+    let (mut left, mut right) = (left.bytes().rev(), right.bytes().rev());
+    let mut carry = 0;
+    loop {
+        let (a, b) = (left.next(), right.next());
+        if a.is_none() && b.is_none() {
+            break;
+        }
+        // Validation above bounds each digit to 0..=9; carry is 0 or 1, so sum <= 19.
+        // Saturating arithmetic is exact throughout these bounds, including ASCII encoding.
+        let sum = a
+            .map_or(0, |byte| byte.saturating_sub(b'0'))
+            .saturating_add(b.map_or(0, |byte| byte.saturating_sub(b'0')))
+            .saturating_add(carry);
+        digits.push(b'0'.saturating_add(sum % 10));
+        carry = sum / 10;
+    }
+    if carry != 0 {
+        digits.push(b'0'.saturating_add(carry));
+    }
+    digits.reverse();
+    String::from_utf8(digits).map_err(|error| internal(format!("encode a decimal count: {error}")))
 }
 
 /// Cancel or retry a job once per mutation id.
@@ -759,11 +1048,19 @@ fn control(
     action: &str,
 ) -> Result<Job, ApiError> {
     let (tenant, workspace) = job_scope_key(scope);
-    let record: String = transaction
+    // A retry queues job work again, so a workspace a purge names refuses it like a new job;
+    // a cancellation is what core does to that workspace's jobs, and is never refused.
+    if action == "retry"
+        && let Some(workspace) = &workspace
+    {
+        guard::refuse(transaction, &tenant, workspace)?;
+    }
+    let (record, sealed): (String, bool) = transaction
         .query_row(
-            "SELECT record FROM jobs WHERE job_id = ?1 AND tenant_id = ?2 AND workspace_id IS ?3",
+            "SELECT record, sealed FROM jobs
+             WHERE job_id = ?1 AND tenant_id = ?2 AND workspace_id IS ?3",
             params![job_id.0.to_string(), tenant, workspace],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(|error| sql(&error))?
@@ -776,12 +1073,25 @@ fn control(
         )
         .map_err(|error| sql(&error))?;
     let mut job = decode_job(&record)?;
+    // A failed content job holds no archive off, so the archive may have landed since: the retry
+    // refuses to queue it again in an archived workspace, in this transaction, as an insert does
+    // (a repeated id included).
+    if action == "retry"
+        && let Some(workspace) = &workspace
+    {
+        catalog::refuse_content_job_while_archived(transaction, &tenant, workspace, job.kind)?;
+    }
     if inserted == 0 {
         return Ok(job);
     }
     match (action, &job.state) {
+        // The refusal is returned, so this transaction, the control row with it, is undone.
+        ("cancel", JobState::Queued | JobState::Running) if sealed => Err(conflict(
+            "this job has passed its point of no return; it runs to its end",
+        )),
         ("cancel", JobState::Queued | JobState::Running) => {
             job.state = JobState::Cancelled;
+            job.finished_at = Some(seam::now()?);
             write_job(transaction, &job, params![], "lease_expires_ms = NULL")?;
             Ok(job)
         }
@@ -798,6 +1108,9 @@ fn control(
             }
             job.state = JobState::Queued;
             job.error = None;
+            job.started_at = None;
+            job.finished_at = None;
+            job.retryable = None;
             write_job(
                 transaction,
                 &job,
@@ -818,33 +1131,28 @@ fn control(
     }
 }
 
-/// Record a purge with its tenant job, or return the purge already recorded for its id or the
-/// unfinished purge of the same target.
+/// Record a purge with its tenant job, or return the purge already recorded for its id, or
+/// else the purge of the same target (`purge_of_target`).
 fn insert_purge(
     transaction: &Transaction<'_>,
     tenant: &TenantId,
     mutation_id: MutationId,
     purge: &NewPurge,
 ) -> Result<Purge, ApiError> {
-    let target_key = match &purge.target {
-        PurgeTarget::Workspace { workspace_id } => format!("workspace/{}", workspace_id.0),
-        PurgeTarget::Item {
-            workspace_id,
-            item_id,
-        } => format!("item/{}/{}", workspace_id.0, item_id.0),
-    };
+    let target_key = target_key(&purge.target);
     let prior: Option<String> = transaction
         .query_row(
-            "SELECT record FROM purges WHERE tenant_id = ?1
-               AND (purge_id = ?2 OR (target_key = ?3 AND state <> 'completed'))
-             ORDER BY purge_id = ?2 DESC LIMIT 1",
-            params![tenant.as_str(), purge.id.0.to_string(), target_key],
+            "SELECT record FROM purges WHERE tenant_id = ?1 AND purge_id = ?2",
+            params![tenant.as_str(), purge.id.0.to_string()],
             |row| row.get(0),
         )
         .optional()
         .map_err(|error| sql(&error))?;
     if let Some(prior) = prior {
         return serde_json::from_str(&prior).map_err(|error| json(&error));
+    }
+    if let Some(prior) = purge_of_target(transaction, tenant, &target_key)? {
+        return Ok(prior);
     }
     let job = insert_job(
         transaction,
@@ -880,6 +1188,38 @@ fn insert_purge(
         )
         .map_err(|error| sql(&error))?;
     Ok(record)
+}
+
+/// The key a purge's target is stored and looked up by (`purges.target_key`).
+fn target_key(target: &PurgeTarget) -> String {
+    match target {
+        PurgeTarget::Workspace { workspace_id } => format!("workspace/{}", workspace_id.0),
+        PurgeTarget::Item {
+            workspace_id,
+            item_id,
+        } => format!("item/{}/{}", workspace_id.0, item_id.0),
+    }
+}
+
+/// The purge a request for the target is answered with (contract ruling 24): the unfinished
+/// one while there is one, otherwise the first completed one, in the order they were recorded.
+fn purge_of_target(
+    connection: &Connection,
+    tenant: &TenantId,
+    target_key: &str,
+) -> Result<Option<Purge>, ApiError> {
+    let found: Option<String> = connection
+        .query_row(
+            "SELECT record FROM purges WHERE tenant_id = ?1 AND target_key = ?2
+             ORDER BY state = 'completed', rowid LIMIT 1",
+            params![tenant.as_str(), target_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| sql(&error))?;
+    found
+        .map(|record| serde_json::from_str(&record).map_err(|error| json(&error)))
+        .transpose()
 }
 
 fn leased_row(transaction: &Transaction<'_>, job_id: JobId) -> Result<LeasedRow, ApiError> {

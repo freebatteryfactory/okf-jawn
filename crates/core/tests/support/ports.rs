@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use okf_jawn_contract::{
-    conventions::NamingRules,
     error::{ApiError, ErrorCode},
     events::Receipt,
     history::{BlameResponse, DiffResponse, LogResponse},
@@ -20,7 +19,7 @@ use okf_jawn_contract::{
     },
     import::{Job, ListJobsResponse},
     item::{ItemDocument, ItemSummary, TypeDefinition},
-    purge::Purge,
+    purge::{Purge, PurgeTarget},
     review::Review,
 };
 use okf_jawn_core::jobs::{
@@ -30,8 +29,8 @@ use okf_jawn_core::jobs::{
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
     BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges, Committed,
-    DiffQuery, FolderListing, LocalSource, LogQuery, ObjectInfo, ObjectRead, Page, Promotion,
-    StorageScope, VersionStore,
+    CommittedFiles, DiffQuery, FilePage, FolderListing, LocalSource, LogQuery, ObjectInfo,
+    ObjectRead, Page, Promotion, RulesFile, StorageScope, VersionStore, WorkspaceTree,
 };
 use tokio::io::AsyncReadExt;
 
@@ -124,11 +123,18 @@ impl VersionStore for FakeVersions {
     ) -> PortFuture<'a, Vec<u8>> {
         unused()
     }
+    fn tree<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _revision: &'a Revision,
+    ) -> PortFuture<'a, WorkspaceTree> {
+        unused()
+    }
     fn rules<'a>(
         &'a self,
         _scope: &'a StorageScope,
         _revision: &'a Revision,
-    ) -> PortFuture<'a, Option<NamingRules>> {
+    ) -> PortFuture<'a, Option<RulesFile>> {
         unused()
     }
     fn types<'a>(
@@ -160,7 +166,7 @@ impl VersionStore for FakeVersions {
         _scope: &'a StorageScope,
         _mutation_id: MutationId,
         _since: Option<&'a Revision>,
-    ) -> PortFuture<'a, Option<Revision>> {
+    ) -> PortFuture<'a, Option<Committed>> {
         unused()
     }
     fn create_candidate<'a>(
@@ -169,7 +175,7 @@ impl VersionStore for FakeVersions {
         _proposal_id: ProposalId,
         _changes: CandidateChanges,
         _check: Arc<dyn CandidateCheck>,
-    ) -> PortFuture<'a, Revision> {
+    ) -> PortFuture<'a, Committed> {
         unused()
     }
     fn promote_candidate<'a>(
@@ -214,6 +220,14 @@ impl VersionStore for FakeVersions {
         _revision: &'a Revision,
         _mutation_id: MutationId,
     ) -> PortFuture<'a, ObjectInfo> {
+        unused()
+    }
+    fn committed_files<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _revision: &'a Revision,
+        _page: FilePage,
+    ) -> PortFuture<'a, CommittedFiles> {
         unused()
     }
 }
@@ -343,6 +357,9 @@ impl RecordStore for FakeRecords {
     fn get_job<'a>(&'a self, _scope: &'a JobScope, _job: JobId) -> PortFuture<'a, Job> {
         unused()
     }
+    fn job_mutation<'a>(&'a self, _scope: &'a JobScope, _job: JobId) -> PortFuture<'a, MutationId> {
+        unused()
+    }
     fn list_jobs<'a>(
         &'a self,
         _scope: &'a JobScope,
@@ -362,9 +379,12 @@ impl RecordStore for FakeRecords {
     fn fail_job(
         &self,
         _lease: JobLease,
-        _message: String,
+        _error: ApiError,
         _retryable: bool,
     ) -> PortFuture<'_, Job> {
+        unused()
+    }
+    fn seal<'a>(&'a self, _lease: &'a JobLease) -> PortFuture<'a, Job> {
         unused()
     }
     fn cancel_job<'a>(
@@ -413,6 +433,13 @@ impl RecordStore for FakeRecords {
         unused()
     }
     fn get_purge<'a>(&'a self, _tenant: &'a TenantId, _purge: PurgeId) -> PortFuture<'a, Purge> {
+        unused()
+    }
+    fn find_purge<'a>(
+        &'a self,
+        _tenant: &'a TenantId,
+        _target: &'a PurgeTarget,
+    ) -> PortFuture<'a, Option<Purge>> {
         unused()
     }
     fn update_purge<'a>(&'a self, _tenant: &'a TenantId, _purge: Purge) -> PortFuture<'a, Purge> {

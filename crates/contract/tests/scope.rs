@@ -11,6 +11,7 @@ use okf_jawn_contract::identity::ConnectorId;
 use okf_jawn_contract::import::{GetTenantJobRequest, ListTenantJobsRequest};
 use okf_jawn_contract::item::SetLifecycleRequest;
 use okf_jawn_contract::metadata::{OperationName, operations};
+use okf_jawn_contract::operations::ALLOWED_WHILE_ARCHIVED;
 use okf_jawn_contract::proposal::OpenProposalRequest;
 use okf_jawn_contract::purge::{GetPurgeRequest, PurgeItemRequest, PurgeWorkspaceRequest};
 use okf_jawn_contract::scope::{ReplayPolicy, RequestScope, Target};
@@ -22,6 +23,7 @@ use okf_jawn_contract::workspace::{
 use schemars::{JsonSchema, generate::SchemaSettings};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::path::PathBuf;
 
@@ -48,6 +50,10 @@ macro_rules! scope_checks {
             })*
             Ok(found)
         }
+
+        fn response_schemas() -> Result<BTreeMap<&'static str, Value>, Box<dyn Error>> {
+            Ok(BTreeMap::from([$((stringify!($id), schema_for::<$response>()?)),*]))
+        }
     };
 }
 
@@ -57,6 +63,15 @@ struct Scoped {
     targets: Vec<Target>,
     keyed: bool,
     replay: ReplayPolicy,
+    response_workspace: Option<&'static str>,
+}
+
+/// One place a response schema names a workspace identity: its JSON pointer, and whether it
+/// is inside a list (an array or a map), where it is one of several.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct WorkspaceField {
+    pointer: String,
+    listed: bool,
 }
 
 /// `check_rules` of one View-carrying request, as synthesized and with every binding moved to
@@ -68,8 +83,12 @@ struct ViewRules {
     moved: usize,
 }
 
-/// Admin-gated operations that read state and therefore carry no idempotency key.
+/// Operations gated by more than `read` that read state and therefore carry no idempotency key:
+/// the tenant reads need `admin`; an upload slot is read with `write` (its file name is the
+/// uploader's business until it is imported).
 const PRIVILEGED_READS: &[&str] = &[
+    "get_upload",
+    "list_uploads",
     "get_purge",
     "get_tenant_job",
     "list_tenant_jobs",
@@ -97,6 +116,64 @@ const SIGN_IN_ONLY: &[&str] = &[
     "get_readiness",
 ];
 const OTHER_WORKSPACE: &str = "33333333-3333-4333-8333-333333333333";
+/// Mutations authorized at the tenant whose response names workspaces only in a list (a
+/// connector's grants): no one workspace to record, so they declare no `RESPONSE_WORKSPACE`.
+/// The issued connector's ledger row keeps only its id (`ReplayPolicy::AlreadyIssued`), and a
+/// purge unlists the workspace from the connector record itself.
+const NAMES_WORKSPACES_IN_A_LIST: &[&str] = &["create_connector", "revoke_connector"];
+/// The mutations an archived workspace allows, by decision (ruling 25; `create_connector` by the
+/// owner's decision of 2026-10-17), in table order.
+const ALLOWED_MUTATIONS_WHILE_ARCHIVED: &[&str] = &[
+    "archive_workspace",
+    "unarchive_workspace",
+    "purge_workspace",
+    "export_workspace",
+    "backup_workspace",
+    "purge_item",
+    "cancel_job",
+    "rebuild_index",
+    "export_view",
+    "create_connector",
+    "revoke_connector",
+];
+
+/// The mutations an archived workspace refuses, in table order. The tenant-level ones
+/// (`create_workspace`, `backup_installation`) never
+/// name an archived workspace as their table target; they are listed so that every mutation
+/// has a decision.
+const REFUSED_MUTATIONS_WHILE_ARCHIVED: &[&str] = &[
+    "create_workspace",
+    "update_workspace",
+    "restore_workspace",
+    "backup_installation",
+    "create_item",
+    "save_draft",
+    "discard_draft",
+    "move_item",
+    "set_lifecycle",
+    "delete_item",
+    "create_folder",
+    "move_folder",
+    "delete_folder",
+    "set_type",
+    "commit_items",
+    "restore_items",
+    "open_proposal",
+    "accept_proposal",
+    "decline_proposal",
+    "add_comment",
+    "create_confirmation",
+    "create_review",
+    "create_upload",
+    "complete_upload",
+    "discard_upload",
+    "start_import",
+    "retry_job",
+    "redigest_item",
+    "correct_digest",
+    "set_rules",
+    "apply_names",
+];
 
 fn scoped<T: RequestScope>(id: &'static str, permission: Permission, request: &T) -> Scoped {
     Scoped {
@@ -105,7 +182,89 @@ fn scoped<T: RequestScope>(id: &'static str, permission: Permission, request: &T
         targets: request.targets(),
         keyed: request.idempotency_key().is_some(),
         replay: T::REPLAY,
+        response_workspace: T::RESPONSE_WORKSPACE,
     }
+}
+
+/// Whether the first of `targets`, the one the table permission names, is a workspace: the
+/// request writes that workspace, and the ledger records it when the mutation begins (core
+/// dispatch's `written_workspace`).
+fn writes_a_workspace(targets: &[Target]) -> bool {
+    matches!(targets.first(), Some(Target::Workspace(..)))
+}
+
+/// Every place `schema` names a `WorkspaceId`, resolving `$ref`s into `defs`, in objects, lists,
+/// tuples (`prefixItems`), maps (value and `propertyNames` key) and combinators.
+///
+/// Limit: a map keyed by workspace is seen only when its schema says so. schemars 1.2 writes no
+/// `propertyNames` for a Rust map, so a contract type that holds a `BTreeMap<WorkspaceId, _>`
+/// would name workspaces this walk cannot see. No contract type has that shape; one that gains
+/// it must declare its response's workspace by hand and say so here.
+fn workspace_fields(
+    schema: &Value,
+    defs: &Value,
+    at: &WorkspaceField,
+    depth: u8,
+    found: &mut BTreeSet<WorkspaceField>,
+) -> Result<(), Box<dyn Error>> {
+    if depth > 40 {
+        return Err("schema recursion too deep to walk".into());
+    }
+    let next = depth.saturating_add(1);
+    let Some(object) = schema.as_object() else {
+        return Ok(());
+    };
+    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+        let name = reference
+            .strip_prefix("#/$defs/")
+            .ok_or_else(|| format!("unsupported reference {reference}"))?;
+        if name == "WorkspaceId" {
+            found.insert(at.clone());
+            return Ok(());
+        }
+        let target = defs
+            .get(name)
+            .ok_or_else(|| format!("missing definition {name}"))?;
+        return workspace_fields(target, defs, at, next, found);
+    }
+    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+        for (name, property) in properties {
+            let field = WorkspaceField {
+                pointer: format!("{}/{name}", at.pointer),
+                listed: at.listed,
+            };
+            workspace_fields(property, defs, &field, next, found)?;
+        }
+    }
+    let listed = WorkspaceField {
+        pointer: at.pointer.clone(),
+        listed: true,
+    };
+    // A list's element, a map's value, a map's key, and each position of a tuple.
+    for listing in ["items", "additionalProperties", "propertyNames"] {
+        if let Some(element) = object.get(listing) {
+            workspace_fields(element, defs, &listed, next, found)?;
+        }
+    }
+    for element in object
+        .get("prefixItems")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        workspace_fields(element, defs, &listed, next, found)?;
+    }
+    for combinator in ["oneOf", "anyOf", "allOf"] {
+        for branch in object
+            .get(combinator)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            workspace_fields(branch, defs, at, next, found)?;
+        }
+    }
+    Ok(())
 }
 
 fn sample<T: DeserializeOwned + JsonSchema + RequestScope>(
@@ -398,6 +557,72 @@ fn the_already_issued_pointer_finds_the_connector_id_in_the_response() -> Result
     Ok(())
 }
 
+/// The mutation ledger records each mutation's workspace: the request's own, or for a mutation
+/// authorized at the tenant the one its response names at `RESPONSE_WORKSPACE`. Every such
+/// mutation whose response schema names a workspace outside a list declares where, and only
+/// those do; a newly declared operation is covered from its own types.
+#[test]
+fn a_tenant_mutation_declares_where_its_response_names_its_workspace() -> Result<(), Box<dyn Error>>
+{
+    let schemas = response_schemas()?;
+    let mut declared = Vec::new();
+    for operation in sampled_operations()? {
+        let id = operation.id;
+        let schema = schemas
+            .get(id)
+            .ok_or_else(|| format!("{id} has no response schema"))?;
+        let defs = schema.get("$defs").cloned().unwrap_or_else(|| json!({}));
+        let mut found = BTreeSet::new();
+        let root = WorkspaceField {
+            pointer: String::new(),
+            listed: false,
+        };
+        workspace_fields(schema, &defs, &root, 0, &mut found)?;
+        let single: BTreeSet<&str> = found
+            .iter()
+            .filter(|field| !field.listed)
+            .map(|field| field.pointer.as_str())
+            .collect();
+        let listed = found.iter().any(|field| field.listed);
+        let at_the_tenant = operation.keyed && !writes_a_workspace(&operation.targets);
+        match operation.response_workspace {
+            Some(pointer) => {
+                assert!(
+                    at_the_tenant,
+                    "{id}: only a mutation authorized at the tenant names its workspace by its response"
+                );
+                assert!(
+                    single.contains(pointer),
+                    "{id}: {pointer} is not a workspace identity of its response ({single:?})"
+                );
+                declared.push(id);
+            }
+            None if at_the_tenant => {
+                assert!(
+                    single.is_empty(),
+                    "{id}: its response names a workspace at {single:?}; declare RESPONSE_WORKSPACE"
+                );
+                assert_eq!(
+                    listed,
+                    NAMES_WORKSPACES_IN_A_LIST.contains(&id),
+                    "{id}: whether its response names workspaces in a list"
+                );
+            }
+            None => {}
+        }
+    }
+    assert_eq!(
+        declared,
+        [
+            "create_workspace",
+            "purge_workspace",
+            "backup_installation",
+            "purge_item"
+        ]
+    );
+    Ok(())
+}
+
 #[test]
 fn tenant_level_reads_need_sign_in_only() -> Result<(), Box<dyn Error>> {
     assert_eq!(Target::Authenticated.permission(), Permission::Read);
@@ -583,6 +808,43 @@ fn a_supply_proposal_holds_only_supply_changes() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Ruling 29: a `create` change names its role in `item_kind`. Absent means a note, a View is
+/// taken, and a source is refused on the change's own field.
+#[test]
+fn a_proposal_cannot_create_a_source() -> Result<(), Box<dyn Error>> {
+    let create = |kind: Option<&str>| {
+        let mut change = json!({"kind": "create", "path": "notes/a.md", "type_name": "Note",
+            "body": "# A", "properties": {}});
+        if let (Some(kind), Some(fields)) = (kind, change.as_object_mut()) {
+            fields.insert("item_kind".to_owned(), json!(kind));
+        }
+        change
+    };
+    let archive = json!({"kind": "archive", "item_id": "22222222-2222-4222-8222-222222222222"});
+    for (kind, accepted) in [
+        (None, true),
+        (Some("note"), true),
+        (Some("view"), true),
+        (Some("source"), false),
+    ] {
+        let changes = json!([archive.clone(), create(kind)]);
+        let request: OpenProposalRequest = edited(|request| {
+            request.insert("changes".to_owned(), changes.clone());
+        })?;
+        let checked = request.check_rules();
+        if accepted {
+            assert!(checked.is_ok(), "{changes}: {checked:?}");
+        } else {
+            assert!(
+                matches!(&checked, Err(error) if error.code == ErrorCode::InvalidInput
+                    && error.field.as_deref() == Some("/changes/1/item_kind")),
+                "{changes}: {checked:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn set_lifecycle_needs_status_or_archived() -> Result<(), Box<dyn Error>> {
     let neither: SetLifecycleRequest = edited(|request| {
@@ -730,5 +992,95 @@ fn typed_error_details_are_tagged_and_closed() -> Result<(), Box<dyn Error>> {
         in_progress,
         ErrorDetail::InProgress { retry_after: 2, .. }
     ));
+    Ok(())
+}
+
+/// The workspace identities `schema` names, walked from the root, as (pointer, listed) pairs.
+fn workspace_fields_of(schema: &Value) -> Result<Vec<(String, bool)>, Box<dyn Error>> {
+    let defs = json!({ "WorkspaceId": { "type": "string" } });
+    let root = WorkspaceField {
+        pointer: String::new(),
+        listed: false,
+    };
+    let mut found = BTreeSet::new();
+    workspace_fields(schema, &defs, &root, 0, &mut found)?;
+    Ok(found
+        .into_iter()
+        .map(|field| (field.pointer, field.listed))
+        .collect())
+}
+
+/// The walk that finds where a response names a workspace sees the two shapes a tuple and a map
+/// add to the object, the array and the combinators: a workspace identity at a position of a
+/// tuple (`prefixItems`) and a map keyed by workspace (`propertyNames`). Each is one of
+/// several, so `listed`.
+#[test]
+fn the_workspace_walk_sees_a_tuple_and_a_map_keyed_by_workspace() -> Result<(), Box<dyn Error>> {
+    let workspace = json!({ "$ref": "#/$defs/WorkspaceId" });
+    let tuple = json!({
+        "type": "object",
+        "properties": {
+            "home": { "type": "array", "prefixItems": [{ "type": "string" }, workspace] }
+        }
+    });
+    assert_eq!(workspace_fields_of(&tuple)?, [("/home".to_owned(), true)]);
+    let keyed = json!({
+        "type": "object",
+        "properties": {
+            "visits": {
+                "type": "object",
+                "propertyNames": workspace,
+                "additionalProperties": { "type": "integer" }
+            }
+        }
+    });
+    assert_eq!(workspace_fields_of(&keyed)?, [("/visits".to_owned(), true)]);
+    // The walk still finds nothing in a schema that names no workspace.
+    let plain = json!({
+        "type": "object",
+        "properties": {
+            "home": { "type": "array", "prefixItems": [{ "type": "string" }] },
+            "visits": { "type": "object", "propertyNames": { "type": "string" } }
+        }
+    });
+    assert_eq!(workspace_fields_of(&plain)?, Vec::<(String, bool)>::new());
+    Ok(())
+}
+
+/// Every operation has a decision for an archived workspace: one that is not a mutation (it
+/// carries no idempotency key) is allowed by rule, and every mutation is named as allowed or as
+/// refused. A row added later without a decision fails here: a read that is not on the
+/// allow-list, or a mutation named in neither list.
+#[test]
+fn every_operation_has_a_decision_for_an_archived_workspace() -> Result<(), Box<dyn Error>> {
+    let allowed: Vec<&str> = ALLOWED_WHILE_ARCHIVED
+        .iter()
+        .map(|name| name.as_str())
+        .collect();
+    let positions: Vec<usize> = ALLOWED_WHILE_ARCHIVED
+        .iter()
+        .filter_map(|name| OperationName::ALL.iter().position(|each| each == name))
+        .collect();
+    assert!(positions.is_sorted(), "listed in table order");
+    let distinct: BTreeSet<usize> = positions.iter().copied().collect();
+    assert_eq!(distinct.len(), allowed.len(), "listed once each");
+    let mut mutations_allowed = Vec::new();
+    let mut mutations_refused = Vec::new();
+    for operation in sampled_operations()? {
+        let listed = allowed.contains(&operation.id);
+        if !operation.keyed {
+            assert!(
+                listed,
+                "{} is not a mutation and must be allowed",
+                operation.id
+            );
+        } else if listed {
+            mutations_allowed.push(operation.id);
+        } else {
+            mutations_refused.push(operation.id);
+        }
+    }
+    assert_eq!(mutations_allowed, ALLOWED_MUTATIONS_WHILE_ARCHIVED);
+    assert_eq!(mutations_refused, REFUSED_MUTATIONS_WHILE_ARCHIVED);
     Ok(())
 }

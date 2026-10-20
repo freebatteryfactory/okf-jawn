@@ -3,7 +3,9 @@
 //!
 //! Every revision a request names is checked against the revision map a purge wrote before
 //! anything is read at it (`shared::resolve`, `shared::check_named`): `at`, both ends of a
-//! comparison, a Rewind's base and target, and the base of every draft a Snapshot commits.
+//! comparison, a Rewind's base and target, and the base of every draft a Snapshot commits. A
+//! Timeline's later pages read at the tip its first page resolved, which its cursor carries
+//! (`shared::resolve_page`), and that tip is checked again on every page.
 //!
 //! A Snapshot commits the caller's own drafts of the selected items in one commit, on the head
 //! it reads. It is blocked only when an item being snapshotted was itself changed or deleted
@@ -14,15 +16,16 @@
 //! the snapshotted drafts are removed. A Snapshot reads the current head, so its expected head is
 //! not stable across attempts: a resumed attempt first asks the store for the commit its earlier
 //! attempt may have written anywhere on the accepted line (`VersionStore::find_commit` with no
-//! `since`), and completes it instead of committing again, answering the warnings the same
-//! check gives over that commit's tree (`shared::replay_warnings`); a refusal there never fails
-//! the landed write.
+//! `since`), and completes it instead of committing again, answering the warnings the store
+//! kept when that commit was written (or the store's one warning that it kept none), which the
+//! store gives with the commit it finds.
 //!
 //! A draft is removed only when it is still the content that was committed
 //! (`DraftStore::discard` with the expected digest): on a first attempt the digest of the draft
-//! read, and on a resumed attempt the digest of the item as the found commit holds it
-//! (`portable::item_content_digest`). A draft saved again in between, before or after a crash,
-//! stays in place. The draft store remembers what it removed under the mutation, so a resumed
+//! read, and on a resumed attempt the digest of the item as the found commit holds it. Both are
+//! `portable::draft_digest`, which covers the whole content, `aliases` included (the review
+//! fingerprint leaves them out), so a draft saved again in between, before or after a crash,
+//! stays in place even when only its `aliases` changed. The draft store remembers what it removed under the mutation, so a resumed
 //! attempt also completes the removals its earlier attempt made.
 //!
 //! An unrelated commit that lands between the Snapshot's check and its commit makes the store
@@ -39,13 +42,17 @@
 //! the target, which follows its moves, lists nothing. The store restores the item by identity,
 //! so another item's file is never brought back, and restoring over another item's path fails
 //! the commit with `Conflict`. The files that comparison shows at the target count as touched.
+//! The store moves an item the base still holds back with its links. An item deleted since has
+//! no path at the base for its links to follow from, so its Rewind first puts it back at its
+//! last path before the delete and moves it from there (`item_restore`, R-I14): the links that
+//! pointed at that last path end pointing at the restored path. In both cases the store tells
+//! the check which files it rewrote for those links, and they count as touched too.
 //!
 //! Both writes commit through `shared::commit` with the production edit check: OKF conformance
 //! refuses, and the validator's warnings and OKF lint about the files the write touches come
 //! back as warnings.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 use okf_jawn_contract::common::{MutationResult, TextRange};
 use okf_jawn_contract::error::{ApiError, DraftConflictItem, ErrorCode, ErrorDetail};
@@ -59,15 +66,15 @@ use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::source::SourceReference;
 
 use super::ApplicationService;
+use super::drafts::refuse_unsupported_draft;
 use super::shared::{
-    Touched, Write, announce, check_named, commit_with_receipt, invalid, mutation_id,
-    record_receipt, replay_warnings, resolve, store_commit, workspace_scope,
+    Touched, Write, announce, check_named, commit_with_receipt, invalid, mutation_id, next_page,
+    record_receipt, resolve, resolve_page, store_commit, workspace_scope,
 };
 use super::sources::{citation, record_of};
-use crate::conformance::EditCheck;
 use crate::context::{Attempt, OperationContext};
-use crate::portable::item_content_digest;
-use crate::storage::{BlameQuery, Committed, DiffQuery, LogQuery, StorageScope, TreeEdit};
+use crate::portable::draft_digest;
+use crate::storage::{BlameQuery, Committed, DiffQuery, LogQuery, Page, StorageScope, TreeEdit};
 
 /// Which side of a comparison a citation is of.
 #[derive(Clone, Copy)]
@@ -88,35 +95,52 @@ enum Hunk {
 
 /// How many heads a Snapshot tries while unrelated commits keep landing before its commit.
 const HEAD_ATTEMPTS: usize = 3;
+/// How many entries of a folder are read at a time when a Rewind asks whether a path is taken.
+const FOLDER_PAGE: u16 = 500;
 
 /// Content snapshots of the workspace or of one item (following its moves), newest first,
 /// walking back from the resolved revision. The commits carry metadata and no item content, so
 /// the receipt it records cites no source.
 ///
+/// A continuation walks back from the tip its first page resolved (`shared::resolve_page`), so
+/// a Snapshot that lands between two pages of a Timeline at `latest` repeats no commit.
+///
 /// # Errors
-/// Returns the typed `NotFound` of an invalidated revision, or any port error.
+/// Returns `InvalidInput` on `/page/cursor` for a cursor that is not this operation's (see `shared::resolve_page`) or one
+/// that continues a read of another revision than `at` names, the typed `NotFound` of an
+/// invalidated revision, or any port error.
 pub(super) async fn log_items(
     service: &ApplicationService,
     context: &OperationContext,
     request: LogRequest,
 ) -> Result<LogResponse, ApiError> {
     let scope = workspace_scope(context)?;
-    let tip = resolve(service, &scope, &request.at).await?;
+    let (tip, page, _) = resolve_page(
+        service,
+        &scope,
+        context.operation,
+        &request.at,
+        request.page,
+    )
+    .await?;
     let response = service
         .ports()
         .versions
         .log(
             &scope,
             LogQuery {
-                tip,
+                tip: tip.clone(),
                 item_id: request.item_id,
-                page: request.page.into(),
+                page,
             },
         )
         .await?;
     // Commit metadata only: the receipt names no item content.
     record_receipt(service, context, &scope, None, Vec::new()).await?;
-    Ok(response)
+    Ok(LogResponse {
+        next_cursor: next_page(context.operation, &tip, response.next_cursor, None)?,
+        commits: response.commits,
+    })
 }
 
 /// Compare two named revisions, optionally only one item (following its moves).
@@ -155,7 +179,7 @@ pub(super) async fn diff_items(
 /// The commit that last changed each selected line of an item at the resolved revision.
 ///
 /// The citation is the server's: the lines attributed, of the item's shown text, located in the
-/// original as a read of those lines locates them (`sources::computed_locations`). The lines
+/// original as a read of those lines locates them (`reading::computed_locations`). The lines
 /// returned are recorded in a receipt, as every read of content is.
 ///
 /// # Errors
@@ -234,25 +258,28 @@ pub(super) async fn commit_items(
     };
     let ports = service.ports();
     if context.attempt == Attempt::Resumed
-        && let Some(revision) = ports.versions.find_commit(&scope, mutation, None).await?
+        && let Some(found) = ports.versions.find_commit(&scope, mutation, None).await?
     {
+        let revision = found.revision;
         announce(service, scope.clone(), mutation, &revision, item).await?;
         // Each draft is removed only if it is still what the found commit holds.
         let mut committed = Vec::with_capacity(request.item_ids.len());
-        let mut touched = Vec::with_capacity(request.item_ids.len());
         for selected in &request.item_ids {
             let document = ports.versions.show(&scope, &revision, *selected).await?;
-            committed.push((*selected, item_content_digest(&document)?));
-            // A Snapshot moves nothing, so each item's path here is its path at the base.
-            touched.push(document.summary.path);
+            committed.push((
+                *selected,
+                draft_digest(&document.body, &document.properties)?,
+            ));
         }
-        // The first attempt's warnings went with it: the same check runs again over the
-        // commit's tree (`shared::replay_warnings`); a refusal there never fails the landed
-        // write.
-        let check = Arc::new(EditCheck::new(&touched, None));
-        let warnings = replay_warnings(service, &scope, &revision, check).await;
+        // The warnings are the ones the store kept when the first attempt committed.
         return finish(
-            service, context, &scope, mutation, committed, revision, warnings,
+            service,
+            context,
+            &scope,
+            mutation,
+            committed,
+            revision,
+            found.warnings,
         )
         .await;
     }
@@ -263,6 +290,10 @@ pub(super) async fn commit_items(
     // Every draft base is a revision this Snapshot reads at.
     for drafted in &drafts {
         check_named(service, &scope, &drafted.draft.base_revision).await?;
+    }
+    // A draft that predates the rules of `save_draft` is refused before anything is committed.
+    for drafted in &drafts {
+        refuse_unsupported_draft(service, &scope, drafted).await?;
     }
     let committed_drafts: Vec<(ItemId, Digest)> = drafts
         .iter()
@@ -326,8 +357,9 @@ pub(super) async fn restore_items(
     }
     // What the restore leaves in the tree: every file present at the target. Restoring one
     // item moves it back from its path at the base, as `MoveItem` moves it, so that path counts
-    // too, as a move's old path does. Neither write counts the referrers whose links the move
-    // rewrote (R-I12).
+    // too, as a move's old path does. The referrers whose links the move back rewrites (or
+    // the `MoveItem` of a deleted item's Rewind, `item_restore`) are the store's to name: it
+    // reports them to the check, which counts them as touched.
     let restored: Vec<WorkspacePath> = changes
         .iter()
         .flat_map(|change| {
@@ -337,14 +369,20 @@ pub(super) async fn restore_items(
         .flatten()
         .filter_map(|path| WorkspacePath::try_from(path).ok())
         .collect();
-    let edit = match request.item_id {
-        None => TreeEdit::RestoreWorkspace {
+    let edits = match request.item_id {
+        None => vec![TreeEdit::RestoreWorkspace {
             from: request.target.clone(),
-        },
-        Some(item) => TreeEdit::RestoreItem {
-            item_id: item,
-            from: request.target.clone(),
-        },
+        }],
+        Some(item) => {
+            item_restore(
+                service,
+                &scope,
+                item,
+                &request.base_revision,
+                &request.target,
+            )
+            .await?
+        }
     };
     commit_with_receipt(
         service,
@@ -352,7 +390,7 @@ pub(super) async fn restore_items(
         Write {
             base: request.base_revision,
             message: request.message,
-            edits: vec![edit],
+            edits,
             item: request.item_id,
             touched: Touched {
                 paths: restored,
@@ -361,6 +399,165 @@ pub(super) async fn restore_items(
         },
     )
     .await
+}
+
+/// The edits that restore `item` to its state at `target` on top of `base`.
+///
+/// One `RestoreItem` is the whole restore for an item the base still holds: the store moves it
+/// back from its path there with its links. An item the base does not hold (deleted since) has
+/// no path there to be moved from, so the links that pointed at it still name its last path
+/// before the delete. When that path is not the one `target` holds it at, and nothing holds it
+/// now, the Rewind is three edits (R-I14):
+///
+/// 1. `RestoreItem` from the last revision that held the item (found as said below), which
+///    puts it back where the links still point;
+/// 2. `MoveItem` to its path at `target`, which rewrites every link that points at it, as a
+///    move does;
+/// 3. `RestoreItem` from `target`, which sets the item and its companions to their state there.
+///
+/// The move separates the two restores, so the store applies them in order and not as one
+/// group. A last path that is another spelling of the path at `target` (one collision key,
+/// `WorkspacePath::collision_key`: `notes/Report.md` and `notes/report.md`) takes the three
+/// edits too: the store moves between two spellings of one path as one move through a parked
+/// name (`TreeEdit::MoveItem`), so the links follow the item to the restored spelling. In every
+/// other case the links have nothing to follow, and the Rewind is the one `RestoreItem`: the
+/// item's last path is exactly its path at `target`; another item, or a folder, took that last
+/// path since (its links are that one's now); or the history of `base` never held the item.
+///
+/// The last holder is the first parent of the newest commit, at or before `base`, that changed
+/// the item: `VersionStore::log` of the item from `base`, one commit. Its cost is the store's
+/// walk, which does not end at that commit: it runs on to the item's second-newest change, or
+/// to the root, and storage reads every item file of two trees at each commit it walks. The
+/// review measured 34 s for 200 items and 301 commits in a debug build; it grows with items
+/// times commits walked. Only a Rewind of an item `base` does not hold pays it.
+///
+/// # Errors
+/// Returns any port error of reading the item, its history or the folder of its last path.
+async fn item_restore(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    item: ItemId,
+    base: &Revision,
+    target: &Revision,
+) -> Result<Vec<TreeEdit>, ApiError> {
+    let restore = TreeEdit::RestoreItem {
+        item_id: item,
+        from: target.clone(),
+    };
+    let versions = &service.ports().versions;
+    if path_at(service, scope, base, item).await?.is_some() {
+        return Ok(vec![restore]);
+    }
+    let Some(destination) = path_at(service, scope, target, item).await? else {
+        return Ok(vec![restore]);
+    };
+    // The newest commit at or before the base that changed the item removed it, since the base
+    // does not hold it; that commit's first parent is the last revision that held it.
+    let newest = versions
+        .log(
+            scope,
+            LogQuery {
+                tip: base.clone(),
+                item_id: Some(item),
+                page: Page {
+                    cursor: None,
+                    limit: 1,
+                },
+            },
+        )
+        .await?
+        .commits
+        .into_iter()
+        .next();
+    let Some(last) = newest.and_then(|commit| commit.parents.into_iter().next()) else {
+        return Ok(vec![restore]);
+    };
+    let Some(last_path) = path_at(service, scope, &last, item).await? else {
+        return Ok(vec![restore]);
+    };
+    // Exactly the restored path: the links already name it. Another spelling of it is moved like
+    // any other path, since the store moves between spellings of one path.
+    if last_path == destination || taken(service, scope, base, &last_path).await? {
+        return Ok(vec![restore]);
+    }
+    Ok(vec![
+        TreeEdit::RestoreItem {
+            item_id: item,
+            from: last,
+        },
+        TreeEdit::MoveItem {
+            item_id: item,
+            destination,
+            keep_alias: false,
+        },
+        restore,
+    ])
+}
+
+/// The path `revision` holds `item` at; `None` when it does not hold the item.
+async fn path_at(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    revision: &Revision,
+    item: ItemId,
+) -> Result<Option<WorkspacePath>, ApiError> {
+    match service.ports().versions.show(scope, revision, item).await {
+        Ok(document) => Ok(Some(document.summary.path)),
+        Err(error) if error.code == ErrorCode::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Whether the folder `path` lies in, listed at `revision` by the spelling `path` gives it,
+/// holds an item or a child folder whose path has `path`'s collision key
+/// (`WorkspacePath::collision_key`), so a path differing only in letter case counts as taken.
+/// Every page of the listing is read; the store lists a folder the revision does not hold as
+/// empty. This is narrower than the store's own check of a destination, which compares every
+/// path of the tree by key and also counts a file standing where a folder of the path is
+/// needed: a taker this does not see makes the store refuse the three edits with `Conflict`.
+///
+/// # Errors
+/// Returns any error of listing the folder.
+async fn taken(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    revision: &Revision,
+    path: &WorkspacePath,
+) -> Result<bool, ApiError> {
+    let key = path.collision_key();
+    let folder = match path.as_str().rsplit_once('/') {
+        Some((folder, _)) => Some(
+            WorkspacePath::try_from(folder.to_owned())
+                .map_err(|error| ApiError::new(ErrorCode::Internal, error.0))?,
+        ),
+        None => None,
+    };
+    let versions = &service.ports().versions;
+    let mut cursor = None;
+    loop {
+        let page = Page {
+            cursor: cursor.take(),
+            limit: FOLDER_PAGE,
+        };
+        // Every error is the Rewind's: the store lists a folder the revision does not hold as
+        // empty, so `NotFound` here would be an unknown revision, never "nothing there".
+        let listing = versions
+            .list(scope, revision, folder.as_ref(), page)
+            .await?;
+        let collides = listing
+            .items
+            .iter()
+            .map(|item| &item.path)
+            .chain(&listing.folders)
+            .any(|held| held.collision_key() == key);
+        if collides {
+            return Ok(true);
+        }
+        match listing.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => return Ok(false),
+        }
+    }
 }
 
 /// Commit the drafts on the head when no selected item changed since its draft's base.

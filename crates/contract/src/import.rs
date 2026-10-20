@@ -1,6 +1,6 @@
 //! Resumable import identities, conversion jobs, and durable progress.
 //!
-//! A job runs in a workspace or, for an installation backup and a purge, at the tenant: a
+//! A job runs in a workspace or, for an installation backup, purge or clean-up, at the tenant: a
 //! tenant job's wire `Job` has no `workspace_id` and is followed through `get_tenant_job`.
 
 use schemars::JsonSchema;
@@ -18,7 +18,7 @@ pub enum JobState {
     Running,
     /// Committed output is available.
     Succeeded,
-    /// Failure retained with retry information.
+    /// Failure retained; `retryable` says whether `retry_job` accepts it.
     Failed,
     /// Explicit cancellation completed.
     Cancelled,
@@ -48,12 +48,17 @@ pub enum JobKind {
     PurgeWorkspace,
     /// Remove one item permanently (tenant-level).
     PurgeItem,
+    /// Reclaim the tenant's stored objects nothing references any more (tenant-level): queued
+    /// by a discarded upload, never more than one queued or running at a time.
+    CleanUp,
 }
 
 /// Durable work status; acknowledgement is not a claim of completion.
 ///
 /// `workspace_id` is present exactly for a workspace job kind and absent exactly for a tenant
-/// job kind (`JobKind::is_tenant`); `check` enforces it.
+/// job kind (`JobKind::is_tenant`); `check` enforces it. The store writes the job's instants
+/// and `retryable` as its state changes; a job accepted before a field existed reads it as
+/// absent.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Job {
@@ -72,7 +77,8 @@ pub struct Job {
     pub attempt: u32,
     /// Recorded warnings.
     pub warnings: Vec<crate::common::Warning>,
-    /// Last failure.
+    /// The refusal as the job's handler gave it; `field` is a JSON Pointer into the request
+    /// that started the job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<crate::error::ApiError>,
     /// Committed result revision.
@@ -86,19 +92,65 @@ pub struct Job {
     /// What a completed restore did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore: Option<crate::workspace::RestoreReport>,
+    /// What a completed workspace backup left out of its archive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<crate::workspace::BackupReport>,
+    /// What a completed clean-up removed and kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_up: Option<CleanUpReport>,
+    /// When the job was accepted; absent on a job accepted before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<crate::identity::Timestamp>,
+    /// When the current attempt was claimed; absent while the job waits, and cleared when a
+    /// retry queues it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<crate::identity::Timestamp>,
+    /// When the job reached a terminal state; cleared when a retry queues it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<crate::identity::Timestamp>,
+    /// Whether `retry_job` will accept the job: present when it failed under a build that
+    /// records this field, and absent in every other state. A job that failed before this field
+    /// existed has none; `retry_job` still decides for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+}
+
+/// What a clean-up did; counts only.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CleanUpReport {
+    /// Stored objects removed, over every pass of the job, as a decimal string.
+    pub objects_removed: String,
+    /// Stored objects its last pass kept because something still references, pends or pins
+    /// them, as a decimal string.
+    pub objects_kept: String,
+    /// Received bytes of discarded upload slots removed (files a stopped discard left).
+    pub upload_files_removed: u32,
 }
 
 /// Register immutable upload intent before streaming bytes.
+///
+/// `filename` and `relative_path` are bounded in UTF-8 bytes (`MAX_UPLOAD_FILENAME_BYTES`,
+/// `MAX_UPLOAD_RELATIVE_PATH_BYTES`): the schema states each bound as `x-max-utf8-bytes`, never as
+/// a `maxLength` in characters, and `check_rules` counts the bytes and refuses a longer name as
+/// `too_large` on its field. A `filename` that gives no workspace path for its source card
+/// (`conventions::source_card_name`, then `WorkspacePath::from_supplied`) is refused as
+/// `invalid_input` on `/filename` when the slot is opened; an import that later places the
+/// card in a folder where the path cannot be written still refuses the job.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateUploadRequest {
     /// Workspace whose permissions and storage scope apply.
     pub workspace_id: crate::identity::WorkspaceId,
-    /// Original filename, preserved.
+    /// Original filename, preserved. At most 1024 bytes in UTF-8: a character takes one to four.
+    #[schemars(extend("x-max-utf8-bytes" = MAX_UPLOAD_FILENAME_BYTES))]
     pub filename: String,
-    /// Supplied folder context.
+    /// Supplied folder context, preserved.
+    /// At most 4096 bytes in UTF-8: a character takes one to four.
+    #[schemars(extend("x-max-utf8-bytes" = MAX_UPLOAD_RELATIVE_PATH_BYTES))]
     pub relative_path: String,
-    /// Expected decimal byte count.
+    /// Expected decimal byte count. A size over `limits.upload_bytes` is refused as
+    /// `too_large` on `/size` when the slot is opened.
     pub size: String,
     /// Expected content hash if caller knows it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -108,6 +160,9 @@ pub struct CreateUploadRequest {
 }
 
 /// An authenticated upload slot for a specific source occurrence.
+///
+/// A slot stays until it is discarded, imported or its workspace is purged; nothing expires,
+/// and a completed upload is never removed by the service on its own.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Upload {
@@ -121,6 +176,33 @@ pub struct Upload {
     pub received_bytes: String,
     /// Whether expected bytes and digest have been verified.
     pub complete: bool,
+    /// Original filename, as supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    /// Supplied folder context, as supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_path: Option<String>,
+    /// The announced byte count, as a decimal string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+    /// When the slot was opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<crate::identity::Timestamp>,
+    /// The job that took this upload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumed_by: Option<crate::identity::JobId>,
+}
+
+/// Which uploads of a workspace to list.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UploadListState {
+    /// Not yet complete: bytes are still to come, or the slot is not finished.
+    Incomplete,
+    /// Complete and not consumed: waiting to be imported or discarded.
+    Waiting,
+    /// Taken by a job as its input.
+    Consumed,
 }
 
 /// Verify upload length and hash without silently creating duplicate occurrences.
@@ -137,15 +219,71 @@ pub struct CompleteUploadRequest {
     pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
+/// Read one upload slot as it now stands.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetUploadRequest {
+    /// Workspace whose permissions and storage scope apply.
+    pub workspace_id: crate::identity::WorkspaceId,
+    /// Upload identity.
+    pub upload_id: crate::identity::UploadId,
+}
+
+/// List a workspace's upload slots, newest first.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListUploadsRequest {
+    /// Workspace whose permissions and storage scope apply.
+    pub workspace_id: crate::identity::WorkspaceId,
+    /// Only the uploads in this state; absent lists every upload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<UploadListState>,
+    /// Bounded pagination with an opaque cursor.
+    pub page: crate::common::PageRequest,
+}
+
+/// A bounded list of upload slots, newest first.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListUploadsResponse {
+    /// Upload slots.
+    pub items: Vec<Upload>,
+    /// Continuation cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+/// Remove an upload slot and its bytes.
+///
+/// Refused with `conflict` when a job has consumed the upload or a queued or running job names
+/// it. A repeat under the same key answers the response first given.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DiscardUploadRequest {
+    /// Workspace whose permissions and storage scope apply.
+    pub workspace_id: crate::identity::WorkspaceId,
+    /// Upload to remove.
+    pub upload_id: crate::identity::UploadId,
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
+}
+
 /// Convert finalized uploads into source cards in the user-selected folder.
+///
+/// `upload_ids` holds between one and `MAX_IMPORT_UPLOADS` uploads (`check_rules`): a longer
+/// list is `too_large` on `/upload_ids`, an empty one `invalid_input` on `/upload_ids`, and an
+/// upload listed twice `invalid_input` on `/upload_ids/<index of the second>`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StartImportRequest {
     /// Workspace whose permissions and storage scope apply.
     pub workspace_id: crate::identity::WorkspaceId,
-    /// Exact revision on which this change is based; stale writes conflict.
+    /// The revision the import was prepared against; card names are chosen there. It must be
+    /// a revision of the workspace. A head that moved since does not refuse the import. A card
+    /// path taken since fails the job, which is not retried.
     pub base_revision: crate::identity::Revision,
-    /// Completed upload slots.
+    /// Completed upload slots, each listed once.
+    #[schemars(length(min = 1, max = MAX_IMPORT_UPLOADS))]
     pub upload_ids: Vec<crate::identity::UploadId>,
     /// Relative destination folder; empty for root.
     pub destination: String,
@@ -264,6 +402,8 @@ pub struct CorrectDigestRequest {
     /// Digest being corrected.
     pub digest: crate::identity::Digest,
     /// Corrected text kept separate from generated text.
+    /// At most 8388608 bytes in UTF-8: a character takes one to four.
+    #[schemars(extend("x-max-utf8-bytes" = crate::item::MAX_ITEM_TEXT_BYTES))]
     pub corrected_markdown: String,
     /// Keep the accepted agent-supplied text of this proposal over a later complete
     /// conversion: `corrected_markdown` must equal that text (compared by digest), and the
@@ -274,14 +414,45 @@ pub struct CorrectDigestRequest {
     pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
+/// The upload size a deployment allows unless it configures another: 512 MiB.
+///
+/// A deployment may set its own (core's `ApplicationConfig::max_upload_bytes`); a client reads
+/// the limit in force from `get_session` (`limits.upload_bytes`), never from this constant.
+pub const DEFAULT_MAX_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
+
+/// The most UTF-8 bytes of an upload's `filename`: 1024 (a 255-unit NTFS name of three-byte
+/// characters is 765).
+pub const MAX_UPLOAD_FILENAME_BYTES: usize = 1024;
+
+/// The most UTF-8 bytes of an upload's `relative_path`: the bound of a `WorkspacePath`.
+pub const MAX_UPLOAD_RELATIVE_PATH_BYTES: usize = crate::identity::MAX_WORKSPACE_PATH_BYTES;
+
+/// The most uploads one `start_import` takes: 5000, the bound of one drop in the workspace UI.
+pub const MAX_IMPORT_UPLOADS: usize = 5000;
+
 impl JobKind {
+    /// Every job kind, in declaration order.
+    pub const ALL: &'static [Self] = &[
+        Self::Import,
+        Self::Redigest,
+        Self::ExportWorkspace,
+        Self::BackupWorkspace,
+        Self::RestoreWorkspace,
+        Self::RebuildIndex,
+        Self::ExportView,
+        Self::BackupInstallation,
+        Self::PurgeWorkspace,
+        Self::PurgeItem,
+        Self::CleanUp,
+    ];
+
     /// Whether a job of this kind runs at the tenant level; its `Job` has no `workspace_id`,
     /// and `retry_job` and `cancel_job`, which take a workspace, never reach it.
     #[must_use]
     pub const fn is_tenant(self) -> bool {
         matches!(
             self,
-            Self::BackupInstallation | Self::PurgeWorkspace | Self::PurgeItem
+            Self::BackupInstallation | Self::PurgeWorkspace | Self::PurgeItem | Self::CleanUp
         )
     }
 
@@ -300,6 +471,7 @@ impl JobKind {
             Self::BackupInstallation => OperationName::BackupInstallation,
             Self::PurgeWorkspace => OperationName::PurgeWorkspace,
             Self::PurgeItem => OperationName::PurgeItem,
+            Self::CleanUp => OperationName::DiscardUpload,
         }
     }
 }
@@ -321,4 +493,86 @@ impl Job {
             Ok(())
         }
     }
+}
+
+impl CreateUploadRequest {
+    /// Refuse a name over its byte bound, and a `filename` that gives no workspace path for
+    /// its source card.
+    ///
+    /// # Errors
+    /// Returns `TooLarge` on `/filename` or `/relative_path` for a name longer than its bound,
+    /// and `InvalidInput` on `/filename` for a name `WorkspacePath::from_supplied` refuses once
+    /// `conventions::source_card_name` has made it a card's file name.
+    pub fn check_names(&self) -> Result<(), crate::error::ApiError> {
+        check_bytes(&self.filename, MAX_UPLOAD_FILENAME_BYTES, "/filename")?;
+        check_bytes(
+            &self.relative_path,
+            MAX_UPLOAD_RELATIVE_PATH_BYTES,
+            "/relative_path",
+        )?;
+        let card = crate::conventions::source_card_name(&self.filename);
+        crate::identity::WorkspacePath::from_supplied(&card).map_err(|error| {
+            crate::error::ApiError::new(
+                crate::error::ErrorCode::InvalidInput,
+                format!("the file name gives no workspace path for its source card: {error}"),
+            )
+            .with_field("/filename")
+        })?;
+        Ok(())
+    }
+}
+
+impl StartImportRequest {
+    /// Refuse an empty list of uploads, a list longer than `MAX_IMPORT_UPLOADS`, and an upload
+    /// listed twice.
+    ///
+    /// # Errors
+    /// Returns `TooLarge` on `/upload_ids` for more than `MAX_IMPORT_UPLOADS`, `InvalidInput` on
+    /// `/upload_ids` for none, and `InvalidInput` on `/upload_ids/<index>` naming the second
+    /// place an upload is listed.
+    pub fn check_uploads(&self) -> Result<(), crate::error::ApiError> {
+        if self.upload_ids.len() > MAX_IMPORT_UPLOADS {
+            return Err(crate::error::ApiError::new(
+                crate::error::ErrorCode::TooLarge,
+                format!(
+                    "an import takes at most {MAX_IMPORT_UPLOADS} uploads; this one lists {}",
+                    self.upload_ids.len()
+                ),
+            )
+            .with_field("/upload_ids"));
+        }
+        if self.upload_ids.is_empty() {
+            return Err(crate::error::ApiError::new(
+                crate::error::ErrorCode::InvalidInput,
+                "an import takes at least one upload",
+            )
+            .with_field("/upload_ids"));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for (index, upload) in self.upload_ids.iter().enumerate() {
+            if !seen.insert(upload.0) {
+                return Err(crate::error::ApiError::new(
+                    crate::error::ErrorCode::InvalidInput,
+                    "an upload is listed more than once",
+                )
+                .with_field(format!("/upload_ids/{index}")));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Refuse `text` longer than `bound` UTF-8 bytes as `too_large` on `field`.
+fn check_bytes(text: &str, bound: usize, field: &str) -> Result<(), crate::error::ApiError> {
+    if text.len() <= bound {
+        return Ok(());
+    }
+    Err(crate::error::ApiError::new(
+        crate::error::ErrorCode::TooLarge,
+        format!(
+            "The name is {} bytes; it is at most {bound} bytes",
+            text.len()
+        ),
+    )
+    .with_field(field))
 }

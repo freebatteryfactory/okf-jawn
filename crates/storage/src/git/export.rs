@@ -8,8 +8,9 @@
 //! accepted line (a candidate, or one a purge rewrote away) is refused, so purged content never
 //! enters it. Stock `git clone <file>` makes a repository of it.
 //!
-//! The written object is recorded under the mutation id in the records database after it is
-//! retained; a repeated id writes nothing and returns the object recorded first.
+//! The written object is a workspace-scoped put: recorded as a pending put before it is
+//! retained, and then recorded under the mutation id in the records database, which lands the
+//! pending put; a repeated id writes nothing and returns the object recorded first.
 
 use std::io::Write as _;
 use std::path::Path;
@@ -23,6 +24,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use super::repo::{HEAD_REF, commit_of, git, head};
 use crate::data::io_error;
 use crate::db::{Db, scope_key, sql, to_i64, to_u64};
+use crate::puts;
 
 /// First line of a version 2 bundle.
 const BUNDLE_SIGNATURE: &str = "# v2 git bundle\n";
@@ -66,6 +68,8 @@ pub(crate) async fn record(
                 ],
             )
             .map_err(|error| sql(&error))?;
+        // The record lands the pending put of the bundle this call stored.
+        puts::land(transaction, &tenant, &workspace, [&object.digest])?;
         read(transaction, &tenant, &workspace, mutation)?.ok_or_else(|| {
             ApiError::new(
                 ErrorCode::Conflict,
@@ -118,7 +122,7 @@ pub(crate) fn write_bundle(
 }
 
 /// Refuse a revision that the accepted head does not contain.
-fn refuse_off_the_line(repository: &Repository, tip: Oid) -> Result<(), ApiError> {
+pub(crate) fn refuse_off_the_line(repository: &Repository, tip: Oid) -> Result<(), ApiError> {
     let accepted = head(repository)?;
     let on_line = accepted == tip
         || repository

@@ -1,30 +1,158 @@
-/** Edit the Rust-defined naming schema through a form; persistence remains an explicit operation. */
+/**
+ * The naming rules as a form built from the Rust-defined schema. Saving and applying stay
+ * explicit operations of the caller; the form's own button asks for a preview.
+ *
+ * The form holds the rules exactly as it is given them. A key the schema does not name is not
+ * shown as a field, and it is not dropped either: every change the form reports carries it,
+ * unchanged, so what was typed in the YAML view survives an edit made here. Because the service
+ * accepts no unknown key, such a key is reported as a problem, by its name, until it is removed.
+ *
+ * Every problem is shown at its field and in a list above the form. A preview is asked only for
+ * rules without a problem (`onPreview`); `onChange` reports every change, valid or not. A refusal
+ * of the service at a field (`fieldRefusal`: a JSON Pointer into the rules, ruling 5) is shown at
+ * that field too (`refusalAt`).
+ */
 import Form from '@rjsf/core';
-import type { RJSFSchema } from '@rjsf/utils';
+import type { ErrorSchema, IconButtonProps, RJSFSchema, RJSFValidationError } from '@rjsf/utils';
 import { customizeValidator } from '@rjsf/validator-ajv8';
+import { flushSync } from 'react-dom';
 import type { NamingRules } from '../../api/generated/types.gen';
 
 const validator = customizeValidator<NamingRules>();
+/** The same checks for a value that may be anything: what the YAML view holds. */
+const anyValidator = customizeValidator();
 
 export interface RulesFormProps {
   schema: RJSFSchema;
   value: NamingRules;
-  onPreview: (value: NamingRules) => void;
+  /** Ask for a preview of valid rules; without it the form has no button of its own. */
+  onPreview?: (value: NamingRules) => void;
+  /** Every change, exactly as the form holds it: it may not be valid rules. */
+  onChange?: (value: unknown) => void;
+  /** A preview is being made: the button says so and asks for nothing more meanwhile. */
+  previewing?: boolean;
+  /** Errors the service gave at fields, shown there (`refusalAt`). */
+  extraErrors?: ErrorSchema<NamingRules> | undefined;
 }
 
-export function RulesForm({ schema, value, onPreview }: RulesFormProps) {
+/**
+ * A refusal at `keys` (the steps of a JSON Pointer into the rules) as the form's errors: the
+ * message at that field. The form names a field's element `root_<steps joined by _>`
+ * (`fieldElementId`).
+ */
+export function refusalAt(keys: readonly string[], message: string): ErrorSchema<NamingRules> {
+  let errors: Record<string, unknown> = { __errors: [message] };
+  for (const key of [...keys].reverse()) errors = { [key]: errors };
+  return errors as ErrorSchema<NamingRules>;
+}
+
+/** The id of the element of the field at `keys`, as the form names it. */
+export function fieldElementId(keys: readonly string[]): string {
+  return ['root', ...keys].join('_');
+}
+
+/**
+ * A value the form can hold: any mapping. Whether it is valid rules is what the form then says,
+ * field by field; the type only names what it holds when it is.
+ */
+export function formHolds(value: unknown): value is NamingRules {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** What is wrong with `value` as naming rules by `schema`, in the form's own words. */
+export function rulesProblems(schema: RJSFSchema, value: unknown): string[] {
+  const { errors } = anyValidator.validateFormData(value, schema, undefined, named);
+  return errors.map((error) => error.stack);
+}
+
+/** An unknown key is named, so the person can find and remove it. */
+function named(errors: RJSFValidationError[]): RJSFValidationError[] {
+  return errors.map((error) => {
+    const key: unknown = error.params?.additionalProperty;
+    if (error.name !== 'additionalProperties' || typeof key !== 'string') return error;
+    const message = `has a key these rules do not have: “${key}”. Remove it; the service accepts no unknown key`;
+    return { ...error, message, stack: `${error.property ?? ''} ${message}`.trim() };
+  });
+}
+
+/**
+ * A button of a list of rules, with its action in words (the library's own shows an icon font).
+ *
+ * Pressing one changes the list under keyboard focus: "Remove this rule" takes its own rule, and
+ * itself, off the page, and a move puts the rule elsewhere. So the change is made at once
+ * (`flushSync`) and focus that fell to the page body with it is put back before anything is
+ * painted: on the button when it is still there, otherwise on "Add a rule", which always is.
+ */
+function worded(text: string, always = false) {
+  return function WordedButton(props: IconButtonProps<NamingRules>) {
+    const { id, onClick, disabled } = props;
+    return (
+      // aria-disabled rather than disabled: the first rule's "up" is unavailable the moment it
+      // gets there, with keyboard focus on it.
+      <button
+        type="button"
+        id={id}
+        aria-disabled={disabled === true}
+        {...(always ? { 'data-always-there': '' } : {})}
+        onClick={(event) => {
+          if (disabled === true) return;
+          const button = event.currentTarget;
+          const form = button.closest('form');
+          flushSync(() => onClick?.(event));
+          const active = document.activeElement;
+          if (active !== null && active !== document.body) return;
+          if (button.isConnected) button.focus();
+          else form?.querySelector<HTMLElement>('button[data-always-there]')?.focus();
+        }}
+      >
+        {text}
+      </button>
+    );
+  };
+}
+
+const BUTTONS = {
+  AddButton: worded('Add a rule', true),
+  RemoveButton: worded('Remove this rule'),
+  MoveUpButton: worded('Move this rule up'),
+  MoveDownButton: worded('Move this rule down'),
+  CopyButton: worded('Copy this rule'),
+};
+
+export function RulesForm({
+  schema,
+  value,
+  onPreview,
+  onChange,
+  previewing,
+  extraErrors,
+}: RulesFormProps) {
   return (
     <Form<NamingRules>
+      className="rules-form"
       schema={schema}
       formData={value}
       liveValidate
       showErrorList="top"
+      noHtml5Validate
       validator={validator}
+      transformErrors={named}
+      {...(extraErrors === undefined ? {} : { extraErrors })}
+      templates={{ ButtonTemplates: BUTTONS }}
+      onChange={(event) => onChange?.(event.formData)}
       onSubmit={(event) => {
-        if (event.formData) onPreview(event.formData);
+        if (event.formData && previewing !== true) onPreview?.(event.formData);
       }}
     >
-      <button type="submit">Preview naming changes</button>
+      {onPreview === undefined ? (
+        // No button of its own: the caller's buttons act on what `onChange` reported.
+        <span />
+      ) : (
+        // aria-disabled rather than disabled: the button keeps focus while the preview is made.
+        <button type="submit" aria-disabled={previewing === true}>
+          {previewing === true ? 'Previewing…' : 'Preview naming changes'}
+        </button>
+      )}
     </Form>
   );
 }

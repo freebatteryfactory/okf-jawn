@@ -6,18 +6,19 @@ use std::pin::Pin;
 
 use okf_jawn_contract::access::{AccessRoute, DelegationCeiling, Permission, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
-use okf_jawn_contract::events::EventKind;
-use okf_jawn_contract::identity::IdentityError;
+use okf_jawn_contract::events::{Event, EventKind, ListEventsResponse};
+use okf_jawn_contract::identity::{IdentityError, MutationId};
 use okf_jawn_contract::import::JobKind;
 use okf_jawn_contract::item::ItemDocument;
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::operations::DRAFT_BEARING;
 use okf_jawn_core::access::authorize_job_kind;
 use okf_jawn_core::context::Attempt;
-use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
-use okf_jawn_core::events::EventScope;
+use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch, record_refusal};
+use okf_jawn_core::events::{EventLog, EventQuery, EventScope, NewEvent};
 use okf_jawn_core::mutations::request_digest;
 use okf_jawn_core::portable::item_content_digest;
+use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::StorageScope;
 use serde_json::{Value, json};
 
@@ -27,6 +28,9 @@ use support::{FixturePorts, GrantTable, LedgerCall, all_permissions, tenant, wor
 
 /// A dispatch that was started and is still running, held so a test can finish or drop it.
 type Running<'a> = Pin<Box<dyn Future<Output = Result<Value, ApiError>> + 'a>>;
+
+/// An event log that cannot be written.
+struct UnwritableLog;
 
 const WORKSPACE_A: &str = "11111111-1111-4111-8111-111111111111";
 const WORKSPACE_B: &str = "22222222-2222-4222-8222-222222222222";
@@ -38,6 +42,25 @@ const CONNECTOR: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const JOB: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 /// Longest `InvalidInput` message: 512 bytes, the closing `…` included.
 const BOUNDED_MESSAGE: usize = 512;
+
+impl EventLog for UnwritableLog {
+    fn append<'a>(
+        &'a self,
+        _scope: &'a EventScope,
+        _mutation_id: Option<MutationId>,
+        _event: NewEvent,
+    ) -> PortFuture<'a, Event> {
+        Box::pin(async { Err(ApiError::new(ErrorCode::Unavailable, "the log is offline")) })
+    }
+
+    fn list<'a>(
+        &'a self,
+        _scope: &'a EventScope,
+        _query: EventQuery,
+    ) -> PortFuture<'a, ListEventsResponse> {
+        Box::pin(async { Err(ApiError::new(ErrorCode::Unavailable, "the log is offline")) })
+    }
+}
 
 fn principal(subject: &str, route: AccessRoute) -> Result<Principal, IdentityError> {
     Ok(Principal {
@@ -141,6 +164,15 @@ fn create_item_body(workspace_id: &str, key: &str, text: &str) -> Value {
         "properties": {},
         "idempotency_key": key
     })
+}
+
+/// What `create_item` answers: the committed item, its receipt and no findings.
+fn created_item(text: &str) -> Result<Value, ApiError> {
+    Ok(json!({
+        "item": item_document(text)?,
+        "receipt_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "warnings": []
+    }))
 }
 
 /// A committed item as the application returns it; its digest is the core function's, never typed.
@@ -356,7 +388,7 @@ fn draft_exchange(operation: OperationName, key: &str) -> Result<(Value, Value),
         )),
         OperationName::ListDrafts => Ok((
             json!({ "workspace_id": WORKSPACE_A, "page": { "limit": 10 } }),
-            json!({ "items": [draft] }),
+            json!({ "revision": REVISION, "items": [{ "draft": draft }] }),
         )),
         OperationName::DiscardDraft => Ok((
             json!({ "workspace_id": WORKSPACE_A, "item_id": item_id, "idempotency_key": key }),
@@ -382,13 +414,13 @@ fn draft_exchange(operation: OperationName, key: &str) -> Result<(Value, Value),
 async fn write_needs_a_write_grant_and_read_needs_only_read() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("hello")?)?;
+    app.set_response("create_item", created_item("hello")?)?;
     app.set_response("list_items", listing())?;
     let alice = principal("alice", AccessRoute::LocalOwner)?;
 
     let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
     let created = call(&app, &ports, &alice, "create_item", body).await?;
-    assert_eq!(created.get("body"), Some(&json!("hello")));
+    assert_eq!(created.pointer("/item/body"), Some(&json!("hello")));
     assert_eq!(app.call_count("create_item")?, 1);
 
     let body = create_item_body(WORKSPACE_B, KEY_TWO, "hello");
@@ -614,6 +646,99 @@ async fn a_tenant_admin_creates_a_workspace() -> TestResult {
     Ok(())
 }
 
+/// The mutation the first run of `operation`'s handler ran under.
+fn handled_mutation(
+    app: &CountingApplication,
+    operation: &str,
+) -> Result<MutationId, Box<dyn std::error::Error>> {
+    let contexts = app.contexts(operation)?;
+    let context = some(contexts.first(), "the handler context")?;
+    Ok(some(context.mutation, "the mutation id")?)
+}
+
+fn comment() -> Value {
+    json!({
+        "id": "c1",
+        "author": "alice",
+        "text": "note",
+        "created_at": "2026-01-01T00:00:00.000Z"
+    })
+}
+
+#[tokio::test]
+async fn the_ledger_records_the_one_workspace_a_mutation_names() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response("create_item", created_item("hello")?)?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+    call(&app, &ports, &alice, "create_item", body).await?;
+    let mutation = handled_mutation(&app, "create_item")?;
+    assert_eq!(
+        ports.mutations.recorded_workspace(mutation)?,
+        Some(workspace(WORKSPACE_A)?)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_ledger_records_the_first_target_s_workspace_and_none_for_a_tenant_target() -> TestResult
+{
+    let mut table = GrantTable::default();
+    let alice = table.workspaces.entry("alice".to_owned()).or_default();
+    alice.insert(workspace(WORKSPACE_A)?, all_permissions());
+    alice.insert(workspace(WORKSPACE_B)?, all_permissions());
+    table.tenants.insert("alice".to_owned(), all_permissions());
+    let ports = FixturePorts::new(table);
+    let app = CountingApplication::new();
+    app.set_response("add_comment", comment())?;
+    app.set_response("create_connector", issued_connector())?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    // Writing in A, citing B: the first target, the one the table permission names, is A.
+    let body = add_comment_body(WORKSPACE_A, WORKSPACE_B, KEY_ONE);
+    call(&app, &ports, &alice, "add_comment", body).await?;
+    let mutation = handled_mutation(&app, "add_comment")?;
+    assert_eq!(
+        ports.mutations.recorded_workspace(mutation)?,
+        Some(workspace(WORKSPACE_A)?),
+        "the workspace the comment is written in, not the one it cites"
+    );
+    // The first target is the Deployment, workspace A follows; the response names workspaces
+    // only in a list, so nothing is recorded at completion either.
+    call(
+        &app,
+        &ports,
+        &alice,
+        "create_connector",
+        create_connector_body(KEY_ONE),
+    )
+    .await?;
+    let mutation = handled_mutation(&app, "create_connector")?;
+    assert_eq!(ports.mutations.recorded_workspace(mutation)?, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_ledger_records_the_workspace_a_tenant_mutation_s_response_names() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    // The description quotes workspace B; only the response's `id` is read.
+    let mut created = created_workspace();
+    if let Some(fields) = created.as_object_mut() {
+        fields.insert("description".to_owned(), json!(WORKSPACE_B));
+    }
+    app.set_response("create_workspace", created)?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let input = create_workspace_body(KEY_ONE);
+    call(&app, &ports, &alice, "create_workspace", input).await?;
+    let mutation = handled_mutation(&app, "create_workspace")?;
+    assert_eq!(
+        ports.mutations.recorded_workspace(mutation)?,
+        Some(workspace(WORKSPACE_A)?)
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn delegation_ceiling_decides_whether_a_connector_may_propose() -> TestResult {
     let ports = ports_admin_a_read_b()?;
@@ -635,7 +760,7 @@ async fn delegation_ceiling_decides_whether_a_connector_may_propose() -> TestRes
     assert_eq!(app.call_count("open_proposal")?, 1);
 
     // A propose-capable ceiling still never reaches a write.
-    app.set_response("create_item", item_document("hello")?)?;
+    app.set_response("create_item", created_item("hello")?)?;
     let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
     let refused = err_of(call(&app, &ports, &drafter, "create_item", body).await)?;
     assert_eq!(refused.code, ErrorCode::Forbidden);
@@ -647,7 +772,7 @@ async fn delegation_ceiling_decides_whether_a_connector_may_propose() -> TestRes
 async fn replay_returns_the_stored_response_and_the_handler_runs_once() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("hello")?)?;
+    app.set_response("create_item", created_item("hello")?)?;
     let alice = principal("alice", AccessRoute::LocalOwner)?;
     let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
     let created = call(&app, &ports, &alice, "create_item", body.clone()).await?;
@@ -657,11 +782,42 @@ async fn replay_returns_the_stored_response_and_the_handler_runs_once() -> TestR
     Ok(())
 }
 
+/// Review N2: a `create_item` answer a build before `CreatedItem` stored in the ledger is the
+/// `ItemDocument` alone. Its repeat answers the current shape: that document as `item`, no
+/// findings, and no receipt, which that build never recorded. The handler does not run again.
+#[tokio::test]
+async fn a_create_item_answer_stored_in_its_earlier_shape_replays_as_a_created_item() -> TestResult
+{
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response("create_item", created_item("hello")?)?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+    call(&app, &ports, &alice, "create_item", body.clone()).await?;
+    let mutation = handled_mutation(&app, "create_item")?;
+    let earlier = item_document("hello")?;
+    ports
+        .mutations
+        .store_body_of_an_earlier_build(mutation, earlier.clone())?;
+    let replayed = call(&app, &ports, &alice, "create_item", body).await?;
+    assert_eq!(replayed, json!({ "item": earlier, "warnings": [] }));
+    assert_eq!(app.call_count("create_item")?, 1);
+    // A body in neither shape is our fault, not the caller's.
+    ports
+        .mutations
+        .store_body_of_an_earlier_build(mutation, json!({ "unknown": true }))?;
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+    let refused = err_of(call(&app, &ports, &alice, "create_item", body).await)?;
+    assert_eq!(refused.code, ErrorCode::Internal);
+    assert_eq!(app.call_count("create_item")?, 1);
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_same_key_with_a_different_body_conflicts() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("hello")?)?;
+    app.set_response("create_item", created_item("hello")?)?;
     let alice = principal("alice", AccessRoute::LocalOwner)?;
     let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
     call(&app, &ports, &alice, "create_item", body).await?;
@@ -676,7 +832,7 @@ async fn the_same_key_with_a_different_body_conflicts() -> TestResult {
 async fn a_second_attempt_during_a_live_lease_is_in_progress() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("hello")?)?;
+    app.set_response("create_item", created_item("hello")?)?;
     app.park_next("create_item")?;
     let alice = principal("alice", AccessRoute::LocalOwner)?;
     let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
@@ -707,7 +863,7 @@ async fn a_second_attempt_during_a_live_lease_is_in_progress() -> TestResult {
 
     app.resume();
     let finished = running.await?;
-    assert_eq!(finished.get("body"), Some(&json!("hello")));
+    assert_eq!(finished.pointer("/item/body"), Some(&json!("hello")));
     Ok(())
 }
 
@@ -715,14 +871,14 @@ async fn a_second_attempt_during_a_live_lease_is_in_progress() -> TestResult {
 async fn an_abandoned_attempt_reruns_the_handler_once_as_resumed() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("hello")?)?;
+    app.set_response("create_item", created_item("hello")?)?;
     let alice = principal("alice", AccessRoute::LocalOwner)?;
     let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
     crash_in_handler(&app, &ports, &alice, "create_item", body.clone()).await?;
     ports.mutations.expire_leases()?;
 
     let response = call(&app, &ports, &alice, "create_item", body.clone()).await?;
-    assert_eq!(response.get("body"), Some(&json!("hello")));
+    assert_eq!(response.pointer("/item/body"), Some(&json!("hello")));
     let seen = app.contexts("create_item")?;
     assert_eq!(seen.len(), 2);
     let crashed = some(seen.first(), "the crashed attempt")?;
@@ -743,14 +899,17 @@ async fn an_abandoned_attempt_reruns_the_handler_once_as_resumed() -> TestResult
 async fn a_slow_attempt_whose_lease_was_taken_over_cannot_complete() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("from the second attempt")?)?;
+    app.set_response("create_item", created_item("from the second attempt")?)?;
     let alice = principal("alice", AccessRoute::LocalOwner)?;
     let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
     let slow = park_in_handler(&app, &ports, &alice, "create_item", body.clone()).await?;
     ports.mutations.expire_leases()?;
 
     let second = call(&app, &ports, &alice, "create_item", body.clone()).await?;
-    assert_eq!(second.get("body"), Some(&json!("from the second attempt")));
+    assert_eq!(
+        second.pointer("/item/body"),
+        Some(&json!("from the second attempt"))
+    );
     let seen = app.contexts("create_item")?;
     let slow_context = some(seen.first(), "the slow attempt")?;
     let second_context = some(seen.get(1), "the attempt that took the lease over")?;
@@ -759,7 +918,7 @@ async fn a_slow_attempt_whose_lease_was_taken_over_cannot_complete() -> TestResu
     assert_eq!(second_context.attempt, Attempt::Resumed);
 
     // The slow handler now returns, with another response, under a lease it no longer holds.
-    app.set_response("create_item", item_document("from the slow attempt")?)?;
+    app.set_response("create_item", created_item("from the slow attempt")?)?;
     app.resume();
     let refused = err_of(slow.await)?;
     assert_eq!(refused.code, ErrorCode::Conflict);
@@ -790,7 +949,7 @@ async fn a_slow_attempt_cannot_complete_while_its_successor_is_still_running() -
 
     // The slow handler returns first and succeeds. The row is leased, but to the other attempt:
     // only the token tells the two holders apart.
-    app.set_response("create_item", item_document("from the slow attempt")?)?;
+    app.set_response("create_item", created_item("from the slow attempt")?)?;
     app.resume();
     let refused = err_of(slow.await)?;
     assert_eq!(refused.code, ErrorCode::Conflict);
@@ -798,11 +957,11 @@ async fn a_slow_attempt_cannot_complete_while_its_successor_is_still_running() -
     let waiting = err_of(call(&app, &ports, &alice, "create_item", body).await)?;
     assert_eq!(waiting.code, ErrorCode::InProgress);
 
-    app.set_response("create_item", item_document("from the current attempt")?)?;
+    app.set_response("create_item", created_item("from the current attempt")?)?;
     app.resume();
     let finished = current.await?;
     assert_eq!(
-        finished.get("body"),
+        finished.pointer("/item/body"),
         Some(&json!("from the current attempt"))
     );
     assert_eq!(ports.mutations.stored_body(mutation_id)?, Some(finished));
@@ -814,7 +973,7 @@ async fn a_slow_attempt_cannot_complete_while_its_successor_is_still_running() -
 async fn a_failed_attempt_whose_lease_was_taken_over_leaves_the_new_lease_held() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("hello")?)?;
+    app.set_response("create_item", created_item("hello")?)?;
     let alice = principal("alice", AccessRoute::LocalOwner)?;
     let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
     let slow = park_in_handler(&app, &ports, &alice, "create_item", body.clone()).await?;
@@ -837,7 +996,7 @@ async fn a_failed_attempt_whose_lease_was_taken_over_leaves_the_new_lease_held()
 
     app.resume();
     let finished = current.await?;
-    assert_eq!(finished.get("body"), Some(&json!("hello")));
+    assert_eq!(finished.pointer("/item/body"), Some(&json!("hello")));
     Ok(())
 }
 
@@ -909,15 +1068,21 @@ async fn the_same_key_from_two_subjects_is_two_mutations() -> TestResult {
     let app = CountingApplication::new();
     let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
 
-    app.set_response("create_item", item_document("for xavier")?)?;
+    app.set_response("create_item", created_item("for xavier")?)?;
     let xavier = principal("xavier", AccessRoute::LocalOwner)?;
     let xavier_item = call(&app, &ports, &xavier, "create_item", body.clone()).await?;
-    app.set_response("create_item", item_document("for yolanda")?)?;
+    app.set_response("create_item", created_item("for yolanda")?)?;
     let yolanda = principal("yolanda", AccessRoute::LocalOwner)?;
     let yolanda_item = call(&app, &ports, &yolanda, "create_item", body).await?;
 
-    assert_eq!(xavier_item.get("body"), Some(&json!("for xavier")));
-    assert_eq!(yolanda_item.get("body"), Some(&json!("for yolanda")));
+    assert_eq!(
+        xavier_item.pointer("/item/body"),
+        Some(&json!("for xavier"))
+    );
+    assert_eq!(
+        yolanda_item.pointer("/item/body"),
+        Some(&json!("for yolanda"))
+    );
     assert_eq!(app.call_count("create_item")?, 2);
     Ok(())
 }
@@ -934,16 +1099,22 @@ async fn the_same_subject_and_key_in_two_tenants_are_two_mutations() -> TestResu
     let app = CountingApplication::new();
     let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
 
-    app.set_response("create_item", item_document("in the local tenant")?)?;
+    app.set_response("create_item", created_item("in the local tenant")?)?;
     let here = principal("alice", AccessRoute::LocalOwner)?;
     let here_item = call(&app, &ports, &here, "create_item", body.clone()).await?;
-    app.set_response("create_item", item_document("in the other tenant")?)?;
+    app.set_response("create_item", created_item("in the other tenant")?)?;
     let mut there = principal("alice", AccessRoute::LocalOwner)?;
     there.tenant_id = tenant("tenant-other")?;
     let there_item = call(&app, &ports, &there, "create_item", body).await?;
 
-    assert_eq!(here_item.get("body"), Some(&json!("in the local tenant")));
-    assert_eq!(there_item.get("body"), Some(&json!("in the other tenant")));
+    assert_eq!(
+        here_item.pointer("/item/body"),
+        Some(&json!("in the local tenant"))
+    );
+    assert_eq!(
+        there_item.pointer("/item/body"),
+        Some(&json!("in the other tenant"))
+    );
     let seen = app.contexts("create_item")?;
     assert_eq!(seen.len(), 2);
     let local = some(seen.first(), "the call in the local tenant")?;
@@ -1118,7 +1289,7 @@ async fn the_session_id_of_the_caller_reaches_the_handler() -> TestResult {
 async fn handler_error_then_retry_runs_again() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("hello")?)?;
+    app.set_response("create_item", created_item("hello")?)?;
     app.fail_once(
         "create_item",
         ApiError::new(ErrorCode::Unavailable, "index offline"),
@@ -1130,7 +1301,7 @@ async fn handler_error_then_retry_runs_again() -> TestResult {
     assert_eq!(refused.message, "index offline");
 
     let response = call(&app, &ports, &alice, "create_item", body).await?;
-    assert_eq!(response.get("body"), Some(&json!("hello")));
+    assert_eq!(response.pointer("/item/body"), Some(&json!("hello")));
     let seen = app.contexts("create_item")?;
     assert_eq!(seen.len(), 2);
     let earlier = some(seen.first(), "the failed attempt")?;
@@ -1145,7 +1316,7 @@ async fn handler_error_then_retry_runs_again() -> TestResult {
 async fn a_failed_begin_is_returned_and_the_handler_does_not_run() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("hello")?)?;
+    app.set_response("create_item", created_item("hello")?)?;
     ports.mutations.fail_next(
         LedgerCall::Begin,
         ApiError::new(ErrorCode::Unavailable, "ledger offline"),
@@ -1163,7 +1334,7 @@ async fn a_failed_begin_is_returned_and_the_handler_does_not_run() -> TestResult
 async fn a_failed_complete_releases_the_lease_so_a_retry_resumes_at_once() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("hello")?)?;
+    app.set_response("create_item", created_item("hello")?)?;
     ports.mutations.fail_next(
         LedgerCall::Complete,
         ApiError::new(ErrorCode::Unavailable, "ledger offline"),
@@ -1176,7 +1347,7 @@ async fn a_failed_complete_releases_the_lease_so_a_retry_resumes_at_once() -> Te
 
     // The lease was released, not left to expire: the retry is not `InProgress`.
     let response = call(&app, &ports, &alice, "create_item", body).await?;
-    assert_eq!(response.get("body"), Some(&json!("hello")));
+    assert_eq!(response.pointer("/item/body"), Some(&json!("hello")));
     let seen = app.contexts("create_item")?;
     assert_eq!(seen.len(), 2);
     let earlier = some(seen.first(), "the attempt whose complete failed")?;
@@ -1212,7 +1383,7 @@ async fn a_failed_release_does_not_replace_the_handler_error() -> TestResult {
 async fn reordered_keys_replay_instead_of_conflicting() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("hello")?)?;
+    app.set_response("create_item", created_item("hello")?)?;
     let alice = principal("alice", AccessRoute::LocalOwner)?;
     let original = json!({
         "workspace_id": WORKSPACE_A,
@@ -1623,6 +1794,127 @@ async fn a_route_refusal_is_the_workspaces_event_or_the_tenants_by_what_the_requ
     Ok(())
 }
 
+#[tokio::test]
+async fn a_bindings_own_refusal_is_recorded_by_the_rule_of_a_route_refusal() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let events = ports.events.as_ref();
+    // A browser session at a binding that answers only agents: refused before any dispatch.
+    let session = principal("alice", AccessRoute::BrowserSession)?;
+    let refusal = || ApiError::new(ErrorCode::Forbidden, "this route uses the HTTP API");
+    let tenant_log = EventScope::Tenant(tenant("tenant-local")?);
+    let log_of_a = EventScope::Workspace(StorageScope {
+        tenant_id: tenant("tenant-local")?,
+        workspace_id: workspace(WORKSPACE_A)?,
+    });
+    let purge = json!({
+        "workspace_id": WORKSPACE_A,
+        "base_revision": REVISION,
+        "idempotency_key": KEY_ONE
+    });
+    let cases = [
+        // Exactly one workspace: its log.
+        (
+            OperationName::ListItems,
+            list_items_body(WORKSPACE_A),
+            &log_of_a,
+        ),
+        // One workspace named by two targets is still one.
+        (
+            OperationName::AddComment,
+            add_comment_body(WORKSPACE_A, WORKSPACE_A, KEY_ONE),
+            &log_of_a,
+        ),
+        // Two distinct workspaces: the tenant's.
+        (
+            OperationName::AddComment,
+            add_comment_body(WORKSPACE_A, WORKSPACE_B, KEY_ONE),
+            &tenant_log,
+        ),
+        // A Deployment target beside a workspace: the tenant's.
+        (OperationName::PurgeWorkspace, purge, &tenant_log),
+        // No workspace at all: the tenant's.
+        (
+            OperationName::ListWorkspaces,
+            json!({ "page": { "limit": 10 } }),
+            &tenant_log,
+        ),
+        // A body that is not a request of the operation names no workspace: the tenant's.
+        (
+            OperationName::ListItems,
+            json!({ "workspace_id": WORKSPACE_A }),
+            &tenant_log,
+        ),
+    ];
+    for (operation, input, expected) in &cases {
+        let before = ports.events.appended()?.len();
+        let returned = record_refusal(events, &session, *operation, input, refusal()).await;
+        assert_eq!(returned.code, ErrorCode::Forbidden, "{operation:?}");
+        assert_eq!(returned.message, "this route uses the HTTP API");
+        let appended = ports.events.appended()?;
+        assert_eq!(appended.len(), before.saturating_add(1), "{operation:?}");
+        let (scope, event) = some(appended.last(), "the refusal event")?;
+        assert_eq!(&scope, expected, "{operation:?} {input}");
+        assert_eq!(event.kind, EventKind::PermissionDenied);
+        assert_eq!(event.operation, Some(*operation));
+        let actor = some(event.actor.as_ref(), "the refused caller")?;
+        assert_eq!(actor.subject, "alice");
+        assert_eq!(actor.route, AccessRoute::BrowserSession);
+    }
+    // Only a refusal is recorded: any other error is returned without an event.
+    let recorded = ports.events.appended()?.len();
+    let unavailable = record_refusal(
+        events,
+        &session,
+        OperationName::ListItems,
+        &list_items_body(WORKSPACE_A),
+        ApiError::new(ErrorCode::Unavailable, "store offline"),
+    )
+    .await;
+    assert_eq!(unavailable.code, ErrorCode::Unavailable);
+    assert_eq!(ports.events.appended()?.len(), recorded);
+    // A log that cannot be written does not change the answer.
+    let returned = record_refusal(
+        &UnwritableLog,
+        &session,
+        OperationName::ListItems,
+        &list_items_body(WORKSPACE_A),
+        refusal(),
+    )
+    .await;
+    assert_eq!(returned.code, ErrorCode::Forbidden);
+    assert_eq!(returned.message, "this route uses the HTTP API");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_bindings_own_refusal_lands_where_dispatchs_route_refusal_of_the_request_lands()
+-> TestResult {
+    // The same single-workspace request, refused by dispatch for its route and refused by a
+    // binding before dispatch, is recorded in the same log.
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    let agent = connector("alice", all_permissions())?;
+    let (input, _) = draft_exchange(OperationName::ListDrafts, KEY_ONE)?;
+    let by_dispatch = err_of(call(&app, &ports, &agent, "list_drafts", input.clone()).await)?;
+    assert_eq!(by_dispatch.code, ErrorCode::Forbidden);
+    let _returned = record_refusal(
+        ports.events.as_ref(),
+        &agent,
+        OperationName::ListDrafts,
+        &input,
+        ApiError::new(ErrorCode::Forbidden, "refused by the binding"),
+    )
+    .await;
+    let appended = ports.events.appended()?;
+    let [(first, dispatched), (second, bound)] = appended.as_slice() else {
+        return Err(format!("not two refusal events: {appended:?}").into());
+    };
+    assert_eq!(first, second);
+    assert_eq!(dispatched, bound);
+    assert!(matches!(first, EventScope::Workspace(_)), "{first:?}");
+    Ok(())
+}
+
 /// Bob writes on A without admin; Carol administers A.
 fn ports_writer_and_admin() -> Result<FixturePorts, serde_json::Error> {
     let mut table = GrantTable::default();
@@ -1680,6 +1972,7 @@ async fn retrying_or_cancelling_a_backup_or_restore_job_needs_a_human_admin() ->
         JobKind::BackupInstallation,
         JobKind::PurgeWorkspace,
         JobKind::PurgeItem,
+        JobKind::CleanUp,
     ] {
         let hidden = err_of(authorize_job_kind(access, &admin, a, kind).await)?;
         assert_eq!(hidden.code, ErrorCode::NotFound, "{kind:?}");

@@ -5,18 +5,30 @@
 //! the rules are core's; this module only sequences them and writes the completion through the
 //! claim's lease. A job found cancelled while it runs stops and writes no completion. A job
 //! refused for good (an import colliding with what the workspace holds now, R-I8) writes its
-//! failure through the lease as not retryable; any other error is the runtime's to record.
+//! failure through the lease as not retryable, and a workspace purge writes any failure through
+//! the lease as retryable, whatever its code (`purge_job`); any other error is the runtime's to
+//! record, which classes it by its code.
 //!
 //! A long storage call runs under the same heartbeat as a conversion, so its lease stays live:
-//! the index rebuild, both archive writes, the restore and both purges each renew the lease
-//! every `HandlerLimits::heartbeat` while they run (`renewing`), and so do an import's two long
-//! reads of a replayed commit (the tree its check runs over again, and the outputs its card
-//! references). Unlike a conversion, such a call
+//! the index rebuild, both archive writes, the restore, both purges and clean-up each renew
+//! the lease every `HandlerLimits::heartbeat` while they run (`renewing`), and so do an
+//! import's two long reads of a replayed commit (the tree its check runs over again, and the
+//! outputs its card references). Unlike a conversion, such a call
 //! is never dropped when the job is found cancelled: storage's write is one transaction that
 //! must not be abandoned mid-call, so the cancellation is observed after it returns, and the job
 //! then stops without a completion. A purge's own record still states what the purge removed.
-//! A restore is the exception: once `restore_import` is called the cancellation is no longer
-//! honoured, and the job goes on to its completion (`restore`).
+//! A restore is the exception: it seals itself before it consumes its upload and calls
+//! `restore_import` (`RecordStore::seal`), from which point the store refuses to cancel it, and
+//! it goes on to its completion (`restore`).
+//!
+//! A workspace purge job is the `Purger`'s caller: before it calls the purger it drains the
+//! workspace's jobs, cancelling each queued or running one and waiting, at most
+//! `HandlerLimits::drain`, until none runs (`drain`). A workspace purge job that fails records
+//! its purge `Failed` with the error, and then writes the job's failure itself, retryable
+//! whatever the error's code, keeping its code and message: a purge was accepted and its
+//! precondition holds, so whatever stopped it (a survivor's archive that does not read, an I/O
+//! error, the drain's bound) is a state to repair, after which asking for the purge again
+//! resumes it (contract rulings 14 and 24).
 //!
 //! What a job commits is announced as core's `announce` does for a request (core
 //! `application::shared::commit`): every revision an ingest job lands (each import commit, the
@@ -30,10 +42,11 @@
 //! keeps the lease, changing neither progress nor state, appends nothing (`Attempt`). A tenant
 //! job's `job_updated` goes to the tenant log: it has no workspace.
 //!
-//! Built: import and redigest (`import`), index rebuild, both backups, restore, both purges.
-//! Construction limitations, stated rather than hidden: a portable export and a View export
-//! fail as `NotImplemented`, which the runtime records as a non-retryable failure (requests
-//! R-I6 and R-I7 in the lane report). Nothing is reported as done that was not done.
+//! Built: import and redigest (`import`), the portable workspace export (`portable_export`),
+//! index rebuild, both backups, restore, both purges and tenant clean-up dispatch. The storage
+//! clean-up sweep remains unimplemented. A View export still fails explicitly as
+//! `NotImplemented`, which the runtime records as a non-retryable failure (request R-I7).
+//! Nothing is reported as done that was not done.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -43,11 +56,12 @@ use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::EventKind;
 use okf_jawn_contract::identity::{
-    ArtifactId, Digest, ItemId, MutationId, PurgeId, Revision, TenantId, UploadId, WorkspaceId,
+    ArtifactId, Digest, ItemId, JobId, MutationId, PurgeId, Revision, TenantId, UploadId,
+    WorkspaceId,
 };
 use okf_jawn_contract::import::{Job, JobState};
 use okf_jawn_contract::purge::{Purge, PurgeReport, PurgeState};
-use okf_jawn_contract::workspace::RestoreReport;
+use okf_jawn_contract::workspace::{BackupReport, RestoreReport};
 use okf_jawn_core::conversion::Converter;
 use okf_jawn_core::events::{EventLog, EventScope, NewEvent};
 use okf_jawn_core::jobs::{
@@ -57,12 +71,14 @@ use okf_jawn_core::jobs::{
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::search::SearchIndex;
 use okf_jawn_core::storage::{
-    Backups, BlobStore, CandidateCheck, ObjectInfo, Purger, StorageScope, VersionStore,
+    Backups, BlobStore, CandidateCheck, ObjectInfo, Page, Purger, StorageScope, VersionStore,
+    derive_drain_mutation_id,
 };
 use okf_jawn_core::uploads::UploadStore;
 
-pub use crate::import::CARD_NOT_WRITTEN;
+pub use crate::import::{CARD_NOT_WRITTEN, NAMING_RULES_ABSENT};
 use crate::import::{ImportRequest, import, redigest};
+use crate::portable_export::{Exported, export_workspace};
 
 /// The ports the handler calls: storage's, the converter and the injected check.
 #[derive(Clone)]
@@ -77,7 +93,7 @@ pub struct HandlerPorts {
     pub events: Arc<dyn EventLog>,
     /// Workspace and installation archives.
     pub backups: Arc<dyn Backups>,
-    /// Purge execution.
+    /// Purge and clean-up execution.
     pub purger: Arc<dyn Purger>,
     /// Upload slots an import or a restore consumes.
     pub uploads: Arc<dyn UploadStore>,
@@ -98,6 +114,9 @@ pub struct HandlerLimits {
     pub heartbeat: Duration,
     /// The time budget of one window (`ConversionInput::timeout`).
     pub window_timeout: Duration,
+    /// The longest a workspace purge waits for the workspace's jobs to stop running
+    /// (`DRAIN_BOUND` in production).
+    pub drain: Duration,
 }
 
 /// What a finished job produced, before it is written as the claim's completion.
@@ -113,6 +132,10 @@ pub(crate) struct Done {
     pub(crate) artifact: Option<ArtifactId>,
     /// What a restore did.
     pub(crate) restore: Option<RestoreReport>,
+    /// What a workspace backup left out of its archive.
+    pub(crate) backup: Option<BackupReport>,
+    /// What a clean-up removed and kept.
+    pub(crate) clean_up: Option<okf_jawn_contract::import::CleanUpReport>,
     /// Findings of the checks the commits ran.
     pub(crate) warnings: Vec<Warning>,
     /// The job was found cancelled: no completion is written.
@@ -120,6 +143,9 @@ pub(crate) struct Done {
     /// The job was refused for good (an import that collides with what the workspace holds
     /// now): its failure is written as not retryable, and no completion.
     pub(crate) refused: Option<ApiError>,
+    /// The job failed in a way that asking for it again repairs (a workspace purge): its
+    /// failure is written as retryable, whatever its code, and no completion.
+    pub(crate) resumable: Option<ApiError>,
 }
 
 /// Runs claimed jobs of every kind.
@@ -150,6 +176,26 @@ pub(crate) enum Renewed<T> {
 /// `download_tenant_artifact`).
 pub const ARCHIVE_MEDIA_TYPE: &str = "application/zip";
 
+/// The longest a workspace purge waits for the workspace's jobs to stop running (the drain)
+/// before its attempt fails, retryable, to be resumed when the purge is asked for again: ten
+/// minutes.
+///
+/// Only a sealed restore is ever waited for. The drain cancels every other queued or running
+/// job, which the store marks `cancelled` at once, and it decides by the store's state, so an
+/// unsealed job is never waited for, a conversion included. A sealed restore whose attempt is
+/// alive renews its lease and is waited for until it finishes; one that runs longer than the
+/// bound fails the purge's attempt. One whose attempt died stays `running` until its lease
+/// lapses (five minutes, storage's `JOB_LEASE_SECONDS`) and the runtime's next sweep queues it,
+/// where it is no longer waited for and the purge's record keeps any worker from claiming it:
+/// at most a lease plus one `RuntimeConfig::sweep_interval`. That fits the bound only while the
+/// sweep interval is shorter than a lease (the runtime recommends a third of one, so 400 s in
+/// all); the composition that sets `HandlerLimits::drain` sets the sweep interval too. Storage's
+/// purge waits as long for the target's writes in flight.
+pub const DRAIN_BOUND: Duration = Duration::from_secs(600);
+
+/// How many of the workspace's jobs one page of the drain's listing asks for.
+const DRAIN_PAGE: u16 = 500;
+
 impl IngestHandler {
     /// A handler over storage's ports.
     #[must_use]
@@ -164,11 +210,16 @@ impl IngestHandler {
         if done.cancelled {
             return Ok(());
         }
-        if let Some(refusal) = done.refused {
+        let failure = match (done.refused, done.resumable) {
+            (Some(refusal), _) => Some((refusal, false)),
+            (None, Some(failure)) => Some((failure, true)),
+            (None, None) => None,
+        };
+        if let Some((error, retryable)) = failure {
             let _job = self
                 .ports
                 .records
-                .fail_job(claimed.lease.clone(), refusal.message, false)
+                .fail_job(claimed.lease.clone(), error, retryable)
                 .await?;
             return announce_job(self.ports.events.as_ref(), claimed).await;
         }
@@ -181,6 +232,8 @@ impl IngestHandler {
                 item_ids: done.item_ids,
                 artifact: done.artifact,
                 restore: done.restore,
+                backup: done.backup,
+                clean_up: done.clean_up,
                 outputs: done.outputs,
                 warnings: done.warnings,
             })
@@ -191,8 +244,7 @@ impl IngestHandler {
     /// Do the work the claim's specification names.
     async fn dispatch(&self, attempt: &Attempt<'_>) -> Result<Done, ApiError> {
         let ports = &self.ports;
-        let claimed = attempt.claimed;
-        match (&claimed.spec, &claimed.scope) {
+        match (&attempt.claimed.spec, &attempt.claimed.scope) {
             (
                 JobSpec::Import {
                     base_revision,
@@ -236,10 +288,16 @@ impl IngestHandler {
                 self.rebuild(attempt, scope).await
             }
             (JobSpec::BackupWorkspace, JobScope::Workspace(scope)) => {
-                let written = ports
-                    .backups
-                    .write_workspace_archive(scope, claimed.mutation_id);
-                self.backup(attempt, ArtifactKind::WorkspaceBackup, written)
+                self.workspace_backup(attempt, scope).await
+            }
+            (
+                JobSpec::ExportWorkspace {
+                    revision,
+                    include_history,
+                },
+                JobScope::Workspace(scope),
+            ) => {
+                self.workspace_export(attempt, scope, revision, *include_history)
                     .await
             }
             (
@@ -254,34 +312,25 @@ impl IngestHandler {
                     .await
             }
             (JobSpec::BackupInstallation, JobScope::Tenant(tenant)) => {
-                let written = ports
-                    .backups
-                    .write_installation_archive(tenant, claimed.mutation_id);
-                self.backup(attempt, ArtifactKind::InstallationBackup, written)
-                    .await
+                self.installation_backup(attempt, tenant).await
             }
             (
                 JobSpec::PurgeWorkspace { .. } | JobSpec::PurgeItem { .. },
                 JobScope::Tenant(tenant),
             ) => self.purge_job(attempt, tenant).await,
-            (JobSpec::ExportWorkspace { .. } | JobSpec::ExportView { .. }, _) => {
-                Err(ApiError::new(
-                    ErrorCode::NotImplemented,
-                    format!(
-                        "the ingest handler does not run {:?} jobs yet",
-                        claimed.spec.kind()
-                    ),
-                ))
-            }
+            (JobSpec::CleanUp, JobScope::Tenant(tenant)) => self.clean_up(attempt, tenant).await,
+            (JobSpec::ExportView { .. }, _) => Err(unimplemented_job(&attempt.claimed.spec)),
             (
                 JobSpec::Import { .. }
                 | JobSpec::Redigest { .. }
+                | JobSpec::ExportWorkspace { .. }
                 | JobSpec::RebuildIndex
                 | JobSpec::BackupWorkspace
                 | JobSpec::RestoreWorkspace { .. }
                 | JobSpec::BackupInstallation
                 | JobSpec::PurgeWorkspace { .. }
-                | JobSpec::PurgeItem { .. },
+                | JobSpec::PurgeItem { .. }
+                | JobSpec::CleanUp,
                 _,
             ) => Err(ApiError::new(
                 ErrorCode::Internal,
@@ -290,17 +339,101 @@ impl IngestHandler {
         }
     }
 
-    /// Write an archive under the heartbeat and record it as the job's artifact; a job found
-    /// cancelled while it was written records none.
+    /// Run one tenant clean-up pass under the heartbeat and forward its count-only report.
+    async fn clean_up(&self, attempt: &Attempt<'_>, tenant: &TenantId) -> Result<Done, ApiError> {
+        match renewing(
+            &self.ports,
+            attempt,
+            self.ports.purger.clean_up(tenant, attempt.claimed.job.id),
+        )
+        .await?
+        {
+            Renewed::Done(report) => Ok(Done {
+                clean_up: Some(report),
+                ..Done::default()
+            }),
+            Renewed::Cancelled(_report) => Ok(Done::stopped()),
+        }
+    }
+
+    /// Record a portable export only after the pinned archive producer finishes.
+    async fn workspace_export(
+        &self,
+        attempt: &Attempt<'_>,
+        scope: &StorageScope,
+        revision: &Revision,
+        include_history: bool,
+    ) -> Result<Done, ApiError> {
+        match export_workspace(&self.ports, attempt, scope, revision, include_history).await? {
+            Exported::Ready(object) => {
+                self.artifact(attempt.claimed, ArtifactKind::Export, object)
+                    .await
+            }
+            Exported::Cancelled => Ok(Done::stopped()),
+            Exported::Refused(error) => Ok(Done {
+                refused: Some(error),
+                ..Done::default()
+            }),
+        }
+    }
+
+    /// Back up the job's workspace: its archive, recorded as the artifact, and what the archive
+    /// left out, carried to the job (`Job::backup`).
+    async fn workspace_backup(
+        &self,
+        attempt: &Attempt<'_>,
+        scope: &StorageScope,
+    ) -> Result<Done, ApiError> {
+        let written = async {
+            let written = self
+                .ports
+                .backups
+                .write_workspace_archive(scope, attempt.claimed.mutation_id)
+                .await?;
+            let report = BackupReport {
+                rows_left_out: written.rows_left_out,
+            };
+            Ok((written.object, Some(report)))
+        };
+        self.backup(attempt, ArtifactKind::WorkspaceBackup, written)
+            .await
+    }
+
+    /// Back up the installation of the job's tenant, recorded as the artifact.
+    async fn installation_backup(
+        &self,
+        attempt: &Attempt<'_>,
+        tenant: &TenantId,
+    ) -> Result<Done, ApiError> {
+        let written = async {
+            let object = self
+                .ports
+                .backups
+                .write_installation_archive(tenant, attempt.claimed.mutation_id)
+                .await?;
+            Ok((object, None))
+        };
+        self.backup(attempt, ArtifactKind::InstallationBackup, written)
+            .await
+    }
+
+    /// Write an archive under the heartbeat and record it as the job's artifact, with what a
+    /// workspace archive left out; a job found cancelled while it was written records none.
     async fn backup(
         &self,
         attempt: &Attempt<'_>,
         kind: ArtifactKind,
-        write: impl Future<Output = Result<ObjectInfo, ApiError>>,
+        write: impl Future<Output = Result<(ObjectInfo, Option<BackupReport>), ApiError>>,
     ) -> Result<Done, ApiError> {
         match renewing(&self.ports, attempt, write).await? {
-            Renewed::Done(object) => self.artifact(attempt.claimed, kind, object).await,
-            Renewed::Cancelled(_object) => Ok(Done::stopped()),
+            Renewed::Done((object, report)) => {
+                let done = self.artifact(attempt.claimed, kind, object).await?;
+                Ok(Done {
+                    backup: report,
+                    ..done
+                })
+            }
+            Renewed::Cancelled(_written) => Ok(Done::stopped()),
         }
     }
 
@@ -320,16 +453,30 @@ impl IngestHandler {
     /// The editors were read from `AccessControl` when the request was accepted; the handler
     /// passes them on and never consults `AccessControl` itself.
     ///
-    /// The order is fixed (fix-5 ruling 1, superseding the Stage 1b design's "consumed when the
-    /// restore completes"): the job checks for a cancellation, then consumes the archive's
-    /// upload under this job, then calls `restore_import`. A cancellation seen before the
-    /// consume stops the job, consuming and restoring nothing. An upload another job consumed
-    /// refuses the job for good. From the moment `restore_import` is called a cancellation is
-    /// no longer honoured: the job indexes and announces the revision and writes its completion
-    /// with the restore report. Storage's `cancel_job` can still mark a running job cancelled
-    /// meanwhile, and the store then refuses that completion; making `cancel_job` refuse a job
-    /// past this point is request R-I11 (a point-of-no-return call on `RecordStore`), owed with
-    /// core M1.4.
+    /// The order is fixed (fix-5 ruling 1 and contract ruling 23: the upload is consumed when
+    /// the restore starts; core M1.4b fix round 1, ruling F2: the seal comes first): the job
+    /// seals itself past its point of no return (`RecordStore::seal`, request R-I11), then
+    /// consumes the archive's upload under this job, then calls `restore_import`. A
+    /// cancellation the store took before the seal leaves the job unsealed, and it stops there,
+    /// consuming and restoring nothing, so its upload stays usable. From the seal on the store
+    /// refuses to cancel the job, so no cancellation can land between the consume and the
+    /// import, or while `restore_import` runs. An upload another job consumed refuses the job
+    /// for good, and so does a consumption the store refuses because a purge names the
+    /// workspace (`UploadStore::consume`): both are `Conflict`, and a retry would meet the same
+    /// refusal. A consume that fails after the seal fails the job, which stays sealed: a sealed
+    /// job may fail, and only its cancellation is refused. Once `restore_import` returns, the
+    /// job indexes and announces the revision and writes its completion with the restore
+    /// report. A sealed attempt that dies is resumed by the next claim (its lease lapses and the
+    /// job is queued again, still sealed): the seal is already set, the consume answers this
+    /// job again with no second effect (the store lets the job that took an upload take it
+    /// again, for a retry), and `restore_import` and the commit it writes are idempotent on the
+    /// job's mutation.
+    ///
+    /// Limit 1 of core M1.4b (review N6), a cancellation between the consume and the seal that
+    /// left the upload consumed by a cancelled job no retry could use, is closed. What the order
+    /// costs instead: the point of no return stands one store write before the consume, so a
+    /// cancellation asked for between the seal and the consume is refused though nothing has
+    /// been taken yet, and the restore runs to its end.
     ///
     /// The completion records the revision the restore wrote (review N9): the commit carrying
     /// the job's mutation, which `restore_import` is idempotent on, and not whatever head stands
@@ -345,9 +492,15 @@ impl IngestHandler {
     ) -> Result<Done, ApiError> {
         let ports = &self.ports;
         let claimed = attempt.claimed;
-        if attempt.renew(ports).await?.state == JobState::Cancelled {
+        // The point of no return, before anything is taken: from the seal on the store refuses
+        // to cancel the job. A cancellation that landed first leaves the job unsealed, and it
+        // stops here, consuming and restoring nothing, so its upload stays usable (contract
+        // ruling 23). The window the old order left, a cancellation between the consume and the
+        // seal that lost the upload to every job, is closed.
+        if ports.records.seal(&claimed.lease).await?.state == JobState::Cancelled {
             return Ok(Done::stopped());
         }
+        // Sealed: a refusal here fails the job, which a sealed job may do.
         match ports
             .uploads
             .consume(scope, upload_id, claimed.lease.job_id)
@@ -362,8 +515,8 @@ impl IngestHandler {
             }
             Err(error) => return Err(error),
         }
-        // Under the heartbeat, never dropped, and past the point of no return: a cancellation
-        // seen while it runs is not honoured.
+        // Under the heartbeat and never dropped; sealed, so no cancellation can land between
+        // the consume and the import, or while it runs.
         let report = match renewing(
             ports,
             attempt,
@@ -379,10 +532,13 @@ impl IngestHandler {
             Renewed::Done(report) | Renewed::Cancelled(report) => report,
         };
         // `None` walks the whole accepted line, so a commit an earlier attempt wrote is found.
+        // Only its revision is read: no check ran for a restore's commit, so the store kept no
+        // warnings for it and answers that they are not available, which is not a finding.
         let revision = ports
             .versions
             .find_commit(scope, claimed.mutation_id, None)
-            .await?;
+            .await?
+            .map(|found| found.revision);
         if let Some(revision) = &revision {
             announce_commit(ports, claimed, scope, revision, claimed.mutation_id, None).await?;
         }
@@ -400,7 +556,6 @@ impl IngestHandler {
         kind: ArtifactKind,
         object: ObjectInfo,
     ) -> Result<Done, ApiError> {
-        let digest = object.digest.clone();
         let record = self
             .ports
             .records
@@ -416,13 +571,27 @@ impl IngestHandler {
             )
             .await?;
         Ok(Done {
-            outputs: vec![digest],
+            // A replay can name different bytes from this attempt's rebuild.
+            outputs: vec![record.object.digest],
             artifact: Some(record.id),
             ..Done::default()
         })
     }
 
-    /// Run a purge job of the tenant: a workspace purge or an item purge.
+    /// Run a purge job of the tenant: a workspace purge, which drains the workspace's jobs
+    /// first, or an item purge, which storage has not built (its purger answers
+    /// `NotImplemented`) and which drains nothing until it is built.
+    ///
+    /// A workspace purge's failure is always retryable (core M1.4b fix round 1, ruling F1): the
+    /// purge was accepted and its precondition holds, so whatever stops it is a state to repair,
+    /// after which asking for the purge again makes its job runnable and resumes it (contract
+    /// rulings 14 and 24). Its failure is written here as `purge` returned it, code and message
+    /// kept (the error the purge was recorded `Failed` with, that error saying the record could
+    /// not be written, or the store's error when the purge's record could not be read), and
+    /// never left to the runtime, which would class `InvalidInput`, `Forbidden`, `Unsupported`
+    /// and `NotImplemented` as not retryable. An item purge's failure is still the runtime's:
+    /// storage answers it `NotImplemented`, which no repair changes, and core records no item
+    /// purge yet.
     async fn purge_job(&self, attempt: &Attempt<'_>, tenant: &TenantId) -> Result<Done, ApiError> {
         let claimed = attempt.claimed;
         match &claimed.spec {
@@ -430,10 +599,18 @@ impl IngestHandler {
                 purge_id,
                 workspace_id,
             } => {
-                self.purge(attempt, tenant, *purge_id, |purger| {
-                    purger.purge_workspace(tenant, claimed.mutation_id, *purge_id, *workspace_id)
-                })
-                .await
+                let drained = item_scope(tenant, *workspace_id);
+                let ran = self
+                    .purge(attempt, tenant, *purge_id, Some(drained), |purger| {
+                        purger.purge_workspace(
+                            tenant,
+                            claimed.mutation_id,
+                            *purge_id,
+                            *workspace_id,
+                        )
+                    })
+                    .await;
+                Ok(ran.unwrap_or_else(Done::resumable))
             }
             JobSpec::PurgeItem {
                 purge_id,
@@ -441,7 +618,7 @@ impl IngestHandler {
                 item_id,
             } => {
                 let scope = item_scope(tenant, *workspace_id);
-                self.purge(attempt, tenant, *purge_id, |purger| async move {
+                self.purge(attempt, tenant, *purge_id, None, |purger| async move {
                     purger
                         .purge_item(&scope, claimed.mutation_id, *purge_id, *item_id)
                         .await
@@ -455,6 +632,7 @@ impl IngestHandler {
             | JobSpec::RestoreWorkspace { .. }
             | JobSpec::RebuildIndex
             | JobSpec::ExportView { .. }
+            | JobSpec::CleanUp
             | JobSpec::BackupInstallation => Err(ApiError::new(
                 ErrorCode::Internal,
                 "a purge job was expected",
@@ -462,15 +640,27 @@ impl IngestHandler {
         }
     }
 
-    /// Carry out a purge and keep its record current: running, then its report. The removal
-    /// runs under the heartbeat and is never dropped; its report is recorded even when the job
-    /// was cancelled meanwhile, since the purge record states what was removed, and the job then
-    /// stops without a completion.
+    /// Carry out a purge and keep its record current: running, then its report, or failed.
+    ///
+    /// A workspace purge drains the workspace's jobs first (`drain`, given the workspace). The
+    /// removal then runs under the heartbeat and is never dropped; its report is recorded even
+    /// when the job was cancelled meanwhile, since the purge record states what was removed, and
+    /// the job then stops without a completion. Any error once the record was read is the purge
+    /// job's failure, which no attempt repeats by itself: the purge is first recorded `Failed`
+    /// with that error (contract ruling 24; repeating the request resumes it), and the error is
+    /// returned for the job's failure (a workspace purge's is written retryable, `purge_job`).
+    /// An attempt that had lost its lease records the same; the attempt that runs the job next
+    /// records `Running` over it. When the failed state cannot be recorded either, the error
+    /// returned says so and the purge stays as it was. The `Failed` write and the job's failure
+    /// are two writes: a request for the purge that lands between them finds the job still
+    /// running and only queues it (the delivery finds nothing to claim), the job then fails, and
+    /// nothing runs until the purge is asked for again; the person sees `Failed` and asks again.
     async fn purge<'a, F, Fut>(
         &'a self,
         attempt: &'a Attempt<'a>,
         tenant: &'a TenantId,
         purge_id: PurgeId,
+        drained: Option<StorageScope>,
         remove: F,
     ) -> Result<Done, ApiError>
     where
@@ -479,28 +669,176 @@ impl IngestHandler {
     {
         let records = &self.ports.records;
         let mut purge: Purge = records.get_purge(tenant, purge_id).await?;
-        let mut done = Done::default();
-        if purge.state != PurgeState::Completed {
-            purge.state = PurgeState::Running;
-            purge.error = None;
-            purge.completed_at = None;
-            purge = records.update_purge(tenant, purge).await?;
-            let report =
-                match renewing(&self.ports, attempt, remove(self.ports.purger.as_ref())).await? {
-                    Renewed::Done(report) => report,
-                    Renewed::Cancelled(report) => {
-                        done = Done::stopped();
-                        report
-                    }
-                };
-            purge.report = Some(report);
-            purge.state = PurgeState::Completed;
-            // The store stamps `completed_at` in the write that first records completion
-            // (`RecordStore::update_purge`); the handler has no clock and passes none.
-            purge.completed_at = None;
-            let _stored = records.update_purge(tenant, purge).await?;
+        if purge.state == PurgeState::Completed {
+            return Ok(Done::default());
         }
+        let error = match self
+            .remove(attempt, tenant, purge.clone(), drained, remove)
+            .await
+        {
+            Ok(done) => return Ok(done),
+            Err(error) => error,
+        };
+        // The record as read, which holds no report: a report is written only with `Completed`,
+        // which returned above, and `remove` sets one only on its own copy.
+        purge.state = PurgeState::Failed;
+        purge.error = Some(error.clone());
+        purge.completed_at = None;
+        match records.update_purge(tenant, purge).await {
+            Ok(_failed) => Err(error),
+            Err(unrecorded) => Err(ApiError {
+                message: format!(
+                    "{}; recording the purge as failed failed too: {}",
+                    error.message, unrecorded.message
+                ),
+                ..error
+            }),
+        }
+    }
+
+    /// Record the purge running, drain the workspace when there is one, run the removal under
+    /// the heartbeat and record its report as completed.
+    async fn remove<'a, F, Fut>(
+        &'a self,
+        attempt: &'a Attempt<'a>,
+        tenant: &'a TenantId,
+        mut purge: Purge,
+        drained: Option<StorageScope>,
+        remove: F,
+    ) -> Result<Done, ApiError>
+    where
+        F: FnOnce(&'a dyn Purger) -> Fut,
+        Fut: Future<Output = Result<PurgeReport, ApiError>> + 'a,
+    {
+        let records = &self.ports.records;
+        purge.state = PurgeState::Running;
+        purge.error = None;
+        purge.completed_at = None;
+        let mut purge = records.update_purge(tenant, purge).await?;
+        if let Some(scope) = &drained {
+            self.drain(attempt, scope).await?;
+        }
+        let mut done = Done::default();
+        let report =
+            match renewing(&self.ports, attempt, remove(self.ports.purger.as_ref())).await? {
+                Renewed::Done(report) => report,
+                Renewed::Cancelled(report) => {
+                    done = Done::stopped();
+                    report
+                }
+            };
+        purge.report = Some(report);
+        purge.state = PurgeState::Completed;
+        // The store stamps `completed_at` in the write that first records completion
+        // (`RecordStore::update_purge`); the handler has no clock and passes none.
+        purge.completed_at = None;
+        let _stored = records.update_purge(tenant, purge).await?;
         Ok(done)
+    }
+
+    /// The `Purger` caller's drain: cancel every queued or running job of the purged workspace
+    /// and wait, at most `HandlerLimits::drain`, until none is running.
+    ///
+    /// Each pass lists the workspace's jobs again, every page, and cancels each queued or
+    /// running one under `derive_drain_mutation_id` of the purge job's mutation and that job, so
+    /// a resumed purge cancels the same way and the store makes no second transition. Each
+    /// cancellation that took effect is announced (`job_updated`, in the workspace's log, under
+    /// that identity, so a resumed purge appends no second one). A job past its point of no
+    /// return (a sealed restore) refuses its cancellation: while it runs the drain waits for it;
+    /// once its attempt died and its lease lapsed it is queued and no worker can claim it (the
+    /// purge's record refuses the claim), so it is not waited for, and the purge removes its
+    /// row. Between passes, every `HandlerLimits::heartbeat`, the purge job renews its lease.
+    ///
+    /// "Running" is the store's state. A job cancelled while its attempt is inside one storage
+    /// call is `cancelled` at once, though that attempt stops only when the call returns; every
+    /// write it would then make to the workspace storage refuses from the moment the purge was
+    /// recorded (`Purger`). The one write storage does not refuse, the import of a restore, runs
+    /// only after the restore sealed itself, so it is never cancelled and always waited for.
+    ///
+    /// # Errors
+    /// Returns `Unavailable`, naming the jobs still running, when one still runs once the bound
+    /// has passed: the purge job fails, retryable, and the run that repeating the request
+    /// starts drains again. Returns any port error.
+    async fn drain(&self, attempt: &Attempt<'_>, scope: &StorageScope) -> Result<(), ApiError> {
+        let limits = self.ports.limits;
+        let started = tokio::time::Instant::now();
+        loop {
+            let running = self.cancel_unfinished(attempt.claimed, scope).await?;
+            if running.is_empty() {
+                return Ok(());
+            }
+            let waited = started.elapsed();
+            if waited >= limits.drain {
+                let named: Vec<String> = running.iter().map(|job| job.0.to_string()).collect();
+                return Err(ApiError::new(
+                    ErrorCode::Unavailable,
+                    format!(
+                        "the purge waited {:?} for the workspace's jobs to stop, and {} still \
+                         run past their point of no return; asking for the purge again resumes it",
+                        limits.drain,
+                        named.join(", ")
+                    ),
+                ));
+            }
+            let _renewed = attempt.renew(&self.ports).await?;
+            let rest = limits.drain.saturating_sub(waited);
+            tokio::time::sleep(limits.heartbeat.min(rest).max(Duration::from_millis(1))).await;
+        }
+    }
+
+    /// One pass of the drain over every page of the workspace's jobs: cancel each queued or
+    /// running one, and answer the jobs still running after it.
+    async fn cancel_unfinished(
+        &self,
+        claimed: &ClaimedJob,
+        scope: &StorageScope,
+    ) -> Result<Vec<JobId>, ApiError> {
+        let records = &self.ports.records;
+        let jobs = JobScope::Workspace(scope.clone());
+        let mut running = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = records
+                .list_jobs(
+                    &jobs,
+                    Page {
+                        cursor,
+                        limit: DRAIN_PAGE,
+                    },
+                )
+                .await?;
+            for job in page.items {
+                if !matches!(job.state, JobState::Queued | JobState::Running) {
+                    continue;
+                }
+                let cancel = derive_drain_mutation_id(claimed.mutation_id, job.id);
+                let stands = match records.cancel_job(&jobs, cancel, job.id).await {
+                    Ok(cancelled) => {
+                        if cancelled.state == JobState::Cancelled {
+                            announce_cancelled(self.ports.events.as_ref(), scope, cancel, job.id)
+                                .await?;
+                        }
+                        cancelled
+                    }
+                    // Refused: past its point of no return, or finished since it was listed.
+                    Err(error) if error.code == ErrorCode::Conflict => {
+                        records.get_job(&jobs, job.id).await?
+                    }
+                    Err(error) => return Err(error),
+                };
+                // Only a running job is waited for. A sealed job that is queued had its lease lapse:
+                // its attempt died, and no worker can claim it while the purge is recorded, so
+                // waiting would hold the purge to its bound. A still-alive stale restore is
+                // fenced at object, history and row publication by its captured job lease.
+                if stands.state == JobState::Running {
+                    running.push(job.id);
+                }
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => return Ok(running),
+            }
+        }
     }
 }
 
@@ -544,12 +882,29 @@ impl Done {
             ..Self::default()
         }
     }
+
+    /// A job that failed with `error` in a way that asking for it again repairs: its failure is
+    /// written as retryable, with `error` as it is.
+    fn resumable(error: ApiError) -> Self {
+        Self {
+            resumable: Some(error),
+            ..Self::default()
+        }
+    }
 }
 
 impl JobHandler for IngestHandler {
     fn handle<'a>(&'a self, claimed: &'a ClaimedJob) -> PortFuture<'a, ()> {
         Box::pin(self.run(claimed))
     }
+}
+
+/// The explicit refusal for a job kind whose handler has not been built.
+fn unimplemented_job(spec: &JobSpec) -> ApiError {
+    ApiError::new(
+        ErrorCode::NotImplemented,
+        format!("the ingest handler does not run {:?} jobs yet", spec.kind()),
+    )
 }
 
 /// Run a long storage call to its end while renewing the claim's lease every
@@ -641,6 +996,39 @@ pub(crate) async fn announce_job(
     Ok(())
 }
 
+/// Announce that a purge's drain cancelled `job` of the purged workspace (`job_updated`, in the
+/// workspace's log) under the cancellation's identity, so a resumed purge that finds the job
+/// cancelled already appends no second notification.
+///
+/// # Errors
+/// Returns the event log's error.
+async fn announce_cancelled(
+    events: &dyn EventLog,
+    scope: &StorageScope,
+    cancel: MutationId,
+    job: JobId,
+) -> Result<(), ApiError> {
+    let _event = events
+        .append(
+            &EventScope::Workspace(scope.clone()),
+            Some(cancel),
+            NewEvent {
+                kind: EventKind::JobUpdated,
+                revision: None,
+                item_id: None,
+                job_id: Some(job),
+                connector_id: None,
+                actor: None,
+                operation: None,
+                transport: None,
+                proposal_id: None,
+                count: None,
+            },
+        )
+        .await?;
+    Ok(())
+}
+
 /// A notification of `kind` about the claimed job.
 pub(crate) fn job_event(
     kind: EventKind,
@@ -656,6 +1044,9 @@ pub(crate) fn job_event(
         connector_id: None,
         actor: None,
         operation: None,
+        transport: None,
+        proposal_id: None,
+        count: None,
     }
 }
 

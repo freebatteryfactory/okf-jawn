@@ -241,7 +241,8 @@ test.describe('Explorer from the keyboard', () => {
     await expect(page.getByRole('tree', { name: 'Folders' })).toBeVisible();
     const box = page.getByRole('searchbox', { name: 'Search this workspace' });
     let guard = 0;
-    while (!(await focused(page)).startsWith('input') && guard < 10) {
+    // The bar holds ten links and buttons before the box (Timeline, Proposals and Graph since M3).
+    while (!(await focused(page)).startsWith('input') && guard < 15) {
       await page.keyboard.press('Tab');
       guard += 1;
     }
@@ -552,6 +553,11 @@ test.describe('a newer head moves nothing until Refresh', () => {
     await expect(row(page, /Item number 40,/)).toBeFocused();
     const scrolled = await treeScrollTop(page);
     expect(scrolled).toBeGreaterThan(0);
+    // The page lists two folders as it opens: the root, and then the open item's own folder
+    // once the item has been read at the head. The second is asked about a tenth of a second
+    // after the first, while the keys above are being pressed, so the count is taken only once
+    // both are in: otherwise a listing that belongs to the opening is counted as a reload.
+    await expect.poll(() => listed.length).toBe(2);
     const listedBefore = listed.length;
 
     await windowRefocus(page);

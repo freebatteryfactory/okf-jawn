@@ -40,15 +40,22 @@ struct Accept;
 
 /// A data directory with one workspace seeded by `seed`.
 struct Seeded {
-    directory: tempfile::TempDir,
     storage: Storage,
     scope: StorageScope,
     /// The commit that wrote the seed.
     revision: Revision,
+    /// Declared last: fields drop in declaration order, so the storage has closed its
+    /// databases and its lock when the directory is removed (Windows cannot remove an open
+    /// file, and `TempDir` would leave the directory behind).
+    directory: tempfile::TempDir,
 }
 
 impl CandidateCheck for Accept {
-    fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
+    fn check(
+        &self,
+        _root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
         Ok(Vec::new())
     }
 }
@@ -184,10 +191,10 @@ async fn seeded() -> Fallible<Seeded> {
         .await?
         .revision;
     Ok(Seeded {
-        directory,
         storage,
         scope,
         revision,
+        directory,
     })
 }
 
@@ -465,6 +472,7 @@ async fn a_moved_item_answers_at_the_revision_asked_not_the_head() -> TestResult
                 vec![TreeEdit::MoveItem {
                     item_id: uuid!(10)?,
                     destination: path("plans/plan.md")?,
+                    keep_alias: false,
                 }],
             )?,
             Arc::new(Accept),

@@ -29,7 +29,7 @@
     },
     "content_digest": {
       "$ref": "#/$defs/Digest",
-      "description": "Digest of the drafted body and properties."
+      "description": "Digest of the drafted body and every property but the server-owned header, `aliases`\nincluded, keys sorted. Unlike `ItemDocument::content_digest`, any edit changes it, one to\n`aliases` alone included: it tells whether a draft is still the content a Snapshot\ncommitted."
     },
     "editor": {
       "description": "Server-established subject who owns this draft.",

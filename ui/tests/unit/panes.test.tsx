@@ -1,11 +1,23 @@
 /** Tabs and split panes: keyboard use, roles and names, URL ownership, and no identity copied into the store. */
 
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useExplorerStore } from '../../src/features/explorer/store';
-import { fail, mockApi, notImplemented } from './support/api';
-import { explorerHandlers, NOTE, OLD, OTHER, renderAt, SOURCE, WS } from './support/workspace';
+import { fail, type Json, mockApi, notImplemented, ok } from './support/api';
+import {
+  explorerHandlers,
+  itemDocument,
+  NOTE,
+  noteSummary,
+  OLD,
+  OTHER,
+  otherSummary,
+  renderAt,
+  SOURCE,
+  summary,
+  WS,
+} from './support/workspace';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -281,6 +293,51 @@ describe('a tab keeps the revision its link resolved', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Close tab' }));
     await waitFor(() => expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`));
     expect(router.state.location.search).toEqual({ rev: OLD });
+  });
+});
+
+describe('a tab’s title is read at the revision the tab shows', () => {
+  const GET = '/api/items/get-item';
+  /** The note is "Meeting notes" at OLD; `atHead` is what `get_item` answers for it otherwise. */
+  const noteSince = (atHead: () => ReturnType<typeof ok>) =>
+    explorerHandlers({
+      [GET]: (body) => {
+        if (body.item_id !== NOTE) return ok(itemDocument(otherSummary));
+        return (body.at as Json).revision === OLD ? ok(itemDocument(noteSummary)) : atHead();
+      },
+    });
+
+  it('shows the old title in a tab that cites a revision from before a rename, and the new one at the head', async () => {
+    const renamed = summary(NOTE, 'notes/meeting.md', 'Minutes', 'meeting-note');
+    mockApi(noteSince(() => ok(itemDocument(renamed))));
+    const { router } = renderAt(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+    await screen.findByRole('tab', { name: 'Meeting notes', selected: true });
+    // The same item in a second pane, which then shows it as the workspace does.
+    await userEvent.click(screen.getByRole('button', { name: 'Split right' }));
+    await waitFor(() =>
+      expect(screen.getAllByRole('tab', { name: 'Meeting notes' })).toHaveLength(2),
+    );
+    act(() => {
+      void router.navigate({
+        to: '/w/$workspaceId/i/$itemId',
+        params: { workspaceId: WS, itemId: NOTE },
+        search: {},
+      });
+    });
+    await screen.findByRole('tab', { name: 'Minutes' });
+    const names = screen.getAllByRole('tab').map((tab) => tab.textContent);
+    expect(names.sort()).toEqual(['Meeting notes', 'Minutes']);
+    // The pane that still cites the old revision is the one with the old title.
+    const focused = screen.getByRole('region', { name: /, focused$/ });
+    expect(within(focused).getByRole('tab').textContent).toBe('Minutes');
+  });
+
+  it('shows the old title, not the item’s id, in a tab that cites a revision from before the item was deleted', async () => {
+    mockApi(noteSince(() => fail(404, 'not_found', 'no such item at this revision')));
+    renderAt(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+    expect(await screen.findByRole('tab', { name: 'Meeting notes', selected: true })).toBeTruthy();
+    await screen.findByRole('article', { name: 'Meeting notes' });
+    expect(screen.queryByRole('tab', { name: /^Item / })).toBeNull();
   });
 });
 

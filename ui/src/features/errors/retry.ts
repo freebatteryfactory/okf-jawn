@@ -30,8 +30,10 @@
  *    a page added later needs one too, or focus stays on the body there.
  * So a retry that loaded content ends on what `loaded` names, and one that failed again on the
  * retry button. Step 1 asks whether the operation is failed, not whether a failure is shown: while
- * a retry is in flight the operation is not failed, so a notice that leaves then is followed to
- * steps 2 and 3. And when the operation is failed but the caller no longer shows this hook's
+ * the retry of a first load is in flight the operation is not failed, so a notice that leaves then
+ * is followed to steps 2 and 3. (A further page that failed stays failed while it is asked again;
+ * once its notice has left, nothing is there for step 1 either.) And when the operation is failed
+ * but the caller no longer shows this hook's
  * notice (another failure of its own has the place), nothing is there for step 1, and focus goes
  * to steps 2 and 3 as well.
  *
@@ -52,12 +54,16 @@
  * away by a component in between, on its own state, would be followed only at the next render.
  * The retry button exists only through this hook, and only where the caller gives it `run`.
  *
- * Limits. The retry is over when `run` settles. A refetch that replaces a request still in flight
- * for content already on screen (an invalidation; nothing does that yet) settles `run` early,
- * while the replacement is still in flight; the outcome followed is then the state at that moment.
- * A notice that leaves because the component calling the hook is itself unmounted is not followed
- * by the hook, which goes with it. When a navigation does that, the router's rule moves the focus
- * that fell to the page body to the new page's level-one heading (`app/router.tsx`).
+ * A retry replaced in flight. The retry is over when `run` settles. An invalidation of a query
+ * with data on screen (the drafts list after a save, a discard or a Snapshot) cancels its request
+ * in flight and asks again; TanStack Query then settles the cancelled request's promise with the
+ * replacement's, so `run` settles when the replacement has answered, not before. The outcome
+ * followed is the operation's state then: for a further page whose list is listed again from its
+ * first page, that listing's (the further page is a new request after it, with its own outcome).
+ *
+ * Limit. A notice that leaves because the component calling the hook is itself unmounted is not
+ * followed by the hook, which goes with it. When a navigation does that, the router's rule moves
+ * the focus that fell to the page body to the new page's level-one heading (`app/router.tsx`).
  */
 import { type RefCallback, useLayoutEffect, useRef, useState } from 'react';
 import { pageHeading, takeHeld, useWatchedPart } from '../../lib/focus';

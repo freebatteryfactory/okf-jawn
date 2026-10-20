@@ -1,24 +1,50 @@
 //! Route only declared operations through validation, target authorization, and the mutation ledger.
 //!
 //! Order: validate, decode, `check_rules()`, `targets()`, authorize every target, build the
-//! context, `MutationStore::begin`, the handler, then `complete` on success or `release` on
-//! error. `check_rules` refuses what no grant can make valid, such as a View bound to another
-//! workspace, so its refusal is `InvalidInput` whoever asks.
+//! context, the archive rule, `MutationStore::begin`, the handler, then `complete` on success or
+//! `release` on error. `check_rules` refuses what no grant can make valid, such as a View bound
+//! to another workspace, so its refusal is `InvalidInput` whoever asks.
+//!
+//! The archive rule (contract ruling 25): a mutation that is not in
+//! `operations::ALLOWED_WHILE_ARCHIVED` is refused with `Conflict` and
+//! `ErrorDetail::WorkspaceArchived` while any workspace its targets name is archived: the one
+//! it writes, a workspace a comment cites, a workspace a connector would be granted. Each
+//! distinct workspace's catalog entry is read once, through `Application::archived_at`, only for
+//! such a mutation and only after authorization, so a caller who may not use the workspace
+//! learns nothing of it. The refusal comes before the ledger begins the mutation and is
+//! recorded nowhere: it is not a permission refusal. A retry of a mutation that completed
+//! before the archive is refused the same way, since the rule runs before the ledger could
+//! replay it. A mutation authorized only at the tenant (a workspace's creation, an installation
+//! backup, a revocation) names no workspace and is not checked.
 //! "Error" is anything that fails after `begin` granted the lease, not only the handler: a
 //! failure to serialize the response, to build the ledger body, or in `complete` itself also
 //! releases the lease, and the caller receives the first error, never the release's.
 //! A request that declares no target is refused as `Internal` before any grant is looked up,
 //! and so is a draft-bearing, backup, restore or purge operation on a route that is not a human
-//! session (`access::check_human_route`, refused as `Forbidden`). Every `Forbidden` from
+//! session (`access::check_human_route`, refused as `Forbidden`), and a connector operation on
+//! any route but the local owner's (`access::check_local_owner_route`, `Forbidden`). A request
+//! refused as `Forbidden` at a workspace it lists, in any array of workspace identities its
+//! schema declares, names the first entry that holds it as the refusal's field
+//! (`name_refused_entry`): `/workspace_ids/<index>` for `create_connector`. Every `Forbidden` from
 //! authorization, dispatch's or a handler's own (such as `access::authorize_job_kind`), is
 //! recorded as a `permission_denied` event before the refusal is returned: in the log of the
 //! refusing workspace target; when no target was evaluated as the refuser (a route refusal, a
 //! handler's own), in the tenant's log if the request has a `Deployment` target, else in the
 //! workspace's log if its targets name exactly one distinct workspace, else in the tenant's
-//! (see `denial_scope`). A grant is used only when it is for the workspace and tenant that were
-//! asked for. The ledger never inspects other stores: a
-//! resumed attempt re-runs the handler under the same `MutationId`, and what the ledger
-//! retains is decided by the request's `ReplayPolicy`.
+//! (see `denial_scope`). A binding that refuses a request itself, before it dispatches (the MCP
+//! server refuses every route but an agent's), records that refusal through `record_refusal`,
+//! which applies the same rule to the request the binding was handed, so one rule decides the
+//! log of every refusal. A grant is used only when it is for the workspace and tenant that were
+//! asked for. The ledger never inspects other stores: a resumed attempt re-runs the handler
+//! under the same `MutationId`, and what the ledger retains is decided by the request's
+//! `ReplayPolicy`; a replay answers a body stored in an earlier shape of the response in this
+//! build's shape (`RequestScope::replayed`). The ledger records the workspace each mutation
+//! writes: `begin` receives the workspace of the request's first target, the one the
+//! table permission names (`written_workspace`), and `None` when that target is not a
+//! workspace, so a comment written in one workspace that cites another is recorded under the
+//! first; `complete` receives the workspace the response names at the request's
+//! `RequestScope::RESPONSE_WORKSPACE`, read from the serialized typed response by that
+//! pointer, never by searching its text.
 //!
 //! Handlers see the `MutationId`; dispatch keeps the `MutationLease` it was granted and closes
 //! the row with it, so an attempt whose lease was taken over cannot complete or release the
@@ -31,8 +57,8 @@ use okf_jawn_contract::identity::{ConnectorId, MutationId, WorkspaceId};
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::scope::{ReplayPolicy, RequestScope, Target};
 use schemars::{JsonSchema, generate::SchemaSettings};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::OnceLock;
 use uuid::Uuid;
@@ -61,20 +87,25 @@ macro_rules! dispatch_operations {
             let operation = parse_operation(operation_id)?;
             match operation_id {
                 $(stringify!($id) => {
-                    static VALIDATOR: OnceLock<Result<jsonschema::Validator, String>> = OnceLock::new();
-                    let request: $request = decode_validated(input, &VALIDATOR)?;
+                    static SCHEMA: OnceLock<Result<RequestSchema, String>> = OnceLock::new();
+                    let schema = request_schema::<$request>(&SCHEMA)?;
+                    let request: $request = decode_validated(input, &schema.validator)?;
                     request.check_rules()?;
                     let mut context =
                         match authorize_targets(ports.access, caller, operation, &request).await {
                             Ok(context) => context,
                             Err(refusal) => {
+                                let refusal =
+                                    name_refused_entry(&request, &schema.workspace_lists, refusal);
                                 return Err(
                                     record_denial(ports.events, caller.principal, operation, &request, refusal)
                                         .await,
                                 );
                             }
                         };
+                    refuse_while_archived(service, caller.principal, operation, &request).await?;
                     let replay = <$request as RequestScope>::REPLAY;
+                    let named = <$request as RequestScope>::RESPONSE_WORKSPACE;
                     match prepare_mutation(ports, &mut context, replay, &request).await? {
                         MutationGate::Run(lease) => {
                             // A handler's own authorization (the job-kind rule) is recorded
@@ -88,12 +119,35 @@ macro_rules! dispatch_operations {
                                 ),
                                 outcome => outcome,
                             };
-                            finish(ports.mutations, lease, replay, outcome).await
+                            finish(ports.mutations, lease, Retained { replay, named }, outcome).await
                         }
                         MutationGate::ShortCircuit(value) => Ok(value),
                     }
                 }),*
                 _ => Err(ApiError::new(ErrorCode::NotFound, "Unknown operation")),
+            }
+        }
+    };
+}
+
+macro_rules! refused_scopes {
+    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
+        $operator:literal, $visibility:literal, $permission:ident, $ui:literal, $status:literal,
+        $destructive:literal, $description:literal)),* $(,)?) => {
+        /// The log a refusal of `operation` with the request body `input`, made before any
+        /// target was evaluated, is recorded in: `denial_scope` for the request `input` decodes
+        /// to. An `input` that is not a request of `operation` names no workspace, so its
+        /// refusal is the tenant's.
+        fn refused_scope(
+            principal: &Principal,
+            operation: OperationName,
+            input: &Value,
+        ) -> EventScope {
+            let tenant = || EventScope::Tenant(principal.tenant_id.clone());
+            match operation.as_str() {
+                $(stringify!($id) => <$request as Deserialize>::deserialize(input)
+                    .map_or_else(|_| tenant(), |request| denial_scope(principal, None, &request)),)*
+                _ => tenant(),
             }
         }
     };
@@ -125,6 +179,16 @@ enum MutationGate {
     ShortCircuit(Value),
 }
 
+/// What the ledger keeps of one operation's completed mutation, from its request type.
+#[derive(Debug, Clone, Copy)]
+struct Retained {
+    /// Which body is stored and replayed (`RequestScope::REPLAY`).
+    replay: ReplayPolicy,
+    /// Where the response names the workspace the ledger records at completion
+    /// (`RequestScope::RESPONSE_WORKSPACE`).
+    named: Option<&'static str>,
+}
+
 /// An authorization refusal and the target that refused, when one had been reached.
 struct Refusal {
     error: ApiError,
@@ -132,6 +196,27 @@ struct Refusal {
     /// request with no target).
     target: Option<Target>,
 }
+
+/// What dispatch reads from a request type's schema, built once per operation.
+struct RequestSchema {
+    /// Validates a request body before it is decoded.
+    validator: jsonschema::Validator,
+    /// Where the request lists workspaces (`workspace_lists`): a refusal at a listed workspace
+    /// names its entry (`name_refused_entry`).
+    workspace_lists: Vec<Vec<Step>>,
+}
+
+/// One step of a place in a request: a named property, or any element of an array.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Step {
+    /// The property of this name.
+    Property(String),
+    /// Each element of an array.
+    Element,
+}
+
+/// How a request type's schema writes a workspace identity (its `$defs` entry).
+const WORKSPACE_ID_SCHEMA: &str = "#/$defs/WorkspaceId";
 
 impl Refusal {
     /// A refusal before any target was evaluated.
@@ -177,7 +262,13 @@ async fn prepare_mutation<Req: RequestScope + Serialize>(
         operation: context.operation,
         key,
     };
-    match ports.mutations.begin(&mutation_key, &digest).await? {
+    // The workspace this mutation writes: a purge of it reaches this row by that column.
+    let workspace = written_workspace(&request.targets());
+    match ports
+        .mutations
+        .begin(&mutation_key, &digest, workspace)
+        .await?
+    {
         BeginOutcome::New(lease) => {
             context.mutation = Some(lease.mutation_id);
             Ok(MutationGate::Run(Some(lease)))
@@ -187,8 +278,9 @@ async fn prepare_mutation<Req: RequestScope + Serialize>(
             context.attempt = Attempt::Resumed;
             Ok(MutationGate::Run(Some(lease)))
         }
+        // A body stored in an earlier shape of the response is answered in this build's.
         BeginOutcome::Replay(stored) => {
-            replay_response(replay, stored.body).map(MutationGate::ShortCircuit)
+            replay_response(replay, Req::replayed(stored.body)?).map(MutationGate::ShortCircuit)
         }
         BeginOutcome::Conflict { operation } => Err(ApiError::new(
             ErrorCode::Conflict,
@@ -220,7 +312,7 @@ async fn prepare_mutation<Req: RequestScope + Serialize>(
 async fn finish<Res: Serialize>(
     mutations: &dyn MutationStore,
     lease: Option<MutationLease>,
-    replay: ReplayPolicy,
+    retained: Retained,
     outcome: Result<Res, ApiError>,
 ) -> Result<Value, ApiError> {
     let Some(lease) = lease else {
@@ -228,11 +320,12 @@ async fn finish<Res: Serialize>(
     };
     let prepared = outcome.and_then(|response| {
         let body = response_body(&response)?;
-        let retained = ledger_body(replay, &body)?;
-        Ok((body, retained))
+        let kept = ledger_body(retained.replay, &body)?;
+        let workspace = named_workspace(retained.named, &body)?;
+        Ok((body, kept, workspace))
     });
     let error = match prepared {
-        Ok((body, retained)) => match mutations.complete(lease, retained).await {
+        Ok((body, kept, workspace)) => match mutations.complete(lease, kept, workspace).await {
             Ok(()) => return Ok(body),
             Err(lost) if lost.code == ErrorCode::Conflict => return Err(lost),
             Err(error) => error,
@@ -264,6 +357,30 @@ fn ledger_body(replay: ReplayPolicy, body: &Value) -> Result<Value, ApiError> {
             Ok(serde_json::json!({ "connector_id": connector_id }))
         }
     }
+}
+
+/// The workspace the response names at `pointer` (`RequestScope::RESPONSE_WORKSPACE`): `None`
+/// without a pointer, and where the response holds nothing there or `null` (a tenant job's
+/// absent `workspace_id`).
+///
+/// # Errors
+/// Returns `Internal` when the value at the pointer is not a workspace identity: the request
+/// type's pointer and its response type disagree.
+fn named_workspace(pointer: Option<&str>, body: &Value) -> Result<Option<WorkspaceId>, ApiError> {
+    let Some(found) = pointer.and_then(|pointer| body.pointer(pointer)) else {
+        return Ok(None);
+    };
+    if found.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value(found.clone())
+        .map(Some)
+        .map_err(|_| {
+            ApiError::new(
+                ErrorCode::Internal,
+                "The response names its workspace with a value that is not a workspace identity",
+            )
+        })
 }
 
 fn replay_response(replay: ReplayPolicy, body: Value) -> Result<Value, ApiError> {
@@ -311,9 +428,10 @@ async fn authorize_targets(
             "Request declares no authorization target",
         )));
     }
-    // No grant lets an agent route see a draft or back up, restore or purge, so this runs
-    // before any grant is looked up.
+    // No grant lets an agent route see a draft or back up, restore or purge, and none lets any
+    // route but the local owner's manage connectors, so these run before any grant is looked up.
     access::check_human_route(principal, operation).map_err(Refusal::before_targets)?;
+    access::check_local_owner_route(principal, operation).map_err(Refusal::before_targets)?;
     for target in targets {
         let at = |error| Refusal {
             error,
@@ -357,6 +475,179 @@ async fn authorize_targets(
     })
 }
 
+/// Refuse a mutation that names an archived workspace when `operations::ALLOWED_WHILE_ARCHIVED`
+/// does not allow it (contract ruling 25).
+///
+/// Every workspace the mutation's targets name is checked, not only the one it writes: a
+/// comment written in a live workspace that cites an archived one is refused as a write in it
+/// is, whatever the order of the targets. Issuing a connector that lists an archived workspace
+/// is allowed (`create_connector` is on `ALLOWED_WHILE_ARCHIVED`, owner decision 2026-10-17). Each distinct workspace's catalog entry is read once, through
+/// `Application::archived_at`, in target order, until one is archived. A mutation authorized
+/// only at the tenant names no workspace and asks nothing. Nothing is recorded: the refusal is
+/// a state of the workspace, not a missing grant.
+///
+/// # Errors
+/// Returns `Conflict` with `ErrorDetail::WorkspaceArchived` of the first archived workspace, or
+/// the error of `Application::archived_at`.
+async fn refuse_while_archived(
+    service: &dyn Application,
+    principal: &Principal,
+    operation: OperationName,
+    request: &impl RequestScope,
+) -> Result<(), ApiError> {
+    if request.idempotency_key().is_none() || operation.allowed_while_archived() {
+        return Ok(());
+    }
+    let mut asked: Vec<WorkspaceId> = Vec::new();
+    for target in request.targets() {
+        let Target::Workspace(workspace_id, _) = target else {
+            continue;
+        };
+        if asked.contains(&workspace_id) {
+            continue;
+        }
+        asked.push(workspace_id);
+        let scope = StorageScope {
+            tenant_id: principal.tenant_id.clone(),
+            workspace_id,
+        };
+        if let Some(archived_at) = service.archived_at(&scope).await? {
+            return Err(ApiError::new(
+                ErrorCode::Conflict,
+                format!(
+                    "Workspace {} is archived, and {} does not run on an archived workspace; \
+                     unarchive it first",
+                    workspace_id.0,
+                    operation.as_str()
+                ),
+            )
+            .with_detail(ErrorDetail::WorkspaceArchived { archived_at }));
+        }
+    }
+    Ok(())
+}
+
+/// Name the request entry a `Forbidden` workspace target came from, when the request lists that
+/// workspace: the first element of an array of workspace identities (`RequestSchema`'s
+/// `workspace_lists`, read from the request type's schema, so every request that lists
+/// workspaces is recognised, not one type by name) that holds it, as a JSON Pointer. A
+/// `create_connector` refused at one of its workspaces names `/workspace_ids/<index>` (contract
+/// ruling 22). Every other refusal is returned as it is: another code, a refusal before any
+/// target or at the tenant's, and a workspace the request names in no list.
+///
+/// The refusal is the answer: a request that cannot be read back as JSON (no contract request
+/// is one) keeps it unnamed rather than turning it into another error.
+fn name_refused_entry<Req: Serialize>(
+    request: &Req,
+    lists: &[Vec<Step>],
+    refusal: Refusal,
+) -> Refusal {
+    let Some(Target::Workspace(workspace, _)) = refusal.target else {
+        return refusal;
+    };
+    if refusal.error.code != ErrorCode::Forbidden || lists.is_empty() {
+        return refusal;
+    }
+    let (Ok(body), Ok(wanted)) = (
+        serde_json::to_value(request),
+        serde_json::to_value(workspace),
+    ) else {
+        return refusal;
+    };
+    match lists
+        .iter()
+        .find_map(|template| entry_of(&body, template, &wanted))
+    {
+        Some(field) => Refusal {
+            error: refusal.error.with_field(field),
+            target: refusal.target,
+        },
+        None => refusal,
+    }
+}
+
+/// The first place of `value` along `template` that holds `wanted`, as a JSON Pointer.
+fn entry_of(value: &Value, template: &[Step], wanted: &Value) -> Option<String> {
+    match template.split_first() {
+        None => (value == wanted).then(String::new),
+        Some((Step::Property(name), rest)) => {
+            let inner = value.get(name.as_str())?;
+            entry_of(inner, rest, wanted).map(|tail| {
+                // RFC 6901: `~` and `/` in a property name are escaped.
+                format!("/{}{tail}", name.replace('~', "~0").replace('/', "~1"))
+            })
+        }
+        Some((Step::Element, rest)) => {
+            value
+                .as_array()?
+                .iter()
+                .enumerate()
+                .find_map(|(index, element)| {
+                    entry_of(element, rest, wanted).map(|tail| format!("/{index}{tail}"))
+                })
+        }
+    }
+}
+
+/// Every place `schema`, a request type's root schema, holds an array of workspace identities,
+/// as a template: the named properties and array elements that lead to it, through definitions
+/// (`$ref`) and alternatives (`anyOf`, `oneOf`, `allOf`). A single identity is not a list, and
+/// a definition is not entered again inside itself.
+fn workspace_lists(schema: &Value) -> Vec<Vec<Step>> {
+    let mut found = Vec::new();
+    collect_lists(schema, schema, &mut Vec::new(), &mut Vec::new(), &mut found);
+    found
+}
+
+/// Walk `node` of `root` at the place `at`, adding each array of workspace identities to `found`.
+fn collect_lists<'a>(
+    root: &'a Value,
+    node: &'a Value,
+    at: &mut Vec<Step>,
+    entered: &mut Vec<&'a str>,
+    found: &mut Vec<Vec<Step>>,
+) {
+    if let Some(reference) = node.get("$ref").and_then(Value::as_str)
+        && reference != WORKSPACE_ID_SCHEMA
+        && !entered.contains(&reference)
+        && let Some(definition) = reference
+            .strip_prefix('#')
+            .and_then(|pointer| root.pointer(pointer))
+    {
+        entered.push(reference);
+        collect_lists(root, definition, at, entered, found);
+        entered.pop();
+    }
+    for combinator in ["anyOf", "oneOf", "allOf"] {
+        for option in node
+            .get(combinator)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            collect_lists(root, option, at, entered, found);
+        }
+    }
+    if let Some(properties) = node.get("properties").and_then(Value::as_object) {
+        for (name, property) in properties {
+            at.push(Step::Property(name.clone()));
+            collect_lists(root, property, at, entered, found);
+            at.pop();
+        }
+    }
+    if let Some(items) = node.get("items") {
+        at.push(Step::Element);
+        if items.get("$ref").and_then(Value::as_str) == Some(WORKSPACE_ID_SCHEMA) {
+            if !found.contains(at) {
+                found.push(at.clone());
+            }
+        } else {
+            collect_lists(root, items, at, entered, found);
+        }
+        at.pop();
+    }
+}
+
 /// Record a `Forbidden` authorization refusal of an authenticated caller and return the
 /// refusal's error unchanged.
 ///
@@ -379,6 +670,34 @@ async fn record_denial(
     }
     let scope = denial_scope(principal, refusal.target, request);
     record_denied(events, principal, operation, &scope, refusal.error).await
+}
+
+/// Record a refusal a binding makes itself, before it dispatches, and return it unchanged.
+///
+/// A binding may refuse a request without dispatching it: the MCP server answers only an agent's
+/// route. Such a refusal comes before any target is evaluated, exactly as dispatch's own route
+/// refusal does, so it is recorded by dispatch's rule for that case (`denial_scope`), applied
+/// to the request `input` decodes to as a request of `operation`: in the tenant's log when the
+/// request has a `Deployment` target; otherwise in the workspace's log when its targets name
+/// exactly one distinct workspace; otherwise (none, or two or more) in the tenant's. An `input`
+/// that does not decode names no workspace, so its refusal is the tenant's. The caller is
+/// refused either way: `input` is read only to find the log, and is never validated for it.
+///
+/// Only a `Forbidden` is recorded, as `permission_denied` naming `principal` and `operation`;
+/// any other error is returned without an event. A failed append does not change the answer, so
+/// a caller cannot learn whether the log is writable from the code it receives.
+pub async fn record_refusal(
+    events: &dyn EventLog,
+    principal: &Principal,
+    operation: OperationName,
+    input: &Value,
+    refusal: ApiError,
+) -> ApiError {
+    if refusal.code != ErrorCode::Forbidden {
+        return refusal;
+    }
+    let scope = refused_scope(principal, operation, input);
+    record_denied(events, principal, operation, &scope, refusal).await
 }
 
 /// Append `permission_denied` for `error` to the log of `scope` and return `error`
@@ -447,6 +766,17 @@ fn sole_workspace(targets: &[Target]) -> Option<WorkspaceId> {
     named
 }
 
+/// The workspace a mutation writes: that of the first of `targets`, which carries the
+/// operation's table permission (`RequestScope::targets`), or `None` when that target is the
+/// tenant or sign-in. A later target is what the request reads (the source a comment cites,
+/// the workspaces a connector is granted), never where its response's content belongs.
+fn written_workspace(targets: &[Target]) -> Option<WorkspaceId> {
+    targets.first().and_then(|first| match *first {
+        Target::Workspace(workspace_id, _) => Some(workspace_id),
+        Target::Authenticated | Target::Deployment(_) => None,
+    })
+}
+
 /// Refuse a workspace grant the adapter returned for a workspace or tenant that was not asked.
 fn require_workspace_scope(
     principal: &Principal,
@@ -489,20 +819,32 @@ fn decode<T: DeserializeOwned>(value: Value) -> Result<T, ApiError> {
         .map_err(|error| ApiError::new(ErrorCode::InvalidInput, bounded(error.to_string())))
 }
 
-fn decode_validated<T: DeserializeOwned + JsonSchema>(
-    value: Value,
-    cell: &OnceLock<Result<jsonschema::Validator, String>>,
-) -> Result<T, ApiError> {
-    let validator = cell
-        .get_or_init(|| {
-            let schema = SchemaSettings::draft2020_12()
-                .into_generator()
-                .into_root_schema_for::<T>();
-            let document = serde_json::to_value(schema).map_err(|error| error.to_string())?;
-            jsonschema::validator_for(&document).map_err(|error| error.to_string())
+/// What dispatch reads from the schema of request type `T`, built once in `cell`.
+///
+/// # Errors
+/// Returns `Internal` when the schema cannot be built or compiled.
+fn request_schema<T: JsonSchema>(
+    cell: &OnceLock<Result<RequestSchema, String>>,
+) -> Result<&RequestSchema, ApiError> {
+    cell.get_or_init(|| {
+        let schema = SchemaSettings::draft2020_12()
+            .into_generator()
+            .into_root_schema_for::<T>();
+        let document = serde_json::to_value(schema).map_err(|error| error.to_string())?;
+        let validator = jsonschema::validator_for(&document).map_err(|error| error.to_string())?;
+        Ok(RequestSchema {
+            validator,
+            workspace_lists: workspace_lists(&document),
         })
-        .as_ref()
-        .map_err(|message| ApiError::new(ErrorCode::Internal, message.clone()))?;
+    })
+    .as_ref()
+    .map_err(|message| ApiError::new(ErrorCode::Internal, message.clone()))
+}
+
+fn decode_validated<T: DeserializeOwned>(
+    value: Value,
+    validator: &jsonschema::Validator,
+) -> Result<T, ApiError> {
     validator
         .validate(&value)
         .map_err(|error| invalid_input(&error))?;
@@ -537,21 +879,26 @@ pub fn new_mutation_id() -> MutationId {
 }
 
 okf_jawn_contract::for_each_operation!(dispatch_operations);
+okf_jawn_contract::for_each_operation!(refused_scopes);
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Mutex, OnceLock};
 
     use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
     use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
     use okf_jawn_contract::identity::{Digest, IdempotencyKey, TenantId, WorkspaceId};
     use okf_jawn_contract::metadata::OperationName;
     use okf_jawn_contract::scope::{ReplayPolicy, RequestScope, Target};
+    use schemars::JsonSchema;
     use serde::{Serialize, Serializer};
     use serde_json::{Value, json};
 
-    use super::{Caller, authorize_targets, finish, ledger_body, new_mutation_id, replay_response};
+    use super::{
+        Caller, Refusal, RequestSchema, Retained, Step, authorize_targets, finish, ledger_body,
+        name_refused_entry, named_workspace, new_mutation_id, replay_response, request_schema,
+    };
     use crate::access::AccessControl;
     use crate::context::{TenantGrant, WorkspaceGrant};
     use crate::mutations::{BeginOutcome, MutationKey, MutationLease, MutationStore};
@@ -568,20 +915,52 @@ mod tests {
     /// the dispatch table only reaches contract requests, so this one is checked directly.
     struct Untargeted;
 
-    /// Ledger double that records the bodies it was asked to keep and the leases it was asked
-    /// to end. `begin` is never reached: these tests enter after the handler.
+    /// Ledger double that records the bodies (with the workspace) it was asked to keep and the
+    /// leases it was asked to end. `begin` is never reached: these tests enter after the
+    /// handler.
     #[derive(Default)]
     struct RecordingLedger {
-        completed: Mutex<Vec<Value>>,
+        completed: Mutex<Vec<(Value, Option<WorkspaceId>)>>,
         released: Mutex<Vec<MutationLease>>,
     }
 
     /// A handler response whose serialization fails.
     struct Unserializable;
 
+    /// A request shape no contract request has yet: workspaces listed under other names, in a
+    /// nested list, in an optional list, and named singly.
+    #[derive(Serialize, JsonSchema)]
+    struct Listing {
+        workspace_id: WorkspaceId,
+        readers: Vec<WorkspaceId>,
+        groups: Vec<Group>,
+        optional: Option<Vec<WorkspaceId>>,
+    }
+
+    /// One nested entry of `Listing`.
+    #[derive(Serialize, JsonSchema)]
+    struct Group {
+        owner: WorkspaceId,
+        workspace_ids: Vec<WorkspaceId>,
+    }
+
     const CONNECTOR: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const WORKSPACE: &str = "11111111-1111-4111-8111-111111111111";
     const POLICY: ReplayPolicy = ReplayPolicy::AlreadyIssued {
         id_pointer: "/issued/id",
+    };
+    const ISSUED: Retained = Retained {
+        replay: POLICY,
+        named: None,
+    };
+    const STORED: Retained = Retained {
+        replay: ReplayPolicy::StoredResponse,
+        named: None,
+    };
+    /// A response naming the workspace it created, as `create_workspace`'s does.
+    const CREATED: Retained = Retained {
+        replay: ReplayPolicy::StoredResponse,
+        named: Some("/id"),
     };
 
     impl NoAccess {
@@ -637,7 +1016,7 @@ mod tests {
     }
 
     impl RecordingLedger {
-        fn completed(&self) -> Result<Vec<Value>, ApiError> {
+        fn completed(&self) -> Result<Vec<(Value, Option<WorkspaceId>)>, ApiError> {
             Ok(self.completed.lock().map_err(|_| poisoned())?.clone())
         }
 
@@ -651,6 +1030,7 @@ mod tests {
             &'a self,
             _key: &'a MutationKey,
             _digest: &'a Digest,
+            _workspace: Option<WorkspaceId>,
         ) -> PortFuture<'a, BeginOutcome> {
             Box::pin(async {
                 Err(ApiError::new(
@@ -660,12 +1040,17 @@ mod tests {
             })
         }
 
-        fn complete(&self, _lease: MutationLease, response: Value) -> PortFuture<'_, ()> {
+        fn complete(
+            &self,
+            _lease: MutationLease,
+            response: Value,
+            workspace: Option<WorkspaceId>,
+        ) -> PortFuture<'_, ()> {
             Box::pin(async move {
                 self.completed
                     .lock()
                     .map_err(|_| poisoned())?
-                    .push(response);
+                    .push((response, workspace));
                 Ok(())
             })
         }
@@ -726,10 +1111,10 @@ mod tests {
         let held = lease();
         // The handler succeeded and returned a secret, but not the identity the policy names.
         let outcome: Result<Value, ApiError> = Ok(json!({ "secret": "s" }));
-        let refused = finish(&ledger, Some(held), POLICY, outcome).await;
+        let refused = finish(&ledger, Some(held), ISSUED, outcome).await;
         assert!(matches!(refused, Err(error) if error.code == ErrorCode::Internal));
         assert_eq!(ledger.released()?, vec![held]);
-        assert_eq!(ledger.completed()?, Vec::<Value>::new());
+        assert_eq!(ledger.completed()?, Vec::new());
         Ok(())
     }
 
@@ -739,10 +1124,10 @@ mod tests {
         let ledger = RecordingLedger::default();
         let held = lease();
         let outcome: Result<Unserializable, ApiError> = Ok(Unserializable);
-        let refused = finish(&ledger, Some(held), ReplayPolicy::StoredResponse, outcome).await;
+        let refused = finish(&ledger, Some(held), STORED, outcome).await;
         assert!(matches!(refused, Err(error) if error.code == ErrorCode::Internal));
         assert_eq!(ledger.released()?, vec![held]);
-        assert_eq!(ledger.completed()?, Vec::<Value>::new());
+        assert_eq!(ledger.completed()?, Vec::new());
         Ok(())
     }
 
@@ -752,12 +1137,73 @@ mod tests {
         let ledger = RecordingLedger::default();
         let body = json!({ "issued": { "id": CONNECTOR }, "secret": "s" });
         let outcome: Result<Value, ApiError> = Ok(body.clone());
-        assert_eq!(finish(&ledger, Some(lease()), POLICY, outcome).await?, body);
+        assert_eq!(finish(&ledger, Some(lease()), ISSUED, outcome).await?, body);
         assert_eq!(
             ledger.completed()?,
-            vec![json!({ "connector_id": CONNECTOR })]
+            vec![(json!({ "connector_id": CONNECTOR }), None)]
         );
         assert_eq!(ledger.released()?, Vec::new());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completion_records_the_workspace_the_response_names_at_its_pointer()
+    -> Result<(), ApiError> {
+        let ledger = RecordingLedger::default();
+        // The name quotes another workspace's identity; only the pointer's field is read.
+        let body = json!({ "id": WORKSPACE, "name": CONNECTOR });
+        let outcome: Result<Value, ApiError> = Ok(body.clone());
+        assert_eq!(
+            finish(&ledger, Some(lease()), CREATED, outcome).await?,
+            body
+        );
+        let workspace = serde_json::from_value(json!(WORKSPACE))
+            .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+        assert_eq!(ledger.completed()?, vec![(body, Some(workspace))]);
+        Ok(())
+    }
+
+    /// A pointer and a response type that disagree are our fault: the mutation completes
+    /// nothing, the lease is released, and the caller receives `Internal`, not a success whose
+    /// ledger row records no workspace for a purge to find.
+    #[tokio::test]
+    async fn a_pointer_that_names_the_wrong_type_completes_nothing_and_releases_the_lease()
+    -> Result<(), ApiError> {
+        let ledger = RecordingLedger::default();
+        let held = lease();
+        let outcome: Result<Value, ApiError> = Ok(json!({ "id": "not an identity" }));
+        let refused = finish(&ledger, Some(held), CREATED, outcome).await;
+        assert!(matches!(refused, Err(error) if error.code == ErrorCode::Internal));
+        assert_eq!(ledger.completed()?, Vec::new());
+        assert_eq!(ledger.released()?, vec![held]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_response_names_a_workspace_only_at_its_pointer() -> Result<(), ApiError> {
+        let body = json!({ "id": WORKSPACE, "job": { "workspace_id": null } });
+        let named = named_workspace(Some("/id"), &body)?;
+        assert_eq!(
+            named.map(|workspace| workspace.0.to_string()),
+            Some(WORKSPACE.to_owned())
+        );
+        assert_eq!(
+            named_workspace(None, &body)?,
+            None,
+            "no pointer, no workspace"
+        );
+        assert_eq!(
+            named_workspace(Some("/workspace_id"), &body)?,
+            None,
+            "absent"
+        );
+        assert_eq!(
+            named_workspace(Some("/job/workspace_id"), &body)?,
+            None,
+            "null"
+        );
+        let refused = named_workspace(Some("/id"), &json!({ "id": "not an identity" }));
+        assert!(matches!(refused, Err(error) if error.code == ErrorCode::Internal));
         Ok(())
     }
 
@@ -796,5 +1242,139 @@ mod tests {
                         if connector_id.0.to_string() == CONNECTOR
                 )
         ));
+    }
+
+    fn id(fill: char) -> Result<WorkspaceId, ApiError> {
+        let run = |length: usize| fill.to_string().repeat(length);
+        serde_json::from_value(json!(format!(
+            "{}-{}-4{}-8{}-{}",
+            run(8),
+            run(4),
+            run(3),
+            run(3),
+            run(12)
+        )))
+        .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))
+    }
+
+    fn listing() -> Result<Listing, ApiError> {
+        Ok(Listing {
+            workspace_id: id('a')?,
+            readers: vec![id('b')?, id('c')?],
+            groups: vec![Group {
+                owner: id('a')?,
+                workspace_ids: vec![id('d')?, id('c')?],
+            }],
+            optional: Some(vec![id('e')?]),
+        })
+    }
+
+    fn refused_at(target: Target, code: ErrorCode) -> Refusal {
+        Refusal {
+            error: ApiError::new(code, "refused"),
+            target: Some(target),
+        }
+    }
+
+    fn property(name: &str) -> Step {
+        Step::Property(name.to_owned())
+    }
+
+    #[test]
+    fn every_array_of_workspace_identities_in_a_request_schema_is_found() -> Result<(), ApiError> {
+        let cell: OnceLock<Result<RequestSchema, String>> = OnceLock::new();
+        let schema = request_schema::<Listing>(&cell)?;
+        let mut found = schema.workspace_lists.clone();
+        found.sort_by_key(|template| format!("{template:?}"));
+        assert_eq!(
+            found,
+            vec![
+                vec![
+                    property("groups"),
+                    Step::Element,
+                    property("workspace_ids"),
+                    Step::Element
+                ],
+                vec![property("optional"), Step::Element],
+                vec![property("readers"), Step::Element],
+            ],
+            "a single identity is no list"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_forbidden_refusal_names_the_first_list_entry_that_holds_its_workspace()
+    -> Result<(), ApiError> {
+        let cell: OnceLock<Result<RequestSchema, String>> = OnceLock::new();
+        let lists = &request_schema::<Listing>(&cell)?.workspace_lists;
+        let request = listing()?;
+        for (fill, field) in [
+            ('b', Some("/readers/0")),
+            ('d', Some("/groups/0/workspace_ids/0")),
+            ('e', Some("/optional/0")),
+            // Named singly, never in a list.
+            ('a', None),
+        ] {
+            let target = Target::Workspace(id(fill)?, Permission::Read);
+            let named =
+                name_refused_entry(&request, lists, refused_at(target, ErrorCode::Forbidden));
+            assert_eq!(named.error.field.as_deref(), field, "{fill}");
+        }
+        // Listed twice: the first entry in the schema's order names it.
+        let twice = name_refused_entry(
+            &request,
+            lists,
+            refused_at(
+                Target::Workspace(id('c')?, Permission::Read),
+                ErrorCode::Forbidden,
+            ),
+        );
+        assert!(
+            matches!(
+                twice.error.field.as_deref(),
+                Some("/groups/0/workspace_ids/1" | "/readers/1")
+            ),
+            "{:?}",
+            twice.error.field
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn only_a_forbidden_refusal_at_a_listed_workspace_names_an_entry() -> Result<(), ApiError> {
+        let cell: OnceLock<Result<RequestSchema, String>> = OnceLock::new();
+        let lists = &request_schema::<Listing>(&cell)?.workspace_lists;
+        let request = listing()?;
+        let listed = Target::Workspace(id('b')?, Permission::Read);
+        for code in [
+            ErrorCode::Internal,
+            ErrorCode::NotFound,
+            ErrorCode::Unavailable,
+        ] {
+            let kept = name_refused_entry(&request, lists, refused_at(listed, code.clone()));
+            assert_eq!(kept.error.field, None, "{code:?}");
+        }
+        let tenant = name_refused_entry(
+            &request,
+            lists,
+            refused_at(Target::Deployment(Permission::Admin), ErrorCode::Forbidden),
+        );
+        assert_eq!(tenant.error.field, None);
+        let before = name_refused_entry(
+            &request,
+            lists,
+            Refusal::before_targets(ApiError::new(ErrorCode::Forbidden, "route")),
+        );
+        assert_eq!(before.error.field, None);
+        // A request that cannot be read back keeps its refusal, unnamed.
+        let unreadable = name_refused_entry(
+            &Unserializable,
+            lists,
+            refused_at(listed, ErrorCode::Forbidden),
+        );
+        assert_eq!(unreadable.error.code, ErrorCode::Forbidden);
+        assert_eq!(unreadable.error.field, None);
+        Ok(())
     }
 }

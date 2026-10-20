@@ -1,7 +1,7 @@
 [
   {
     "auth": "principal",
-    "description": "Stream authenticated original bytes into a preallocated upload, enforcing byte limits and digest verification.",
+    "description": "Stream authenticated original bytes into a preallocated upload, enforcing byte limits. complete_upload verifies the expected length and digest.",
     "id": "upload_content",
     "method": "put",
     "path": "/api/workspaces/{workspace_id}/uploads/{upload_id}/content",
@@ -51,7 +51,7 @@
   },
   {
     "auth": "principal",
-    "description": "Resume workspace notifications with Last-Event-ID; notifications are projections, not canonical content.",
+    "description": "Resume workspace notifications with Last-Event-ID; notifications are projections, not canonical content. A workspace's security events are returned only to a caller holding `admin` on it, checked on every call; a page may therefore hold fewer rows than asked, or none, and still carry a cursor.",
     "id": "stream_events",
     "method": "get",
     "path": "/api/workspaces/{workspace_id}/events",

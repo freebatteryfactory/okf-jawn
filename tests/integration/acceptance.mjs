@@ -10,7 +10,7 @@ import { readResolvedRevision,reviewCoversRevision } from '../support/assertions
 export async function runJourney(call){
  const key=randomUUID();const workspace=await call('workspaces','create_workspace',{name:`Acceptance ${key}`,description:'Disposable independent test',idempotency_key:key});
  const workspace_id=workspace.id;const properties={our_extension:{kept:true}};
- const item=await call('items','create_item',{workspace_id,base_revision:workspace.head,path:'case.md',title:'Case',type_name:'Note',kind:'note',body:'Proposal is not approved.\n',properties,idempotency_key:randomUUID()});
+ const {item}=await call('items','create_item',{workspace_id,base_revision:workspace.head,path:'case.md',title:'Case',type_name:'Note',kind:'note',body:'Proposal is not approved.\n',properties,idempotency_key:randomUUID()});
  const item_id=item.summary.id;const revision=item.summary.revision;
  const read=await call('reads','read_item',{workspace_id,item_id,at:{kind:'revision',revision},view:'text',selection:{kind:'all'},max_bytes:65536,max_images:0},true);
  readResolvedRevision(read,revision);assert.match(read.markdown,/not approved/);
@@ -19,7 +19,7 @@ export async function runJourney(call){
  await call('reviews','create_review',{source:read.source,content_digest,confirmation_id:randomUUID(),idempotency_key:randomUUID()},true,403);
  const confirm=await call('reviews','create_confirmation',{workspace_id,action:'review',target:{kind:'item',item_id},revision,content_digest,idempotency_key:randomUUID()});
  const review=await call('reviews','create_review',{source:read.source,content_digest,confirmation_id:confirm.id,idempotency_key:randomUUID()});reviewCoversRevision(review,revision);
- await call('items','save_draft',{workspace_id,item_id,base_revision:revision,body:'The proposal is now recorded as changed.\n',properties,idempotency_key:randomUUID()});
+ await call('items','save_draft',{workspace_id,item_id,base_revision:revision,body:'The proposal is now recorded as changed.\n',properties:item.properties,idempotency_key:randomUUID()});
  const snapshot=await call('history','commit_items',{workspace_id,item_ids:[item_id],message:'Record the change',idempotency_key:randomUUID()});
  assert.notEqual(snapshot.revision,revision,'a Snapshot must create a new revision; saving a draft must not');
  const reviews=await call('reviews','list_reviews',{workspace_id,item_id,at:{kind:'latest'}});
@@ -45,7 +45,7 @@ if(!local && (base.protocol!=='https:'||process.env['OKF_TEST_ALLOW_REMOTE']!=='
 async function call(domain,id,body,agent=false,expected=200){
  const headers={'content-type':'application/json'};
  if(agent)headers.authorization=`Bearer ${process.env['OKF_TEST_AGENT_TOKEN']}`;
- else{headers.cookie=process.env['OKF_TEST_BROWSER_COOKIE'];headers['x-csrf-token']=process.env['OKF_TEST_CSRF'];headers.origin=base.origin;}
+ else{headers.cookie=process.env['OKF_TEST_BROWSER_COOKIE'];headers['x-okf-csrf']=process.env['OKF_TEST_CSRF'];headers.origin=base.origin;}
  const response=await fetch(new URL(`/api/${domain}/${id.replaceAll('_','-')}`,base),{method:'POST',headers,redirect:'error',signal:AbortSignal.timeout(30000),body:JSON.stringify(body)});
  assert.equal(response.status,expected,`${id} status`);return response.json();
 }

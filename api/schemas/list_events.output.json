@@ -32,7 +32,7 @@
     },
     "Event": {
       "additionalProperties": false,
-      "description": "A resumable change notification, not canonical content.\n\nA tenant-level event (a sign-in, a connector issued or revoked, a refusal outside a\nworkspace) has no `workspace_id`. Security events carry their `actor`.",
+      "description": "A resumable change notification, not canonical content.\n\nA tenant-level event (a sign-in or a refused one, a connector issued or revoked, a refusal\noutside a workspace) has no `workspace_id`. Security events (`EventKind::is_security`) carry\ntheir `actor`, except a `sign_in_refused` event before a subject was established.",
       "properties": {
         "actor": {
           "anyOf": [
@@ -59,6 +59,15 @@
             }
           ],
           "description": "Affected connector."
+        },
+        "count": {
+          "description": "How many occurrences this one event stands for; absent means one. A `sign_in_refused`\nevent past its source's allowance counts that source's refusals of the minute, and a\n`permission_denied` event may count the same way when the server bounds its flood.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "id": {
           "description": "Opaque monotonic event cursor.",
@@ -99,7 +108,18 @@
               "type": "null"
             }
           ],
-          "description": "The refused operation of a `permission_denied` event."
+          "description": "The refused operation of a `permission_denied` event; absent when a byte transport was\nrefused (`transport`)."
+        },
+        "proposal_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Affected proposal."
         },
         "revision": {
           "anyOf": [
@@ -111,6 +131,17 @@
             }
           ],
           "description": "Content revision when applicable."
+        },
+        "transport": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TransportName"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The refused byte transport of a `permission_denied` event (a download, or an upload's\nbytes, which are not operations); `operation` is then absent."
         },
         "workspace_id": {
           "anyOf": [
@@ -198,6 +229,11 @@
         {
           "const": "signed_in",
           "description": "A browser session began (tenant-level).",
+          "type": "string"
+        },
+        {
+          "const": "sign_in_refused",
+          "description": "A sign-in was refused (tenant-level). It carries `at`, and `actor` only when a subject\nwas established.\n\nEach refusal from one source is recorded as its own event up to an allowance a minute;\npast it, the refusals of that source in that minute are recorded as one event with their\n`count`, written at the end of that minute or when the server stops. So every refusal is\ncounted, and what one source can write is bounded. The source and the allowance are the\nserver's. A refusal before any tenant is known (a hosted callback that names no\norganization) belongs to no tenant's log: the server's ingress limit and its diagnostics\ncount it.",
           "type": "string"
         },
         {
@@ -336,6 +372,16 @@
           "type": "string"
         },
         {
+          "const": "move_folder",
+          "description": "The `move_folder` operation.",
+          "type": "string"
+        },
+        {
+          "const": "delete_folder",
+          "description": "The `delete_folder` operation.",
+          "type": "string"
+        },
+        {
           "const": "list_types",
           "description": "The `list_types` operation.",
           "type": "string"
@@ -436,6 +482,11 @@
           "type": "string"
         },
         {
+          "const": "list_comments",
+          "description": "The `list_comments` operation.",
+          "type": "string"
+        },
+        {
           "const": "create_confirmation",
           "description": "The `create_confirmation` operation.",
           "type": "string"
@@ -458,6 +509,21 @@
         {
           "const": "complete_upload",
           "description": "The `complete_upload` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_upload",
+          "description": "The `get_upload` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_uploads",
+          "description": "The `list_uploads` operation.",
+          "type": "string"
+        },
+        {
+          "const": "discard_upload",
+          "description": "The `discard_upload` operation.",
           "type": "string"
         },
         {
@@ -607,6 +673,11 @@
         }
       ]
     },
+    "ProposalId": {
+      "description": "Identity of a suggested change set, not a review.",
+      "format": "uuid",
+      "type": "string"
+    },
     "Revision": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
       "type": "string"
@@ -615,6 +686,31 @@
       "format": "date-time",
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$",
       "type": "string"
+    },
+    "TransportName": {
+      "description": "A byte transport by name, as a refused one is recorded (`Event::transport`); each is one entry\nof `TRANSPORTS`, whose `id` is its `as_str`.",
+      "oneOf": [
+        {
+          "const": "upload_content",
+          "description": "`upload_content`.",
+          "type": "string"
+        },
+        {
+          "const": "download_object",
+          "description": "`download_object`.",
+          "type": "string"
+        },
+        {
+          "const": "download_artifact",
+          "description": "`download_artifact`.",
+          "type": "string"
+        },
+        {
+          "const": "download_tenant_artifact",
+          "description": "`download_tenant_artifact`.",
+          "type": "string"
+        }
+      ]
     },
     "WorkspaceId": {
       "description": "Stable application identity for one user-organized workspace.",

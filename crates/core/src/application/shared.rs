@@ -1,6 +1,14 @@
 //! Steps every handler of this service shares: the authorized scope, revision resolution with
 //! the purge check, the commit path of a content write, and receipts.
 //!
+//! A paginated read that resolves `at` (`log_items`, `list_items`, `search_items`, `get_links`)
+//! resolves it for its first page only. Its cursor is this service's, not the store's: it
+//! carries the operation's name and the tip that page resolved beside the store's own position
+//! (and nothing of the query; it is not signed), and every later page
+//! reads at that tip (`resolve_page`, `next_page`), so a write that lands between two pages of
+//! a read at `latest` cannot repeat or skip an entry. `read_item` has its own cursor, which
+//! carries its revision the same way.
+//!
 //! A content write is one path: the request's base revision is checked against the revision
 //! map first (`reading::check_revision`), the edits are committed on top of it with the edit
 //! check (`conformance::EditCheck`: OKF conformance refuses; the validator's warnings and OKF
@@ -9,23 +17,27 @@
 //! idempotent on the mutation identity (the commit replays, indexing a revision again is a
 //! no-op, the event and the receipt are unique on the mutation), so a failure at any step
 //! fails the request and a retry under the same idempotency key completes it without a
-//! second effect. A replayed commit's warnings are rebuilt by the same check over the
-//! committed tree, so the retry answers the warnings the first attempt would have; when they
-//! cannot be rebuilt, one warning says so and the landed write still succeeds
-//! (`replay_warnings`).
+//! second effect. A replayed commit answers the warnings the store kept when the commit was
+//! written (`VersionStore::commit`), so the retry answers the warnings its first attempt was
+//! given; for a commit the store kept none for, the store answers one warning that says so,
+//! and the landed write still succeeds. This service runs no check of its own on a replay and
+//! writes no file.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use okf_jawn_contract::access::Principal;
-use okf_jawn_contract::common::{MutationResult, Warning};
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::common::{MutationResult, PageRequest};
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::events::{EventKind, Receipt, ReceiptAudience};
 use okf_jawn_contract::identity::{
-    At, ItemId, MutationId, ReceiptId, Revision, Timestamp, WorkspacePath,
+    At, ItemId, MutationId, ReceiptId, Revision, TenantId, Timestamp, WorkspacePath,
 };
 use okf_jawn_contract::item::ItemDocument;
+use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::source::SourceReference;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::ApplicationService;
@@ -35,9 +47,7 @@ use crate::context::OperationContext;
 use crate::events::{EventScope, NewEvent};
 use crate::portable::item_content_digest;
 use crate::reading::check_revision;
-use crate::storage::{
-    CandidateCheck, CommitChanges, Committed, Page, Provenance, StorageScope, TreeEdit,
-};
+use crate::storage::{CommitChanges, Committed, Page, Provenance, StorageScope, TreeEdit};
 
 /// One content write of a handler.
 pub(super) struct Write {
@@ -64,46 +74,26 @@ pub(super) struct Touched {
     pub(super) of_type: Option<String>,
 }
 
-/// A private directory the tree of a replayed commit is written to for its check; a guard
-/// that removes it when dropped, so it goes on every path out of the check: a success, an
-/// error of a write or of the check, and a panic, whose unwinding drops it (the workspace
-/// builds with the default `panic = "unwind"`). core has no `tempfile`, so this is that guard.
-struct Scratch(PathBuf);
-
-/// How many entries of a folder are read at a time when a replayed commit's tree is read back.
-const TREE_PAGE: u16 = 500;
-/// The index the store maintains in every folder.
-const MAINTAINED_INDEX: &str = "index.md";
-/// The change log the store maintains at the root.
-const CHANGE_LOG: &str = "log.md";
-/// The code of the warning a replayed write answers when its first attempt's warnings could
-/// not be rebuilt (`replay_warnings`).
-const REPLAY_WARNINGS_UNAVAILABLE: &str = "replay_warnings_unavailable";
-
-impl Scratch {
-    /// A new, empty private directory under the system's temporary directory.
-    fn create() -> Result<Self, ApiError> {
-        let root = std::env::temp_dir().join(format!("okf-jawn-recheck-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&root).map_err(|error| scratch_error(&error))?;
-        Ok(Self(root))
-    }
-
-    /// Write one file of the tree.
-    fn write(&self, path: &WorkspacePath, bytes: &[u8]) -> Result<(), ApiError> {
-        let target = self.0.join(path.as_str());
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| scratch_error(&error))?;
-        }
-        std::fs::write(&target, bytes).map_err(|error| scratch_error(&error))
-    }
+/// Where a paginated read that resolves `at` resumes; opaque to the caller (base64url of this
+/// JSON). The store's own cursor is only a position in a listing, so it is carried with the
+/// revision that listing was read at.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PageCursor {
+    /// The operation the cursor continues, by its name: another operation's cursor is refused.
+    op: String,
+    /// The revision the first page resolved; every later page reads at it.
+    tip: Revision,
+    /// The store's own continuation within the listing at `tip`.
+    next: String,
+    /// For a folder listing only: whether its first page decided it is a current listing
+    /// (`items::list_items`), so every later page hides or shows archived items as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    current: Option<bool>,
 }
 
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        // Best effort: a directory left under the temporary directory harms nothing.
-        let _left = std::fs::remove_dir_all(&self.0);
-    }
-}
+/// The request field a page cursor is refused on.
+const PAGE_CURSOR: &str = "/page/cursor";
 
 /// The storage scope of the operation's one authorized workspace.
 ///
@@ -118,6 +108,24 @@ pub(super) fn workspace_scope(context: &OperationContext) -> Result<StorageScope
             ApiError::new(
                 ErrorCode::Internal,
                 "the operation was authorized for no workspace",
+            )
+        })
+}
+
+/// The tenant the operation was authorized at (its `Deployment` target).
+///
+/// # Errors
+/// Returns `Internal` when dispatch authorized no tenant, which only a request without a
+/// `Deployment` target could cause.
+pub(super) fn tenant_scope(context: &OperationContext) -> Result<TenantId, ApiError> {
+    context
+        .tenant
+        .as_ref()
+        .map(|grant| grant.tenant_id.clone())
+        .ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::Internal,
+                "the operation was authorized for no tenant",
             )
         })
 }
@@ -155,6 +163,94 @@ pub(super) async fn resolve(
     }
 }
 
+/// The revision one page of a paginated read is read at, the page to ask the store for, and,
+/// on a continuation of a folder listing, the "current" answer its cursor carries.
+///
+/// The first page (no cursor) resolves the selector once (`resolve`). A continuation reads at
+/// the tip its cursor carries, whatever `latest` is now, so a write that lands between two pages
+/// neither repeats nor skips an entry: the store's cursor is a position in the listing of one
+/// revision, and means nothing in another's. The tip is checked against the revision map again,
+/// so a continuation never reads a revision a purge invalidated meanwhile.
+///
+/// What a cursor is bound to, exactly: the operation that issued it (its name is in the
+/// cursor) and the tip. It is not signed and not bound to the query. So a cursor a caller
+/// writes in this shape with this operation's name is accepted, and reads what `at` naming
+/// that tip would read, from a position the store checks; and a cursor given to another
+/// query of the same operation (another item, folder, text or direction) reads that query at
+/// the tip from the position. A written cursor can also set a folder listing's "current" answer
+/// to `false`, so the head is listed with its archived items; that shows nothing an explicit
+/// revision would not (`at` naming an earlier revision, `search_items` with `include_archived`
+/// and `get_item` show the same items under the same permission), because hiding archived items
+/// is how a current listing looks, not an access rule.
+///
+/// # Errors
+/// Returns `InvalidInput` on `/page/cursor` for a cursor that is not base64url JSON of this
+/// shape (another field included), one that names another operation, or one whose tip is not
+/// the revision `at` names; the typed `NotFound` of an invalidated revision; or any port
+/// error.
+pub(super) async fn resolve_page(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    operation: OperationName,
+    at: &At,
+    page: PageRequest,
+) -> Result<(Revision, Page, Option<bool>), ApiError> {
+    let Some(text) = page.cursor.as_deref() else {
+        return Ok((resolve(service, scope, at).await?, page.into(), None));
+    };
+    let cursor: PageCursor = URL_SAFE_NO_PAD
+        .decode(text)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .ok_or_else(|| invalid("the cursor is not one this operation issues", PAGE_CURSOR))?;
+    if cursor.op != operation.as_str() {
+        return Err(invalid(
+            "the cursor was issued by another operation",
+            PAGE_CURSOR,
+        ));
+    }
+    if matches!(at, At::Revision { revision } if revision != &cursor.tip) {
+        return Err(invalid(
+            "the cursor continues a read of another revision than the one named",
+            PAGE_CURSOR,
+        ));
+    }
+    check_named(service, scope, &cursor.tip).await?;
+    Ok((
+        cursor.tip,
+        Page {
+            cursor: Some(cursor.next),
+            limit: page.limit,
+        },
+        cursor.current,
+    ))
+}
+
+/// The cursor of the page after one read of `operation` at `tip`: the store's continuation,
+/// bound to both (`resolve_page` reads it back), with a folder listing's "current" answer when `current`
+/// gives one. `None` when the store has no more.
+///
+/// # Errors
+/// Returns `Internal` when the cursor cannot be serialized.
+pub(super) fn next_page(
+    operation: OperationName,
+    tip: &Revision,
+    next: Option<String>,
+    current: Option<bool>,
+) -> Result<Option<String>, ApiError> {
+    next.map(|next| {
+        serde_json::to_vec(&PageCursor {
+            op: operation.as_str().to_owned(),
+            tip: tip.clone(),
+            next,
+            current,
+        })
+        .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
+        .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))
+    })
+    .transpose()
+}
+
 /// Check a revision the request names (a base revision, a cited revision) against the
 /// revision map before it is used.
 ///
@@ -172,15 +268,17 @@ pub(super) async fn check_named(
 ///
 /// # Errors
 /// Returns the purge check's refusal of the base, the store's refusal (`Conflict` for a moved
-/// head, the check's refusal of the candidate, a path collision, a header change), or any
-/// later port error.
+/// head, with `ErrorDetail::StaleBase` and the request's `/base_revision` named; the check's
+/// refusal of the candidate, a path collision, a header change), or any later port error.
 pub(super) async fn commit(
     service: &ApplicationService,
     context: &OperationContext,
     write: Write,
 ) -> Result<Committed, ApiError> {
     let item = write.item;
-    let committed = store_commit(service, context, write).await?;
+    let committed = store_commit(service, context, write)
+        .await
+        .map_err(on_the_base)?;
     announce(
         service,
         workspace_scope(context)?,
@@ -192,9 +290,22 @@ pub(super) async fn commit(
     Ok(committed)
 }
 
+/// Name the request's `/base_revision` on the store's refusal of a base that is not the head
+/// (`ErrorDetail::StaleBase`); every request this module commits names its base so, and so do
+/// the workspace metadata changes (`WorkspaceCatalog::update`, `archive`). The store names no
+/// field on that refusal (`VersionStore::commit`): the field is the caller's to name.
+pub(super) fn on_the_base(error: ApiError) -> ApiError {
+    if matches!(error.detail.as_deref(), Some(ErrorDetail::StaleBase { .. })) {
+        error.with_field("/base_revision")
+    } else {
+        error
+    }
+}
+
 /// Commit one write in the store only, without indexing or announcing it: the step whose
 /// `Conflict` alone means the store refused the write (a moved head, a path collision). A writer
-/// that retries on a moved head retries only this step, and announces once it succeeded.
+/// that retries on a moved head retries only this step, and announces once it succeeded. The
+/// answer is the store's, a replay's kept warnings included, unchanged.
 ///
 /// # Errors
 /// Returns the purge check's refusal of the base, the store's refusal, or any port error of
@@ -220,7 +331,7 @@ pub(super) async fn store_commit(
         );
     }
     let check = Arc::new(EditCheck::new(&touched, write.touched.of_type));
-    let mut committed = ports
+    ports
         .versions
         .commit(
             &scope,
@@ -231,150 +342,9 @@ pub(super) async fn store_commit(
                 message: write.message,
                 edits: write.edits,
             },
-            check.clone(),
+            check,
         )
-        .await?;
-    if committed.replayed {
-        committed.warnings = replay_warnings(service, &scope, &committed.revision, check).await;
-    }
-    Ok(committed)
-}
-
-/// The warnings a replayed commit answers: those `checked_again` rebuilds, or, when it refuses
-/// or fails, one `replay_warnings_unavailable` warning in their place saying why.
-///
-/// The commit has landed, so a refusal or a fault here must not fail the write: an error would
-/// fail every retry the same way, and a landed commit would become a permanent error. The write
-/// answers its revision and receipt with this warning instead.
-pub(super) async fn replay_warnings(
-    service: &ApplicationService,
-    scope: &StorageScope,
-    revision: &Revision,
-    check: Arc<dyn CandidateCheck>,
-) -> Vec<Warning> {
-    match checked_again(service, scope, revision, check).await {
-        Ok(warnings) => warnings,
-        Err(error) => vec![Warning {
-            code: REPLAY_WARNINGS_UNAVAILABLE.to_owned(),
-            message: format!(
-                "the commit landed on an earlier attempt, and that attempt's warnings could not \
-                 be rebuilt: {}",
-                error.message
-            ),
-            location: None,
-        }],
-    }
-}
-
-/// The warnings `check` gives over the committed tree of `revision`, read back from the store.
-///
-/// A store that replays a commit runs no check and returns no warnings, so the warnings the
-/// first attempt's check produced were lost with that attempt. They are rebuilt by running the
-/// same check, with the same touched set, over the tree the commit holds: every item file, each
-/// folder's maintained `index.md` and the root `log.md`, the Markdown files of the bundle the
-/// check reads (the store's side records under `.okf/` are not Markdown, and no OKF check reads
-/// them). That is the candidate tree the check saw when the store wrote the commit, so a
-/// replayed write answers the warnings its first attempt would have. Ingest rebuilds an
-/// import's warnings the same way. The cleaner fix is R-I10, where the store keeps the warnings
-/// with the commit; it is a later shared change.
-///
-/// The tree is written to a private directory under the system's temporary directory
-/// (`Scratch`), which is removed on every path out of the check. This is core's only
-/// filesystem write: a `CandidateCheck` reads a directory, and no port offers one for a tree
-/// already committed. It goes when R-I10 lands.
-///
-/// A replaying write calls `replay_warnings`, which never fails on this function's error.
-///
-/// # Errors
-/// Returns any port error of reading the tree, `Internal` when the directory cannot be
-/// written, or the check's own error.
-async fn checked_again(
-    service: &ApplicationService,
-    scope: &StorageScope,
-    revision: &Revision,
-    check: Arc<dyn CandidateCheck>,
-) -> Result<Vec<Warning>, ApiError> {
-    let versions = &service.ports().versions;
-    let mut files: Vec<(WorkspacePath, Vec<u8>)> = Vec::new();
-    let mut folders: Vec<Option<WorkspacePath>> = vec![None];
-    while let Some(folder) = folders.pop() {
-        let mut cursor = None;
-        loop {
-            let listing = versions
-                .list(
-                    scope,
-                    revision,
-                    folder.as_ref(),
-                    Page {
-                        cursor: cursor.take(),
-                        limit: TREE_PAGE,
-                    },
-                )
-                .await?;
-            for item in listing.items {
-                let bytes = versions.read_file(scope, revision, &item.path).await?;
-                files.push((item.path, bytes));
-            }
-            folders.extend(listing.folders.into_iter().map(Some));
-            match listing.next_cursor {
-                Some(next) => cursor = Some(next),
-                None => break,
-            }
-        }
-        let index = folder.as_ref().map_or_else(
-            || MAINTAINED_INDEX.to_owned(),
-            |folder| format!("{}/{MAINTAINED_INDEX}", folder.as_str()),
-        );
-        files.extend(file_if_present(service, scope, revision, index).await?);
-    }
-    files.extend(file_if_present(service, scope, revision, CHANGE_LOG.to_owned()).await?);
-    tokio::task::spawn_blocking(move || {
-        let scratch = Scratch::create()?;
-        for (path, bytes) in &files {
-            scratch.write(path, bytes)?;
-        }
-        check.check(&scratch.0)
-    })
-    .await
-    .map_err(|error| {
-        ApiError::new(
-            ErrorCode::Internal,
-            format!("the replayed commit's check stopped: {error}"),
-        )
-    })?
-}
-
-/// The versioned file at `path` of `revision`, when the tree holds one.
-async fn file_if_present(
-    service: &ApplicationService,
-    scope: &StorageScope,
-    revision: &Revision,
-    path: String,
-) -> Result<Option<(WorkspacePath, Vec<u8>)>, ApiError> {
-    let path = WorkspacePath::try_from(path).map_err(|error| {
-        ApiError::new(
-            ErrorCode::Internal,
-            format!("a maintained file has no workspace path: {error}"),
-        )
-    })?;
-    match service
-        .ports()
-        .versions
-        .read_file(scope, revision, &path)
         .await
-    {
-        Ok(bytes) => Ok(Some((path, bytes))),
-        Err(error) if error.code == ErrorCode::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-/// The `Internal` refusal of a scratch directory the system would not let us write.
-fn scratch_error(error: &std::io::Error) -> ApiError {
-    ApiError::new(
-        ErrorCode::Internal,
-        format!("the replayed commit's tree could not be written for its check: {error}"),
-    )
 }
 
 /// Index a revision a write produced and append its `changed` event under the write's
@@ -408,6 +378,9 @@ pub(super) async fn announce(
                 connector_id: None,
                 actor: None,
                 operation: None,
+                transport: None,
+                proposal_id: None,
+                count: None,
             },
         )
         .await?;

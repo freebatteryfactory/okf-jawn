@@ -11,6 +11,8 @@
 //!   file is review evidence (SPEC section 8).
 //! - OKF lint runs at import. `ImportCheck` wraps the conformance check of an import commit and
 //!   adds okf-validator's lint findings for the imported files as warnings; lint never refuses.
+//!   It reports what its commit wrote: the conformance check's warnings about other files are
+//!   not passed on.
 //!
 //! Ingest's export and import handlers call these functions and never re-implement them. They
 //! hold the rules and do no IO beyond reading the candidate directory a `CandidateCheck` is
@@ -40,23 +42,44 @@ use crate::storage::CandidateCheck;
 /// The candidate check of an import commit: the conformance check first, whose refusal stands,
 /// then OKF lint of the imported files, whose findings are added to its warnings.
 ///
+/// A commit's check reports what that commit wrote. `imported` names the files this commit
+/// writes, not every file of the import: an import of N cards runs N + 1 commits, and a check
+/// that reported all N cards on each would have the job complete with, and the store keep
+/// (`VersionStore::commit`), about N x N warnings for one import. So the conformance check's
+/// refusal stands whatever file it names, but of its warnings only those located at an
+/// imported file, or at a file the store reports it rewrote, are passed on: the production
+/// conformance check (`conformance::OkfConformance`) answers the validator's findings for the
+/// whole candidate on every commit, the files this commit did not write included. It locates a
+/// broken link at the file of the concept that holds it, so a broken link in an imported card
+/// is passed on, located at the card. A warning that names no file is left out, as
+/// `conformance::EditCheck` leaves it out.
+///
 /// Lint findings never refuse a commit; okf-validator's lint is not a conformance check.
+/// The paths the store reports it rewrote on its own (`CandidateCheck::check`, `rewritten`) are
+/// handed to the conformance check as they are. The lint stays on the imported files: an
+/// import commit writes source cards, which move nothing, so the store rewrites no other file.
 pub struct ImportCheck {
     conformance: Arc<dyn CandidateCheck>,
     imported: Vec<WorkspacePath>,
 }
 
-/// What a whole-item review covers: the body and the properties without the application
+/// The content a digest is taken over: a body and a property map without the application
 /// header, which is server bookkeeping (an archive or a redigest's header update is not a
-/// content change).
+/// content change). The review fingerprint also leaves out `aliases` (`ALIASES_KEY`), where a
+/// rename records old paths; a draft's digest keeps them.
 #[derive(Serialize)]
-struct ReviewedContent<'a> {
+struct DigestedContent<'a> {
     body: &'a str,
     properties: BTreeMap<String, Value>,
 }
 
 /// The OKF frontmatter key of verification events.
 pub const VERIFIED_KEY: &str = "verified";
+
+/// The frontmatter key of an item's former paths. A rename by the naming rules records the old
+/// path there, and a pure rename must not turn a review's coverage to `changed`, so the review
+/// fingerprint leaves it out (owner decision 2026-10-14).
+pub const ALIASES_KEY: &str = "aliases";
 
 /// The OKF actor prefix of a person; a reviewer is always one (only a human session reviews).
 const HUMAN_ACTOR: &str = "human:";
@@ -66,7 +89,7 @@ const LINT_CODE: &str = "okf_lint";
 
 impl ImportCheck {
     /// Wrap `conformance` (the production `CandidateCheck`) for a commit that writes the
-    /// `imported` paths.
+    /// `imported` paths: the files this one commit writes.
     #[must_use]
     pub fn new(conformance: Arc<dyn CandidateCheck>, imported: Vec<WorkspacePath>) -> Self {
         Self {
@@ -77,8 +100,24 @@ impl ImportCheck {
 }
 
 impl CandidateCheck for ImportCheck {
-    fn check(&self, root: &Path) -> Result<Vec<Warning>, ApiError> {
-        let mut warnings = self.conformance.check(root)?;
+    fn check(&self, root: &Path, rewritten: &[WorkspacePath]) -> Result<Vec<Warning>, ApiError> {
+        // A refusal stands whatever file it names: a non-conformant candidate is never committed.
+        let found = self.conformance.check(root, rewritten)?;
+        let written: BTreeSet<&str> = self
+            .imported
+            .iter()
+            .chain(rewritten)
+            .map(WorkspacePath::as_str)
+            .collect();
+        let mut warnings: Vec<Warning> = found
+            .into_iter()
+            .filter(|warning| {
+                warning
+                    .location
+                    .as_deref()
+                    .is_some_and(|location| written.contains(location))
+            })
+            .collect();
         warnings.extend(lint_imported(root, &self.imported)?);
         Ok(warnings)
     }
@@ -90,10 +129,13 @@ pub const fn claim_coverage(_claim: &ImportedClaim) -> ReviewCoverage {
     ReviewCoverage::Imported
 }
 
-/// The digest a review of a whole item records, computed from the item's committed content.
+/// The review fingerprint: the digest a review of a whole item records, computed from the item's
+/// committed content, and `ItemDocument::content_digest`. A draft is compared by `draft_digest`.
 ///
-/// SHA-256 over the body and the properties without the application header, with object keys
-/// sorted (`mutations::request_digest`), so it does not depend on how a store orders keys.
+/// SHA-256 over the body and the properties without the application header and without
+/// `aliases` (`ALIASES_KEY`), with object keys sorted (`mutations::request_digest`), so it does
+/// not depend on how a store orders keys. A rename that only records the old path in `aliases`
+/// keeps the digest, and so keeps a review `current`.
 ///
 /// # Errors
 /// Returns `Internal` when the content cannot be serialized.
@@ -101,8 +143,8 @@ pub fn item_content_digest(document: &ItemDocument) -> Result<Digest, ApiError> 
     content_digest(&document.body, &document.properties)
 }
 
-/// The same digest of a body and a property map that are not a committed document, such as a
-/// draft's (`DraftWrite::content_digest`), so a draft and the item it would commit compare.
+/// The review fingerprint, `item_content_digest`, of a body and a property map that are not a
+/// committed document.
 ///
 /// # Errors
 /// Returns `Internal` when the content cannot be serialized.
@@ -110,7 +152,25 @@ pub fn content_digest(
     body: &str,
     properties: &BTreeMap<String, Value>,
 ) -> Result<Digest, ApiError> {
-    request_digest(&ReviewedContent {
+    let mut reviewed = without_header(properties);
+    reviewed.remove(ALIASES_KEY);
+    request_digest(&DigestedContent {
+        body,
+        properties: reviewed,
+    })
+}
+
+/// The digest of everything a draft holds: the body and every property but the application
+/// header, `aliases` included, keys sorted. It is not the review fingerprint: it decides whether
+/// a draft is still exactly the content a Snapshot committed (`Draft::content_digest`,
+/// `DraftStore::discard`), so a draft saved again with any change, one to `aliases` alone
+/// included, is never removed as committed. It is taken alike from a draft and from the item a
+/// commit holds, so the two compare.
+///
+/// # Errors
+/// Returns `Internal` when the content cannot be serialized.
+pub fn draft_digest(body: &str, properties: &BTreeMap<String, Value>) -> Result<Digest, ApiError> {
+    request_digest(&DigestedContent {
         body,
         properties: without_header(properties),
     })
@@ -195,6 +255,62 @@ pub fn exported_verified(
         }
     }
     Some(Value::Array(entries))
+}
+
+/// The bytes an export writes for one committed item, or `None` to keep its exact stored
+/// bytes. Only `verified` changes: the existing claim and current whole-item reviews are
+/// combined by `exported_verified`, then the pinned OKF writer restores preferred key order.
+/// All other frontmatter values and the parsed body are preserved.
+///
+/// # Errors
+/// Returns `Internal` when the stored item is not UTF-8 or is not a parseable OKF document.
+/// The caller supplies committed bytes and the content fingerprint of that same revision.
+pub fn export_item_file(
+    stored: &[u8],
+    reviews: &[Review],
+    content: &Digest,
+) -> Result<Option<Vec<u8>>, ApiError> {
+    let text = std::str::from_utf8(stored)
+        .map_err(|_| ApiError::new(ErrorCode::Internal, "a committed item file is not UTF-8"))?;
+    let mut document = okf_core::Document::parse(text).map_err(|error| {
+        ApiError::new(
+            ErrorCode::Internal,
+            format!("a committed item file does not parse: {error}"),
+        )
+    })?;
+    let existing = document.frontmatter.get(VERIFIED_KEY).map(json_of);
+    let Some(value) = exported_verified(existing.as_ref(), reviews, content) else {
+        return Ok(None);
+    };
+    if existing.as_ref() == Some(&value) {
+        return Ok(None);
+    }
+    document.frontmatter.set(VERIFIED_KEY, yaml_value(&value));
+    document.frontmatter.reorder_preferred();
+    Ok(Some(document.serialize().into_bytes()))
+}
+
+/// An OKF YAML property as storage reads it into JSON: non-finite floats become null;
+/// mapping keys use their display strings, with nondisplayable keys omitted. Export compares
+/// existing verification through this same conversion; import can reuse it for properties.
+#[must_use]
+pub fn json_of(value: &YamlValue) -> Value {
+    match value {
+        YamlValue::Null => Value::Null,
+        YamlValue::Bool(flag) => Value::Bool(*flag),
+        YamlValue::Int(integer) => Value::from(*integer),
+        YamlValue::Float(float) => {
+            serde_json::Number::from_f64(*float).map_or(Value::Null, Value::Number)
+        }
+        YamlValue::String(text) => Value::String(text.clone()),
+        YamlValue::Sequence(items) => Value::Array(items.iter().map(json_of).collect()),
+        YamlValue::Mapping(mapping) => Value::Object(
+            mapping
+                .iter()
+                .filter_map(|(key, child)| key.as_display_string().map(|key| (key, json_of(child))))
+                .collect(),
+        ),
+    }
 }
 
 /// The verification events an imported file claims in its frontmatter `properties`, read with

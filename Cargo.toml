@@ -36,9 +36,10 @@ git2 = { version = "=0.21.0", default-features = false, features = ["vendored-li
 object_store = { version = "=0.14.2", default-features = false, features = ["fs"] }
 bytes = { version = "=1.12.1" }
 uuid = { version = "=1.27.0", features = ["serde", "v4"] }
-time = { version = "=0.3.55" }
+time = { version = "=0.3.55", features = ["formatting"] }
 url = { version = "=2.5.8" }
 workos = { version = "=3.3.0" }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation"] }
 notify = { version = "=8.2.0" }
 directories = { version = "=6.0.0" }
 open = { version = "=5.4.4" }
@@ -46,6 +47,7 @@ clap = { version = "=4.6.7", features = ["derive", "env", "string"] }
 unicode-normalization = { version = "=0.1.25" }
 convert_case = { version = "=0.12.0" }
 regex = { version = "=1.13.1" }
+glob = { version = "=0.3.4" }
 yaml_serde = { version = "=0.10.7" }
 jsonschema = { version = "=0.58.5", default-features = false }
 zip = { version = "=8.6.0" }
@@ -82,6 +84,13 @@ rlimit = { version = "=0.11.0" }
 # resident set (memory-cap-research; vendors.json process-memory-cap). macOS-only; it needs
 # libclang at build time there.
 libproc = { version = "=0.14.11" }
+# Batch C: the server lane's M1 requests (lane-server-report R1, R2, R5). The browser session and
+# CSRF cookies are read and written with cookie, never hand-parsed. WorkOS Connect tokens are
+# verified with jsonwebtoken on the pure-Rust provider: signatures are checked with public JWKS
+# keys only (deny.toml RUSTSEC-2023-0071). futures-util turns the event-log poll into the SSE stream.
+cookie = { version = "=0.18.2", default-features = false }
+jsonwebtoken = { version = "=11.1.0", default-features = false, features = ["rust_crypto"] }
+futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
 
 clap_complete = "=4.6.11"
 clap_mangen = "=0.3.3"

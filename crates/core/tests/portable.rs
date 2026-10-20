@@ -17,8 +17,9 @@ use okf_jawn_contract::item::{APP_HEADER_KEY, ItemDocument, ItemKind, ItemStatus
 use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::review::{ImportedClaim, Review, ReviewCoverage};
 use okf_jawn_contract::source::SourceReference;
+use okf_jawn_core::conformance::OkfConformance;
 use okf_jawn_core::portable::{
-    ImportCheck, VERIFIED_KEY, claim_coverage, coverage_at, exported_verified,
+    ImportCheck, VERIFIED_KEY, claim_coverage, coverage_at, draft_digest, exported_verified,
     imported_verification, item_content_digest, lint_imported,
 };
 use okf_jawn_core::storage::CandidateCheck;
@@ -30,12 +31,53 @@ use check::{TestResult, err_of, some};
 /// The conformance half of an import commit's check: answers as the test sets it.
 struct ScriptedConformance(Result<Vec<Warning>, ApiError>);
 
+/// A conformance half that answers one warning for each rewritten path it is handed, located at
+/// that path, so a test sees what an `ImportCheck` passed on.
+struct EchoingRewritten;
+
 /// A candidate directory under the system temporary directory, removed when dropped.
 struct Candidate(PathBuf);
 
+/// A committed note for M2a's export writer (design VW1-VW3), with an extension and body to keep.
+const STORED_EXPORT_NOTE: &str = concat!(
+    "---\n",
+    "type: Note\n",
+    "title: Plan\n",
+    "generated:\n",
+    "  by: agent:writer\n",
+    "  at: '2026-10-01T08:00:00Z'\n",
+    "stale_after: '2027-01-01'\n",
+    "x_team: 7\n",
+    "okf_jawn:\n",
+    "  item_id: 00000000-0000-0000-0000-00000000000a\n",
+    "  kind: note\n",
+    "---\n",
+    "\n",
+    "# Plan\n",
+    "\n",
+    "Ship it.\n",
+);
+
 impl CandidateCheck for ScriptedConformance {
-    fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
+    fn check(
+        &self,
+        _root: &Path,
+        _rewritten: &[okf_jawn_contract::identity::WorkspacePath],
+    ) -> Result<Vec<Warning>, ApiError> {
         self.0.clone()
+    }
+}
+
+impl CandidateCheck for EchoingRewritten {
+    fn check(&self, _root: &Path, rewritten: &[WorkspacePath]) -> Result<Vec<Warning>, ApiError> {
+        Ok(rewritten
+            .iter()
+            .map(|path| Warning {
+                code: "handed".to_owned(),
+                message: "the store rewrote this file".to_owned(),
+                location: Some(path.as_str().to_owned()),
+            })
+            .collect())
     }
 }
 
@@ -138,6 +180,308 @@ fn yaml(value: &Value) -> YamlValue {
 
 fn properties(value: Value) -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
     Ok(serde_json::from_value(value)?)
+}
+
+/// The actual content fingerprint of the fixed note, using the existing item test helper.
+fn export_note_fingerprint() -> Result<Digest, Box<dyn Error>> {
+    let stored = okf_core::Document::parse(STORED_EXPORT_NOTE)?;
+    Ok(document(
+        &stored.body,
+        json!({
+            "type": "Note",
+            "title": "Plan",
+            "generated": { "by": "agent:writer", "at": "2026-10-01T08:00:00Z" },
+            "stale_after": "2027-01-01",
+            "x_team": 7
+        }),
+    )?
+    .content_digest)
+}
+
+#[test]
+fn export_item_file_adds_only_the_current_whole_review() -> TestResult {
+    // The caller supplies the item's fingerprint. The review names that same content;
+    // the expected verification below is the literal VW1 answer, not the value writer's output.
+    let content = export_note_fingerprint()?;
+    let reviews = [review(
+        "alice",
+        "2026-10-08T09:00:00.000Z",
+        content.clone(),
+        Selection::All,
+        ReviewCoverage::Current,
+    )?];
+    let exported = some(
+        okf_jawn_core::portable::export_item_file(
+            STORED_EXPORT_NOTE.as_bytes(),
+            &reviews,
+            &content,
+        )?,
+        "the file with its current review written",
+    )?;
+    let after = okf_core::Document::parse(std::str::from_utf8(&exported)?)?;
+    let before = okf_core::Document::parse(STORED_EXPORT_NOTE)?;
+    assert_eq!(
+        after.frontmatter.get(VERIFIED_KEY),
+        Some(&yaml(&json!([
+            { "by": "human:alice", "at": "2026-10-08T09:00:00.000Z" }
+        ])))
+    );
+    assert_eq!(
+        after.frontmatter.keys().collect::<Vec<_>>(),
+        vec![
+            "type",
+            "title",
+            "generated",
+            "verified",
+            "stale_after",
+            "x_team",
+            APP_HEADER_KEY,
+        ]
+    );
+    assert_eq!(after.body, before.body);
+    for key in before.frontmatter.keys() {
+        assert_eq!(
+            after.frontmatter.get(key),
+            before.frontmatter.get(key),
+            "{key}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn export_item_file_without_whole_current_review_keeps_stored_bytes() -> TestResult {
+    let content = export_note_fingerprint()?;
+    let line_review = review(
+        "alice",
+        "2026-10-08T09:00:00.000Z",
+        content.clone(),
+        Selection::Lines {
+            range: TextRange { start: 1, end: 1 },
+        },
+        ReviewCoverage::Current,
+    )?;
+    for reviews in [Vec::new(), vec![line_review]] {
+        // VW2-VW3: None instructs the caller to export the exact original bytes; an empty
+        // verification or a reserialized copy would change a file that has no whole-item review.
+        assert_eq!(
+            okf_jawn_core::portable::export_item_file(
+                STORED_EXPORT_NOTE.as_bytes(),
+                &reviews,
+                &content,
+            )?,
+            None
+        );
+    }
+    Ok(())
+}
+
+/// Design VW4-VW5: a different content fingerprint and invalidated/imported coverage
+/// cannot become exported verification. C is the caller-provided vector fingerprint.
+#[test]
+fn export_item_file_does_not_promote_changed_or_invalidated_coverage() -> TestResult {
+    let content = digest('c')?;
+    for (reviewed, coverage) in [
+        (digest('d')?, ReviewCoverage::Current),
+        (content.clone(), ReviewCoverage::Invalidated),
+        (content.clone(), ReviewCoverage::Imported),
+    ] {
+        let reviews = [review(
+            "alice",
+            "2026-10-08T09:00:00.000Z",
+            reviewed,
+            Selection::All,
+            coverage,
+        )?];
+        assert_eq!(
+            okf_jawn_core::portable::export_item_file(
+                STORED_EXPORT_NOTE.as_bytes(),
+                &reviews,
+                &content,
+            )?,
+            None
+        );
+    }
+    Ok(())
+}
+
+/// Add a literal claim to the fixed input, without using the export writer for fixture setup.
+fn stored_export_claim(claim: &str) -> String {
+    STORED_EXPORT_NOTE.replacen(
+        "stale_after:",
+        &format!("verified: {claim}\nstale_after:"),
+        1,
+    )
+}
+
+/// VW6: an imported bare claim is retained as the first list member, never replaced.
+#[test]
+fn export_item_file_appends_the_review_to_the_existing_bare_claim() -> TestResult {
+    let stored = stored_export_claim("{by: 'human:x', at: '2026-01-01T00:00:00Z'}");
+    let content = digest('c')?;
+    let reviews = [review(
+        "alice",
+        "2026-10-08T09:00:00.000Z",
+        content.clone(),
+        Selection::All,
+        ReviewCoverage::Current,
+    )?];
+    let exported: Vec<u8> = some(
+        okf_jawn_core::portable::export_item_file(stored.as_bytes(), &reviews, &content)?,
+        "a file with the appended review",
+    )?;
+    let after = okf_core::Document::parse(std::str::from_utf8(&exported)?)?;
+    assert_eq!(
+        after.frontmatter.get(VERIFIED_KEY),
+        Some(&yaml(&json!([
+            {"by": "human:x", "at": "2026-01-01T00:00:00Z"},
+            {"by": "human:alice", "at": "2026-10-08T09:00:00.000Z"}
+        ])))
+    );
+    assert_eq!(after.body, "# Plan\n\nShip it.");
+    Ok(())
+}
+
+/// VW7 and VW9: unchanged claims leave the caller's original bytes intact, even when the
+/// entry's keys are reversed and the stored file has comments and CRLF line endings.
+#[test]
+fn export_item_file_unchanged_claims_require_no_reserialization() -> TestResult {
+    let stored = stored_export_claim(
+        "[{at: '2026-10-08T09:00:00.000Z', by: 'human:alice'}] # retained comment",
+    )
+    .replace('\n', "\r\n");
+    let content = digest('c')?;
+    let reviews = [review(
+        "alice",
+        "2026-10-08T09:00:00.000Z",
+        content.clone(),
+        Selection::All,
+        ReviewCoverage::Current,
+    )?];
+    for current in [&[][..], reviews.as_slice()] {
+        assert_eq!(
+            okf_jawn_core::portable::export_item_file(stored.as_bytes(), current, &content)?,
+            None
+        );
+    }
+    Ok(())
+}
+
+/// VW8: record-store enumeration order does not determine exported event order.
+#[test]
+fn export_item_file_writes_current_reviews_oldest_first() -> TestResult {
+    let content = export_note_fingerprint()?;
+    let reviews = [
+        review(
+            "bob",
+            "2026-10-09T09:00:00.000Z",
+            content.clone(),
+            Selection::All,
+            ReviewCoverage::Current,
+        )?,
+        review(
+            "alice",
+            "2026-10-08T09:00:00.000Z",
+            content.clone(),
+            Selection::All,
+            ReviewCoverage::Current,
+        )?,
+    ];
+    let exported: Vec<u8> = some(
+        okf_jawn_core::portable::export_item_file(
+            STORED_EXPORT_NOTE.as_bytes(),
+            &reviews,
+            &content,
+        )?,
+        "the file with chronologically ordered reviews",
+    )?;
+    let parsed = okf_core::Document::parse(std::str::from_utf8(&exported)?)?;
+    assert_eq!(
+        parsed.frontmatter.get(VERIFIED_KEY),
+        Some(&yaml(&json!([
+            {"by": "human:alice", "at": "2026-10-08T09:00:00.000Z"},
+            {"by": "human:bob", "at": "2026-10-09T09:00:00.000Z"}
+        ])))
+    );
+    Ok(())
+}
+
+/// VW10: a restored file's old key order may change only when verified is added; the
+/// logical original properties and body remain equal, including the application header.
+#[test]
+fn export_item_file_reorders_restored_frontmatter_without_changing_other_values() -> TestResult {
+    let stored = STORED_EXPORT_NOTE.replacen("type: Note\n", "", 1).replacen(
+        "okf_jawn:\n",
+        "type: Note\nokf_jawn:\n",
+        1,
+    );
+    let content = export_note_fingerprint()?;
+    let reviews = [review(
+        "alice",
+        "2026-10-08T09:00:00.000Z",
+        content.clone(),
+        Selection::All,
+        ReviewCoverage::Current,
+    )?];
+    let exported: Vec<u8> = some(
+        okf_jawn_core::portable::export_item_file(stored.as_bytes(), &reviews, &content)?,
+        "the file in preferred order",
+    )?;
+    let before = okf_core::Document::parse(&stored)?;
+    let after = okf_core::Document::parse(std::str::from_utf8(&exported)?)?;
+    assert_eq!(
+        after.frontmatter.keys().collect::<Vec<_>>(),
+        vec![
+            "type",
+            "title",
+            "generated",
+            "verified",
+            "stale_after",
+            "x_team",
+            APP_HEADER_KEY
+        ]
+    );
+    assert_eq!(after.body, "# Plan\n\nShip it.");
+    for key in before.frontmatter.keys() {
+        assert_eq!(
+            after.frontmatter.get(key),
+            before.frontmatter.get(key),
+            "{key}"
+        );
+    }
+    Ok(())
+}
+
+/// Design section2.4 treats invalid committed text as a store fault, even with no review.
+#[test]
+fn export_item_file_refuses_invalid_utf8_and_unparseable_stored_documents() -> TestResult {
+    for stored in [&[0xff_u8, 0xfe][..], b"---\ntype: Note\n"] {
+        let refused = err_of(okf_jawn_core::portable::export_item_file(
+            stored,
+            &[],
+            &digest('c')?,
+        ))?;
+        assert_eq!(refused.code, ErrorCode::Internal);
+    }
+    Ok(())
+}
+
+/// Design section6.2 copies storage's conversion, including scalar mapping keys and the
+/// nonfinite-to-null rule. Expected values are literals, not the JSON writer's output.
+#[test]
+fn json_of_preserves_storage_scalar_and_nested_property_values() -> TestResult {
+    let parsed = YamlValue::parse("count: -3\n5: true\nnested: [null, false, 7, 1.5, 'text']\n")?;
+    let source = YamlValue::Sequence(vec![
+        parsed,
+        YamlValue::Float(f64::NAN),
+        YamlValue::Float(f64::INFINITY),
+        YamlValue::Float(f64::NEG_INFINITY),
+    ]);
+    assert_eq!(
+        okf_jawn_core::portable::json_of(&source),
+        json!([{"count": -3, "5": true, "nested": [null, false, 7, 1.5, "text"]}, null, null, null])
+    );
+    Ok(())
 }
 
 #[test]
@@ -355,6 +699,75 @@ fn the_reviewed_content_digest_ignores_the_header_and_key_order() -> TestResult 
     Ok(())
 }
 
+/// A rename records the old path in `aliases`; the review fingerprint leaves that property out,
+/// so a pure rename keeps a review current, while any other property still counts.
+#[test]
+fn the_reviewed_content_digest_leaves_out_aliases_and_nothing_else() -> TestResult {
+    let base = document("# Plan\n", json!({ "type": "Note", "status": "stable" }))?;
+    let digest_of_base = item_content_digest(&base)?;
+    let renamed = document(
+        "# Plan\n",
+        json!({ "type": "Note", "status": "stable", "aliases": ["notes/old-plan.md"] }),
+    )?;
+    assert_eq!(item_content_digest(&renamed)?, digest_of_base);
+    let renamed_twice = document(
+        "# Plan\n",
+        json!({
+            "type": "Note",
+            "status": "stable",
+            "aliases": ["notes/old-plan.md", "plans/plan.md"],
+        }),
+    )?;
+    assert_eq!(item_content_digest(&renamed_twice)?, digest_of_base);
+    let tagged = document(
+        "# Plan\n",
+        json!({ "type": "Note", "status": "stable", "tags": ["notes/old-plan.md"] }),
+    )?;
+    assert_ne!(item_content_digest(&tagged)?, digest_of_base);
+    let deprecated = document(
+        "# Plan\n",
+        json!({ "type": "Note", "status": "deprecated", "aliases": ["notes/old-plan.md"] }),
+    )?;
+    assert_ne!(item_content_digest(&deprecated)?, digest_of_base);
+    Ok(())
+}
+
+/// Review N1: a draft is compared by its whole content. `draft_digest` keeps `aliases`, which
+/// the review fingerprint leaves out, and like it ignores the application header and key order;
+/// it is the digest of a body and a property map whether they come from a draft or an item.
+#[test]
+fn the_draft_digest_covers_aliases_and_ignores_the_header() -> TestResult {
+    let base = document("# Plan\n", json!({ "type": "Note", "status": "stable" }))?;
+    let digest_of_base = draft_digest(&base.body, &base.properties)?;
+    let renamed = document(
+        "# Plan\n",
+        json!({ "type": "Note", "status": "stable", "aliases": ["notes/old-plan.md"] }),
+    )?;
+    assert_ne!(
+        draft_digest(&renamed.body, &renamed.properties)?,
+        digest_of_base,
+        "an alias alone is a change of the draft"
+    );
+    assert_eq!(
+        item_content_digest(&renamed)?,
+        item_content_digest(&base)?,
+        "and not of the review fingerprint"
+    );
+    let headed = document(
+        "# Plan\n",
+        json!({
+            "status": "stable",
+            "type": "Note",
+            APP_HEADER_KEY: { "item_id": Uuid::from_u128(10), "archived": true },
+        }),
+    )?;
+    assert_eq!(
+        draft_digest(&headed.body, &headed.properties)?,
+        digest_of_base
+    );
+    Ok(())
+}
+
 #[test]
 fn an_imported_verified_is_an_unconfirmed_claim() -> TestResult {
     let listed = properties(json!({
@@ -411,21 +824,22 @@ fn lint_at_import_reports_the_imported_files_findings_as_warnings() -> TestResul
     candidate.write("notes/imported.md", "---\ntype: Note\n---\n\nNo heading.\n")?;
     candidate.write("notes/other.md", "---\ntype: Note\n---\n\nNo heading.\n")?;
     let imported = vec![WorkspacePath::try_from("notes/imported.md".to_owned())?];
+    // A conformance warning about the imported file is the import's to report.
     let conformant = Warning {
         code: "conformance".to_owned(),
         message: "kept".to_owned(),
-        location: None,
+        location: Some("notes/imported.md".to_owned()),
     };
     let check = ImportCheck::new(
         Arc::new(ScriptedConformance(Ok(vec![Warning {
             code: conformant.code.clone(),
             message: conformant.message.clone(),
-            location: None,
+            location: conformant.location.clone(),
         }]))),
         imported.clone(),
     );
 
-    let warnings = check.check(&candidate.0)?;
+    let warnings = check.check(&candidate.0, &[])?;
     let first = some(warnings.first(), "the conformance warning")?;
     assert_eq!(
         (first.code.as_str(), first.message.as_str()),
@@ -457,6 +871,101 @@ fn lint_at_import_reports_the_imported_files_findings_as_warnings() -> TestResul
 }
 
 #[test]
+fn an_import_check_hands_the_rewritten_paths_to_its_conformance_check() -> TestResult {
+    let candidate = Candidate::new()?;
+    candidate.write(
+        "notes/imported.md",
+        "---
+type: Note
+---
+
+No heading.
+",
+    )?;
+    candidate.write(
+        "notes/referrer.md",
+        "---
+type: Note
+---
+
+No heading.
+",
+    )?;
+    let check = ImportCheck::new(
+        Arc::new(EchoingRewritten),
+        vec![WorkspacePath::try_from("notes/imported.md".to_owned())?],
+    );
+    let rewritten = [WorkspacePath::try_from("notes/referrer.md".to_owned())?];
+    let warnings = check.check(&candidate.0, &rewritten)?;
+    let located = |code: &str| -> Vec<&str> {
+        warnings
+            .iter()
+            .filter(|warning| warning.code.starts_with(code))
+            .filter_map(|warning| warning.location.as_deref())
+            .collect()
+    };
+    // The conformance half was handed the path the store rewrote, as it was.
+    assert_eq!(located("handed"), ["notes/referrer.md"]);
+    // The import's own lint stays on the imported file (an import commit moves nothing).
+    let lint = located("okf_lint");
+    assert!(lint.contains(&"notes/imported.md"), "{warnings:?}");
+    assert!(!lint.contains(&"notes/referrer.md"), "{warnings:?}");
+    // With nothing rewritten, nothing is handed on.
+    let none = check.check(&candidate.0, &[])?;
+    assert!(
+        none.iter().all(|warning| warning.code != "handed"),
+        "{none:?}"
+    );
+    Ok(())
+}
+
+/// Review N2: an import commit's check reports what that commit wrote. The conformance check
+/// answers for the whole candidate (as `OkfConformance` does: every file's findings, and
+/// findings that name no file); of those, only the ones located at a file this commit writes,
+/// or at a file the store rewrote, are passed on, each once and in the order given.
+#[test]
+fn an_import_check_passes_on_the_conformance_warnings_of_the_files_its_commit_wrote_only()
+-> TestResult {
+    let candidate = Candidate::new()?;
+    candidate.write("notes/imported.md", "---\ntype: Note\n---\n\n# Imported\n")?;
+    let about = |code: &str, location: Option<&str>| Warning {
+        code: code.to_owned(),
+        message: "a validator finding".to_owned(),
+        location: location.map(str::to_owned),
+    };
+    let whole_candidate = vec![
+        about("at_another_card", Some("notes/other.md")),
+        about("at_the_imported", Some("notes/imported.md")),
+        about("names_no_file", None),
+        about("at_a_rewritten", Some("notes/referrer.md")),
+        about("at_a_bystander", Some("notes/bystander.md")),
+        // A path that only starts like the imported one is another file.
+        about("at_a_longer_path", Some("notes/imported.md.bak")),
+    ];
+    let check = ImportCheck::new(
+        Arc::new(ScriptedConformance(Ok(whole_candidate))),
+        vec![WorkspacePath::try_from("notes/imported.md".to_owned())?],
+    );
+    let passed_on = |warnings: &[Warning]| -> Vec<String> {
+        warnings
+            .iter()
+            .filter(|warning| !warning.code.starts_with("okf_lint"))
+            .map(|warning| warning.code.clone())
+            .collect()
+    };
+    assert_eq!(
+        passed_on(&check.check(&candidate.0, &[])?),
+        ["at_the_imported"]
+    );
+    let rewritten = [WorkspacePath::try_from("notes/referrer.md".to_owned())?];
+    assert_eq!(
+        passed_on(&check.check(&candidate.0, &rewritten)?),
+        ["at_the_imported", "at_a_rewritten"]
+    );
+    Ok(())
+}
+
+#[test]
 fn lint_at_import_never_overrides_a_conformance_refusal() -> TestResult {
     let candidate = Candidate::new()?;
     candidate.write("notes/imported.md", "---\ntype: Note\n---\n\nNo heading.\n")?;
@@ -465,7 +974,7 @@ fn lint_at_import_never_overrides_a_conformance_refusal() -> TestResult {
         Arc::new(ScriptedConformance(Err(refusal.clone()))),
         vec![WorkspacePath::try_from("notes/imported.md".to_owned())?],
     );
-    let refused = err_of(check.check(&candidate.0))?;
+    let refused = err_of(check.check(&candidate.0, &[]))?;
     assert_eq!(refused.code, refusal.code);
     assert_eq!(refused.message, refusal.message);
 
@@ -474,6 +983,66 @@ fn lint_at_import_never_overrides_a_conformance_refusal() -> TestResult {
     let fault = err_of(lint_imported(&missing, &[]))?;
     assert_eq!(fault.code, ErrorCode::Internal);
     assert!(!fault.message.contains(&missing.display().to_string()));
+    Ok(())
+}
+
+/// An import commit checked by the production conformance check (`OkfConformance`), not a
+/// scripted one. A card the commit writes holds a broken link: the import reports that link,
+/// located at the card, once. A broken link in a file the commit does not write is not
+/// reported, and no warning about that file is. A non-conformant file elsewhere still refuses
+/// the commit.
+#[test]
+fn an_import_reports_a_broken_link_of_the_card_it_wrote_located_at_the_card_once() -> TestResult {
+    let candidate = Candidate::new()?;
+    let linking = |title: &str, target: &str| {
+        format!("---\ntype: Note\ntitle: {title}\n---\n# {title}\n\nSee [it]({target}).\n")
+    };
+    candidate.write(
+        "notes/imported.md",
+        &linking("Imported", "missing-thing.md"),
+    )?;
+    candidate.write("notes/other.md", &linking("Other", "elsewhere.md"))?;
+    let imported = WorkspacePath::try_from("notes/imported.md".to_owned())?;
+    let check = ImportCheck::new(Arc::new(OkfConformance), vec![imported]);
+    let warnings = check.check(&candidate.0, &[])?;
+    let broken: Vec<(Option<&str>, &str)> = warnings
+        .iter()
+        .filter(|warning| warning.message.contains("does not resolve to a concept"))
+        .map(|warning| (warning.location.as_deref(), warning.message.as_str()))
+        .collect();
+    assert_eq!(
+        broken,
+        [(
+            Some("notes/imported.md"),
+            "link target does not resolve to a concept in the bundle: missing-thing.md"
+        )]
+    );
+    assert!(
+        warnings
+            .iter()
+            .all(|warning| warning.location.as_deref() == Some("notes/imported.md")),
+        "{warnings:?}"
+    );
+    // The production check does report the other file's link, located there: the import's
+    // check is what leaves it out.
+    let whole = OkfConformance.check(&candidate.0, &[])?;
+    assert!(
+        whole.iter().any(|warning| {
+            warning.location.as_deref() == Some("notes/other.md")
+                && warning.message.ends_with("elsewhere.md")
+        }),
+        "{whole:?}"
+    );
+
+    // A refusal is a refusal as before, whatever file it names.
+    candidate.write("notes/bad.md", "---\ntitle: No type\n---\nBody\n")?;
+    let refused = err_of(check.check(&candidate.0, &[]))?;
+    assert_eq!(refused.code, ErrorCode::InvalidInput);
+    assert!(
+        refused.message.contains("notes/bad.md"),
+        "{}",
+        refused.message
+    );
     Ok(())
 }
 

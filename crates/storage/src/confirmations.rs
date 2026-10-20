@@ -3,7 +3,8 @@
 //! `consume` checks the subject, session, action, target, revision, digest and expiry inside one
 //! transaction and then sets `consumed_by` only where it is empty or already this mutation, so a
 //! confirmation is used by exactly one `MutationId`; the same mutation may consume it again after
-//! a crash, any other is refused as already used.
+//! a crash, any other is refused as already used. Both writes are refused inside their
+//! transaction while a purge names the workspace (`purge::guard`).
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::MutationId;
@@ -14,6 +15,7 @@ use okf_jawn_core::storage::StorageScope;
 use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::db::{Db, conflict, internal, json, not_found, scope_key, sql};
+use crate::purge::guard;
 use crate::seam;
 
 /// `ConfirmationStore` over the records database.
@@ -50,6 +52,7 @@ impl ConfirmationStore for SqliteConfirmations {
     ) -> PortFuture<'a, Confirmation> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
+            guard::refuse(transaction, &tenant, &workspace)?;
             let id: okf_jawn_contract::identity::ConfirmationId = new_id!()?;
             transaction
                 .execute(
@@ -87,6 +90,7 @@ impl ConfirmationStore for SqliteConfirmations {
     ) -> PortFuture<'a, Confirmation> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
+            guard::refuse(transaction, &tenant, &workspace)?;
             let id = consume.confirmation_id.0.to_string();
             let found: Option<(String, String)> = transaction
                 .query_row(

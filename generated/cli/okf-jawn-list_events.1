@@ -2,18 +2,18 @@
 .el .ds Aq '
 .TH okf-jawn-list_events 1  "list_events " 
 .SH NAME
-okf\-jawn\-list_events \- Read resumable notifications without treating them as authoritative document content.
+okf\-jawn\-list_events \- Read resumable notifications without treating them as authoritative document content. A workspace\*(Aqs security events are returned only to a caller holding `admin` on it, checked on every call; a page may therefore hold fewer rows than asked, or none, and still carry a cursor.
 .SH SYNOPSIS
-\fBokf\-jawn list_events\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBokf\-jawn list_events\fR [\fB\-\-json\fR] [\fB\-\-server\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
-Read resumable notifications without treating them as authoritative document content.
+Read resumable notifications without treating them as authoritative document content. A workspace\*(Aqs security events are returned only to a caller holding `admin` on it, checked on every call; a page may therefore hold fewer rows than asked, or none, and still carry a cursor.
 .SH OPTIONS
 .TP
-\fB\-\-server\fR [default: http://127.0.0.1:7711]
-
+\fB\-\-json\fR \fI<JSON>\fR [default: {}]
+The operation\*(Aqs JSON input: inline, @file, or \- for standard input
 .TP
-\fB\-\-json\fR [default: {}]
-JSON request, @file, or \- for stdin
+\fB\-\-server\fR \fI<URL>\fR [default: http://127.0.0.1:7711]
+The service address: HTTPS, or HTTP for a loopback address
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

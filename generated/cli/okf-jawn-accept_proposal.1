@@ -4,16 +4,16 @@
 .SH NAME
 okf\-jawn\-accept_proposal \- Accept exactly the confirmed proposal against the displayed head; never an agent tool.
 .SH SYNOPSIS
-\fBokf\-jawn accept_proposal\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBokf\-jawn accept_proposal\fR [\fB\-\-json\fR] [\fB\-\-server\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
 Accept exactly the confirmed proposal against the displayed head; never an agent tool.
 .SH OPTIONS
 .TP
-\fB\-\-server\fR [default: http://127.0.0.1:7711]
-
+\fB\-\-json\fR \fI<JSON>\fR [default: {}]
+The operation\*(Aqs JSON input: inline, @file, or \- for standard input
 .TP
-\fB\-\-json\fR [default: {}]
-JSON request, @file, or \- for stdin
+\fB\-\-server\fR \fI<URL>\fR [default: http://127.0.0.1:7711]
+The service address: HTTPS, or HTTP for a loopback address
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

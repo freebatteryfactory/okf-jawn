@@ -21,6 +21,7 @@ use okf_jawn_contract::search::{
     GetGraphRequest, GetGraphResponse, GetLinksRequest, GetLinksResponse, Link, LinkDirection,
     SearchRequest, SearchResponse,
 };
+use okf_jawn_contract::source::{SourceLocation, SourceLocator};
 use okf_jawn_core::application::{ApplicationService, Ports};
 use okf_jawn_core::jobs::RevisionMapping;
 use okf_jawn_core::ports::{Application, PortFuture};
@@ -31,8 +32,8 @@ use uuid::Uuid;
 
 use crate::check::{TestResult, err_of, some};
 use crate::fixture::{
-    ALICE, Built, FakeSearch, NOTE, Unused, World, alice, config, draft_of, instant, note, path,
-    revision, scope,
+    ALICE, Built, CARD_BODY, FakeSearch, NOTE, Unused, World, alice, config, converted, digest,
+    draft_of, instant, note, path, record, revision, scope, source_card,
 };
 
 /// How many index builds started, are running, and ran at most at once.
@@ -55,6 +56,7 @@ struct DetachedSearch {
 
 const OTHER: u128 = 21;
 const THIRD: u128 = 22;
+const CARD: u128 = 10;
 
 impl SearchIndex for DetachedSearch {
     fn index_revision<'a>(
@@ -155,14 +157,15 @@ fn graph(folder: Option<&str>, max_nodes: u32, at: At) -> Built<GetGraphRequest>
     })
 }
 
-fn link(from: u128, to: u128, line: u32) -> Link {
-    Link {
+fn link(from: u128, to: u128, line: u32) -> Built<Link> {
+    Ok(Link {
         from: item(from),
+        from_path: path(&format!("notes/{from}.md"))?,
         to_path: format!("notes/{to}.md"),
         to: Some(item(to)),
         label: format!("to {to}"),
         line,
-    }
+    })
 }
 
 fn hit_items(response: &okf_jawn_contract::search::SearchResponse) -> Vec<ItemId> {
@@ -369,7 +372,7 @@ async fn a_query_at_a_revision_the_index_has_not_built_indexes_it_and_asks_again
     world
         .search
         .put_entry(&at, summary(NOTE, "notes/plan.md")?, "plan")?;
-    world.search.put_link(&at, link(NOTE, OTHER, 3))?;
+    world.search.put_link(&at, link(NOTE, OTHER, 3)?)?;
     let response = world
         .service
         .search_items(
@@ -383,7 +386,7 @@ async fn a_query_at_a_revision_the_index_has_not_built_indexes_it_and_asks_again
     assert_eq!(world.search.queries()?.len(), 3);
     // Links and the graph of another unbuilt revision build it the same way.
     let older = revision('b')?;
-    world.search.put_link(&older, link(NOTE, OTHER, 4))?;
+    world.search.put_link(&older, link(NOTE, OTHER, 4)?)?;
     // The receipt cites the linking item, read at that revision.
     world.versions.put_document(
         &older,
@@ -603,6 +606,7 @@ fn detached(
         confirmations: unused.clone(),
         sandbox: world.sandbox.clone(),
         readiness: world.readiness.clone(),
+        backups: unused.clone(),
     };
     Ok((ApplicationService::new(ports, config())?, counters))
 }
@@ -739,8 +743,8 @@ async fn get_links_reads_one_direction_of_one_item_at_the_resolved_revision() ->
     let world = World::new()?;
     let at = revision('a')?;
     world.search.mark_indexed(&at)?;
-    world.search.put_link(&at, link(NOTE, OTHER, 3))?;
-    world.search.put_link(&at, link(THIRD, NOTE, 7))?;
+    world.search.put_link(&at, link(NOTE, OTHER, 3)?)?;
+    world.search.put_link(&at, link(THIRD, NOTE, 7)?)?;
     linking_items(&world, &at)?;
     let caller = alice(OperationName::GetLinks, None)?;
     let mut lines = Vec::new();
@@ -767,6 +771,229 @@ async fn get_links_reads_one_direction_of_one_item_at_the_resolved_revision() ->
     let query = some(queries.first(), "the link query")?;
     assert_eq!(query.revision, at);
     assert_eq!(query.item_id, item(NOTE));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_search_continues_at_the_revision_its_first_page_resolved() -> TestResult {
+    let world = World::new()?;
+    let at = revision('a')?;
+    world.search.mark_indexed(&at)?;
+    for (id, location) in [
+        (NOTE, "notes/a.md"),
+        (OTHER, "notes/b.md"),
+        (THIRD, "notes/c.md"),
+    ] {
+        world
+            .search
+            .put_entry(&at, summary(id, location)?, "the plan")?;
+    }
+    let page = |at: At, cursor: Option<String>| -> Built<SearchRequest> {
+        let mut request = search("plan", false)?;
+        request.at = at;
+        request.page = PageRequest { cursor, limit: 2 };
+        Ok(request)
+    };
+    let caller = alice(OperationName::SearchItems, None)?;
+    let first = world
+        .service
+        .search_items(&caller, page(At::Latest, None)?)
+        .await?;
+    let cursor = some(first.next_cursor.clone(), "a continuation")?;
+    // A write lands: `latest` is `b` now, which the index has not built.
+    world.versions.set_head(revision('b')?)?;
+    let second = world
+        .service
+        .search_items(&caller, page(At::Latest, Some(cursor.clone()))?)
+        .await?;
+    assert_eq!(second.revision, at);
+    assert_eq!(second.next_cursor, None);
+    let mut hits = hit_items(&first);
+    hits.extend(hit_items(&second));
+    assert_eq!(
+        hits,
+        vec![item(NOTE), item(OTHER), item(THIRD)],
+        "each hit once"
+    );
+    let asked: Vec<_> = world
+        .search
+        .queries()?
+        .into_iter()
+        .map(|query| (query.revision, query.page.cursor, query.page.limit))
+        .collect();
+    assert_eq!(
+        asked,
+        vec![(at.clone(), None, 2), (at, Some("2".to_owned()), 2)]
+    );
+    assert_eq!(world.search.builds(), 0, "`b` was never asked for");
+    // A search cursor is no cursor of an item's links.
+    let mut request = links(LinkDirection::Both, At::Latest)?;
+    request.page.cursor = Some(cursor.clone());
+    let as_links = alice(OperationName::GetLinks, None)?;
+    let elsewhere = err_of(world.service.get_links(&as_links, request).await)?;
+    assert_eq!(elsewhere.code, ErrorCode::InvalidInput);
+    assert_eq!(elsewhere.field.as_deref(), Some("/page/cursor"));
+    assert_eq!(world.search.link_queries()?.len(), 0);
+    // A cursor this operation did not issue, and one that continues another revision's search.
+    let named_b = At::Revision {
+        revision: revision('b')?,
+    };
+    for (at, text) in [(At::Latest, "2".to_owned()), (named_b, cursor)] {
+        let refused = err_of(
+            world
+                .service
+                .search_items(&caller, page(at, Some(text))?)
+                .await,
+        )?;
+        assert_eq!(refused.code, ErrorCode::InvalidInput);
+        assert_eq!(refused.field.as_deref(), Some("/page/cursor"));
+    }
+    assert_eq!(world.search.queries()?.len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_search_of_three_pages_reads_every_page_at_the_revision_the_first_resolved() -> TestResult
+{
+    // The cursor a continuation returns carries the first page's revision too: a write lands
+    // after each page, and the index has built no later head.
+    let world = World::new()?;
+    let at = revision('a')?;
+    world.search.mark_indexed(&at)?;
+    for id in 20..25_u128 {
+        world
+            .search
+            .put_entry(&at, summary(id, &format!("notes/{id}.md"))?, "the plan")?;
+    }
+    let mut hits = Vec::new();
+    let mut cursor = None;
+    for landing in ['b', 'c', 'd'] {
+        let mut request = search("plan", false)?;
+        request.page = PageRequest {
+            cursor: cursor.take(),
+            limit: 2,
+        };
+        let found = world
+            .service
+            .search_items(&alice(OperationName::SearchItems, None)?, request)
+            .await?;
+        assert_eq!(found.revision, at);
+        hits.extend(hit_items(&found));
+        cursor = found.next_cursor;
+        world.versions.set_head(revision(landing)?)?;
+    }
+    assert_eq!(cursor, None, "three pages");
+    let expected: Vec<ItemId> = (20..25_u128).map(item).collect();
+    assert_eq!(hits, expected, "each hit once, over three pages");
+    assert_eq!(world.search.builds(), 0, "no later head was asked for");
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_items_links_of_three_pages_read_every_page_at_the_revision_the_first_resolved()
+-> TestResult {
+    let world = World::new()?;
+    let at = revision('a')?;
+    world.search.mark_indexed(&at)?;
+    for line in 1..=5_u32 {
+        world.search.put_link(&at, link(NOTE, OTHER, line)?)?;
+    }
+    linking_items(&world, &at)?;
+    let mut lines = Vec::new();
+    let mut cursor = None;
+    for landing in ['b', 'c', 'd'] {
+        let mut request = links(LinkDirection::Outgoing, At::Latest)?;
+        request.page = PageRequest {
+            cursor: cursor.take(),
+            limit: 2,
+        };
+        let linked = world
+            .service
+            .get_links(&alice(OperationName::GetLinks, None)?, request)
+            .await?;
+        assert_eq!(linked.revision, at);
+        lines.extend(linked.links.iter().map(|link| link.line));
+        cursor = linked.next_cursor;
+        world.versions.set_head(revision(landing)?)?;
+    }
+    assert_eq!(cursor, None, "three pages");
+    assert_eq!(
+        lines,
+        vec![1, 2, 3, 4, 5],
+        "each link once, over three pages"
+    );
+    assert_eq!(world.search.builds(), 0, "no later head was asked for");
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_items_links_continue_at_the_revision_their_first_page_resolved() -> TestResult {
+    let world = World::new()?;
+    let at = revision('a')?;
+    world.search.mark_indexed(&at)?;
+    world.search.put_link(&at, link(NOTE, OTHER, 3)?)?;
+    world.search.put_link(&at, link(THIRD, NOTE, 7)?)?;
+    world.search.put_link(&at, link(NOTE, THIRD, 2)?)?;
+    linking_items(&world, &at)?;
+    let page = |at: At, cursor: Option<String>| -> Built<GetLinksRequest> {
+        let mut request = links(LinkDirection::Both, at)?;
+        request.page = PageRequest { cursor, limit: 2 };
+        Ok(request)
+    };
+    let caller = alice(OperationName::GetLinks, None)?;
+    let first = world
+        .service
+        .get_links(&caller, page(At::Latest, None)?)
+        .await?;
+    let cursor = some(first.next_cursor, "a continuation")?;
+    // A write lands: `latest` is `b` now, which the index has not built.
+    world.versions.set_head(revision('b')?)?;
+    let second = world
+        .service
+        .get_links(&caller, page(At::Latest, Some(cursor.clone()))?)
+        .await?;
+    assert_eq!(second.revision, at);
+    assert_eq!(second.next_cursor, None);
+    let lines: Vec<u32> = first
+        .links
+        .iter()
+        .chain(&second.links)
+        .map(|link| link.line)
+        .collect();
+    assert_eq!(lines, vec![3, 7, 2], "each link once");
+    let asked: Vec<_> = world
+        .search
+        .link_queries()?
+        .into_iter()
+        .map(|query| (query.revision, query.page.cursor, query.page.limit))
+        .collect();
+    assert_eq!(
+        asked,
+        vec![(at.clone(), None, 2), (at, Some("2".to_owned()), 2)]
+    );
+    // A links cursor is no search cursor.
+    let mut request = search("plan", false)?;
+    request.page.cursor = Some(cursor.clone());
+    let as_search = alice(OperationName::SearchItems, None)?;
+    let elsewhere = err_of(world.service.search_items(&as_search, request).await)?;
+    assert_eq!(elsewhere.code, ErrorCode::InvalidInput);
+    assert_eq!(elsewhere.field.as_deref(), Some("/page/cursor"));
+    assert_eq!(world.search.queries()?.len(), 0);
+    // A cursor this operation did not issue, and one that continues another revision's links.
+    let named_b = At::Revision {
+        revision: revision('b')?,
+    };
+    for (at, text) in [(At::Latest, "2".to_owned()), (named_b, cursor)] {
+        let refused = err_of(
+            world
+                .service
+                .get_links(&caller, page(at, Some(text))?)
+                .await,
+        )?;
+        assert_eq!(refused.code, ErrorCode::InvalidInput);
+        assert_eq!(refused.field.as_deref(), Some("/page/cursor"));
+    }
+    assert_eq!(world.search.link_queries()?.len(), 2);
     Ok(())
 }
 
@@ -820,13 +1047,14 @@ async fn get_links_records_one_reference_per_link_by_its_body_line() -> TestResu
     let world = World::new()?;
     let at = revision('a')?;
     world.search.mark_indexed(&at)?;
-    world.search.put_link(&at, link(NOTE, OTHER, 3))?;
-    world.search.put_link(&at, link(THIRD, NOTE, 7))?;
+    world.search.put_link(&at, link(NOTE, OTHER, 3)?)?;
+    world.search.put_link(&at, link(THIRD, NOTE, 7)?)?;
     // A broken link names no item; it still cites the item it is written in.
     world.search.put_link(
         &at,
         Link {
             from: item(NOTE),
+            from_path: path(&format!("notes/{NOTE}.md"))?,
             to_path: "notes/missing.md".to_owned(),
             to: None,
             label: "gone".to_owned(),
@@ -859,11 +1087,73 @@ async fn get_links_records_one_reference_per_link_by_its_body_line() -> TestResu
 }
 
 #[tokio::test]
+async fn a_link_cited_from_a_source_card_carries_the_cards_computed_locations() -> TestResult {
+    let world = World::new()?;
+    let at = revision('a')?;
+    world.search.mark_indexed(&at)?;
+    // The linking item is a source card showing its converter's text (`CARD_BODY`), whose
+    // record puts lines 1 to 3 on page 1 and lines 5 to 8 on page 2.
+    world.versions.put_document(
+        &at,
+        source_card(
+            CARD,
+            &at,
+            "sources/report-pdf.md",
+            CARD_BODY,
+            converted(&digest('b')?),
+        )?,
+    )?;
+    world
+        .blobs
+        .put_object(digest('b')?, serde_json::to_vec(&record(Vec::new())?)?)?;
+    world.search.put_link(&at, link(CARD, NOTE, 6)?)?;
+    world.search.put_link(&at, link(CARD, NOTE, 2)?)?;
+    // Line 4 is the blank line between the two pages: the record locates nothing there.
+    world.search.put_link(&at, link(CARD, NOTE, 4)?)?;
+    let response = world
+        .service
+        .get_links(
+            &alice(OperationName::GetLinks, None)?,
+            links(LinkDirection::Incoming, At::Latest)?,
+        )
+        .await?;
+    assert_eq!(response.links.len(), 3);
+    let on_page = |page_no: u32| SourceLocation::Direct {
+        locator: SourceLocator::Page { page_no },
+    };
+    let receipts = world.records.receipts()?;
+    let (_, receipt) = some(receipts.first(), "the receipt")?;
+    let cited: Vec<_> = receipt
+        .sources
+        .iter()
+        .map(|source| {
+            (
+                source.item_id,
+                source.digest.clone(),
+                source.selection.clone(),
+                source.locations.clone(),
+            )
+        })
+        .collect();
+    // Each link cites the card by its conversion record, located as a read of that line is.
+    let record_digest = Some(digest('b')?);
+    assert_eq!(
+        cited,
+        vec![
+            (item(CARD), record_digest.clone(), line(6), vec![on_page(2)]),
+            (item(CARD), record_digest.clone(), line(2), vec![on_page(1)]),
+            (item(CARD), record_digest, line(4), Vec::new()),
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_links_whose_linking_item_cannot_be_read_fails_and_records_no_receipt() -> TestResult {
     let world = World::new()?;
     let at = revision('a')?;
     world.search.mark_indexed(&at)?;
-    world.search.put_link(&at, link(NOTE, OTHER, 3))?;
+    world.search.put_link(&at, link(NOTE, OTHER, 3)?)?;
     linking_items(&world, &at)?;
     world.versions.fail_next_show(ErrorCode::Unavailable)?;
     let failed = err_of(
@@ -894,7 +1184,7 @@ async fn get_graph_reads_a_bounded_graph_of_one_folder_and_refuses_no_room() -> 
     world
         .search
         .put_entry(&at, summary(THIRD, "elsewhere/c.md")?, "c")?;
-    world.search.put_link(&at, link(NOTE, OTHER, 1))?;
+    world.search.put_link(&at, link(NOTE, OTHER, 1)?)?;
     linking_items(&world, &at)?;
     let caller = alice(OperationName::GetGraph, None)?;
     let whole = world

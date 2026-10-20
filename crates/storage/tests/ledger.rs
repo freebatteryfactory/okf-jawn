@@ -6,13 +6,21 @@
 #![cfg(feature = "runtime")]
 
 use check::{TestResult, err_of};
+use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::error::ErrorCode;
-use okf_jawn_contract::identity::Digest;
+use okf_jawn_contract::identity::{Digest, WorkspaceId};
 use okf_jawn_contract::metadata::OperationName;
+use okf_jawn_contract::purge::PurgeTarget;
+use okf_jawn_core::jobs::{NewPurge, RecordStore};
 use okf_jawn_core::mutations::{BeginOutcome, MutationKey, MutationLease, MutationStore};
+use okf_jawn_core::storage::Provenance;
 use okf_jawn_storage::Storage;
 use rusqlite::Connection;
 use serde_json::json;
+
+const HOME: &str = "11111111-1111-4111-8111-111111111111";
+const ELSEWHERE: &str = "22222222-2222-4222-8222-222222222222";
+const PURGE: &str = "00000000-0000-4000-8000-000000000098";
 
 fn key(client: Option<&str>) -> Result<MutationKey, Box<dyn std::error::Error>> {
     Ok(MutationKey {
@@ -26,6 +34,19 @@ fn key(client: Option<&str>) -> Result<MutationKey, Box<dyn std::error::Error>> 
 
 fn digest(fill: char) -> Result<Digest, Box<dyn std::error::Error>> {
     Ok(Digest::try_from(fill.to_string().repeat(64))?)
+}
+
+fn workspace(id: &str) -> Result<WorkspaceId, serde_json::Error> {
+    serde_json::from_value(json!(id))
+}
+
+/// The workspace the ledger row of `lease`'s mutation records.
+fn recorded(storage: &Storage, lease: MutationLease) -> Result<Option<String>, rusqlite::Error> {
+    Connection::open(storage.data().records_path())?.query_row(
+        "SELECT workspace_id FROM mutations WHERE mutation_id = ?1",
+        [lease.mutation_id.0.to_string()],
+        |row| row.get(0),
+    )
 }
 
 /// Move every live lease's expiry into the past.
@@ -72,12 +93,62 @@ async fn superseded(
 ) -> Result<(MutationLease, MutationLease), Box<dyn std::error::Error>> {
     let ledger = storage.mutations();
     let key = key(None)?;
-    let first = new_lease(ledger.begin(&key, &digest('a')?).await?)?;
+    let first = new_lease(ledger.begin(&key, &digest('a')?, None).await?)?;
     expire_leases(storage)?;
-    let second = abandoned_lease(ledger.begin(&key, &digest('a')?).await?)?;
+    let second = abandoned_lease(ledger.begin(&key, &digest('a')?, None).await?)?;
     assert_eq!(second.mutation_id, first.mutation_id);
     assert_ne!(second.token, first.token);
     Ok((first, second))
+}
+
+/// Record the workspace purge through its real public port, without running a sweep.
+async fn record_home_purge(storage: &Storage) -> TestResult {
+    let purge = storage
+        .records()
+        .create_purge(
+            &key(None)?.tenant_id,
+            serde_json::from_value(json!("00000000-0000-4000-8000-000000000099"))?,
+            NewPurge {
+                id: serde_json::from_value(json!(PURGE))?,
+                target: PurgeTarget::Workspace {
+                    workspace_id: workspace(HOME)?,
+                },
+                initiator: Provenance {
+                    subject: "purge-owner".to_owned(),
+                    route: AccessRoute::LocalOwner,
+                    client_id: None,
+                },
+            },
+        )
+        .await?;
+    assert_eq!(purge.id.0.to_string(), PURGE);
+    Ok(())
+}
+
+/// The complete ledger row, so a refused retry cannot quietly extend a clock or lease.
+fn ledger_snapshot(storage: &Storage) -> Result<String, rusqlite::Error> {
+    Connection::open(storage.data().records_path())?.query_row(
+        "SELECT json_array(tenant_id,subject,client_key,operation,idempotency_key,mutation_id,
+             digest,state,token,lease_expires_ms,response,finished_ms,workspace_id,purge_id)
+         FROM mutations",
+        [],
+        |row| row.get(0),
+    )
+}
+
+/// Literal V5.1/V5.2 terminal shape; the public completion/release wrote it, not a fixture.
+fn assert_terminally_purged(storage: &Storage) -> TestResult {
+    let row: String = Connection::open(storage.data().records_path())?.query_row(
+        "SELECT json_array(state,digest,response,purge_id,workspace_id,finished_ms IS NOT NULL)
+         FROM mutations",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&row)?,
+        json!(["purged", null, null, PURGE, HOME, 1])
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -85,9 +156,9 @@ async fn mutation_ledger_replays_a_completed_response() -> TestResult {
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;
     let ledger = storage.mutations();
-    let lease = new_lease(ledger.begin(&key(None)?, &digest('a')?).await?)?;
-    ledger.complete(lease, json!({ "answer": 1 })).await?;
-    let body = replayed(ledger.begin(&key(None)?, &digest('a')?).await?)?;
+    let lease = new_lease(ledger.begin(&key(None)?, &digest('a')?, None).await?)?;
+    ledger.complete(lease, json!({ "answer": 1 }), None).await?;
+    let body = replayed(ledger.begin(&key(None)?, &digest('a')?, None).await?)?;
     assert_eq!(body, json!({ "answer": 1 }));
     Ok(())
 }
@@ -97,8 +168,8 @@ async fn mutation_ledger_conflicts_when_the_key_is_reused_with_another_body() ->
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;
     let ledger = storage.mutations();
-    new_lease(ledger.begin(&key(None)?, &digest('a')?).await?)?;
-    match ledger.begin(&key(None)?, &digest('b')?).await? {
+    new_lease(ledger.begin(&key(None)?, &digest('a')?, None).await?)?;
+    match ledger.begin(&key(None)?, &digest('b')?, None).await? {
         BeginOutcome::Conflict { operation } => {
             assert_eq!(operation, OperationName::CreateWorkspace);
         }
@@ -112,8 +183,8 @@ async fn mutation_ledger_reports_a_live_lease_as_in_progress() -> TestResult {
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;
     let ledger = storage.mutations();
-    let lease = new_lease(ledger.begin(&key(None)?, &digest('a')?).await?)?;
-    match ledger.begin(&key(None)?, &digest('a')?).await? {
+    let lease = new_lease(ledger.begin(&key(None)?, &digest('a')?, None).await?)?;
+    match ledger.begin(&key(None)?, &digest('a')?, None).await? {
         BeginOutcome::InProgress {
             mutation_id,
             retry_after,
@@ -131,9 +202,9 @@ async fn mutation_ledger_resumes_a_released_attempt_at_once() -> TestResult {
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;
     let ledger = storage.mutations();
-    let first = new_lease(ledger.begin(&key(None)?, &digest('a')?).await?)?;
+    let first = new_lease(ledger.begin(&key(None)?, &digest('a')?, None).await?)?;
     ledger.release(first).await?;
-    let second = abandoned_lease(ledger.begin(&key(None)?, &digest('a')?).await?)?;
+    let second = abandoned_lease(ledger.begin(&key(None)?, &digest('a')?, None).await?)?;
     assert_eq!(second.mutation_id, first.mutation_id);
     assert_ne!(second.token, first.token);
     Ok(())
@@ -144,10 +215,10 @@ async fn mutation_ledger_keeps_a_crashed_attempt_until_it_is_reconciled() -> Tes
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;
     let ledger = storage.mutations();
-    let first = new_lease(ledger.begin(&key(None)?, &digest('a')?).await?)?;
+    let first = new_lease(ledger.begin(&key(None)?, &digest('a')?, None).await?)?;
     // Neither completed nor released, and far past the retention window.
     age_finished_rows(&storage, 30)?;
-    let second = abandoned_lease(ledger.begin(&key(None)?, &digest('a')?).await?)?;
+    let second = abandoned_lease(ledger.begin(&key(None)?, &digest('a')?, None).await?)?;
     assert_eq!(second.mutation_id, first.mutation_id);
     Ok(())
 }
@@ -157,12 +228,12 @@ async fn mutation_ledger_drops_finished_rows_after_seven_days() -> TestResult {
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;
     let ledger = storage.mutations();
-    let completed = new_lease(ledger.begin(&key(None)?, &digest('a')?).await?)?;
-    ledger.complete(completed, json!({})).await?;
+    let completed = new_lease(ledger.begin(&key(None)?, &digest('a')?, None).await?)?;
+    ledger.complete(completed, json!({}), None).await?;
     age_finished_rows(&storage, 6)?;
-    replayed(ledger.begin(&key(None)?, &digest('a')?).await?)?;
+    replayed(ledger.begin(&key(None)?, &digest('a')?, None).await?)?;
     age_finished_rows(&storage, 2)?;
-    let fresh = new_lease(ledger.begin(&key(None)?, &digest('a')?).await?)?;
+    let fresh = new_lease(ledger.begin(&key(None)?, &digest('a')?, None).await?)?;
     assert_ne!(fresh.mutation_id, completed.mutation_id);
     Ok(())
 }
@@ -172,8 +243,12 @@ async fn mutation_ledger_separates_a_connector_from_its_subject() -> TestResult 
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;
     let ledger = storage.mutations();
-    let direct = new_lease(ledger.begin(&key(None)?, &digest('a')?).await?)?;
-    let connector = new_lease(ledger.begin(&key(Some("claude"))?, &digest('b')?).await?)?;
+    let direct = new_lease(ledger.begin(&key(None)?, &digest('a')?, None).await?)?;
+    let connector = new_lease(
+        ledger
+            .begin(&key(Some("claude"))?, &digest('b')?, None)
+            .await?,
+    )?;
     assert_ne!(direct.mutation_id, connector.mutation_id);
     Ok(())
 }
@@ -185,12 +260,12 @@ async fn mutation_lease_compare_and_set_after_the_takeover_completes() -> TestRe
     let ledger = storage.mutations();
     let (stale, current) = superseded(&storage).await?;
     ledger
-        .complete(current, json!({ "by": "takeover" }))
+        .complete(current, json!({ "by": "takeover" }), None)
         .await?;
-    let error = err_of(ledger.complete(stale, json!({ "by": "stale" })).await)?;
+    let error = err_of(ledger.complete(stale, json!({ "by": "stale" }), None).await)?;
     assert_eq!(error.code, ErrorCode::Conflict);
     ledger.release(stale).await?;
-    let body = replayed(ledger.begin(&key(None)?, &digest('a')?).await?)?;
+    let body = replayed(ledger.begin(&key(None)?, &digest('a')?, None).await?)?;
     assert_eq!(body, json!({ "by": "takeover" }));
     Ok(())
 }
@@ -201,20 +276,20 @@ async fn mutation_lease_compare_and_set_before_the_takeover_completes() -> TestR
     let storage = Storage::open(directory.path())?;
     let ledger = storage.mutations();
     let (stale, current) = superseded(&storage).await?;
-    let error = err_of(ledger.complete(stale, json!({ "by": "stale" })).await)?;
+    let error = err_of(ledger.complete(stale, json!({ "by": "stale" }), None).await)?;
     assert_eq!(error.code, ErrorCode::Conflict);
     ledger.release(stale).await?;
     // The stale release ended nothing: the takeover still holds a live lease.
-    match ledger.begin(&key(None)?, &digest('a')?).await? {
+    match ledger.begin(&key(None)?, &digest('a')?, None).await? {
         BeginOutcome::InProgress { mutation_id, .. } => {
             assert_eq!(mutation_id, current.mutation_id);
         }
         other => return Err(format!("expected in progress, got {other:?}").into()),
     }
     ledger
-        .complete(current, json!({ "by": "takeover" }))
+        .complete(current, json!({ "by": "takeover" }), None)
         .await?;
-    let body = replayed(ledger.begin(&key(None)?, &digest('a')?).await?)?;
+    let body = replayed(ledger.begin(&key(None)?, &digest('a')?, None).await?)?;
     assert_eq!(body, json!({ "by": "takeover" }));
     Ok(())
 }
@@ -224,13 +299,199 @@ async fn mutation_lease_compare_and_set_release_of_a_completed_mutation_is_a_no_
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;
     let ledger = storage.mutations();
-    let lease = new_lease(ledger.begin(&key(None)?, &digest('a')?).await?)?;
-    ledger.complete(lease, json!({ "kept": true })).await?;
+    let lease = new_lease(ledger.begin(&key(None)?, &digest('a')?, None).await?)?;
+    ledger
+        .complete(lease, json!({ "kept": true }), None)
+        .await?;
     ledger.release(lease).await?;
     // Completing again under the same grant keeps the first response.
-    ledger.complete(lease, json!({ "kept": false })).await?;
-    let body = replayed(ledger.begin(&key(None)?, &digest('a')?).await?)?;
+    ledger
+        .complete(lease, json!({ "kept": false }), None)
+        .await?;
+    let body = replayed(ledger.begin(&key(None)?, &digest('a')?, None).await?)?;
     assert_eq!(body, json!({ "kept": true }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn mutation_ledger_keeps_the_workspace_its_first_begin_named() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let ledger = storage.mutations();
+    let first = new_lease(
+        ledger
+            .begin(&key(None)?, &digest('a')?, Some(workspace(HOME)?))
+            .await?,
+    )?;
+    assert_eq!(recorded(&storage, first)?, Some(HOME.to_owned()));
+    ledger.release(first).await?;
+    // The same key and digest are the same request: a resumed begin changes nothing.
+    let resumed = abandoned_lease(
+        ledger
+            .begin(&key(None)?, &digest('a')?, Some(workspace(ELSEWHERE)?))
+            .await?,
+    )?;
+    // A completion's workspace is recorded only when begin recorded none.
+    let named = Some(workspace(ELSEWHERE)?);
+    ledger.complete(resumed, json!({}), named).await?;
+    assert_eq!(recorded(&storage, resumed)?, Some(HOME.to_owned()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn mutation_ledger_records_the_workspace_a_completion_names_when_begin_had_none() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let ledger = storage.mutations();
+    let lease = new_lease(ledger.begin(&key(None)?, &digest('a')?, None).await?)?;
+    assert_eq!(recorded(&storage, lease)?, None);
+    let named = Some(workspace(HOME)?);
+    ledger.complete(lease, json!({ "id": HOME }), named).await?;
+    assert_eq!(recorded(&storage, lease)?, Some(HOME.to_owned()));
+    Ok(())
+}
+
+/// Design5.2/V5.6: an already purged row refuses before digest comparison, never moves its
+/// existing clock, stays at six days and expires at eight. Raw SQL seeds only that new state.
+#[tokio::test]
+async fn schema5_ledger_purged_retry_keeps_identity_and_retention_clock() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let ledger = storage.mutations();
+    let request = key(None)?;
+    let lease = new_lease(
+        ledger
+            .begin(&request, &digest('a')?, Some(workspace(HOME)?))
+            .await?,
+    )?;
+    ledger
+        .complete(lease, json!({ "old": "response" }), None)
+        .await?;
+    record_home_purge(&storage).await?;
+    Connection::open(storage.data().records_path())?.execute(
+        "UPDATE mutations SET state='purged',digest=NULL,response=NULL,purge_id=?1",
+        [PURGE],
+    )?;
+    age_finished_rows(&storage, 6)?;
+    let before = ledger_snapshot(&storage)?;
+    for body in ['a', 'b'] {
+        let refused = err_of(
+            ledger
+                .begin(&request, &digest(body)?, Some(workspace(ELSEWHERE)?))
+                .await,
+        )?;
+        assert_eq!(refused.code, ErrorCode::Conflict);
+        assert!(refused.message.contains(HOME), "{}", refused.message);
+        assert!(refused.message.contains(PURGE), "{}", refused.message);
+        assert_eq!(ledger_snapshot(&storage)?, before);
+    }
+    age_finished_rows(&storage, 2)?;
+    let fresh = new_lease(
+        ledger
+            .begin(&request, &digest('b')?, Some(workspace(ELSEWHERE)?))
+            .await?,
+    )?;
+    assert_ne!(fresh.mutation_id, lease.mutation_id);
+    Ok(())
+}
+
+/// Design5.2/V5.1: the workspace supplied only by complete is checked in that transaction.
+#[tokio::test]
+async fn schema5_ledger_late_completion_keeps_no_purged_response_or_digest() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let ledger = storage.mutations();
+    let lease = new_lease(ledger.begin(&key(None)?, &digest('a')?, None).await?)?;
+    record_home_purge(&storage).await?;
+    ledger
+        .complete(
+            lease,
+            json!({ "must_not_survive": HOME }),
+            Some(workspace(HOME)?),
+        )
+        .await?;
+    assert_terminally_purged(&storage)
+}
+
+/// Design5.2/V5.2: release after the recorded purge erases the request digest too.
+#[tokio::test]
+async fn schema5_ledger_late_release_keeps_no_purged_request_digest() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let ledger = storage.mutations();
+    let lease = new_lease(
+        ledger
+            .begin(&key(None)?, &digest('a')?, Some(workspace(HOME)?))
+            .await?,
+    )?;
+    record_home_purge(&storage).await?;
+    ledger.release(lease).await?;
+    assert_terminally_purged(&storage)
+}
+
+/// Design5.2/V5.3: released/expired attempts become terminal before comparing a new digest.
+/// A still-live lease remains in progress until it expires; no takeover is manufactured.
+#[tokio::test]
+async fn schema5_ledger_released_and_expired_attempts_refuse_recorded_purges() -> TestResult {
+    for released in [true, false] {
+        let directory = tempfile::tempdir()?;
+        let storage = Storage::open(directory.path())?;
+        let ledger = storage.mutations();
+        let request = key(None)?;
+        let lease = new_lease(
+            ledger
+                .begin(&request, &digest('a')?, Some(workspace(HOME)?))
+                .await?,
+        )?;
+        if released {
+            ledger.release(lease).await?;
+        }
+        record_home_purge(&storage).await?;
+        if !released {
+            assert!(matches!(
+                ledger.begin(&request, &digest('a')?, None).await?,
+                BeginOutcome::InProgress { .. }
+            ));
+            expire_leases(&storage)?;
+        }
+        let refused = err_of(ledger.begin(&request, &digest('b')?, None).await)?;
+        assert_eq!(refused.code, ErrorCode::Conflict);
+        assert!(refused.message.contains(HOME), "{}", refused.message);
+        assert!(refused.message.contains(PURGE), "{}", refused.message);
+        assert_terminally_purged(&storage)?;
+    }
+    Ok(())
+}
+
+/// Design5.2/V5.4: a purge's own ledger and other workspaces retain ordinary replay semantics.
+#[tokio::test]
+async fn schema5_ledger_purge_operations_and_other_workspaces_are_not_terminalized() -> TestResult {
+    for (operation, named) in [
+        (OperationName::PurgeWorkspace, HOME),
+        (OperationName::PurgeItem, HOME),
+        (OperationName::CreateWorkspace, ELSEWHERE),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let storage = Storage::open(directory.path())?;
+        let ledger = storage.mutations();
+        let mut request = key(None)?;
+        request.operation = operation;
+        let lease = new_lease(
+            ledger
+                .begin(&request, &digest('a')?, Some(workspace(named)?))
+                .await?,
+        )?;
+        record_home_purge(&storage).await?;
+        ledger
+            .complete(lease, json!({ "kept": true }), None)
+            .await?;
+        assert_eq!(
+            replayed(ledger.begin(&request, &digest('a')?, None).await?)?,
+            json!({ "kept": true })
+        );
+        assert_eq!(recorded(&storage, lease)?, Some(named.to_owned()));
+    }
     Ok(())
 }
 

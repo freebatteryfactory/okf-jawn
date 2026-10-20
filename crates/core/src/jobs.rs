@@ -6,7 +6,7 @@
 //! carries the inputs, the initiator and the `MutationId` a handler needs to do the work again
 //! after a crash. Every insert is unique on `MutationId` and a repeated id returns the prior row.
 //!
-//! A job belongs to a workspace or, for an installation backup and a purge, to the tenant
+//! A job belongs to a workspace or, for an installation backup, purge or clean-up, to the tenant
 //! (`JobScope`); a tenant job outlives a purged workspace. `JobSpec::fits` holds the two
 //! together. Purge records and the revision map are tenant and workspace records the same store
 //! keeps (Stage 1b design sections 6 and 9.2); derived objects (a View's materialized dataset)
@@ -20,10 +20,10 @@ use okf_jawn_contract::{
         ArtifactId, Digest, ItemId, JobId, MutationId, PurgeId, ReceiptId, Revision, TenantId,
         Timestamp, UploadId, WorkspaceId, WorkspacePath,
     },
-    import::{Job, JobKind, ListJobsResponse},
+    import::{CleanUpReport, Job, JobKind, ListJobsResponse},
     purge::{Purge, PurgeTarget},
     review::Review,
-    workspace::{ArtifactScope, DownloadArtifact, RestoreReport},
+    workspace::{ArtifactScope, BackupReport, DownloadArtifact, RestoreReport},
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -37,7 +37,7 @@ use crate::stored::{ValidatorCell, decode_stored};
 /// What a retained artifact is; the contract's, so the record and the wire agree.
 pub use okf_jawn_contract::workspace::ArtifactKind;
 
-/// Whose job or artifact a record is: the tenant's (an installation backup, a purge) or one
+/// Whose job or artifact a record is: the tenant's (an installation backup, purge or clean-up) or one
 /// workspace's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobScope {
@@ -132,6 +132,8 @@ pub enum JobSpec {
         /// Item removed.
         item_id: ItemId,
     },
+    /// Reclaim the tenant's unreferenced objects. Tenant-scoped.
+    CleanUp,
 }
 
 /// A job to register durably before it is enqueued or reported.
@@ -189,6 +191,11 @@ pub struct JobCompletion {
     pub artifact: Option<ArtifactId>,
     /// What a restore did; present exactly for a `RestoreWorkspace` job.
     pub restore: Option<RestoreReport>,
+    /// What a workspace backup left out of its archive; present exactly for a
+    /// `BackupWorkspace` job (`Backups::write_workspace_archive`).
+    pub backup: Option<BackupReport>,
+    /// What a clean-up removed and kept; present exactly for a `CleanUp` job.
+    pub clean_up: Option<CleanUpReport>,
     /// Retained output objects, kept as garbage-collection roots.
     pub outputs: Vec<Digest>,
     /// Non-fatal issues recorded during the work.
@@ -270,20 +277,49 @@ pub struct DerivedObject {
 }
 
 /// SQLite-backed non-rebuildable application records.
+///
+/// The store writes a job's instants and retry flag as its state changes:
+/// `created_at` when the job is created; `started_at` when a claim starts an attempt;
+/// `finished_at` when the job succeeds, fails or is cancelled; `retryable` exactly while it is
+/// failed. A retry, and a released lease (`expire_leases`), queue the job again and clear
+/// `started_at` (and a retry `finished_at` and `retryable`), so a waiting job has no
+/// `started_at`.
 pub trait RecordStore: Send + Sync {
     /// Register a queued job and allocate its identity.
     ///
     /// Unique on `job.mutation_id`: a repeated id inserts nothing and returns the prior job,
     /// whatever state it has reached. The returned `Job::kind` is `job.spec.kind()`, and a
     /// tenant job's `Job::workspace_id` is absent. Refuses with `Internal` a specification that
-    /// does not fit the scope (`JobSpec::fits`).
+    /// does not fit the scope (`JobSpec::fits`). Refuses with `Conflict`, naming the purge, a
+    /// job of a workspace a purge is recorded for, a repeated id included (`Purger`). Refuses
+    /// with `Conflict` and `ErrorDetail::WorkspaceArchived` an import, redigest or restore job
+    /// of an archived workspace, a repeated id included, in the insert's own transaction, so
+    /// that an archive (`WorkspaceCatalog::archive`) and such an insert racing end with one of
+    /// them refused (contract ruling 25).
+    ///
+    /// A `CleanUp` job of a tenant that already has one queued or running is not created:
+    /// that one is returned, and the request it absorbs is served by a pass that begins
+    /// after the request.
     fn create_job<'a>(&'a self, scope: &'a JobScope, job: NewJob) -> PortFuture<'a, Job>;
     /// Read one durable job within its scope.
     fn get_job<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, Job>;
+    /// Read the immutable creating mutation of a known job identity within its scope.
+    ///
+    /// The same tenant/workspace filtering as `get_job`: an unknown job or another scope is
+    /// `NotFound`. This reads by `JobId`, never finds a job by mutation, and creates or claims
+    /// nothing. Import acceptance uses it to recognize uploads its own earlier attempt's job
+    /// consumed before its pending-card commit, as SPEC section 5 requires: "a retried request
+    /// returns the job it already created".
+    fn job_mutation<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, MutationId>;
     /// List durable jobs of one scope, newest first, with bounded pagination.
     fn list_jobs<'a>(&'a self, scope: &'a JobScope, page: Page)
     -> PortFuture<'a, ListJobsResponse>;
-    /// Claim runnable work under a compare-and-set lease; `None` when it is not runnable.
+    /// Claim runnable work under a compare-and-set lease; `None` when it is not runnable
+    /// (unknown, finished, or running under a live lease).
+    ///
+    /// Refuses with `Conflict`, naming the purge, a queued or running job of a workspace a
+    /// purge is recorded for, and leaves the job as it is for the purge's caller to cancel. A
+    /// worker treats that refusal as "skip this job", not as a fault (`Purger`).
     fn claim_job(&self, job: JobId) -> PortFuture<'_, Option<ClaimedJob>>;
     /// Record progress, 0 to 100, for the current claim, renew the lease to now plus the lease
     /// duration, and return the job as it now stands.
@@ -295,13 +331,40 @@ pub trait RecordStore: Send + Sync {
     ///
     /// When `completion.artifact` is set, the returned and stored job shows
     /// `ArtifactRecord::download` of that record as its artifact.
+    /// A `CleanUp` job whose tenant asked for a clean-up after its pass began is queued again
+    /// instead of succeeding and returned queued; removed-object and upload-file counts
+    /// accumulate across passes, while the kept-object count is the last pass's count
+    /// (`CleanUpReport`, lifecycle design section 3.2). The runtime's next sweep delivers it.
     fn complete_job(&self, completion: JobCompletion) -> PortFuture<'_, Job>;
-    /// Keep the failure and retry eligibility for the current claim.
-    fn fail_job(&self, lease: JobLease, message: String, retryable: bool) -> PortFuture<'_, Job>;
+    /// Record the failure of the current claim: `error` is stored as `Job.error` as given (its
+    /// code, message, `field` and `detail`), and `retryable` as `Job.retryable`, which says
+    /// whether `retry_job` queues the job again; the code never says it. `field` is a JSON
+    /// Pointer into the request that started the job.
+    fn fail_job(&self, lease: JobLease, error: ApiError, retryable: bool) -> PortFuture<'_, Job>;
+    /// Mark the job the current claim runs as past its point of no return, and return the job
+    /// as it stands.
+    ///
+    /// From then on `cancel_job` refuses the job while it is unfinished, so its handler goes on
+    /// to its completion: a restore seals before it consumes its upload (`UploadStore::consume`)
+    /// and calls `Backups::restore_import`, whose import cannot be undone midway, so a
+    /// cancellation lands before the consume or not at all. A sealed job may still fail
+    /// (`fail_job`); only its cancellation is refused. A job already cancelled is returned as it
+    /// is, not sealed, and its handler stops: the seal and a cancellation are ordered by the
+    /// store, and only the first of them takes effect. Sealing again changes nothing. The seal stays with the
+    /// job: once its lease lapses and the job is queued again (`expire_leases`), or a failed
+    /// sealed job is retried, it is still sealed, because the attempt that runs it next resumes
+    /// the same work. The wire `Job` does not show it.
+    ///
+    /// Refuses with `Conflict`, sealing nothing, when `lease` is not the job's current,
+    /// unexpired claim of a running job.
+    fn seal<'a>(&'a self, lease: &'a JobLease) -> PortFuture<'a, Job>;
     /// Cancel pending or running work while retaining recorded state.
     ///
     /// Unique on `mutation_id`: a repeated id makes no second transition and returns the job
-    /// row as it stands.
+    /// row as it stands. Refuses with `Conflict` ("this job has passed its point of no
+    /// return"), writing nothing, a queued or running job that sealed itself (`seal`): its
+    /// work cannot be undone midway, so it runs to its end. Never refused because of a recorded
+    /// purge: cancelling is the purge's own drain, which waits for a sealed job instead.
     fn cancel_job<'a>(
         &'a self,
         scope: &'a JobScope,
@@ -311,7 +374,11 @@ pub trait RecordStore: Send + Sync {
     /// Queue a failed job again under the same durable identity.
     ///
     /// Unique on `mutation_id`: a repeated id does not queue the job a second time, even when
-    /// the job has run and failed again since, and returns the job row as it stands.
+    /// the job has run and failed again since, and returns the job row as it stands. Refuses
+    /// with `Conflict`, naming the purge, a job of a workspace a purge is recorded for, a
+    /// repeated id included (`Purger`). Refuses with `Conflict` and
+    /// `ErrorDetail::WorkspaceArchived` an import, redigest or restore job of an archived
+    /// workspace, a repeated id included, in the retry's own transaction (contract ruling 25).
     fn retry_job<'a>(
         &'a self,
         scope: &'a JobScope,
@@ -336,22 +403,38 @@ pub trait RecordStore: Send + Sync {
         scope: &'a JobScope,
         artifact: ArtifactId,
     ) -> PortFuture<'a, ArtifactRecord>;
-    /// Enumerate unfinished records across tenants for queue reconciliation on restart.
+    /// Enumerate unfinished records across tenants for queue reconciliation on restart. It may
+    /// list a job of a purged workspace that `claim_job` then refuses.
     fn pending_jobs(&self) -> PortFuture<'_, Vec<(JobScope, JobId)>>;
-    /// Release claims whose leases have expired so work can be reclaimed.
+    /// Release claims whose leases have expired so work can be reclaimed; a released job of a
+    /// purged workspace is not reclaimed (`claim_job` refuses it).
     fn expire_leases(&self) -> PortFuture<'_, u32>;
     /// Record a purge and, in the same transaction, its tenant job (`PurgeWorkspace` or
     /// `PurgeItem` from the target) under `mutation_id`.
     ///
-    /// Unique on `purge.id`: a repeated id returns the prior purge. While a purge of the same
-    /// target is not completed, any request for that target returns that unfinished purge and
-    /// records nothing: that is how a failed purge is resumed.
+    /// Unique on `purge.id`: a repeated id returns the prior purge. A request for a target that
+    /// a purge already names returns that purge and records nothing (the one `find_purge`
+    /// answers): the unfinished one while there is one, which is how a failed purge is
+    /// resumed, otherwise the completed one, since a target is purged once (contract ruling
+    /// 24).
     fn create_purge<'a>(
         &'a self,
         tenant: &'a TenantId,
         mutation_id: MutationId,
         purge: NewPurge,
     ) -> PortFuture<'a, Purge>;
+    /// The purge a request for `target` is answered with: the unfinished purge of the target
+    /// while there is one, otherwise the first completed one; `None` when no purge names the
+    /// target. Nothing is recorded.
+    ///
+    /// It is the purge `create_purge` would return instead of recording one, read without
+    /// recording, so a caller answers a recorded purge before it checks what only a new purge
+    /// needs (`purge_workspace` checks `base_revision` only then).
+    fn find_purge<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        target: &'a PurgeTarget,
+    ) -> PortFuture<'a, Option<Purge>>;
     /// Read one purge; it outlives the workspace it removed.
     fn get_purge<'a>(&'a self, tenant: &'a TenantId, purge: PurgeId) -> PortFuture<'a, Purge>;
     /// Store the progress, report or failure of a purge and return it as stored.
@@ -363,6 +446,9 @@ pub trait RecordStore: Send + Sync {
     fn update_purge<'a>(&'a self, tenant: &'a TenantId, purge: Purge) -> PortFuture<'a, Purge>;
     /// What became of a revision a purge rewrote or removed; `None` when no purge touched it.
     /// Written by `Purger`.
+    /// A recorded workspace purge, in any state, answers its purge id and no replacement
+    /// for every revision of that workspace, including a never-committed revision and one
+    /// whose earlier per-revision mapping names a replacement. No target history is read.
     fn revision_mapping<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -491,6 +577,7 @@ impl JobSpec {
             Self::BackupInstallation => JobKind::BackupInstallation,
             Self::PurgeWorkspace { .. } => JobKind::PurgeWorkspace,
             Self::PurgeItem { .. } => JobKind::PurgeItem,
+            Self::CleanUp => JobKind::CleanUp,
         }
     }
 

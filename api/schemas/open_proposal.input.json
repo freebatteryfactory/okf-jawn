@@ -8,8 +8,20 @@
           "description": "Create a note or View with retained properties.",
           "properties": {
             "body": {
-              "description": "Body.",
-              "type": "string"
+              "description": "Body. At most 8388608 bytes in UTF-8: a character takes one to four.",
+              "type": "string",
+              "x-max-utf8-bytes": 8388608
+            },
+            "item_kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ItemKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The new item's rendering role. Absent means a note; `source` is refused: a source\ncomes only from an import."
             },
             "kind": {
               "const": "create",
@@ -43,8 +55,9 @@
           "description": "Replace authored content with preconditions.",
           "properties": {
             "body": {
-              "description": "Body.",
-              "type": "string"
+              "description": "Body. At most 8388608 bytes in UTF-8: a character takes one to four.",
+              "type": "string",
+              "x-max-utf8-bytes": 8388608
             },
             "item_id": {
               "$ref": "#/$defs/ItemId",
@@ -135,8 +148,9 @@
               "type": "string"
             },
             "markdown": {
-              "description": "The complete proposed text, Markdown.",
-              "type": "string"
+              "description": "The complete proposed text, Markdown.\nAt most 8388608 bytes in UTF-8: a character takes one to four.",
+              "type": "string",
+              "x-max-utf8-bytes": 8388608
             },
             "pages": {
               "description": "Pages the text covers, as the agent claims; empty for the whole.",
@@ -168,6 +182,26 @@
       "description": "Stable item identity independent of its current relative path.",
       "format": "uuid",
       "type": "string"
+    },
+    "ItemKind": {
+      "description": "Built-in presentation roles; user-defined OKF type names remain unrestricted.",
+      "oneOf": [
+        {
+          "const": "note",
+          "description": "Human or agent-authored Markdown knowledge.",
+          "type": "string"
+        },
+        {
+          "const": "source",
+          "description": "An appearance of immutable source bytes.",
+          "type": "string"
+        },
+        {
+          "const": "view",
+          "description": "A source-bound declarative visual artifact. Its file is an OKF concept: the `title`\nproperty, then a body that is the View's description as Markdown followed by exactly one\nfenced code block whose info string is `json okf-jawn-view`, holding `schema_version`, `mode`,\n`grammar`, `bindings` (without `workspace_id`, `locations` or `materialized`, which the\nserver derives), `spec` and `charts`; the block ends the body.",
+          "type": "string"
+        }
+      ]
     },
     "PageRange": {
       "additionalProperties": false,
@@ -202,10 +236,11 @@
       "type": "string"
     },
     "WorkspacePath": {
-      "maxLength": 4096,
+      "description": "A relative path inside one workspace, in Unicode NFC, with `/` between segments. At most 4096 bytes in UTF-8: a character takes one to four.",
       "minLength": 1,
       "pattern": "^[^/\\\\:<>\"|?*\\x00-\\x1f]+(/[^/\\\\:<>\"|?*\\x00-\\x1f]+)*$",
-      "type": "string"
+      "type": "string",
+      "x-max-utf8-bytes": 4096
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

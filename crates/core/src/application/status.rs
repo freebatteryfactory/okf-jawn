@@ -13,12 +13,14 @@
 
 use std::future::Ready;
 
-use okf_jawn_contract::access::SessionResponse;
+use okf_jawn_contract::access::{Limits, SessionResponse};
 use okf_jawn_contract::common::Empty;
-use okf_jawn_contract::error::ApiError;
+use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::health::{
     HealthRequest, HealthResponse, ReadinessRequest, ReadinessResponse, SandboxOriginConfig,
 };
+use okf_jawn_contract::item::MAX_ITEM_TEXT_BYTES;
+use okf_jawn_contract::transport::MAX_REQUEST_BODY_BYTES;
 
 use super::ApplicationService;
 use crate::context::OperationContext;
@@ -62,14 +64,31 @@ pub(super) async fn get_readiness(
     })
 }
 
-/// The authenticated caller, and whether its writes need the anti-CSRF token.
+/// The authenticated caller, whether its writes need the anti-CSRF token, and the limits the
+/// deployment applies: its upload limit (`ApplicationConfig::max_upload_bytes`), the request
+/// body bound and the item text bound of the contract.
 pub(super) fn get_session(
-    _service: &ApplicationService,
+    service: &ApplicationService,
     context: &OperationContext,
     _request: Empty,
 ) -> Ready<Result<SessionResponse, ApiError>> {
-    std::future::ready(Ok(SessionResponse {
+    std::future::ready(limits(service).map(|limits| SessionResponse {
         principal: context.principal.clone(),
         csrf_required: context.session_id.is_some(),
+        limits,
     }))
+}
+
+/// The limits `get_session` reports.
+fn limits(service: &ApplicationService) -> Result<Limits, ApiError> {
+    let bound = |bytes: usize| {
+        u32::try_from(bytes).map_err(|_| {
+            ApiError::new(ErrorCode::Internal, "a contract bound does not fit 32 bits")
+        })
+    };
+    Ok(Limits {
+        upload_bytes: service.config().max_upload_bytes.to_string(),
+        request_body_bytes: bound(MAX_REQUEST_BODY_BYTES)?,
+        item_text_bytes: bound(MAX_ITEM_TEXT_BYTES)?,
+    })
 }

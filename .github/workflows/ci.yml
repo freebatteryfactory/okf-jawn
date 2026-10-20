@@ -13,7 +13,7 @@ jobs:
   source-tooling:
     name: Dependency-free source tooling, not product acceptance
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -26,7 +26,7 @@ jobs:
   foundation:
     name: Actual pinned generators and consumers, every feature
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 90
     env:
       SCARF_ANALYTICS: "false"
@@ -47,9 +47,9 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
-            cargo-${{ runner.os }}-
+            cargo-${{ runner.os }}-${{ runner.arch }}-
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.bun/install/cache
@@ -111,7 +111,7 @@ jobs:
   lane:
     name: Lane gate for build/* branches
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/build/')
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 90
     env:
       SCARF_ANALYTICS: "false"
@@ -132,9 +132,9 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-lane-${{ github.ref_name }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: cargo-lane-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
-            cargo-lane-${{ github.ref_name }}-
+            cargo-lane-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.bun/install/cache
@@ -149,9 +149,43 @@ jobs:
           if-no-files-found: error
           include-hidden-files: true
           path: .artifacts/lane/
+  # Windows and macOS file systems ignore letter case (`Report.md` and `report.md` are one file),
+  # and macOS also ignores Unicode normalization, while Linux and Git do not. Storage edits a
+  # staged copy of the tree on the disk it runs on, so its path rules are tested where they bite.
+  platforms:
+    name: Contract and storage on ${{ matrix.os }}, whose file system ignores case
+    if: github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            runner: blacksmith-4vcpu-windows-2025
+          - os: macos-15
+            runner: blacksmith-6vcpu-macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain selected by rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-platforms-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: |
+            cargo-platforms-${{ runner.os }}-${{ runner.arch }}-
+      - name: Contract and storage tests, every feature
+        run: cargo test --locked --all-features -p okf-jawn-contract -p okf-jawn-storage
   audit:
     name: Dependency advisories and licences
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 20
     env:
       SCARF_ANALYTICS: "false"

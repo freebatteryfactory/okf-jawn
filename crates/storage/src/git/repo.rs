@@ -14,6 +14,7 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{MutationId, Revision};
 use okf_jawn_core::storage::{Provenance, StorageScope};
 
+use super::item::Holder;
 use crate::data::{DataDir, io_error};
 
 /// Repositories of every workspace, and their write locks.
@@ -42,6 +43,14 @@ pub(crate) const FSYNC_SETTING: &str = "core.fsyncObjectFiles";
 const BLOB_MODE: i32 = 0o100_644;
 /// File mode of a tree.
 const TREE_MODE: i32 = 0o040_000;
+/// The length of a commit id these repositories write: SHA-1, in hex.
+const SHA1_HEX_LEN: usize = 40;
+/// The folders of the data directory whose contents libgit2 reads and writes: the
+/// repositories, and the staging directories of candidates, archives and restores (a restore's
+/// scratch repository among them). Every path a Git failure here names lies under one of them.
+const GIT_FOLDERS: [&str; 2] = ["repositories", "staging"];
+/// How a Git failure's message names an absolute path under neither of `GIT_FOLDERS`.
+const OUTSIDE: &str = "a path outside the data directory";
 
 impl Repositories {
     /// The repositories and staging directory of the locked `data` directory.
@@ -97,6 +106,19 @@ impl Repositories {
         durable(&path)
     }
 
+    /// Delete a workspace's repository and its staging directories under its write lock, so
+    /// no write is half done in it; `true` when a repository was there.
+    pub(crate) fn remove(&self, scope: &StorageScope) -> Result<bool, ApiError> {
+        self.locked(scope, || {
+            let staging = self
+                .staging
+                .join(scope.tenant_id.as_str())
+                .join(scope.workspace_id.0.to_string());
+            remove_tree(&staging)?;
+            remove_tree(&self.path(scope))
+        })
+    }
+
     /// Hold the workspace's write lock while `work` runs.
     pub(crate) fn locked<T>(
         &self,
@@ -115,6 +137,23 @@ impl Repositories {
             .lock()
             .map_err(|_| internal("a workspace lock was poisoned"))?;
         work()
+    }
+
+    /// How many hold the workspace's write lock or wait for it (or are about to): the callers
+    /// of `locked` that took the lock's handle and have not ended. A test that holds the lock
+    /// itself sees a second caller as 2, once that caller passed every check it makes before
+    /// `locked`.
+    #[cfg(test)]
+    pub(crate) fn lock_users(&self, scope: &StorageScope) -> Result<usize, ApiError> {
+        let key = format!("{}/{}", scope.tenant_id.as_str(), scope.workspace_id.0);
+        let locks = self
+            .locks
+            .lock()
+            .map_err(|_| internal("the workspace lock table was poisoned"))?;
+        // The table holds one handle of its own.
+        Ok(locks
+            .get(&key)
+            .map_or(0, |lock| Arc::strong_count(lock).saturating_sub(1)))
     }
 
     /// A fresh staging directory for one mutation, removed when the guard drops.
@@ -203,19 +242,37 @@ pub(crate) fn reference_target(
     }
 }
 
-/// The commit a `Revision` names; `NotFound` when the repository does not hold it.
+/// The commit a `Revision` names; `NotFound` when the repository does not hold it, or when the
+/// revision cannot name a commit here at all (`oid_of`).
 pub(crate) fn commit_of<'r>(
     repository: &'r Repository,
     revision: &Revision,
 ) -> Result<Commit<'r>, ApiError> {
-    let oid = Oid::from_str(revision.as_str()).map_err(|error| git(&error))?;
+    let oid = oid_of(revision)?;
     repository.find_commit(oid).map_err(|error| {
         if error.code() == git2::ErrorCode::NotFound {
-            ApiError::new(ErrorCode::NotFound, "No revision with that identity here")
+            no_such_revision()
         } else {
             git(&error)
         }
     })
+}
+
+/// The object id a `Revision` names. `Revision` holds 40 or 64 lower-case hex characters, and
+/// these repositories use SHA-1, so a revision of 64 (a SHA-256 commit id) can never name a
+/// commit here: it is `NotFound` (`no_such_revision`), the answer to a revision the repository
+/// does not hold, never `Unavailable`, which a caller would retry. The field is the caller's to
+/// name, as for every revision the store does not hold.
+pub(crate) fn oid_of(revision: &Revision) -> Result<Oid, ApiError> {
+    if revision.as_str().len() != SHA1_HEX_LEN {
+        return Err(no_such_revision());
+    }
+    Oid::from_str(revision.as_str()).map_err(|error| git(&error))
+}
+
+/// The answer to a revision that names no commit of the repository.
+pub(crate) fn no_such_revision() -> ApiError {
+    ApiError::new(ErrorCode::NotFound, "No revision with that identity here")
 }
 
 /// The `Revision` of a commit id.
@@ -318,12 +375,68 @@ pub(crate) fn signature(who: &Provenance) -> Result<Signature<'static>, ApiError
     Signature::now(&sanitize(&who.subject), &sanitize(&email)).map_err(|error| git(&error))
 }
 
-/// Write the files of `tree` under `root`.
+/// Write the files of a workspace tree under `root` (`materialize_at` for the whole tree).
 pub(crate) fn materialize(
     repository: &Repository,
     tree: &Tree<'_>,
     root: &Path,
+    holder: Holder,
 ) -> Result<(), ApiError> {
+    materialize_at(repository, tree, root, "", holder)
+}
+
+/// Write the files of `tree`, the folder at `at` of a workspace tree (empty for the whole
+/// tree), under `root`.
+///
+/// A tree that holds two paths sharing a collision key (two spellings of one file or folder),
+/// or a path the server writes spelled another way (`item::respelled`), is refused as
+/// `Conflict` before anything is written, naming both spellings and the repair
+/// (`Respelled::held`: for `holder`'s `Head`, a whole-tree restore of a revision from before
+/// they appeared; for a revision a Rewind restores, `Restored`, the choice of an earlier one):
+/// on a case-insensitive filesystem the staged copy would merge the two, or the server's next
+/// write would land in the other spelling, so a commit made from it would silently respell,
+/// drop or hide a file. Git, and a case-sensitive filesystem, can hold such a tree (a commit of
+/// an earlier build, an archive); it is refused the same way on every system.
+pub(crate) fn materialize_at(
+    repository: &Repository,
+    tree: &Tree<'_>,
+    root: &Path,
+    at: &str,
+    holder: Holder,
+) -> Result<(), ApiError> {
+    let paths: Vec<String> = files(repository, tree)?
+        .into_iter()
+        .map(|(path, _)| {
+            if at.is_empty() {
+                path
+            } else {
+                format!("{at}/{path}")
+            }
+        })
+        .collect();
+    if let Some(found) = super::item::respelled(paths.iter().map(String::as_str)) {
+        return Err(found.held(holder));
+    }
+    write_files(repository, tree, root)
+}
+
+/// What `materialize` would refuse in `tree`, a tree that an archive's reference `reference`
+/// names, in the words of a refused archive (`item::respelled`, `Respelled::archived`); `None`
+/// when the tree holds no such thing.
+pub(crate) fn respelled_in_archive(
+    repository: &Repository,
+    tree: &Tree<'_>,
+    reference: &str,
+) -> Result<Option<String>, ApiError> {
+    let paths = files(repository, tree)?;
+    Ok(
+        super::item::respelled(paths.iter().map(|(path, _)| path.as_str()))
+            .map(|found| found.archived(reference)),
+    )
+}
+
+/// Write the files of `tree` under `root`, as `materialize` does once the tree is checked.
+fn write_files(repository: &Repository, tree: &Tree<'_>, root: &Path) -> Result<(), ApiError> {
     for entry in tree {
         let name = entry
             .name()
@@ -337,7 +450,7 @@ pub(crate) fn materialize(
                 let child = repository
                     .find_tree(entry.id())
                     .map_err(|error| git(&error))?;
-                materialize(repository, &child, &target)?;
+                write_files(repository, &child, &target)?;
             }
             Some(ObjectType::Blob) => {
                 let blob = repository
@@ -454,16 +567,133 @@ pub(crate) fn blob_bytes(repository: &Repository, oid: Oid) -> Result<Vec<u8>, A
         .to_vec())
 }
 
-/// A Git failure as an unavailable store.
+/// A Git failure as an unavailable store: libgit2's class and code of the failure, and its
+/// message with every absolute path named relative to the data directory (`git_message`).
 pub(crate) fn git(error: &git2::Error) -> ApiError {
     ApiError::new(
         ErrorCode::Unavailable,
-        format!("the version store failed: {}", error.message()),
+        format!(
+            "the version store failed ({:?}, {:?}): {}",
+            error.class(),
+            error.code(),
+            git_message(error)
+        ),
     )
+}
+
+/// libgit2's message of `error` with every absolute path in it (`'D:/data/repositories/...'`,
+/// `/home/...`, `\\?\C:\...`) named relative to the data directory (`relative_to_data`), so an
+/// error mapped from Git never carries a machine path, a user name or a drive letter; the rest
+/// of the message is kept. Every message of a Git failure goes through here.
+pub(crate) fn git_message(error: &git2::Error) -> String {
+    without_machine_paths(error.message())
+}
+
+/// `message` with each absolute path in it replaced by `relative_to_data` of it. A path starts
+/// at the start of the message or after a space, a quote, `(`, `=` or `,`; a quoted one ends at
+/// its closing quote (one followed by the end, a space or punctuation, so a quote inside a
+/// path does not end it), an unquoted one at the next space or quote, without the punctuation
+/// that follows it.
+fn without_machine_paths(message: &str) -> String {
+    let mut kept = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some((start, quote)) = absolute_start(rest) {
+        let Some((before, from)) = rest.split_at_checked(start) else {
+            break;
+        };
+        let Some((path, after)) = from.split_at_checked(path_end(from, quote)) else {
+            kept.push_str(before);
+            kept.push_str(OUTSIDE);
+            return kept;
+        };
+        kept.push_str(before);
+        kept.push_str(&relative_to_data(path));
+        rest = after;
+    }
+    kept.push_str(rest);
+    kept
+}
+
+/// Where the first absolute path of `text` starts, and the quote just before it, if any.
+fn absolute_start(text: &str) -> Option<(usize, Option<char>)> {
+    let mut previous = None;
+    for (at, character) in text.char_indices() {
+        let opens = previous.is_none_or(|before: char| {
+            before.is_whitespace() || matches!(before, '\'' | '"' | '(' | '=' | ',')
+        });
+        if opens && text.get(at..).is_some_and(is_absolute) {
+            return Some((at, previous.filter(|before| matches!(before, '\'' | '"'))));
+        }
+        previous = Some(character);
+    }
+    None
+}
+
+/// Whether `text` starts with an absolute path: `/`, `\\` (a UNC or `\\?\` path) or a drive
+/// letter and its separator.
+fn is_absolute(text: &str) -> bool {
+    let mut characters = text.chars();
+    match (characters.next(), characters.next(), characters.next()) {
+        (Some('/'), ..) | (Some('\\'), Some('\\'), _) => true,
+        (Some(drive), Some(':'), Some('/' | '\\')) => drive.is_ascii_alphabetic(),
+        _ => false,
+    }
+}
+
+/// The length of the path `from` starts with (see `without_machine_paths`).
+fn path_end(from: &str, quote: Option<char>) -> usize {
+    let ends = |after: Option<char>| {
+        after.is_none_or(|after| {
+            after.is_whitespace() || matches!(after, ':' | ',' | ';' | ')' | '.')
+        })
+    };
+    if let Some(quote) = quote {
+        return from
+            .char_indices()
+            .find(|(at, character)| {
+                *character == quote
+                    && ends(
+                        from.get(at.saturating_add(1)..)
+                            .and_then(|after| after.chars().next()),
+                    )
+            })
+            .map_or(from.len(), |(at, _)| at);
+    }
+    let token = from
+        .char_indices()
+        .find(|(_, character)| character.is_whitespace() || matches!(character, '\'' | '"'))
+        .map_or(from, |(at, _)| from.get(..at).unwrap_or(from));
+    token.trim_end_matches([':', ',', ';', ')', '.']).len()
+}
+
+/// An absolute path named from its last `repositories` or `staging` component on, the folders
+/// of the data directory that libgit2 reads and writes (`GIT_FOLDERS`); `OUTSIDE` for a path
+/// under neither, such as a configuration file in a home directory. Known limit: a tenant, or a
+/// reference name in a crafted archive, spelled exactly `repositories` or `staging` makes the
+/// named path start after the data directory's own folder, never before it.
+fn relative_to_data(path: &str) -> String {
+    let parts: Vec<&str> = path
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    parts
+        .iter()
+        .rposition(|part| GIT_FOLDERS.contains(part))
+        .and_then(|at| parts.get(at..))
+        .map_or_else(|| OUTSIDE.to_owned(), |inside| inside.join("/"))
 }
 
 pub(crate) fn internal(message: impl Into<String>) -> ApiError {
     ApiError::new(ErrorCode::Internal, message)
+}
+
+/// Remove a directory tree; `true` when it was there.
+fn remove_tree(path: &Path) -> Result<bool, ApiError> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(io_error("remove", path, &error)),
+    }
 }
 
 /// A signature field without the characters Git refuses in one.
@@ -476,5 +706,54 @@ fn sanitize(text: &str) -> String {
         "unknown".to_owned()
     } else {
         cleaned
+    }
+}
+
+/// Unit tests here, not in a test target: the path scrub is private to the crate.
+#[cfg(test)]
+mod tests {
+    use super::without_machine_paths;
+
+    /// Messages of the shapes libgit2 writes, with the data directory's absolute path in them,
+    /// and what each becomes: every path relative to the data directory, every other word kept.
+    #[test]
+    fn a_git_message_names_every_path_relative_to_the_data_directory() {
+        let cases = [
+            (
+                "failed to lock file 'D:/okf/tmp/.tmpAb12/repositories/local/w.git/refs/heads/main.lock' for writing: File exists",
+                "failed to lock file 'repositories/local/w.git/refs/heads/main.lock' for writing: File exists",
+            ),
+            (
+                "could not find repository at '/home/ana/.local/share/okf/repositories/local/w.git/'",
+                "could not find repository at 'repositories/local/w.git'",
+            ),
+            (
+                r"failed to resolve path '\\?\C:\Users\ana\data\staging\restore-1\history-check.git': gone",
+                "failed to resolve path 'staging/restore-1/history-check.git': gone",
+            ),
+            (
+                "failed to map '/srv/okf/repositories/local/w.git/objects/pack/p.pack': denied, and \"C:/x/staging/a\"",
+                "failed to map 'repositories/local/w.git/objects/pack/p.pack': denied, and \"staging/a\"",
+            ),
+            (
+                "unquoted /var/okf/repositories/local/w.git/config: bad",
+                "unquoted repositories/local/w.git/config: bad",
+            ),
+            (
+                "failed to parse config file 'C:/Users/O'Brien/.gitconfig' (in line 2)",
+                "failed to parse config file 'a path outside the data directory' (in line 2)",
+            ),
+            (
+                "object not found - no match for id (0123abcd)",
+                "object not found - no match for id (0123abcd)",
+            ),
+            (
+                "reference 'refs/heads/main' not found",
+                "reference 'refs/heads/main' not found",
+            ),
+        ];
+        for (message, kept) in cases {
+            assert_eq!(without_machine_paths(message), kept, "{message}");
+        }
     }
 }

@@ -45,7 +45,7 @@ describe('RulesForm', () => {
     const first = ajv.errors[0];
     expect(first).toBeDefined();
     expect(first!.message).toMatch(/must be integer/i);
-    expect(first!.stack).toMatch(/schema_version.*must be integer/i);
+    expect(first!.stack).toMatch(/Format version.*must be integer/i);
 
     const { container } = render(
       <RulesForm schema={schema} value={invalid} onPreview={onPreview} />,

@@ -2,18 +2,18 @@
 .el .ds Aq '
 .TH okf-jawn-get_rules 1  "get_rules " 
 .SH NAME
-okf\-jawn\-get_rules \- Read the same naming conventions used by the form, YAML editor, and import process.
+okf\-jawn\-get_rules \- Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with `set_rules`.
 .SH SYNOPSIS
-\fBokf\-jawn get_rules\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBokf\-jawn get_rules\fR [\fB\-\-json\fR] [\fB\-\-server\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
-Read the same naming conventions used by the form, YAML editor, and import process.
+Read the same naming conventions used by the form, YAML editor, and import process. A stored file this build cannot read as rules is answered as its text with what was wrong, never as a failure, so it can be repaired and saved with `set_rules`.
 .SH OPTIONS
 .TP
-\fB\-\-server\fR [default: http://127.0.0.1:7711]
-
+\fB\-\-json\fR \fI<JSON>\fR [default: {}]
+The operation\*(Aqs JSON input: inline, @file, or \- for standard input
 .TP
-\fB\-\-json\fR [default: {}]
-JSON request, @file, or \- for stdin
+\fB\-\-server\fR \fI<URL>\fR [default: http://127.0.0.1:7711]
+The service address: HTTPS, or HTTP for a loopback address
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

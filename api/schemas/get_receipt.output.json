@@ -248,6 +248,16 @@
           "type": "string"
         },
         {
+          "const": "move_folder",
+          "description": "The `move_folder` operation.",
+          "type": "string"
+        },
+        {
+          "const": "delete_folder",
+          "description": "The `delete_folder` operation.",
+          "type": "string"
+        },
+        {
           "const": "list_types",
           "description": "The `list_types` operation.",
           "type": "string"
@@ -348,6 +358,11 @@
           "type": "string"
         },
         {
+          "const": "list_comments",
+          "description": "The `list_comments` operation.",
+          "type": "string"
+        },
+        {
           "const": "create_confirmation",
           "description": "The `create_confirmation` operation.",
           "type": "string"
@@ -370,6 +385,21 @@
         {
           "const": "complete_upload",
           "description": "The `complete_upload` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_upload",
+          "description": "The `get_upload` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_uploads",
+          "description": "The `list_uploads` operation.",
+          "type": "string"
+        },
+        {
+          "const": "discard_upload",
+          "description": "The `discard_upload` operation.",
           "type": "string"
         },
         {
@@ -1096,10 +1126,11 @@
       "type": "string"
     },
     "WorkspacePath": {
-      "maxLength": 4096,
+      "description": "A relative path inside one workspace, in Unicode NFC, with `/` between segments. At most 4096 bytes in UTF-8: a character takes one to four.",
       "minLength": 1,
       "pattern": "^[^/\\\\:<>\"|?*\\x00-\\x1f]+(/[^/\\\\:<>\"|?*\\x00-\\x1f]+)*$",
-      "type": "string"
+      "type": "string",
+      "x-max-utf8-bytes": 4096
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

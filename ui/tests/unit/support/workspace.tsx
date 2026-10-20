@@ -2,6 +2,7 @@
 import { createMemoryHistory } from '@tanstack/react-router';
 import { render } from '@testing-library/react';
 import type {
+  Draft,
   GetSourcesResponse,
   ItemDocument,
   ItemSummary,
@@ -12,8 +13,9 @@ import type {
 } from '../../../src/api/generated/types.gen';
 import { createQueryClient } from '../../../src/app/query-client';
 import { App, createAppRouter } from '../../../src/app/router';
+import { resetDraftSessions } from '../../../src/features/drafts/saving';
 import { emptyView, useExplorerStore } from '../../../src/features/explorer/store';
-import { type Handler, type Json, ok } from './api';
+import { draftsPage, type Handler, type Json, knowItems, ok } from './api';
 
 export const WS = '11111111-1111-4111-8111-111111111111';
 export const HEAD = 'a'.repeat(40);
@@ -34,6 +36,20 @@ export const workspace: Workspace = {
   created_at: NOW,
   permissions: ['read'],
 };
+
+/** The same workspace for a person who may write in it. */
+export const writableWorkspace: Workspace = { ...workspace, permissions: ['read', 'write'] };
+
+/** The draft the service holds after a save: what `save_draft` and `list_drafts` answer. */
+export function draftOf(itemId: string, base: string = HEAD, savedAt: string = NOW): Draft {
+  return {
+    item_id: itemId,
+    base_revision: base,
+    content_digest: DIGEST,
+    editor: 'ada',
+    saved_at: savedAt,
+  };
+}
 
 export function summary(
   id: string,
@@ -64,6 +80,11 @@ export function summary(
 export const noteSummary = summary(NOTE, 'notes/meeting.md', 'Meeting notes', 'meeting-note');
 export const otherSummary = summary(OTHER, 'notes/plan.md', 'Plan', 'plan');
 export const sourceSummary = summary(SOURCE, 'report.pdf.md', 'Annual report', 'report', 'source');
+
+// A listing of drafts finds these items, unless a test says otherwise.
+knowItems((itemId) =>
+  [noteSummary, otherSummary, sourceSummary].find((item) => item.id === itemId),
+);
 
 export function listing(
   folders: string[],
@@ -134,13 +155,20 @@ export const sourcesOfNote: GetSourcesResponse = {
   ],
 };
 
-/** Render the whole app (router, query cache, Explorer) at `url`, with a fresh Explorer store. */
+/**
+ * Render the whole app (router, query cache, Explorer) at `url`, with a fresh Explorer store and no
+ * editing session left from another test.
+ */
 export function renderAt(url: string) {
+  resetDraftSessions();
   useExplorerStore.setState({
     views: { [WS]: emptyView() },
     layouts: {},
     nextPane: 2,
     focusRequest: null,
+    treeReveal: null,
+    editRequest: null,
+    deleted: {},
   });
   const router = createAppRouter(createMemoryHistory({ initialEntries: [url] }));
   const queryClient = createQueryClient();
@@ -154,6 +182,15 @@ export function explorerHandlers(overrides: Record<string, Handler> = {}): Recor
     body.item_id === NOTE ? noteSummary : body.item_id === SOURCE ? sourceSummary : otherSummary;
   return {
     '/api/workspaces/open-workspace': () => ok(workspace),
+    // Attention found nothing at the requested revision, unless the test supplies findings/failure.
+    '/api/attention/get-attention': (body) => {
+      const at = body.at as { revision?: unknown } | undefined;
+      return ok({
+        revision: typeof at?.revision === 'string' ? at.revision : HEAD,
+        items: [],
+        next_cursor: null,
+      });
+    },
     '/api/items/list-items': (body) =>
       body.folder === 'notes'
         ? ok(listing([], [noteSummary, otherSummary]))
@@ -164,6 +201,15 @@ export function explorerHandlers(overrides: Record<string, Handler> = {}): Recor
       return ok(readResponse(item, `# ${item.title}\n\nText of ${item.title}`));
     },
     '/api/reads/get-sources': () => ok(sourcesOfNote),
+    // The person has no drafts, and the workspace defines no types, unless a test says so.
+    '/api/items/list-drafts': () => ok(draftsPage([])),
+    '/api/types/list-types': () => ok({ items: [] }),
+    // No review of any item is recorded, and no item links to another, unless a test says so.
+    '/api/reviews/list-reviews': () => ok({ items: [], imported: [] }),
+    '/api/search/get-links': (body) => {
+      const at = body.at as { revision?: unknown } | undefined;
+      return ok({ revision: typeof at?.revision === 'string' ? at.revision : HEAD, links: [] });
+    },
     ...overrides,
   };
 }

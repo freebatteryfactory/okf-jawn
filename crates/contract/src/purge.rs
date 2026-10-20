@@ -2,10 +2,12 @@
 //!
 //! A purge authorizes at the tenant only, because it removes the workspace's grants: a
 //! workspace target could not authorize the retry of a half-finished purge. A purge is unique
-//! per target while it is not completed, so repeating the request (any idempotency key)
-//! returns the unfinished purge and queues its job again; that is checked before
-//! `base_revision`, so a moved or removed head never blocks the resumption. A purge cannot be
-//! cancelled. Its record holds identities and counts, never content of the target.
+//! per target, so repeating the request (any other idempotency key) returns the purge: an
+//! unfinished one with its job queued again, a completed one as it is, queuing nothing. That
+//! is checked before `base_revision`, so a moved or removed head never blocks the resumption.
+//! A repeat under the same key answers the purge as first answered; its current state is read
+//! with `get_purge`. A purge cannot be cancelled. Its record holds identities and counts, never
+//! content of the target.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -72,7 +74,8 @@ pub enum PurgeState {
     Running,
     /// Every application-managed copy is removed or rewritten; no affected backup is restorable.
     Completed,
-    /// Stopped; repeating the request resumes it.
+    /// Set, with `error`, when the purge's job failed and will not run again by itself;
+    /// repeating the request resumes it.
     Failed,
 }
 
@@ -82,7 +85,9 @@ pub enum PurgeState {
 pub struct PurgeReport {
     /// Stored objects deleted, as a decimal string.
     pub objects_removed: String,
-    /// Objects kept because a surviving item still references them, as a decimal string.
+    /// Stored objects kept because a surviving record, retained history, pending put or running
+    /// write still references, pends or pins them, as a decimal string. Includes objects the
+    /// target never referenced.
     pub objects_kept_shared: String,
     /// Managed backups deleted (workspace archives, and their copies in pre-migration backups).
     pub backups_removed: u32,
@@ -94,7 +99,8 @@ pub struct PurgeReport {
     pub proposals_removed: u32,
     /// Drafts deleted.
     pub drafts_removed: u32,
-    /// Revisions that no longer exist or were rewritten.
+    /// Revisions the purge's records name for the workspace, including earlier item-purge
+    /// mappings. Every revision of a purged workspace is invalidated, whether counted or not.
     pub revisions_invalidated: u32,
     /// Stored citations of other items remapped to a rewritten revision.
     pub citations_remapped: u32,

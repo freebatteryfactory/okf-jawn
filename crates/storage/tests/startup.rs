@@ -75,7 +75,9 @@ fn migrations_bring_a_new_directory_to_the_latest_schema() -> TestResult {
     let records = storage.data().records_path();
     let index = storage.data().index_path();
     drop(storage);
-    assert_eq!(user_version(&records)?, 1);
+    // Records schema 5 adds lifecycle state; the index schema is
+    // still at 1.
+    assert_eq!(user_version(&records)?, 5);
     assert_eq!(user_version(&index)?, 1);
     let marker: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
         directory.path().join(FORMAT_FILE),
@@ -90,7 +92,7 @@ fn migrations_bring_a_new_directory_to_the_latest_schema() -> TestResult {
     );
     // Opening again finds nothing pending.
     drop(Storage::open(directory.path())?);
-    assert_eq!(user_version(&records)?, 1);
+    assert_eq!(user_version(&records)?, 5);
     Ok(())
 }
 
@@ -165,7 +167,7 @@ fn migrations_back_up_then_upgrade_then_verify() -> TestResult {
     assert_eq!((first.from, first.to), (0, 1));
     assert!(first.backup.is_none(), "a new database needs no backup");
     first
-        .connection
+        .connection()
         .execute("INSERT INTO notes (text) VALUES ('kept')", [])?;
     drop(first);
 
@@ -189,7 +191,7 @@ fn migrations_back_up_then_upgrade_then_verify() -> TestResult {
     );
     let author: Option<String> =
         upgraded
-            .connection
+            .connection()
             .query_row("SELECT author FROM notes", [], |row| row.get(0))?;
     assert_eq!(author, None);
     Ok(())
@@ -227,7 +229,7 @@ fn migrations_roll_back_a_failing_step_and_keep_the_backup() -> TestResult {
         &steps(&["CREATE TABLE notes (text TEXT);"]),
     )?;
     first
-        .connection
+        .connection()
         .execute("INSERT INTO notes (text) VALUES ('kept')", [])?;
     drop(first);
     let error = err_of(migrate_database(
@@ -360,6 +362,7 @@ async fn single_writer_lock_lives_as_long_as_any_store_it_handed_out() -> TestRe
         .begin(
             &key,
             &okf_jawn_contract::identity::Digest::try_from("a".repeat(64))?,
+            None,
         )
         .await?;
     drop(ledger);
