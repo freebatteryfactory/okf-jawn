@@ -28,6 +28,7 @@ import { createServer } from 'node:http';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, type Locator, type Page, test, type Worker } from '@playwright/test';
+import type { Extraction, ExtractionSummary } from '../../../src/api/generated/types.gen';
 import { type Answers, HEAD, ok, readAnswer, routeApi, SOURCE, summary, WS } from './explorer';
 
 const dist = fileURLToPath(new URL('../../../dist', import.meta.url));
@@ -274,7 +275,7 @@ export interface SourceOptions {
   /** The file the original was supplied as. */
   filename: string;
   /** How its text stands; converted by default. */
-  extraction?: Record<string, unknown>;
+  extraction?: Partial<Extraction>;
   /** More answers, over the Explorer's. */
   extra?: Answers;
 }
@@ -287,25 +288,38 @@ export interface ByteRead {
 }
 
 /** The source the journeys open, as its listing row shows it. */
-export function sourceRow(mediaType: string) {
+export function sourceRow(
+  mediaType: string,
+  extraction: ExtractionSummary = {
+    status: 'completed',
+    text_origin: 'converter',
+    corrected: false,
+  },
+) {
   return {
     ...summary(SOURCE, 'reports/annual-report.md', 'Annual report 2025', 'report', 'source'),
-    extraction: { status: 'completed', text_origin: 'converter', corrected: false },
+    extraction,
     media_type: mediaType,
   };
 }
 
 /** Answer the Explorer with one source of `mediaType`, and its bytes; returns the byte reads. */
 export async function routeSource(page: Page, options: SourceOptions): Promise<ByteRead[]> {
-  const row = sourceRow(options.mediaType);
+  const extraction: Extraction = {
+    corrected: false,
+    outcome: { status: 'completed' },
+    text_origin: 'converter',
+    warnings: [],
+    ...options.extraction,
+  };
+  const row = sourceRow(options.mediaType, {
+    status: extraction.outcome.status,
+    text_origin: extraction.text_origin,
+    corrected: extraction.corrected,
+  });
+  const hasText = extraction.text_origin !== 'none';
   const appearance = {
-    extraction: {
-      corrected: false,
-      outcome: { status: 'completed' },
-      text_origin: 'converter',
-      warnings: [],
-      ...options.extraction,
-    },
+    extraction,
     media_type: options.mediaType,
     metadata: {},
     names: [
@@ -325,7 +339,7 @@ export async function routeSource(page: Page, options: SourceOptions): Promise<B
     '/api/items/get-item': () =>
       ok({
         summary: row,
-        body: '# Annual report 2025\n\nThe year in figures.',
+        body: hasText ? '# Annual report 2025\n\nThe year in figures.' : '',
         content_digest: 'c'.repeat(64),
         properties: { type: 'report', okf_jawn: { id: SOURCE } },
         source: appearance,
@@ -338,10 +352,12 @@ export async function routeSource(page: Page, options: SourceOptions): Promise<B
       return ok({
         ...answer,
         view: body.view,
-        markdown: original
-          ? ''
-          : '# Annual report 2025\n\nThe year in figures, as converted from the original.\n\nRevenue grew by 12 percent.',
-        outline: original ? [] : answer.outline,
+        markdown:
+          original || !hasText
+            ? ''
+            : '# Annual report 2025\n\nThe year in figures, as converted from the original.\n\nRevenue grew by 12 percent.',
+        outline: original || !hasText ? [] : answer.outline,
+        extraction: row.extraction,
         source: { ...answer.source, digest: original ? OBJECT : 'c'.repeat(64) },
       });
     },

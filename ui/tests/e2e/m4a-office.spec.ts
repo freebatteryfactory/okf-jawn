@@ -11,19 +11,11 @@
  */
 import { readFile } from 'node:fs/promises';
 import { expect, type Page, test } from '@playwright/test';
-import {
-  expectNoAxeViolations,
-  expectVisibleFocus,
-  ok,
-  readAnswer,
-  shot,
-  workspace,
-} from './support/explorer';
+import { expectNoAxeViolations, expectVisibleFocus, ok, shot, workspace } from './support/explorer';
 import {
   OBJECT_PATH,
   routeSource,
   sourceAddress,
-  sourceRow,
   useOriginalServer,
   watchPolicy,
 } from './support/m4a-pdf';
@@ -91,18 +83,6 @@ for (const original of [
             // Reads, including the original, remain available in an archived workspace.
             '/api/workspaces/open-workspace': () =>
               ok({ ...workspace, archived_at: '2026-01-02T08:00:00.000Z' }),
-            ...(!original.converted
-              ? {
-                  '/api/reads/read-item': (body: Record<string, unknown>) =>
-                    ok(
-                      readAnswer(sourceRow(original.mediaType), body, {
-                        view: body.view,
-                        markdown: '',
-                        outline: [],
-                      }),
-                    ),
-                }
-              : {}),
           },
         });
         await page.goto(sourceAddress(server.origin()));
