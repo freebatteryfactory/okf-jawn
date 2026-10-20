@@ -415,6 +415,7 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
             query={query}
             documents={view.panes.find((pane) => pane.id === view.focusedPaneId) ?? null}
             onFollow={followBar}
+            admin={workspace.permissions.includes('admin')}
           />
           <button
             type="button"

@@ -11,9 +11,11 @@
  * page, a browser, is taken for a browser session (as for cancelling a job, `job-control.ts`). The
  * service decides again on every download either way.
  *
- * Limit, stated: the permission an installation backup needs is on the installation, which this
- * page does not hold; it is checked against the workspace's here. A workspace's Jobs page does
- * not list one (it is a job of the installation), and the service decides.
+ * The permission an installation backup needs is on the installation, which the contract names no
+ * way to read. A workspace's Jobs page does not list one (it is a job of the installation); the
+ * installation's Administration lists it from `list_tenant_jobs`, which the service answers only
+ * to an administrator of the installation, and offers it with that `admin`
+ * (`ArtifactDownload.tsx`, `TenantArtifactDownload`). The service decides either way.
  *
  * Where from. The download is a plain link, not a request through the transport (the one stated
  * exception to that rule: an archive can be larger than memory), so the browser sends the session

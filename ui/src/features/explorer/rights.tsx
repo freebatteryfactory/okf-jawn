@@ -15,6 +15,13 @@
  * `ALLOWED_WHILE_ARCHIVED`). An action of one of those is asked about by its operation
  * (`allowedOperation`) and runs as in any other workspace. `allowed` alone knows no operation, and
  * an archived workspace stops whatever it is asked about.
+ *
+ * Two more of the contract's guards are the service's to apply, and the page only says them
+ * (ruling C2): some operations are asked only by an administrator in their own browser session
+ * (`HUMAN_SESSION_ONLY`: the purges, backups and restore), and connectors are issued only to the
+ * local owner (`LOCAL_OWNER_ONLY`). The page offers those actions by the person's permissions,
+ * states the rule in words (`humanSessionWords`, `LOCAL_OWNER_WORDS`), and shows the service's
+ * refusal when it answers one; it never refuses on its own.
  */
 import type { OperationName, Permission, Timestamp } from '../../api/generated/types.gen';
 import { formatInstant } from '../../lib/instant';
@@ -90,9 +97,42 @@ export const ALLOWED_WHILE_ARCHIVED: ReadonlySet<OperationName> = new Set<Operat
   'get_session',
   'create_connector',
   'list_connectors',
+  'revoke_connector',
   'get_health',
   'get_readiness',
 ]);
+
+/**
+ * The operations the service takes only from a person in their own browser session, never from an
+ * agent, a connector or a service: the contract's `HUMAN_SESSION_ONLY`, `human_session_only` in
+ * `api/operations.json`, held to it by a unit test both ways.
+ */
+export const HUMAN_SESSION_ONLY: ReadonlySet<OperationName> = new Set<OperationName>([
+  'purge_workspace',
+  'backup_workspace',
+  'restore_workspace',
+  'backup_installation',
+  'purge_item',
+]);
+
+/**
+ * The operations the service takes only from the installation's local owner: the contract's
+ * `LOCAL_OWNER_ONLY`, `local_owner_only` in `api/operations.json`, held to it by a unit test.
+ */
+export const LOCAL_OWNER_ONLY: ReadonlySet<OperationName> = new Set<OperationName>([
+  'create_connector',
+  'list_connectors',
+  'revoke_connector',
+]);
+
+/** The rule of `HUMAN_SESSION_ONLY`, said where such an action is offered. */
+export function humanSessionWords(action: string): string {
+  return `${action} is done only by an administrator in their own browser session: an agent, a connector or a service cannot ask for it.`;
+}
+
+/** The rule of `LOCAL_OWNER_ONLY`, and what a hosted installation does instead (ruling C5). */
+export const LOCAL_OWNER_WORDS =
+  'Connectors are issued only on a local installation. Hosted agents connect through WorkOS Connect.';
 
 /**
  * Whether `operation`, which needs `permission`, can run here: as `allowed`, except that the
