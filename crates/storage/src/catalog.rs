@@ -188,23 +188,7 @@ impl WorkspaceCatalog for GitCatalog {
                 tenant_id: tenant.clone(),
                 workspace_id: from_text!(stored.as_str())?,
             };
-            let initial = initialize(&repositories, &scope, mutation_id, &workspace.creator)?;
-            // The initial commit has no candidate warnings, but its revision must be named
-            // durably like later commits (lifecycle ruling Q1). A creation replay keeps the
-            // first record even when the workspace has since advanced.
-            transaction
-                .execute(
-                    "INSERT INTO commit_warnings
-                         (tenant_id, workspace_id, mutation_id, commit_id, warnings)
-                     VALUES (?1, ?2, ?3, ?4, '[]') ON CONFLICT DO NOTHING",
-                    params![
-                        scope.tenant_id.as_str(),
-                        scope.workspace_id.0.to_string(),
-                        mutation_id.0.to_string(),
-                        initial.to_string()
-                    ],
-                )
-                .map_err(|error| sql(&error))?;
+            initialize(&repositories, &scope, mutation_id, &workspace.creator)?;
             read(transaction, &repositories, &scope)
         }))
     }
@@ -264,7 +248,7 @@ fn initialize(
     scope: &StorageScope,
     mutation_id: MutationId,
     creator: &Provenance,
-) -> Result<git2::Oid, ApiError> {
+) -> Result<(), ApiError> {
     let path = repositories.path(scope);
     // The path is derived from this creation's mutation id, so nothing else writes there. A
     // directory a crash left that is not a repository at all is replaced; any other failure
@@ -280,8 +264,8 @@ fn initialize(
     } else {
         repositories.create(scope)?
     };
-    if let Some(initial) = reference_target(&repository, HEAD_REF)? {
-        return Ok(initial);
+    if reference_target(&repository, HEAD_REF)?.is_some() {
+        return Ok(());
     }
     let staging = repositories.stage(scope, mutation_id)?;
     let tree = staged_tree(&repository, &staging.path)?;
@@ -301,8 +285,7 @@ fn initialize(
     repository
         .reference(HEAD_REF, commit, false, "okf-jawn create")
         .map_err(|error| git(&error))?;
-    repository.set_head(HEAD_REF).map_err(|error| git(&error))?;
-    Ok(commit)
+    repository.set_head(HEAD_REF).map_err(|error| git(&error))
 }
 
 fn read(

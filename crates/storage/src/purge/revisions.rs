@@ -18,8 +18,9 @@ pub(super) fn named(
         .query_row(
             "WITH revisions(revision) AS (
                 SELECT old_revision FROM revision_map WHERE tenant_id=?1 AND workspace_id=?2
-                UNION SELECT replacement FROM revision_map WHERE tenant_id=?1 AND workspace_id=?2
                 UNION SELECT commit_id FROM commit_warnings WHERE tenant_id=?1 AND workspace_id=?2
+                UNION SELECT json_extract(result, '$') FROM workspace_mutations
+                    WHERE tenant_id=?1 AND workspace_id=?2 AND action='commit_base'
                 UNION SELECT revision FROM derived_objects WHERE tenant_id=?1 AND workspace_id=?2
                 UNION SELECT revision FROM confirmations WHERE tenant_id=?1 AND workspace_id=?2
                 UNION SELECT revision FROM sandbox_capabilities WHERE tenant_id=?1 AND workspace_id=?2

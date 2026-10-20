@@ -1079,14 +1079,39 @@ async fn a_records_database_at_schema_3_migrates_its_jobs_unsealed_after_a_backu
     Ok(())
 }
 
-/// The approved R2 staging boundary refuses execution instead of claiming a cleanup sweep.
+/// Lifecycle design section 3.3: a real pass over an empty tenant has zero objects and upload
+/// files to remove, and its literal report completes the durable job. Owner approved replacing
+/// the obsolete R2 `NotImplemented` placeholder after the full diagnostic run exposed it.
 #[tokio::test]
-async fn clean_up_storage_execution_is_explicitly_unimplemented_until_its_slice() -> TestResult {
+async fn clean_up_storage_execution_reports_an_empty_tenant_and_completes_the_job() -> TestResult {
+    use okf_jawn_contract::import::CleanUpReport;
     use okf_jawn_core::storage::Purger;
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;
-    let refusal = err_of(storage.purger().clean_up(&tenant()?, uuid!(70)?).await)?;
-    assert_eq!(refusal.code, ErrorCode::NotImplemented);
+    let records = storage.records();
+    let scope = JobScope::Tenant(tenant()?);
+    let job = records
+        .create_job(&scope, new_job(70, JobSpec::CleanUp)?)
+        .await?;
+    let claimed = some(records.claim_job(job.id).await?, "the cleanup job's claim")?;
+    let report = storage.purger().clean_up(&tenant()?, job.id).await?;
+    assert_eq!(
+        report,
+        CleanUpReport {
+            objects_removed: "0".to_owned(),
+            objects_kept: "0".to_owned(),
+            upload_files_removed: 0,
+        }
+    );
+    let mut completed = completion(claimed.lease);
+    completed.clean_up = Some(report.clone());
+    let written = records.complete_job(completed).await?;
+    assert_eq!(written.state, JobState::Succeeded);
+    assert_eq!(written.clean_up, Some(report));
+    assert_eq!(
+        records.get_job(&scope, job.id).await?.state,
+        JobState::Succeeded
+    );
     Ok(())
 }
 

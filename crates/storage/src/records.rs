@@ -861,6 +861,16 @@ fn claim(transaction: &Transaction<'_>, job_id: JobId) -> Result<Option<ClaimedJ
         .attempt
         .checked_add(1)
         .ok_or_else(|| internal("a job's attempt count overflowed"))?;
+    if job.kind == JobKind::CleanUp {
+        // A completion covers at least the requests present at its claim. The collector
+        // refreshes this baseline when it marks roots, so later requests still requeue it.
+        transaction
+            .execute(
+                "UPDATE clean_up_requests SET started=requested WHERE tenant_id=?1",
+                [&tenant],
+            )
+            .map_err(|error| sql(&error))?;
+    }
     let token = seam::hex(&seam::random_bytes::<16>()?);
     let expires_at = seam::later(JOB_LEASE_SECONDS)?;
     write_job(
@@ -960,20 +970,17 @@ fn complete_clean_up(
     pass: Option<&CleanUpReport>,
 ) -> Result<(), ApiError> {
     let pass = pass.ok_or_else(|| internal("a clean-up completion has no pass report"))?;
-    let number = |text: &str| {
-        text.parse::<u64>()
-            .map_err(|_| internal("a clean-up report holds an invalid removal count"))
-    };
     let prior = job.clean_up.as_ref();
-    let removed = number(&pass.objects_removed)?
-        .checked_add(prior.map_or(Ok(0), |report| number(&report.objects_removed))?)
-        .ok_or_else(|| internal("a clean-up removal count exceeds its report"))?;
+    let removed = add_decimal_counts(
+        &pass.objects_removed,
+        prior.map_or("0", |report| report.objects_removed.as_str()),
+    )?;
     let files = pass
         .upload_files_removed
         .checked_add(prior.map_or(0, |report| report.upload_files_removed))
         .ok_or_else(|| internal("a clean-up file count exceeds its report"))?;
     job.clean_up = Some(CleanUpReport {
-        objects_removed: removed.to_string(),
+        objects_removed: removed,
         objects_kept: pass.objects_kept.clone(),
         upload_files_removed: files,
     });
@@ -997,6 +1004,39 @@ fn complete_clean_up(
         )
         .map_err(|error| sql(&error))?;
     Ok(())
+}
+
+/// Decimal-string reports have no machine-integer ceiling. Add digits with a single carry;
+/// an absent higher digit is mathematically zero, not an invalid count coerced to a default.
+fn add_decimal_counts(left: &str, right: &str) -> Result<String, ApiError> {
+    if [left, right]
+        .iter()
+        .any(|text| text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err(internal("a clean-up report holds an invalid removal count"));
+    }
+    let mut digits = Vec::with_capacity(left.len().max(right.len()).saturating_add(1));
+    let (mut left, mut right) = (left.bytes().rev(), right.bytes().rev());
+    let mut carry = 0;
+    loop {
+        let (a, b) = (left.next(), right.next());
+        if a.is_none() && b.is_none() {
+            break;
+        }
+        // Validation above bounds each digit to 0..=9; carry is 0 or 1, so sum <= 19.
+        // Saturating arithmetic is exact throughout these bounds, including ASCII encoding.
+        let sum = a
+            .map_or(0, |byte| byte.saturating_sub(b'0'))
+            .saturating_add(b.map_or(0, |byte| byte.saturating_sub(b'0')))
+            .saturating_add(carry);
+        digits.push(b'0'.saturating_add(sum % 10));
+        carry = sum / 10;
+    }
+    if carry != 0 {
+        digits.push(b'0'.saturating_add(carry));
+    }
+    digits.reverse();
+    String::from_utf8(digits).map_err(|error| internal(format!("encode a decimal count: {error}")))
 }
 
 /// Cancel or retry a job once per mutation id.

@@ -1440,6 +1440,13 @@ pub fn derive_commit_mutation_id(mutation_id: MutationId, ordinal: u32) -> Mutat
     MutationId(derived_uuid(b"commit", mutation_id, ordinal))
 }
 
+/// Stable identity of a commit attempt's retained base-revision record, separate from the
+/// commit and catalog mutations. Lifecycle ruling Q1 counts it without reopening target Git.
+#[must_use]
+pub fn derive_commit_base_mutation_id(mutation_id: MutationId) -> MutationId {
+    MutationId(derived_uuid(b"commit_base", mutation_id, 0))
+}
+
 /// The identity of the workspace created under one mutation.
 ///
 /// Derived, not allocated, so a creation that crashed after its repository was written and
