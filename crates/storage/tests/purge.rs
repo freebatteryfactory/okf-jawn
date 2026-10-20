@@ -1327,16 +1327,63 @@ async fn purge_empties_the_ledger_of_a_copy_that_records_no_workspace() -> TestR
             row("local", purge, "completed", true),
         ]
     );
+    let copied_digests: Vec<String> = rusqlite::Connection::open(&copy)?
+        .prepare("SELECT digest FROM mutations WHERE tenant_id='local' AND operation='update_workspace' ORDER BY idempotency_key")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    assert_eq!(
+        copied_digests,
+        ["", ""],
+        "section5.2: old-copy response and request digest are both emptied"
+    );
     // The live ledger records each row's workspace, so only the target's row is emptied.
     assert_eq!(
         ledger_of(&directory.path().join("records.sqlite"))?,
         [
-            row("local", update, "released", false),
+            row("local", update, "purged", false),
             row("local", update, "completed", true),
             row("elsewhere", update, "completed", true),
             row("local", purge, "completed", true),
         ]
     );
+    let live_payload: String = rusqlite::Connection::open(directory.path().join("records.sqlite"))?
+        .query_row(
+            "SELECT json_array(digest,response,purge_id) FROM mutations WHERE idempotency_key=?1",
+            [uuid_text(42)],
+            |row| row.get(0),
+        )?;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&live_payload)?,
+        json!([null, null, uuid_text(60)])
+    );
+    Ok(())
+}
+
+/// V5.7: an actually malformed released-schema records copy stops the public purge,
+/// naming that copy and its missing column. This is intentional corruption, never an upgrade.
+#[tokio::test]
+async fn purge_rows_refuses_a_pre_migration_copy_missing_a_ledger_column() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let name = "records-v4-damaged.sqlite";
+    pre_migration_copy(directory.path(), "records.sqlite", name)?;
+    let copy = directory.path().join("backups/pre-migration").join(name);
+    legacy_schema::rebuild(&copy, 4)?;
+    rusqlite::Connection::open(&copy)?
+        .execute_batch("ALTER TABLE mutations DROP COLUMN response;")?;
+    let purge: PurgeId = uuid!(60)?;
+    record_purge(&fixture.storage, &fixture, purge).await?;
+    let refused = err_of(
+        fixture
+            .storage
+            .purger()
+            .purge_workspace(&tenant()?, uuid!(61)?, purge, fixture.target.workspace_id)
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Internal);
+    assert!(refused.message.contains(name), "{}", refused.message);
+    assert!(refused.message.contains("response"), "{}", refused.message);
+    assert!(copy.is_file());
     Ok(())
 }
 
