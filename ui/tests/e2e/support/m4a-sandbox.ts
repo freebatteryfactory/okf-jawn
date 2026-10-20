@@ -656,17 +656,40 @@ export async function watchPolicy(page: Page) {
       if (name.toLowerCase() === 'style') made.set(element, new Error('style made').stack ?? '');
       return element;
     } as typeof Document.prototype.createElement;
-    const record = (node: Node) => {
+    const seenStyles = new WeakSet<Node>();
+    const seenUrls = new Set<string>();
+    const recordStyle = (node: Node) => {
       if (!(node instanceof HTMLStyleElement)) return;
+      if (seenStyles.has(node)) return;
+      seenStyles.add(node);
       found.styles.push({
         text: (node.textContent ?? '').replace(/\s+/g, ' ').slice(0, 200),
         attributes: [...node.attributes].map((a) => `${a.name}=${a.value}`).join(' '),
         stack: (made.get(node) ?? '').split('\n').slice(1, 6).join(' | '),
       });
     };
+    const record = (node: Node) => {
+      if (!(node instanceof Element)) return;
+      for (const element of [node, ...node.querySelectorAll('*')]) {
+        recordStyle(element);
+        for (const attribute of element.attributes) {
+          const url = attribute.value.trim();
+          const where = `<${element.localName}> ${attribute.name}`;
+          const key = `${where}\n${url}`;
+          if (/^(blob:|data:)/i.test(url) && !seenUrls.has(key)) {
+            seenUrls.add(key);
+            found.urls.push({ url: url.slice(0, 60), where });
+          }
+        }
+      }
+    };
     new MutationObserver((records) => {
-      for (const entry of records) for (const node of entry.addedNodes) record(node);
-    }).observe(document, { childList: true, subtree: true });
+      for (const entry of records) {
+        if (entry.type === 'attributes') record(entry.target);
+        for (const node of entry.addedNodes) record(node);
+        for (const node of entry.removedNodes) record(node);
+      }
+    }).observe(document, { childList: true, subtree: true, attributes: true });
     const createObjectURL = URL.createObjectURL;
     URL.createObjectURL = (object: Blob | MediaSource) => {
       const url = createObjectURL(object);

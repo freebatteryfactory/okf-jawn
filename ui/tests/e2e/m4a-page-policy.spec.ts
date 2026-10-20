@@ -78,6 +78,7 @@ interface KnownViolation {
 /** A `<style>` inserter the spec knows of: the library, and why the policy allows it. */
 interface KnownStyle {
   text: RegExp;
+  attributes: RegExp;
   library: string;
 }
 
@@ -91,11 +92,33 @@ interface KnownUrl {
 /** No violation is known in this build. */
 const KNOWN_VIOLATIONS: KnownViolation[] = [];
 
-/** No library inserts a `<style>` element on these screens in this build. */
-const KNOWN_STYLES: KnownStyle[] = [];
+/** Installed-library styles allowed by the server's existing style-src 'unsafe-inline'. */
+const KNOWN_STYLES: KnownStyle[] = [
+  {
+    text: /^\.\u037c[a-z0-9]+\.cm-focused \{outline:/,
+    attributes: /^$/,
+    library: '@codemirror/view 6.41.0 through style-mod 4.1.4 (StyleSet.mount)',
+  },
+  {
+    text: /^\.vega-embed \{/,
+    attributes: /^id=vega-embed-style$/,
+    library: 'vega-embed 7.3.0, embed.js defaultStyle',
+  },
+  {
+    text: /^#vg-tooltip-element \{/,
+    attributes: /^id=vega-tooltip-style$/,
+    library: 'vega-tooltip 1.1.0 (vega-embed tooltip Handler)',
+  },
+];
 
-/** No `blob:` or `data:` address is used on these screens in this build. */
-const KNOWN_URLS: KnownUrl[] = [];
+/** CodeMirror draws its visible-tab marker with a data SVG; img-src already allows data:. */
+const KNOWN_URLS: KnownUrl[] = [
+  {
+    url: /^data:image\/svg\+xml,/,
+    where: /^stylesheet <style>: .*\.cm-highlightTab /,
+    library: '@codemirror/view 6.41.0 baseTheme .cm-highlightTab; img-src data:',
+  },
+];
 
 /** Console lines in which a browser refuses something under a Content-Security-Policy. */
 const REFUSED = /Content Security Policy|Content-Security-Policy/i;
@@ -163,7 +186,7 @@ const SCREENS: Screen[] = [
     },
   },
   {
-    name: 'the workspace’s Administration',
+    name: "the workspace's Administration",
     path: `/w/${WS}/admin`,
     answers: {
       '/api/workspaces/open-workspace': () => ok(adminWorkspace),
@@ -176,7 +199,7 @@ const SCREENS: Screen[] = [
     },
   },
   {
-    name: 'the installation’s Administration',
+    name: "the installation's Administration",
     path: '/admin',
     answers: { '/api/session/get-session': () => ok(localOwner), ...tenantLog([]) },
     ready: async (page) => {
@@ -245,7 +268,11 @@ function unlisted(found: PolicyFindings, console: string[]): string[] {
     if (!known) left.push(`console: ${line}`);
   }
   for (const style of found.styles) {
-    if (!KNOWN_STYLES.some((entry) => entry.text.test(style.text))) {
+    if (
+      !KNOWN_STYLES.some(
+        (entry) => entry.text.test(style.text) && entry.attributes.test(style.attributes),
+      )
+    ) {
       left.push(`<style> inserted: ${JSON.stringify(style)}`);
     }
   }
@@ -285,6 +312,32 @@ test.describe('the built UI under the page policy', () => {
     expect(ran).toEqual({ ran: false, reported: expect.stringMatching(/^script-src/) });
   });
 
+  test('the inventory records nested styles and transient data images', async ({ page }) => {
+    // A5 requires every inserted style and data/blob use. These known probe values are
+    // independent of the observer; a library may append a subtree and remove it in one task.
+    await watchPolicy(page);
+    await underPagePolicy(page, server.origin());
+    await routeApi(page);
+    await page.goto(`${server.origin()}/`);
+    await expect(page.getByRole('link', { name: /Workshop notes/ }).first()).toBeVisible();
+    await page.evaluate(() => {
+      const subtree = document.createElement('div');
+      const style = document.createElement('style');
+      style.textContent = ':root { --okf-policy-probe: 1; }';
+      const image = document.createElement('img');
+      image.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACw=';
+      subtree.append(style, image);
+      document.body.append(subtree);
+      subtree.remove();
+    });
+    const found = await policyFindings(page);
+    expect(found.styles.some((style) => style.text.includes('--okf-policy-probe'))).toBe(true);
+    expect(found.urls).toContainEqual({
+      url: 'data:image/gif;base64,R0lGODlhAQABAAAAACw=',
+      where: '<img> src',
+    });
+  });
+
   for (const screen of SCREENS) {
     test(`${screen.name}: nothing outside the policy`, async ({ page, browserName }) => {
       await watchPolicy(page);
@@ -308,7 +361,32 @@ test.describe('the built UI under the page policy', () => {
       const file = `${screen.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-${browserName}.json`;
       await writeFile(
         join(findingsDir, file),
-        `${JSON.stringify({ screen: screen.name, browserName, console, ...found }, null, 2)}\n`,
+        `${JSON.stringify(
+          {
+            screen: screen.name,
+            browserName,
+            console,
+            ...found,
+            libraries: {
+              styles: found.styles.map((style) => ({
+                ...style,
+                library:
+                  KNOWN_STYLES.find(
+                    (entry) =>
+                      entry.text.test(style.text) && entry.attributes.test(style.attributes),
+                  )?.library ?? 'unlisted',
+              })),
+              urls: found.urls.map((use) => ({
+                ...use,
+                library:
+                  KNOWN_URLS.find((entry) => entry.url.test(use.url) && entry.where.test(use.where))
+                    ?.library ?? 'unlisted',
+              })),
+            },
+          },
+          null,
+          2,
+        )}\n`,
       );
       expect(unlisted(found, console), `${screen.name} in ${browserName}`).toEqual([]);
     });
