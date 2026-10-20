@@ -238,8 +238,11 @@ export function JobRow({ workspaceId, job }: JobRowProps) {
   );
 }
 
-/** When the job was accepted, started and ended, as far as the wire says. */
-function JobTimes({ job }: { job: Job }) {
+/**
+ * When the job was accepted, started and ended, as far as the wire says. Exported for the row of a
+ * job of the installation (`admin/installation/TenantJobRow.tsx`), which says its times the same way.
+ */
+export function JobTimes({ job }: { job: Job }) {
   const times = (
     [
       ['Accepted', job.created_at],
