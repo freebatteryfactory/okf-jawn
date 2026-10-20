@@ -9,6 +9,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[[bin]]
+name = "okf-jawn-server"
+path = "src/main.rs"
+required-features = ["runtime"]
+
 [dependencies]
 okf-jawn-contract = { path = "../contract" }
 okf-jawn-core = { path = "../core" }
@@ -39,6 +44,10 @@ time = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true, features = ["io"] }
+# The binary's three commands (serve, backup, restore).
+clap = { workspace = true, optional = true }
+# The one outbound client (no redirect, https only) for WorkOS, AuthKit and the Connect key set.
+reqwest = { workspace = true, optional = true }
 
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }
@@ -47,4 +56,4 @@ jsonwebtoken = { workspace = true, features = ["use_pem"] }
 
 [features]
 default = []
-runtime = ["dep:okf-jawn-storage", "dep:okf-jawn-ingest", "dep:okf-jawn-mcp", "dep:rmcp", "dep:workos", "dep:tracing", "dep:tracing-subscriber", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry", "dep:tower-http", "dep:notify", "dep:directories", "dep:url", "dep:cookie", "dep:jsonwebtoken", "dep:getrandom", "dep:time", "dep:serde", "dep:futures-util", "dep:tokio-util"]
+runtime = ["dep:okf-jawn-storage", "dep:okf-jawn-ingest", "dep:okf-jawn-mcp", "dep:rmcp", "dep:workos", "dep:tracing", "dep:tracing-subscriber", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry", "dep:tower-http", "dep:notify", "dep:directories", "dep:url", "dep:cookie", "dep:jsonwebtoken", "dep:getrandom", "dep:time", "dep:serde", "dep:futures-util", "dep:tokio-util", "dep:clap", "dep:reqwest"]

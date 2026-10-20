@@ -42,10 +42,10 @@
 //! keeps the lease, changing neither progress nor state, appends nothing (`Attempt`). A tenant
 //! job's `job_updated` goes to the tenant log: it has no workspace.
 //!
-//! Built: import and redigest (`import`), index rebuild, both backups, restore, both purges.
-//! Construction limitations, stated rather than hidden: a portable export and a View export
-//! fail as `NotImplemented`, which the runtime records as a non-retryable failure (requests
-//! R-I6 and R-I7 in the lane report). Nothing is reported as done that was not done.
+//! Built: import and redigest (`import`), the portable workspace export (`portable_export`),
+//! index rebuild, both backups, restore, both purges. A View export still fails explicitly as
+//! `NotImplemented`, which the runtime records as a non-retryable failure (request R-I7).
+//! Nothing is reported as done that was not done.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -77,6 +77,7 @@ use okf_jawn_core::uploads::UploadStore;
 
 pub use crate::import::{CARD_NOT_WRITTEN, NAMING_RULES_ABSENT};
 use crate::import::{ImportRequest, import, redigest};
+use crate::portable_export::{Exported, export_workspace};
 
 /// The ports the handler calls: storage's, the converter and the injected check.
 #[derive(Clone)]
@@ -239,8 +240,7 @@ impl IngestHandler {
     /// Do the work the claim's specification names.
     async fn dispatch(&self, attempt: &Attempt<'_>) -> Result<Done, ApiError> {
         let ports = &self.ports;
-        let claimed = attempt.claimed;
-        match (&claimed.spec, &claimed.scope) {
+        match (&attempt.claimed.spec, &attempt.claimed.scope) {
             (
                 JobSpec::Import {
                     base_revision,
@@ -287,6 +287,16 @@ impl IngestHandler {
                 self.workspace_backup(attempt, scope).await
             }
             (
+                JobSpec::ExportWorkspace {
+                    revision,
+                    include_history,
+                },
+                JobScope::Workspace(scope),
+            ) => {
+                self.workspace_export(attempt, scope, revision, *include_history)
+                    .await
+            }
+            (
                 JobSpec::RestoreWorkspace {
                     upload_id,
                     archive,
@@ -304,18 +314,17 @@ impl IngestHandler {
                 JobSpec::PurgeWorkspace { .. } | JobSpec::PurgeItem { .. },
                 JobScope::Tenant(tenant),
             ) => self.purge_job(attempt, tenant).await,
-            (JobSpec::ExportWorkspace { .. } | JobSpec::ExportView { .. }, _) => {
-                Err(ApiError::new(
-                    ErrorCode::NotImplemented,
-                    format!(
-                        "the ingest handler does not run {:?} jobs yet",
-                        claimed.spec.kind()
-                    ),
-                ))
-            }
+            (JobSpec::ExportView { .. }, _) => Err(ApiError::new(
+                ErrorCode::NotImplemented,
+                format!(
+                    "the ingest handler does not run {:?} jobs yet",
+                    attempt.claimed.spec.kind()
+                ),
+            )),
             (
                 JobSpec::Import { .. }
                 | JobSpec::Redigest { .. }
+                | JobSpec::ExportWorkspace { .. }
                 | JobSpec::RebuildIndex
                 | JobSpec::BackupWorkspace
                 | JobSpec::RestoreWorkspace { .. }
@@ -327,6 +336,27 @@ impl IngestHandler {
                 ErrorCode::Internal,
                 "the claimed job's specification does not fit its scope",
             )),
+        }
+    }
+
+    /// Record a portable export only after the pinned archive producer finishes.
+    async fn workspace_export(
+        &self,
+        attempt: &Attempt<'_>,
+        scope: &StorageScope,
+        revision: &Revision,
+        include_history: bool,
+    ) -> Result<Done, ApiError> {
+        match export_workspace(&self.ports, attempt, scope, revision, include_history).await? {
+            Exported::Ready(object) => {
+                self.artifact(attempt.claimed, ArtifactKind::Export, object)
+                    .await
+            }
+            Exported::Cancelled => Ok(Done::stopped()),
+            Exported::Refused(error) => Ok(Done {
+                refused: Some(error),
+                ..Done::default()
+            }),
         }
     }
 
@@ -509,7 +539,6 @@ impl IngestHandler {
         kind: ArtifactKind,
         object: ObjectInfo,
     ) -> Result<Done, ApiError> {
-        let digest = object.digest.clone();
         let record = self
             .ports
             .records
@@ -525,7 +554,8 @@ impl IngestHandler {
             )
             .await?;
         Ok(Done {
-            outputs: vec![digest],
+            // A replay can name different bytes from this attempt's rebuild.
+            outputs: vec![record.object.digest],
             artifact: Some(record.id),
             ..Done::default()
         })

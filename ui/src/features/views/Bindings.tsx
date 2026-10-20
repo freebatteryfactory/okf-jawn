@@ -1,10 +1,30 @@
 /** Provide already-authorized read results to presentation components. */
 
-import { createContext, useContext } from 'react';
+import { createContext, type ReactNode, useContext } from 'react';
 import type { TopLevelSpec } from 'vega-lite';
 import type { z } from 'zod';
-import type { zReadItemResponse, zViewBinding } from '../../api/generated/zod.gen';
+import type {
+  zReadItemResponse,
+  zSourceReference,
+  zViewBinding,
+} from '../../api/generated/zod.gen';
 import type { DerivedDataset } from './transforms';
+
+/**
+ * How the host opens a source the View cites, at the revision the View read it: the label given
+ * (the source's path and revision, as the View says them), made into the host's own link. A host
+ * with nowhere to open a source (an MCP App) gives none, and the label stays text.
+ */
+export type SourceLink = (source: z.infer<typeof zSourceReference>, label: ReactNode) => ReactNode;
+
+/** `label`, as the host's link to `source` when it gives one. */
+export function linked(
+  sourceLink: SourceLink | undefined,
+  source: z.infer<typeof zSourceReference>,
+  label: ReactNode,
+): ReactNode {
+  return sourceLink === undefined ? label : sourceLink(source, label);
+}
 
 export interface ResolvedPresentation {
   charts: ReadonlyMap<string, TopLevelSpec>;
@@ -39,6 +59,8 @@ export interface ResolvedPresentation {
    * (`planChart`); the key as in `chartErrors`. None when a chart looks up nothing transformed.
    */
   derivedDatasets?: ReadonlyMap<string, readonly DerivedDataset[]>;
+  /** The host's link to a cited source; none, and sources are named as text. */
+  sourceLink?: SourceLink | undefined;
 }
 export const BindingsContext = createContext<ResolvedPresentation | null>(null);
 export function useBindings(): ResolvedPresentation {

@@ -69,11 +69,19 @@
 //! panics after the caller that asked went away, the short wait is told until the next fetch
 //! ends.
 //!
-//! Known limit: the fetch follows whatever redirect policy the transport it is given has.
-//! [`IssuerKeys`] cannot see or refuse a redirect through the `workos` transport interface; the
-//! composition must hand it a transport whose client follows none
-//! (`ReqwestTransport::from_client`), which needs `reqwest` in this crate's manifest (reported as
-//! a request).
+//! Where the keys are, and what a token names. The key set's path and the claims follow WorkOS's
+//! MCP guide (read 2026-10-18): it verifies with
+//! `createRemoteJWKSet(new URL('https://<authkit domain>/oauth2/jwks'))` and issuer
+//! `https://<authkit domain>`, and "Access tokens will be issued with an `aud` claim that matches
+//! the requested `resource`". The installed `workos` 3.3.0 names no Connect key set (its one JWKS
+//! URL is the API base's `/sso/jwks/{client_id}`), and there is no fallback to it: a second key
+//! source would be a second trust path. The guide does not name `org_id`, so the Wave 3 round
+//! trip (`workos-end-to-end`) must confirm that a Connect token carries it; until then a token
+//! without it is refused, never read as another tenant.
+//!
+//! [`IssuerKeys`] cannot see or refuse a redirect through the `workos` transport interface, so
+//! the composition hands it the one outbound transport (`outbound`), whose client follows none,
+//! is `https` only and has its own time limit.
 //!
 //! Only public-key signature verification happens here: no private-key operation is ever
 //! performed in production, so the `rsa` crate's private-key decryption timing advisory

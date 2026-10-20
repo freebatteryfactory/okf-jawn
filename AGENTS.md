@@ -51,7 +51,7 @@ The integration owner holds Cargo.toml/Cargo.lock, package.json/bun.lock and oth
 
 ## Conventions
 
-Use `//!` purpose and non-obvious invariant headers. Imports, coherent types/traits, constants, implementations, functions/helpers, tests. Use canonical library terms, resolved Revision versus At selectors, and fallible APIs. No authored unsafe, allow, expect or conditional lint suppression. Do not force unrelated types into contract merely to avoid duplication.
+Use `//!` purpose and non-obvious invariant headers. Imports, coherent types/traits, constants, implementations, functions/helpers, tests. Use canonical library terms, resolved Revision versus At selectors, and fallible APIs. No authored unsafe, allow, expect or conditional lint suppression, except the one documented `SetHandleInformation` call in the Windows-only `keep_back_standard_handles` function in `crates/cli/src/relay/launch.rs` (owner exception of 2026-10-18), confined by `xtask source-policy`. Do not force unrelated types into contract merely to avoid duplication.
 
 Rust tests use one idiom. A test target includes `tests/support/check.rs` with `#[path]`. Unit tests inside `src/` define the same helpers locally, because source code never includes test support (`tests/foundation/policy.test.mjs`). A test returns `TestResult` (`Result<(), Box<dyn std::error::Error>>`) and uses `?`, `assert!`/`assert_eq!`, `err_of(result)` for a result that must have failed and `some(option, "what")` for a value that must be present. No `unwrap`, `expect`, `expect_err`, `panic!`, `unreachable!` or `[]` indexing (use `.get(..)` with `some`), and no `#[allow]` or `#[expect]` anywhere.
 

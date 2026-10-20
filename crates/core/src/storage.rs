@@ -206,6 +206,54 @@ pub enum TreeEdit {
         /// New folder path.
         folder: WorkspacePath,
     },
+    /// Move a folder, with every item and file under it, archived items included, to a new path.
+    ///
+    /// Every item under the folder moves as `MoveItem` moves one (no alias is recorded): the
+    /// links and `sources` entries that point at it are rewritten, and so are its own relative
+    /// links. So does every other Markdown file okf-core reads as a concept. Every other file
+    /// under it moves as it is, and the links and frontmatter paths (`sources[].resource`,
+    /// `computation`, `executor.resource`, `attester.resource`) that point at it are rewritten
+    /// to its new path. The files whose links this rewrote are told to the check as `rewritten`
+    /// (`CandidateCheck::check`). A draft is keyed by its item, so it stays with it.
+    ///
+    /// A destination with the folder's collision key but another spelling (`Notes` to `notes`)
+    /// renames the folder: it moves first to a free private folder beside it and then to the
+    /// destination, so a filesystem that holds both spellings as one never sees them at once.
+    /// The private folder is in no commit.
+    ///
+    /// Refused, writing nothing: a reserved folder (`.okf`, `index.md`, `log.md` as any segment,
+    /// in any letter case) or one the tree spells another way, `InvalidInput` on `/folder`; a
+    /// folder the tree does not hold, `NotFound` on `/folder`; a reserved destination, the folder
+    /// itself, a path inside it, or a destination one of whose folders the tree spells another
+    /// way, `InvalidInput` on `/destination`; a destination whose collision key (or a key below
+    /// it) any other file, folder or item holds, or below a file, `Conflict` on `/destination`.
+    ///
+    /// When files that are not items moved (the folder indexes the store regenerates are not
+    /// counted), the commit's warnings end with one `FOLDER_OTHER_FILES` warning saying how many
+    /// (`folder_other_files`).
+    MoveFolder {
+        /// The folder to move.
+        folder: WorkspacePath,
+        /// Its new path.
+        destination: WorkspacePath,
+    },
+    /// Remove a folder with every item and file under it, archived items included; history and
+    /// retained objects stay.
+    ///
+    /// Every item under the folder is removed as `DeleteItem` removes one, with every companion
+    /// file it owns; then every other file under it, and the folder. A draft is keyed by its
+    /// item, so a deleted item's draft is kept as `DeleteItem` keeps it.
+    ///
+    /// Refused, writing nothing: a reserved folder (`.okf`, `index.md`, `log.md` as any segment,
+    /// in any letter case) or one the tree spells another way, `InvalidInput` on `/folder`; a
+    /// folder the tree does not hold, `NotFound` on `/folder`. When files that are not items
+    /// went with it (the folder indexes the store regenerates are not counted), the commit's
+    /// warnings end with one `FOLDER_OTHER_FILES` warning saying how many
+    /// (`folder_files_deleted`).
+    DeleteFolder {
+        /// The folder to remove.
+        folder: WorkspacePath,
+    },
     /// Create or replace one user-defined type definition.
     SetType {
         /// Definition to store under its own name.
@@ -377,12 +425,13 @@ pub struct Committed {
     pub revision: Revision,
     /// `true` when that commit already existed and this call wrote nothing.
     pub replayed: bool,
-    /// Findings the candidate check returned when the commit was written. A replay answers the
-    /// warnings the store kept with that commit, so a retry answers what its first attempt
-    /// did; for a commit the store kept no warnings for it answers the one warning
-    /// `replay_warnings_unavailable` instead. Warnings kept under the same mutation for another
-    /// attempt's commit are not this commit's, and are never answered for it
-    /// (`VersionStore::commit`).
+    /// Findings the candidate check returned when the commit was written, followed by what the
+    /// edits themselves report (`FOLDER_OTHER_FILES` of a `TreeEdit::MoveFolder` or a
+    /// `TreeEdit::DeleteFolder`). A replay answers the warnings the store kept with that
+    /// commit, so a retry answers what its first attempt did; for a commit the store kept no
+    /// warnings for it answers the one warning `replay_warnings_unavailable` instead. Warnings
+    /// kept under the same mutation for another attempt's commit are not this commit's, and are
+    /// never answered for it (`VersionStore::commit`).
     pub warnings: Vec<Warning>,
 }
 
@@ -419,6 +468,56 @@ pub struct FolderListing {
     pub folders: Vec<WorkspacePath>,
     /// Continuation cursor, when more entries remain.
     pub next_cursor: Option<String>,
+}
+
+/// Where a page of `VersionStore::committed_files` starts and how much it may hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilePage {
+    /// The path of the last file of the previous page (`CommittedFiles::next_after`); `None`
+    /// starts at the first file.
+    pub after: Option<String>,
+    /// At most this many files; a store answers at least one and at most 500.
+    pub limit: u16,
+    /// The page ends with the first file that takes the bytes of its files past this, so a
+    /// page holds at least one file however large that file is.
+    pub max_bytes: u64,
+}
+
+/// One page of the committed files of a revision (`VersionStore::committed_files`).
+#[derive(Debug, Clone)]
+pub struct CommittedFiles {
+    /// Files in byte order of their paths, each once.
+    pub files: Vec<CommittedFile>,
+    /// The path to pass as `FilePage::after` for the next page; `None` on the last page.
+    pub next_after: Option<String>,
+}
+
+/// One committed file: its path as the tree spells it, its exact bytes, and the item it holds.
+#[derive(Debug, Clone)]
+pub struct CommittedFile {
+    /// The `/`-separated path in the revision's tree.
+    pub path: String,
+    /// The stored bytes, exactly.
+    pub bytes: Vec<u8>,
+    /// The item the file holds; `None` for a file that holds none (a folder `index.md`,
+    /// `log.md`, anything under `.okf/`, a Markdown file without an application header).
+    pub item: Option<CommittedItem>,
+}
+
+/// What a portable export needs of one item file, as `show` answers it at the same revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedItem {
+    /// The item's identity (`ApplicationHeader::item_id`).
+    pub item_id: ItemId,
+    /// Its rendering role (`ApplicationHeader::kind`).
+    pub kind: ItemKind,
+    /// `ItemDocument::content_digest` at this revision: `portable::content_digest` of the
+    /// file's body and properties.
+    pub content_digest: Digest,
+    /// The original a source card names (`ApplicationHeader::source`).
+    pub source: Option<SourceHeader>,
+    /// The conversion record its extraction names (`Extraction::digest`).
+    pub record: Option<Digest>,
 }
 
 /// Every item of one revision with what the naming rules read of it, and every folder
@@ -492,7 +591,10 @@ pub trait CandidateCheck: Send + Sync {
     /// an item back to its earlier path, of every such move of the commit or the candidate. The
     /// caller that built the edits cannot know them, so the store reports them here, as
     /// workspace paths spelled as the tree spells them, in path order and each once; a moved
-    /// item's own old and new path are not among them. It names what the store rewrote while
+    /// item's own old and new path are not among them. A `MoveFolder` moves many items and
+    /// files: the files whose links or frontmatter paths its moves rewrote are named, a file
+    /// under the folder among them at the path the folder move gave it, though the caller knows
+    /// those paths. It names what the store rewrote while
     /// it applied the edits, not what differs at the end: a file rewritten and then rewritten
     /// back (the referrer of an item moved away and back by one commit) is named, though its
     /// bytes end as they began. A referrer a later edit of the same commit removed or moved
@@ -601,7 +703,8 @@ pub trait VersionStore: Send + Sync {
     ///
     /// `check` runs once on the staged candidate tree, and is told which other files the edits
     /// made the store rewrite (`CandidateCheck::check`, `rewritten`). Its error rejects the
-    /// commit; its warnings are returned in the result.
+    /// commit; its warnings are returned in the result, followed by what the edits report
+    /// (`Committed::warnings`).
     ///
     /// The store keeps those warnings, an empty list included, in a record of its own keyed by
     /// the workspace and the mutation, written before the commit lands, and the record names
@@ -745,6 +848,26 @@ pub trait VersionStore: Send + Sync {
         revision: &'a Revision,
         mutation_id: MutationId,
     ) -> PortFuture<'a, ObjectInfo>;
+    /// Every file of `revision`'s tree, a page at a time, in byte order of path: what a
+    /// portable export writes (`JobSpec::ExportWorkspace`).
+    ///
+    /// Every file is answered once with its exact bytes: item files, folder `index.md` files,
+    /// `log.md` and everything under `.okf/`. An item file also carries what `show` would
+    /// answer of it at this revision (`CommittedItem`); which files hold an item is decided as
+    /// `list` decides it. A page holds at most `page.limit` files (clamped to 1..=500) and ends
+    /// with the first file that takes its bytes past `page.max_bytes`; `next_after` names the
+    /// last file answered while more remain.
+    ///
+    /// Reads no draft and no other reference. `NotFound` for a revision this repository does
+    /// not hold or that is not on the accepted line (a proposal candidate, or one a purge
+    /// rewrote away), as `write_history` refuses one. A tree entry that is not a regular file
+    /// (a link, a submodule) is `Internal`: no store edit writes one.
+    fn committed_files<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+        page: FilePage,
+    ) -> PortFuture<'a, CommittedFiles>;
 }
 
 /// A new blank workspace.
@@ -1021,6 +1144,11 @@ pub trait Backups: Send + Sync {
 /// it (`VersionStore::commit`); see `replay_warnings_unavailable`.
 pub const REPLAY_WARNINGS_UNAVAILABLE: &str = "replay_warnings_unavailable";
 
+/// The code of the one warning a folder move or delete answers when files that are not items
+/// went with the folder (`TreeEdit::MoveFolder`, `TreeEdit::DeleteFolder`); see
+/// `folder_other_files` and `folder_files_deleted`.
+pub const FOLDER_OTHER_FILES: &str = "folder_other_files";
+
 impl ChangeContext {
     /// The context of `change`, with `new_item_kind` filled from it: the role its `item_kind`
     /// names, a note when it names none (`Change::created_kind`). A change that creates no item
@@ -1161,6 +1289,26 @@ impl Provenance {
     }
 }
 
+/// The item owning a versioned companion path: its source appearance, accepted supplied text,
+/// or any file under its corrections folder. IDs use the canonical spelling written by the
+/// store; a differently spelled or unrelated path belongs to no item.
+///
+/// Folder conflict checks and item-filtered history share this ownership rule so a change to
+/// an item outside its visible folder is still a change to that item.
+#[must_use]
+pub fn item_companion_owner(path: &str) -> Option<ItemId> {
+    let text = if let Some(file) = path
+        .strip_prefix(".okf/sources/")
+        .or_else(|| path.strip_prefix(".okf/supplied/"))
+    {
+        file.strip_suffix(".json")?
+    } else {
+        path.strip_prefix(".okf/corrections/")?.split_once('/')?.0
+    };
+    let id = uuid::Uuid::parse_str(text).ok()?;
+    (id.to_string() == text).then_some(ItemId(id))
+}
+
 /// The one warning a replayed commit answers in place of warnings the store does not hold for
 /// it, saying `why` (`VersionStore::commit`). A version store, real or fake, answers a replay
 /// with exactly this, so a caller sees one code whatever store it runs over.
@@ -1173,6 +1321,40 @@ pub fn replay_warnings_unavailable(why: &str) -> Warning {
              not available: {why}"
         ),
         location: None,
+    }
+}
+
+/// The one warning that `count` files that are not items went with a folder: moved with it to
+/// `at` (`TreeEdit::MoveFolder`). It names the folder where the files are now, so a person can
+/// find them; the store adds it to the commit's warnings (`Committed::warnings`) only when
+/// `count` is not zero.
+#[must_use]
+pub fn folder_other_files(at: &WorkspacePath, count: usize) -> Warning {
+    Warning {
+        code: FOLDER_OTHER_FILES.to_owned(),
+        message: format!(
+            "{} moved with the folder to {}",
+            not_items(count),
+            at.as_str()
+        ),
+        location: Some(at.as_str().to_owned()),
+    }
+}
+
+/// The one warning that `count` files that are not items were deleted with the folder `folder`
+/// (`TreeEdit::DeleteFolder`), naming it; added to the commit's warnings only when `count` is
+/// not zero. The revisions before the delete still hold them.
+#[must_use]
+pub fn folder_files_deleted(folder: &WorkspacePath, count: usize) -> Warning {
+    let verb = if count == 1 { "was" } else { "were" };
+    Warning {
+        code: FOLDER_OTHER_FILES.to_owned(),
+        message: format!(
+            "{} {verb} deleted with the folder {}",
+            not_items(count),
+            folder.as_str()
+        ),
+        location: Some(folder.as_str().to_owned()),
     }
 }
 
@@ -1268,6 +1450,16 @@ pub fn derive_drain_mutation_id(purge_mutation: MutationId, job: JobId) -> Mutat
     hasher.update(purge_mutation.0.as_bytes());
     hasher.update(job.0.as_bytes());
     MutationId(version_8(hasher.finalize().into()))
+}
+
+/// `count` files that are not items, in words: "1 file that is not an item", "3 files that are
+/// not items".
+fn not_items(count: usize) -> String {
+    if count == 1 {
+        "1 file that is not an item".to_owned()
+    } else {
+        format!("{count} files that are not items")
+    }
 }
 
 /// A version-8 UUID from SHA-256 of a label, a mutation identity and a count.

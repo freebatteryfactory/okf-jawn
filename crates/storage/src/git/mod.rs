@@ -12,7 +12,8 @@
 //! replay answers them (`warnings`).
 //!
 //! `write_history` writes the accepted line up to a revision as a Git bundle into the blob
-//! store (`export`).
+//! store (`export`); `committed_files` reads every file of a revision a page at a time, for a
+//! portable export (`read`).
 
 use std::sync::Arc;
 
@@ -26,9 +27,9 @@ use okf_jawn_contract::identity::{
 use okf_jawn_contract::item::{ItemDocument, ItemSummary, TypeDefinition};
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
-    BlameQuery, CandidateChanges, CandidateCheck, CommitChanges, Committed, DiffQuery,
-    FolderListing, LogQuery, ObjectInfo, Page, Promotion, Provenance, RulesFile, StorageScope,
-    TreeEdit, VersionStore, WorkspaceTree,
+    BlameQuery, CandidateChanges, CandidateCheck, CommitChanges, Committed, CommittedFiles,
+    DiffQuery, FilePage, FolderListing, LogQuery, ObjectInfo, Page, Promotion, Provenance,
+    RulesFile, StorageScope, TreeEdit, VersionStore, WorkspaceTree,
 };
 
 use crate::blobs::{LocalBlobs, file_reader};
@@ -509,6 +510,18 @@ impl VersionStore for GitVersions {
     ) -> PortFuture<'a, ObjectInfo> {
         Box::pin(self.history(scope, revision, mutation_id))
     }
+
+    fn committed_files<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+        page: FilePage,
+    ) -> PortFuture<'a, CommittedFiles> {
+        let revision = revision.clone();
+        Box::pin(self.blocking(scope, move |repositories, scope| {
+            read::committed_files(&repositories.open(scope)?, &revision, &page)
+        }))
+    }
 }
 
 /// The objects the source cards of `edits` name, read structurally as a purge reads them
@@ -570,8 +583,10 @@ fn stage_and_commit(
         // passes (`Staged::refuse_collisions`), so the rule holds on what is committed.
         staged.refuse_collisions()?;
         maintain(&staged_root, &write.message)?;
-        // The check is told the files the edits made the store rewrite on its own.
-        let warnings = check.check(&staged_root, &staged.rewritten()?)?;
+        // The check is told the files the edits made the store rewrite on its own; what the
+        // edits report about themselves follows its findings (`Committed::warnings`).
+        let mut warnings = check.check(&staged_root, &staged.rewritten()?)?;
+        warnings.extend(staged.notes().iter().cloned());
         Ok((staged_tree(repository, &staged_root)?, warnings))
     };
     let (tree, warnings) = candidate().map_err(|error| without_staging(error, &staging.path))?;

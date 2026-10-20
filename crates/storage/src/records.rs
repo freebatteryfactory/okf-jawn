@@ -135,6 +135,22 @@ impl RecordStore for SqliteRecords {
         }))
     }
 
+    fn job_mutation<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, MutationId> {
+        let (tenant, workspace) = job_scope_key(scope);
+        Box::pin(self.db.call(move |connection| {
+            let mutation: Option<String> = connection
+                .query_row(
+                    "SELECT mutation_id FROM jobs
+                     WHERE job_id = ?1 AND tenant_id = ?2 AND workspace_id IS ?3",
+                    params![job.0.to_string(), tenant, workspace],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| sql(&error))?;
+            from_text!(mutation.ok_or_else(|| not_found("job"))?.as_str())
+        }))
+    }
+
     fn list_jobs<'a>(
         &'a self,
         scope: &'a JobScope,

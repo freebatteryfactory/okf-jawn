@@ -32,6 +32,14 @@ const READ = '/api/reads/read-item';
 function workspaceHandlers() {
   return {
     '/api/workspaces/open-workspace': () => ok(workspace),
+    '/api/attention/get-attention': (body: Record<string, unknown>) => {
+      const at = body.at as { revision?: unknown } | undefined;
+      return ok({
+        revision: typeof at?.revision === 'string' ? at.revision : HEAD,
+        items: [],
+        next_cursor: null,
+      });
+    },
     [LIST]: (body: Record<string, unknown>) =>
       body.folder === 'notes'
         ? ok(listing([], [noteSummary, otherSummary]))

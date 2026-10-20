@@ -33,6 +33,7 @@ use okf_jawn_server::{BoundApplication, events, transfers};
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt as _;
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 use check::{TestResult, err_of, some};
@@ -90,6 +91,7 @@ struct Stream {
     base: LocalApp,
     scripted: Arc<Scripted>,
     app: Router,
+    stop: CancellationToken,
 }
 
 /// A wall clock a test sets, in milliseconds since the Unix epoch.
@@ -175,6 +177,7 @@ impl Stream {
                 credentials: base.credentials.clone(),
                 events: base.ports.events.clone(),
                 cookies: Arc::new(CrateCookies),
+                refusals: base.refusals.clone(),
             },
             vec![ORIGIN.to_owned()],
             clock,
@@ -194,6 +197,7 @@ impl Stream {
             asked: Mutex::new(Vec::new()),
             allowed: Mutex::new(None),
         });
+        let stop = CancellationToken::new();
         let streams = EventStreams::new(
             BoundApplication {
                 application: scripted.clone(),
@@ -201,7 +205,8 @@ impl Stream {
             },
             identity.clone(),
             interval,
-        )?;
+        )?
+        .with_stop(stop.clone());
         let app = service(ServiceParts {
             bound: base.bound(),
             identity,
@@ -209,12 +214,14 @@ impl Stream {
             hosted: None,
             cors_origins: Vec::new(),
             ui_dir: None,
+            sandbox_origin: None,
             extra: events::routes(streams),
         })?;
         Ok(Self {
             base,
             scripted,
             app,
+            stop,
         })
     }
 
@@ -864,6 +871,26 @@ async fn a_page_that_is_not_full_is_followed_by_a_wait() -> TestResult {
 }
 
 #[tokio::test]
+async fn shutdown_ends_a_stream_waiting_for_its_next_poll() -> TestResult {
+    // Design section 1.6: shutdown ends an open stream without waiting for its poll interval.
+    let stream = Stream::new(NEVER, vec![json!({ "events": [] }), page(99, 1)])?;
+    let response = stream
+        .open(&[("authorization", &format!("Bearer {SECRET}"))])
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut frames = response.into_body().into_data_stream();
+    assert!(timeout(SHORT, frames.next()).await.is_err());
+    stream.stop.cancel();
+    assert!(
+        timeout(Duration::from_secs(1), frames.next())
+            .await?
+            .is_none()
+    );
+    assert_eq!(stream.scripted.asked()?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_stream_ends_when_its_session_is_logged_out() -> TestResult {
     let stream = Stream::new(SHORT, vec![page(1, 1), page(99, 1)])?;
     let cookie = stream.session("stream-session-secret", FAR_FUTURE)?;
@@ -1096,6 +1123,33 @@ async fn a_path_that_cannot_be_read_is_an_api_error_on_every_byte_and_event_rout
             serde_json::from_slice(&to_bytes(response.into_body(), 65_536).await?)?;
         assert_eq!(error.code, ErrorCode::InvalidInput);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_caller_holds_at_most_sixteen_open_streams() -> TestResult {
+    assert_eq!(okf_jawn_server::events::MAX_STREAMS_PER_CALLER, 16);
+    let stream = Stream::new(NEVER, Vec::new())?;
+    let bearer = format!("Bearer {SECRET}");
+    let mut open = Vec::new();
+    for _ in 0..16 {
+        let response = stream.open(&[("authorization", &bearer)]).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        open.push(response);
+    }
+    let refused = stream.open(&[("authorization", &bearer)]).await?;
+    assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(header(&refused, "retry-after").as_deref(), Some("5"));
+    let error: ApiError = serde_json::from_slice(&to_bytes(refused.into_body(), 4096).await?)?;
+    assert_eq!(error.code, ErrorCode::Unavailable);
+    // Another caller is counted apart.
+    let cookie = stream.session("another-session-secret", FAR_FUTURE)?;
+    let other = stream.open(&[("cookie", &cookie)]).await?;
+    assert_eq!(other.status(), StatusCode::OK);
+    // A stream that ends gives its place back.
+    drop(open.pop());
+    let again = stream.open(&[("authorization", &bearer)]).await?;
+    assert_eq!(again.status(), StatusCode::OK);
     Ok(())
 }
 

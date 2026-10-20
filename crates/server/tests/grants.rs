@@ -540,6 +540,153 @@ mod grant_cache_ttl {
     }
 }
 
+/// N-g: the cache holds a bounded number of entries, so a flood of distinct lookups cannot grow
+/// it without end; a stale entry goes before any fresh one, and then the oldest fresh one.
+mod grant_cache_bound {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
+    use okf_jawn_contract::identity::WorkspaceId;
+    use okf_jawn_core::access::AccessControl;
+    use okf_jawn_server::grants::{CachedAccess, GRANT_CACHE_MAX_ENTRIES};
+
+    use super::{Roles, TestClock, member};
+    use crate::check::TestResult;
+    use crate::fixtures::workspace;
+
+    /// The `n`th of a run of distinct workspace ids.
+    fn nth(n: usize) -> Result<WorkspaceId, serde_json::Error> {
+        workspace(&format!("00000000-0000-4000-8000-{n:012}"))
+    }
+
+    async fn read(
+        cache: &CachedAccess,
+        principal: &Principal,
+        n: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        cache
+            .authorize(principal, nth(n)?, Permission::Read)
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_full_cache_evicts_its_oldest_entry_for_a_new_one() -> TestResult {
+        let roles = Arc::new(Roles::holding(&[Permission::Read]));
+        let clock = Arc::new(TestClock::new());
+        let cache = CachedAccess::with_capacity(roles.clone(), clock.clone(), 3);
+        let principal = member()?;
+        for n in 1..=3 {
+            read(&cache, &principal, n).await?;
+            clock.advance(Duration::from_secs(1))?;
+        }
+        assert_eq!(roles.lookups(), 3);
+        read(&cache, &principal, 4).await?;
+        assert_eq!(roles.lookups(), 4);
+        // The second and third are still cached; the first, the oldest, was evicted.
+        read(&cache, &principal, 2).await?;
+        read(&cache, &principal, 3).await?;
+        assert_eq!(roles.lookups(), 4);
+        read(&cache, &principal, 1).await?;
+        assert_eq!(roles.lookups(), 5);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_stale_entry_goes_before_any_fresh_one() -> TestResult {
+        let roles = Arc::new(Roles::holding(&[Permission::Read]));
+        let clock = Arc::new(TestClock::new());
+        let cache = CachedAccess::with_capacity(roles.clone(), clock.clone(), 3);
+        let principal = member()?;
+        read(&cache, &principal, 1).await?;
+        clock.advance(Duration::from_secs(59))?;
+        read(&cache, &principal, 2).await?;
+        read(&cache, &principal, 3).await?;
+        clock.advance(Duration::from_secs(2))?;
+        read(&cache, &principal, 4).await?;
+        assert_eq!(roles.lookups(), 4);
+        // The stale first went; the two fresh ones stayed.
+        read(&cache, &principal, 2).await?;
+        read(&cache, &principal, 3).await?;
+        assert_eq!(roles.lookups(), 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_refreshed_entry_takes_no_place_of_another() -> TestResult {
+        let roles = Arc::new(Roles::holding(&[Permission::Read]));
+        let clock = Arc::new(TestClock::new());
+        let cache = CachedAccess::with_capacity(roles.clone(), clock.clone(), 2);
+        let principal = member()?;
+        read(&cache, &principal, 2).await?;
+        clock.advance(Duration::from_secs(1))?;
+        read(&cache, &principal, 1).await?;
+        // A fresh check of the first replaces its own entry and evicts nothing.
+        cache
+            .authorize(&principal, nth(1)?, Permission::Admin)
+            .await?;
+        assert_eq!(roles.lookups(), 3);
+        read(&cache, &principal, 2).await?;
+        assert_eq!(roles.lookups(), 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_tenant_entries_are_bounded_the_same_way() -> TestResult {
+        let roles = Arc::new(Roles::holding(&[Permission::Read]));
+        let clock = Arc::new(TestClock::new());
+        let cache = CachedAccess::with_capacity(roles.clone(), clock.clone(), 2);
+        let caller = |n: usize| -> Result<Principal, Box<dyn std::error::Error>> {
+            Ok(Principal {
+                subject: format!("user_{n}"),
+                route: AccessRoute::BrowserSession,
+                ..member()?
+            })
+        };
+        for n in 1..=3 {
+            cache
+                .authorize_tenant(&caller(n)?, Permission::Read)
+                .await?;
+            clock.advance(Duration::from_secs(1))?;
+        }
+        assert_eq!(roles.lookups(), 3);
+        cache
+            .authorize_tenant(&caller(3)?, Permission::Read)
+            .await?;
+        cache
+            .authorize_tenant(&caller(2)?, Permission::Read)
+            .await?;
+        assert_eq!(roles.lookups(), 3);
+        cache
+            .authorize_tenant(&caller(1)?, Permission::Read)
+            .await?;
+        assert_eq!(roles.lookups(), 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_production_cache_holds_ten_thousand_entries() -> TestResult {
+        assert_eq!(GRANT_CACHE_MAX_ENTRIES, 10_000);
+        let roles = Arc::new(Roles::holding(&[Permission::Read]));
+        let clock = Arc::new(TestClock::new());
+        let cache = CachedAccess::new(roles.clone(), clock.clone());
+        let principal = member()?;
+        for n in 0..=GRANT_CACHE_MAX_ENTRIES {
+            read(&cache, &principal, n).await?;
+            clock.advance(Duration::from_millis(1))?;
+        }
+        let before = roles.lookups();
+        // The ten thousand most recent are cached; the first, one past the bound, is not.
+        read(&cache, &principal, 1).await?;
+        read(&cache, &principal, GRANT_CACHE_MAX_ENTRIES).await?;
+        assert_eq!(roles.lookups(), before);
+        read(&cache, &principal, 0).await?;
+        assert_eq!(roles.lookups(), before.saturating_add(1));
+        Ok(())
+    }
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
 #[path = "../../core/tests/support/mod.rs"]

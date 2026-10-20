@@ -50,6 +50,14 @@
  * its Timeline and Who changed each line, at the revision the tab reads. A Note at the version
  * the workspace shows offers "Propose a change…" to a person who may propose
  * (`proposals/ProposeChange.tsx`).
+ *
+ * A View's tab shows the View, not its Markdown (`ViewTab`): resolved at the revision the tab
+ * reads, with the sources it cites to open at the revisions it pins. Its text, the prose and the
+ * View's block, stays one step away and rendered, in the disclosure "Text of this View", read as
+ * any item's text is (parts, continuation, warnings and citation). The view components show the
+ * description as one plain paragraph; the disclosure is where its Markdown reads as written. It is
+ * open from the start, and opens, when the address names a part of the item: that part is what the
+ * link is for.
  */
 import {
   type UseQueryResult,
@@ -58,7 +66,7 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import {
   getItemOptions,
   openWorkspaceQueryKey,
@@ -97,6 +105,7 @@ import { LeftDraft } from './LeftDraft';
 import { Properties } from './Properties';
 import { PropertiesViews } from './PropertiesYaml';
 import { SafeMarkdown } from './SafeMarkdown';
+import { ViewTab } from './ViewTab';
 
 /** Text budget per read; a longer item is read in parts through the continuation. */
 export const READ_BUDGET_BYTES = 65_536;
@@ -611,6 +620,15 @@ export function DocumentView({
       if (!textFixed) focusNext.current = 'text';
     }
   });
+  // A View's text is one step away: open from the start, and opened, when the address names a part.
+  const textId = useId();
+  const named = JSON.stringify(selection ?? null);
+  const [textOpen, setTextOpen] = useState(selection !== undefined);
+  const [textNamed, setTextNamed] = useState(named);
+  if (textNamed !== named) {
+    setTextNamed(named);
+    if (selection !== undefined) setTextOpen(true);
+  }
   const reading = JSON.stringify(request);
   const itemFailure = useRetry({
     request: reading,
@@ -844,6 +862,10 @@ export function DocumentView({
         </div>
       ) : (
         <>
+          {/* The View first: it is what a View's tab is for. */}
+          {kind === 'view' && (
+            <ViewTab workspaceId={workspaceId} itemId={itemId} revision={revision} />
+          )}
           {document ? (
             <Properties properties={document.properties} />
           ) : itemFailure.shown ? null : (
@@ -886,84 +908,120 @@ export function DocumentView({
             <ProposeChange workspaceId={workspaceId} document={document} />
           )}
 
-          {textLabels(extraction).map((label) => (
-            <p key={label} role="note" className="notice">
-              {label}
-            </p>
-          ))}
-
-          {read.isPending && !readFailure.retrying && <p role="status">Reading…</p>}
-          {readFailure.shown && (
-            <FailureNotice
-              context="Reading this item"
-              error={readFailure.error}
-              retry={readFailure}
-              workspaceId={workspaceId}
-            />
-          )}
-          {pages.length > 0 && (
-            <div className="document-body" ref={bodyRef}>
-              {keyed(pages, (page) => page.receipt_id).map(({ key, value: page }, index) => (
-                <div
-                  key={key}
-                  data-part
-                  tabIndex={-1}
-                  {...(pages.length > 1
-                    ? { role: 'group', 'aria-label': `Part ${index + 1} of this reading` }
-                    : {})}
-                >
-                  <SafeMarkdown markdown={page.markdown} />
-                </div>
-              ))}
-            </div>
-          )}
-          <p role="status" className="sr-only">
-            {readingStatus(read, pages.length, moreFailure.retrying)}
-          </p>
-          {keyed(warnings, (warning) => JSON.stringify(warning)).map(({ key, value: warning }) => (
-            <p key={key} role="note" className="notice">
-              {warning.message}
-              {warning.location ? ` (${warning.location})` : ''}
-            </p>
-          ))}
-          {last?.truncated && (
-            <div role="note" className="notice">
-              <p>
-                Partial reading: this is not all of {describeSelection(request.selection)}.
-                {last.next_cursor ? '' : ' The rest cannot be continued from here.'}
+          <ItemText asView={kind === 'view'} id={textId} open={textOpen} onToggle={setTextOpen}>
+            {textLabels(extraction).map((label) => (
+              <p key={label} role="note" className="notice">
+                {label}
               </p>
-              {read.hasNextPage && (
-                // aria-disabled rather than disabled while reading: the button stays focusable and
-                // announced. A disabled one would lose focus: Chromium and WebKit move focus to the
-                // body within a frame of a focused button becoming disabled (HTML's focus fixup).
-                <button
-                  type="button"
-                  ref={continueRef}
-                  aria-disabled={continuing}
-                  onClick={continueReading}
-                >
-                  {continuing ? 'Reading more…' : 'Continue reading'}
-                </button>
-              )}
-            </div>
-          )}
-          {moreFailure.shown && (
-            <FailureNotice
-              context="Continuing this reading"
-              error={moreFailure.error}
-              retry={moreFailure}
-              workspaceId={workspaceId}
-            />
-          )}
-          {first && (
-            <p className="citation">
-              Read from {first.source.path} at{' '}
-              <code title={first.source.revision}>{short(first.source.revision)}</code>,{' '}
-              {describeSelection(first.source.selection)}.
+            ))}
+
+            {read.isPending && !readFailure.retrying && <p role="status">Reading…</p>}
+            {readFailure.shown && (
+              <FailureNotice
+                context="Reading this item"
+                error={readFailure.error}
+                retry={readFailure}
+                workspaceId={workspaceId}
+              />
+            )}
+            {pages.length > 0 && (
+              <div className="document-body" ref={bodyRef}>
+                {keyed(pages, (page) => page.receipt_id).map(({ key, value: page }, index) => (
+                  <div
+                    key={key}
+                    data-part
+                    tabIndex={-1}
+                    {...(pages.length > 1
+                      ? { role: 'group', 'aria-label': `Part ${index + 1} of this reading` }
+                      : {})}
+                  >
+                    <SafeMarkdown markdown={page.markdown} />
+                  </div>
+                ))}
+              </div>
+            )}
+            <p role="status" className="sr-only">
+              {readingStatus(read, pages.length, moreFailure.retrying)}
             </p>
-          )}
+            {keyed(warnings, (warning) => JSON.stringify(warning)).map(
+              ({ key, value: warning }) => (
+                <p key={key} role="note" className="notice">
+                  {warning.message}
+                  {warning.location ? ` (${warning.location})` : ''}
+                </p>
+              ),
+            )}
+            {last?.truncated && (
+              <div role="note" className="notice">
+                <p>
+                  Partial reading: this is not all of {describeSelection(request.selection)}.
+                  {last.next_cursor ? '' : ' The rest cannot be continued from here.'}
+                </p>
+                {read.hasNextPage && (
+                  // aria-disabled rather than disabled while reading: the button stays focusable and
+                  // announced. A disabled one would lose focus: Chromium and WebKit move focus to the
+                  // body within a frame of a focused button becoming disabled (HTML's focus fixup).
+                  <button
+                    type="button"
+                    ref={continueRef}
+                    aria-disabled={continuing}
+                    onClick={continueReading}
+                  >
+                    {continuing ? 'Reading more…' : 'Continue reading'}
+                  </button>
+                )}
+              </div>
+            )}
+            {moreFailure.shown && (
+              <FailureNotice
+                context="Continuing this reading"
+                error={moreFailure.error}
+                retry={moreFailure}
+                workspaceId={workspaceId}
+              />
+            )}
+            {first && (
+              <p className="citation">
+                Read from {first.source.path} at{' '}
+                <code title={first.source.revision}>{short(first.source.revision)}</code>,{' '}
+                {describeSelection(first.source.selection)}.
+              </p>
+            )}
+          </ItemText>
         </>
       )}
     </article>
+  );
+}
+
+/**
+ * The item's text: in place for a Note or a Source; for a View, one step away under its own
+ * disclosure, which the person opens and closes (`open`, `onToggle`).
+ */
+function ItemText({
+  asView,
+  id,
+  open,
+  onToggle,
+  children,
+}: {
+  asView: boolean;
+  /** The identity of the disclosure's summary, which names it. */
+  id: string;
+  open: boolean;
+  onToggle: (open: boolean) => void;
+  children: ReactNode;
+}) {
+  if (!asView) return children;
+  return (
+    <details
+      className="view-text"
+      open={open}
+      aria-labelledby={id}
+      onToggle={(event) => onToggle(event.currentTarget.open)}
+    >
+      <summary id={id}>Text of this View</summary>
+      {children}
+    </details>
   );
 }

@@ -5,22 +5,29 @@
 //! names, so a moved item is found at its new path. `item_at_path` answers what is at one path
 //! of that revision, by direct tree lookup, and summarizes it exactly as `list` does.
 
-use git2::{Oid, Repository, Tree};
+use git2::{ObjectType, Oid, Repository, Sort, Tree};
 use okf_jawn_contract::conventions::NamingRules;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::{SuppliedText, TextOrigin};
-use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath};
+use okf_jawn_contract::identity::{Digest, ItemId, ProposalId, Revision, Timestamp, WorkspacePath};
 use okf_jawn_contract::item::{ItemDocument, ItemSummary, TypeDefinition};
 use okf_jawn_contract::source::SourceAppearance;
-use okf_jawn_core::portable::item_content_digest;
+use okf_jawn_core::portable::{content_digest, item_content_digest};
 use okf_jawn_core::storage::{
-    FolderListing, Page, Provenance, RulesFile, RulesParseError, TreeItem, WorkspaceTree,
+    CommittedFile, CommittedFiles, CommittedItem, FilePage, FolderListing, Page, Provenance,
+    RulesFile, RulesParseError, TreeItem, WorkspaceTree,
 };
 
-use super::edit::{appearance_file, correction_file, supplied_file};
+use super::edit::{appearance_file, correction_adopts, correction_file, supplied_file};
+use super::export::refuse_off_the_line;
 use super::history::last_change;
 use super::item::{ItemFile, RULES_FILE, TYPES_FILE, is_item_path};
-use super::repo::{blob_bytes, commit_of, files, git, internal};
+use super::repo::{blob_bytes, commit_of, files, git, internal, revision_of};
+
+/// The Git file mode of a regular file.
+const REGULAR_FILE: i32 = 0o100_644;
+/// The Git file mode of an executable file, also a regular file.
+const EXECUTABLE_FILE: i32 = 0o100_755;
 
 /// Every item of a tree with its path, in path order.
 pub(crate) fn items(
@@ -48,7 +55,8 @@ fn items_of(
 
 /// The item a file at `path` holds: `None` when `path` cannot hold an item (`is_item_path`)
 /// or the text carries no application header. `items`, and so `list`, `item_at_path` and the
-/// item-filtered log (`history::log`) decide what is an item here and nowhere else.
+/// item-filtered log (`history::log`), and `committed_files` decide what is an item here and
+/// nowhere else (`item_in`).
 pub(crate) fn item_file(
     repository: &Repository,
     path: &str,
@@ -57,10 +65,122 @@ pub(crate) fn item_file(
     if !is_item_path(path) {
         return Ok(None);
     }
+    item_in(path, blob_bytes(repository, blob)?)
+}
+
+/// The item the bytes of a file at an item path hold (`item_file`).
+fn item_in(path: &str, bytes: Vec<u8>) -> Result<Option<ItemFile>, ApiError> {
     parses::record();
-    let text = String::from_utf8(blob_bytes(repository, blob)?)
-        .map_err(|_| internal(format!("{path} is not UTF-8")))?;
+    let text = String::from_utf8(bytes).map_err(|_| internal(format!("{path} is not UTF-8")))?;
     ItemFile::parse(&text)
+}
+
+/// One page of every file of `revision`'s tree, in byte order of path
+/// (`VersionStore::committed_files`).
+///
+/// The tree's paths are listed first without reading a blob; only the files of the page are
+/// read and, at an item path, parsed. So a whole walk reads each file once and visits the
+/// tree's paths once a page.
+pub(crate) fn committed_files(
+    repository: &Repository,
+    revision: &Revision,
+    page: &FilePage,
+) -> Result<CommittedFiles, ApiError> {
+    let commit = commit_of(repository, revision)?;
+    refuse_off_the_line(repository, commit.id())?;
+    let tree = commit.tree().map_err(|error| git(&error))?;
+    let mut paths = Vec::new();
+    regular_files(repository, &tree, "", &mut paths)?;
+    paths.sort();
+    let limit = usize::from(page.limit.clamp(1, 500));
+    let mut remaining = paths
+        .into_iter()
+        .filter(|(path, _)| {
+            page.after
+                .as_deref()
+                .is_none_or(|after| path.as_str() > after)
+        })
+        .peekable();
+    let mut files = Vec::new();
+    let mut held: u64 = 0;
+    for (path, blob) in remaining.by_ref() {
+        let bytes = blob_bytes(repository, blob)?;
+        held = held.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        let item = if is_item_path(&path) {
+            item_in(&path, bytes.clone())?
+                .map(|file| committed_item(&file))
+                .transpose()?
+        } else {
+            None
+        };
+        files.push(CommittedFile { path, bytes, item });
+        if files.len() >= limit || held > page.max_bytes {
+            break;
+        }
+    }
+    let next_after = remaining
+        .peek()
+        .is_some()
+        .then(|| files.last().map(|file| file.path.clone()))
+        .flatten();
+    Ok(CommittedFiles { files, next_after })
+}
+
+/// What `show` would answer of an item file that a portable export needs: its identity, role,
+/// content digest (computed from the same body and properties `show` builds its document from)
+/// and the digests its header names.
+fn committed_item(file: &ItemFile) -> Result<CommittedItem, ApiError> {
+    Ok(CommittedItem {
+        item_id: file.header.item_id,
+        kind: file.kind(),
+        content_digest: content_digest(&file.document.body, &file.properties())?,
+        source: file.header.source.clone(),
+        record: file
+            .header
+            .extraction
+            .as_ref()
+            .and_then(|extraction| extraction.digest.clone()),
+    })
+}
+
+/// Every regular file under `tree`, as `/`-separated paths below `prefix` with their blobs.
+///
+/// A link or a submodule is `Internal`: no store edit writes one, and a portable export must not
+/// write a link's target text as if it were a file.
+fn regular_files(
+    repository: &Repository,
+    tree: &Tree<'_>,
+    prefix: &str,
+    found: &mut Vec<(String, Oid)>,
+) -> Result<(), ApiError> {
+    for entry in tree {
+        let name = entry
+            .name()
+            .ok()
+            .ok_or_else(|| internal("a tree entry name is not UTF-8"))?;
+        let path = if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        match (entry.kind(), entry.filemode()) {
+            (Some(ObjectType::Tree), _) => {
+                let child = repository
+                    .find_tree(entry.id())
+                    .map_err(|error| git(&error))?;
+                regular_files(repository, &child, &path, found)?;
+            }
+            (Some(ObjectType::Blob), REGULAR_FILE | EXECUTABLE_FILE) => {
+                found.push((path, entry.id()));
+            }
+            _ => {
+                return Err(internal(format!(
+                    "{path} is not a regular file of the tree (a link or a submodule)"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The navigation summary of one item at `revision`. `list` and `item_at_path` both summarize
@@ -254,7 +374,13 @@ pub(crate) fn show(
     {
         appearance.extraction = extraction;
         if appearance.extraction.text_origin == TextOrigin::SuppliedByAgent {
-            appearance.extraction.supplied = supplied(repository, revision, &tree, item)?;
+            appearance.extraction.supplied = supplied(
+                repository,
+                revision,
+                &tree,
+                item,
+                appearance.extraction.digest.as_ref(),
+            )?;
         }
     }
     let summary = file.summary(&path, revision, source.as_ref());
@@ -368,15 +494,14 @@ fn supplied(
     revision: &Revision,
     tree: &Tree<'_>,
     item: ItemId,
+    digest: Option<&Digest>,
 ) -> Result<Option<SuppliedText>, ApiError> {
     let path = supplied_file(item);
-    let entry = match tree.get_path(std::path::Path::new(&path)) {
-        Ok(entry) => entry,
-        Err(error) if error.code() == git2::ErrorCode::NotFound => return Ok(None),
-        Err(error) => return Err(git(&error)),
+    let adopts = adopted_proposal(repository, tree, item, digest)?;
+    let Some((supplied_at, record)) = supplied_record(repository, revision, tree, &path, adopts)?
+    else {
+        return Ok(None);
     };
-    let record: serde_json::Value = serde_json::from_slice(&blob_bytes(repository, entry.id())?)
-        .map_err(|error| internal(format!("supplied text does not parse: {error}")))?;
     let supplier: Provenance =
         serde_json::from_value(record.get("supplier").cloned().unwrap_or_default())
             .map_err(|error| internal(format!("supplied text has no supplier: {error}")))?;
@@ -384,12 +509,14 @@ fn supplied(
         .get("markdown")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    let Some((approver, approved_at)) = last_change(repository, revision, &path)? else {
+    let proposal_id = supplied_proposal(&record)?;
+    let Some((approver, approved_at)) =
+        supplied_approval(repository, &supplied_at, &path, proposal_id)?
+    else {
         return Ok(None);
     };
     Ok(Some(SuppliedText {
-        proposal_id: serde_json::from_value(record.get("proposal_id").cloned().unwrap_or_default())
-            .map_err(|error| internal(format!("supplied text has no proposal: {error}")))?,
+        proposal_id,
         supplied_by: supplier.subject,
         client_id: supplier.client_id,
         approved_by: approver,
@@ -400,8 +527,142 @@ fn supplied(
         .map_err(|error| internal(error.to_string()))?,
         pages: serde_json::from_value(record.get("pages").cloned().unwrap_or_default())
             .unwrap_or_default(),
-        kept_by: None,
+        kept_by: keeper(repository, revision, tree, item, digest, proposal_id)?,
     }))
+}
+
+/// A later accepted supply replaces the companion file but not its retained Git history.
+/// An explicit adoption selects that proposal's record and original approval revision.
+fn supplied_record(
+    repository: &Repository,
+    revision: &Revision,
+    tree: &Tree<'_>,
+    path: &str,
+    adopts: Option<ProposalId>,
+) -> Result<Option<(Revision, serde_json::Value)>, ApiError> {
+    let current = blob_at(tree, path)?;
+    if let Some(blob) = current {
+        let record = supplied_blob(repository, blob)?;
+        if adopts.is_none() || Some(supplied_proposal(&record)?) == adopts {
+            return Ok(Some((revision.clone(), record)));
+        }
+    } else if adopts.is_none() {
+        return Ok(None);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    seen.extend(current);
+    let mut walk = repository.revwalk().map_err(|error| git(&error))?;
+    walk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)
+        .map_err(|error| git(&error))?;
+    walk.push(commit_of(repository, revision)?.id())
+        .map_err(|error| git(&error))?;
+    for oid in walk {
+        let commit = repository
+            .find_commit(oid.map_err(|error| git(&error))?)
+            .map_err(|error| git(&error))?;
+        let tree = commit.tree().map_err(|error| git(&error))?;
+        let Some(blob) = blob_at(&tree, path)? else {
+            continue;
+        };
+        if !seen.insert(blob) {
+            continue;
+        }
+        let record = supplied_blob(repository, blob)?;
+        if Some(supplied_proposal(&record)?) == adopts {
+            return Ok(Some((revision_of(commit.id())?, record)));
+        }
+    }
+    Err(internal(
+        "the adopted supplied text is absent from retained history",
+    ))
+}
+
+fn supplied_blob(repository: &Repository, blob: Oid) -> Result<serde_json::Value, ApiError> {
+    serde_json::from_slice(&blob_bytes(repository, blob)?)
+        .map_err(|error| internal(format!("supplied text does not parse: {error}")))
+}
+
+fn supplied_proposal(record: &serde_json::Value) -> Result<ProposalId, ApiError> {
+    serde_json::from_value(record.get("proposal_id").cloned().unwrap_or_default())
+        .map_err(|error| internal(format!("supplied text has no proposal: {error}")))
+}
+
+/// The original acceptance is the earliest introduction of this immutable proposal on the
+/// resolved accepted line. Rewind can reintroduce the same blob, but its committer is not the
+/// approver. First parents exclude draft refs and merge side branches; promotion makes a new
+/// commit on that line, with the accepting human as committer and the candidate as no parent.
+fn supplied_approval(
+    repository: &Repository,
+    revision: &Revision,
+    path: &str,
+    proposal: ProposalId,
+) -> Result<Option<(String, Timestamp)>, ApiError> {
+    let mut next = Some(commit_of(repository, revision)?.id());
+    let mut approval = None;
+    while let Some(oid) = next {
+        let commit = repository.find_commit(oid).map_err(|error| git(&error))?;
+        next = commit.parent_ids().next();
+        let tree = commit.tree().map_err(|error| git(&error))?;
+        let Some(blob) = blob_at(&tree, path)? else {
+            continue;
+        };
+        let before = if let Some(parent) = next {
+            let parent = repository
+                .find_commit(parent)
+                .map_err(|error| git(&error))?;
+            let tree = parent.tree().map_err(|error| git(&error))?;
+            blob_at(&tree, path)?
+        } else {
+            None
+        };
+        if before == Some(blob) || supplied_proposal(&supplied_blob(repository, blob)?)? != proposal
+        {
+            continue;
+        }
+        let committer = commit.committer();
+        approval = Some((
+            committer.name().unwrap_or_default().to_owned(),
+            crate::seam::unix_instant(committer.when().seconds())?,
+        ));
+    }
+    Ok(approval)
+}
+
+fn adopted_proposal(
+    repository: &Repository,
+    tree: &Tree<'_>,
+    item: ItemId,
+    digest: Option<&Digest>,
+) -> Result<Option<ProposalId>, ApiError> {
+    let Some(digest) = digest else {
+        return Ok(None);
+    };
+    let Some(blob) = blob_at(tree, &correction_file(item, digest))? else {
+        return Ok(None);
+    };
+    let record: serde_json::Value = serde_json::from_slice(&blob_bytes(repository, blob)?)
+        .map_err(|error| internal(format!("a correction does not parse: {error}")))?;
+    correction_adopts(&record)
+}
+
+/// Adoption changes the correction file, not the original approval. Read the keeper from
+/// that choice's commit so a later conversion cannot relabel the original approver.
+fn keeper(
+    repository: &Repository,
+    revision: &Revision,
+    tree: &Tree<'_>,
+    item: ItemId,
+    digest: Option<&Digest>,
+    proposal: ProposalId,
+) -> Result<Option<String>, ApiError> {
+    let Some(digest) = digest else {
+        return Ok(None);
+    };
+    let path = correction_file(item, digest);
+    if adopted_proposal(repository, tree, item, Some(digest))? != Some(proposal) {
+        return Ok(None);
+    }
+    Ok(last_change(repository, revision, &path)?.map(|(subject, _)| subject))
 }
 
 /// How many item files `item_file` parsed on this thread, counted in unit tests so the cost of

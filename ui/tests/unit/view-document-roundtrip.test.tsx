@@ -29,7 +29,11 @@ import {
   zReadItemResponse,
   zViewDocument,
 } from '../../src/api/generated/zod.gen';
-import { BindingsContext, type ResolvedPresentation } from '../../src/features/views/Bindings';
+import {
+  BindingsContext,
+  type ResolvedPresentation,
+  type SourceLink,
+} from '../../src/features/views/Bindings';
 import { Layout, prepareSpec } from '../../src/features/views/Layout';
 import { datasetRecords, PresentView, parseDataset } from '../../src/features/views/PresentView';
 import { SavedView, type SavedViewProps } from '../../src/features/views/SavedView';
@@ -1195,5 +1199,77 @@ describe('a dataset the server could not produce says why under its table', () =
     expect(within(columns).getByRole('alert').textContent).toBe(
       `Dataset unavailable: metrics: ${message}`,
     );
+  });
+});
+
+describe("a View's sources open where its host links them, at the revision they were read", () => {
+  const presented = zPresentResponse.parse(presentResponseFixture);
+  const refusing = serverToolData(async () => ({
+    isError: true,
+    content: [{ type: 'text', text: 'not read here' }],
+  }));
+  /** The host's link: here, an anchor naming the item and revision it opens. */
+  const sourceLink: SourceLink = (source, label) => (
+    <a href={`#open/${source.item_id}@${source.revision}`}>{label}</a>
+  );
+  const opened = (links: HTMLElement[]) =>
+    links.map((link) => [link.textContent, link.getAttribute('href')]);
+
+  it('links each source read, and each source the View lists, through the host', async () => {
+    render(<PresentView response={presented} data={refusing} sourceLink={sourceLink} />);
+    const region = await screen.findByRole('region', {
+      name: "Where this View's data comes from",
+    });
+    const read = within(region).getByRole('list', { name: 'Sources read' });
+    expect(opened(within(read).getAllByRole('link'))).toEqual(
+      presented.resolved_bindings.map((binding) => [
+        `${binding.source.path} at revision ${binding.source.revision}`,
+        `#open/${binding.source.item_id}@${binding.source.revision}`,
+      ]),
+    );
+    // The binding's name stays text beside its link.
+    expect(within(read).getAllByRole('listitem')[0]?.textContent).toMatch(/^venue: /);
+    // The View's own SourceList links each binding it names the same way.
+    const listed = screen
+      .getAllByRole('link')
+      .filter((link) => !region.contains(link))
+      .map((link) => link.textContent);
+    expect(listed).toEqual(
+      presented.resolved_bindings.map(
+        (binding) => `${binding.source.path} @ ${binding.source.revision}`,
+      ),
+    );
+  });
+
+  it('shows them as text, as before, when the host gives no link', async () => {
+    render(<PresentView response={presented} data={refusing} />);
+    await screen.findByRole('region', { name: "Where this View's data comes from" });
+    expect(screen.queryAllByRole('link')).toEqual([]);
+  });
+
+  it('is given the link by a saved View', async () => {
+    const client = createClient({
+      baseUrl: 'http://okf.test',
+      fetch: Object.assign(
+        async () =>
+          new Response(JSON.stringify(presented), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        { preconnect: () => {} },
+      ),
+    });
+    render(
+      <SavedView
+        workspaceId="aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff"
+        itemId="11111111-2222-4333-8444-555555555555"
+        at={{ kind: 'revision', revision: '0123456789abcdef0123456789abcdef01234567' }}
+        data={refusing}
+        client={client}
+        sourceLink={sourceLink}
+      />,
+    );
+    const read = await screen.findByRole('list', { name: 'Sources read' });
+    expect(within(read).getAllByRole('link')).toHaveLength(presented.resolved_bindings.length);
   });
 });

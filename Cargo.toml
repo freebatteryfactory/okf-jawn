@@ -39,6 +39,7 @@ uuid = { version = "=1.27.0", features = ["serde", "v4"] }
 time = { version = "=0.3.55", features = ["formatting"] }
 url = { version = "=2.5.8" }
 workos = { version = "=3.3.0" }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation"] }
 notify = { version = "=8.2.0" }
 directories = { version = "=6.0.0" }
 open = { version = "=5.4.4" }

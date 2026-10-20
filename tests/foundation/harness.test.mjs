@@ -90,6 +90,7 @@ import {
   viewCriteria,
 } from '../../qualification/mcp-apps/lib/criteria.mjs';
 import { DOM_SELECTORS, HarnessError, appFrameOf, observeView, readAppDom, viewSettled } from '../../qualification/mcp-apps/lib/observe.mjs';
+import { measureViewport } from '../../qualification/mcp-apps/lib/viewport.mjs';
 import { qualify as qualifyMcpApps } from '../../qualification/mcp-apps/lib/qualify.mjs';
 import { envelopeFailures as mcpAppsEnvelopeFailures, foldCriteria as mcpAppsFold } from '../../scripts/lib/receipt-envelope.mjs';
 import { PROTOCOL_CRITERIA, PROTOCOL_RULES, canonicalJson, judgeProtocol, observeProtocol } from '../../qualification/mcp-apps/lib/protocol.mjs';
@@ -171,6 +172,27 @@ async function fixture(t, body) {
  t.after(()=>new Promise(resolve=>server.close(resolve)));
  return `http://127.0.0.1:${server.address().port}`;
 }
+test('acceptance executable sends the contract CSRF header on browser writes',async t=>{
+ // The literal header is the contract's CSRF_HEADER, not derived from the harness under test.
+ // Stop at the first request: this proves transport authentication, not application acceptance.
+ let observed;
+ const server=createServer((request,response)=>{
+  observed={method:request.method,path:request.url,headers:request.headers};
+  request.resume();response.writeHead(418,{'content-type':'application/json'});response.end('{}');
+ });
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+ t.after(()=>new Promise(resolve=>server.close(resolve)));
+ const base=`http://127.0.0.1:${server.address().port}`;
+ const result=await runCommand(process.execPath,['tests/integration/acceptance.mjs'],{
+  cwd:root,capture:true,allowFailure:true,timeout:SLOW_MACHINE_BUDGET_MS,
+  env:{OKF_TEST_DISPOSABLE:'1',OKF_TEST_BASE_URL:base,OKF_TEST_BROWSER_COOKIE:'session=fixture',OKF_TEST_CSRF:'fixture-csrf',OKF_TEST_AGENT_TOKEN:'fixture-agent',OKF_TEST_ALLOW_REMOTE:'0'},
+ });
+ assert.notEqual(result.code,0);assert.match(result.stderr,/create_workspace status/);
+ assert.ok(observed);assert.equal(observed.method,'POST');assert.equal(observed.path,'/api/workspaces/create-workspace');
+ assert.equal(observed.headers.cookie,'session=fixture');assert.equal(observed.headers.origin,base);
+ assert.equal(observed.headers['x-okf-csrf'],'fixture-csrf');
+ assert.equal(observed.headers['x-csrf-token'],undefined);assert.equal(observed.headers.authorization,undefined);
+});
 test('positive HTTP control reaches and validates a correct reviewed revision',async t=>{
  const revision='a'.repeat(40);const url=await fixture(t,{source:{revision},coverage:'current'});
  const body=await (await fetch(url)).json();
@@ -3941,45 +3963,106 @@ test('the App document is read with the selectors that separate marks from axes 
   assert.equal(appFrameOf([hostPage, nested, sandbox, app]).frame, nested);
 });
 
+/** Two real driver frame levels, with injected DOM data only where browser globals are read. */
+function viewportFrames({ readFailure = false, acquireFailure = false } = {}) {
+  const disposed = [];
+  const measured = [];
+  const running = { playState: 'running', pending: false };
+  const pending = { playState: 'idle', pending: true };
+  const finished = { playState: 'finished', pending: false };
+  const node = (height, rectHeight, animations, parentAnimations) => ({
+    clientHeight: height,
+    getBoundingClientRect: () => ({ height: rectHeight }),
+    getAnimations: () => animations,
+    parentElement: { getAnimations: () => parentAnimations, parentElement: null },
+  });
+  const handle = (name, element) => ({
+    evaluate: async (read) => { measured.push(name); return read(element); },
+    dispose: async () => { disposed.push(name); },
+  });
+  const inner = handle('inner', node(240, 244, [], [running]));
+  const outer = handle('outer', node(220, 226, [running, finished], [pending]));
+  const root = { parentFrame: () => null };
+  const sandbox = { parentFrame: () => root, frameElement: async () => {
+    if (acquireFailure) throw new Error('fixture frame acquisition failed');
+    return outer;
+  } };
+  const frame = { parentFrame: () => sandbox, frameElement: async () => inner, evaluate: async (read) => {
+    if (readFailure) throw new Error('fixture app read failed');
+    return read({ doc: { documentElement: { scrollHeight: 948 }, body: { scrollHeight: 940 }, getAnimations: () => [running, pending, finished] }, height: 260 });
+  } };
+  return { frame, disposed, measured };
+}
+
+test('reference-host viewport measurement includes both frames and all active ancestor animations', async () => {
+  const fixture = viewportFrames();
+  assert.deepEqual(await measureViewport(fixture.frame), {
+    heights: [[240, 244], [220, 226]], viewport_height: 220, content_height: 948, active_animations: 5,
+  });
+  assert.deepEqual(fixture.measured, ['inner', 'outer']);
+  assert.deepEqual(fixture.disposed, ['inner', 'outer']);
+});
+
+test('reference-host viewport measurement disposes both handles when the App read fails', async () => {
+  const fixture = viewportFrames({ readFailure: true });
+  await assert.rejects(measureViewport(fixture.frame), /fixture app read failed/);
+  assert.deepEqual(fixture.measured, ['inner', 'outer']);
+  assert.deepEqual(fixture.disposed, ['inner', 'outer']);
+});
+
+test('reference-host viewport measurement disposes an acquired handle when the next acquisition fails', async () => {
+  const fixture = viewportFrames({ acquireFailure: true });
+  await assert.rejects(measureViewport(fixture.frame), /fixture frame acquisition failed/);
+  assert.deepEqual(fixture.measured, []);
+  assert.deepEqual(fixture.disposed, ['inner']);
+});
+/** Existing pure observer driver double, shared with the resize-settlement regressions. */
+function observationDriver({ frames, appends = [], hostText = 'basic-host', before = '', viewports = [{ heights: [[100, 100], [100, 100]], viewport_height: 100, content_height: 100, active_animations: 0 }] }) {
+  const frame = (parent) => ({ parentFrame: () => parent });
+  const appFrame = frame(frame(frame(null)));
+  const state = { log: before, reads: 0, clock: 0, opened: [], waits: 0, axe: 0, screenshots: [], screenshotTimes: [] };
+  return {
+    state,
+    now: () => state.clock,
+    toolLog: () => state.log,
+    open: async (url) => {
+      state.opened.push(url);
+    },
+    hostText: async () => hostText,
+    frames: () => [appFrame.parentFrame().parentFrame(), appFrame.parentFrame(), appFrame],
+    readFrame: async (given) => {
+      assert.equal(given, appFrame);
+      state.log += appends[state.reads] ?? '';
+      const shown = frames[Math.min(state.reads, frames.length - 1)];
+      state.reads += 1;
+      return shown;
+    },
+    viewport: async (given) => {
+      assert.equal(given, appFrame);
+      return viewports[Math.min(Math.max(0, state.reads - 1), viewports.length - 1)];
+    },
+    wait: async (ms) => {
+      state.waits += 1;
+      state.clock += ms;
+    },
+    screenshot: async (name) => {
+      state.screenshots.push(name);
+      state.screenshotTimes.push(state.clock);
+      return `basic-host-${name}.png`;
+    },
+    axe: async () => {
+      state.axe += 1;
+      return AXE_CLEAN;
+    },
+  };
+}
+
 test('a view is watched from the moment it is opened: only its own tool calls count, and waiting stops when it has settled', async () => {
   const { of, expected, presentCalls } = await goodObservations();
   const present = VIEWS[3];
   const line = (call) => `${TOOL_CALL_LOG_PREFIX}${JSON.stringify(call)}\n`;
-  const frame = (parent) => ({ parentFrame: () => parent });
-  const appFrame = frame(frame(frame(null)));
-  /** A driver whose App frame shows `frames[n]` on the n-th read and whose server log grows by `appends[n]`. */
-  const driver = ({ frames, appends = [], hostText = 'basic-host', before = '' }) => {
-    const state = { log: before, reads: 0, clock: 0, opened: [], waits: 0, axe: 0, screenshots: [] };
-    return {
-      state,
-      now: () => state.clock,
-      toolLog: () => state.log,
-      open: async (url) => {
-        state.opened.push(url);
-      },
-      hostText: async () => hostText,
-      frames: () => [appFrame.parentFrame().parentFrame(), appFrame.parentFrame(), appFrame],
-      readFrame: async (given) => {
-        assert.equal(given, appFrame);
-        state.log += appends[state.reads] ?? '';
-        const shown = frames[Math.min(state.reads, frames.length - 1)];
-        state.reads += 1;
-        return shown;
-      },
-      wait: async (ms) => {
-        state.waits += 1;
-        state.clock += ms;
-      },
-      screenshot: async (name) => {
-        state.screenshots.push(name);
-        return `basic-host-${name}.png`;
-      },
-      axe: async () => {
-        state.axe += 1;
-        return AXE_CLEAN;
-      },
-    };
-  };
+
+  const driver = observationDriver;
   const good = of(present);
   const appLog = presentCalls.map(line).join('');
   // The protocol check read the dataset through the same server before this view was opened.
@@ -3990,8 +4073,8 @@ test('a view is watched from the moment it is opened: only its own tool calls co
   const observation = await observeView(watched, present, expected, { timeoutMs: 30_000, pollMs: 500 });
   assert.deepEqual(watched.state.opened, [basicHostUrl('render_present')]);
   assert.equal(observation.settled, true);
-  assert.equal(watched.state.reads, 3, 'it reads until the view has settled, then stops');
-  assert.equal(watched.state.waits, 2);
+  assert.equal(watched.state.reads, 4, 'it reads until content and 500ms of stable viewport geometry have settled, then stops');
+  assert.equal(watched.state.waits, 3);
   assert.deepEqual(observation.tool_calls, presentCalls, 'only calls reported after the view was opened are this view\'s');
   assert.equal(observation.tool_calls.filter((call) => call.tool === 'read_object').length, blocksOf(expected.bytes).length);
   assert.deepEqual(observation.frame, good.frame);
@@ -4030,6 +4113,72 @@ test('a view is watched from the moment it is opened: only its own tool calls co
   await assert.rejects(observeView(unreachable, present, expected), (error) => error instanceof HarnessError && /basic-host could not reach the harness server/.test(error.message));
   assert.equal(unreachable.state.reads, 0);
 });
+
+
+for (const resize of [
+  { name: 'expansion', early: { heights: [[215, 220.5], [215, 215]], viewport_height: 215, content_height: 948, active_animations: 2 }, final: { heights: [[948, 954], [948, 948]], viewport_height: 948, content_height: 948, active_animations: 0 } },
+  { name: 'contraction', early: { heights: [[242, 247.67], [313, 313]], viewport_height: 242, content_height: 288, active_animations: 1 }, final: { heights: [[82, 88], [82, 82]], viewport_height: 82, content_height: 82, active_animations: 0 } },
+]) {
+  test(`reference-host screenshots wait for delayed ${resize.name} after content matches`, async () => {
+    const { of, expected, presentCalls } = await goodObservations();
+    const view = resize.name === 'expansion' ? VIEWS[3] : VIEWS[2];
+    const good = of(view).frame;
+    const waiting = { ...good, text: 'Waiting for a tool result from the connected host.' };
+    const appLog = view.dataset ? presentCalls.map((call) => `${TOOL_CALL_LOG_PREFIX}${JSON.stringify(call)}\n`).join('') : '';
+    const watched = observationDriver({ frames: [waiting, waiting, good], appends: [appLog], viewports: [resize.early, resize.early, resize.early, resize.final, resize.final] });
+    const observation = await observeView(watched, view, view.dataset ? expected : null);
+    assert.deepEqual(watched.state.screenshotTimes, [2000], 'content at1000ms is insufficient; resize must finish and remain stable500ms');
+    assert.deepEqual(observation.viewport, resize.final);
+    assert.deepEqual(observation.frame, good);
+    assert.equal(observation.settled, true);
+    assert.equal(watched.state.axe, 1);
+  });
+}
+
+test('an already-fitting reference-host view needs stability rather than a fixed two-second delay', async () => {
+  const { of } = await goodObservations();
+  const view = VIEWS[2];
+  const watched = observationDriver({ frames: [of(view).frame] });
+  assert.equal((await observeView(watched, view, null)).settled, true);
+  assert.deepEqual(watched.state.screenshotTimes, [500]);
+});
+
+test('reference-host viewport stability restarts when matching content disappears', async () => {
+  const { of } = await goodObservations();
+  const view = VIEWS[2];
+  const good = of(view).frame;
+  const waiting = { ...good, text: 'Waiting for a tool result from the connected host.' };
+  const watched = observationDriver({ frames: [good, waiting, good, good] });
+  assert.equal((await observeView(watched, view, null)).settled, true);
+  assert.deepEqual(watched.state.screenshotTimes, [1500]);
+});
+
+test('reference-host viewport stability restarts when fitting geometry changes', async () => {
+  const { of } = await goodObservations();
+  const view = VIEWS[2];
+  const first = { heights: [[100, 100], [100, 100]], viewport_height: 100, content_height: 100, active_animations: 0 };
+  const next = { heights: [[120, 120], [120, 120]], viewport_height: 120, content_height: 120, active_animations: 0 };
+  const watched = observationDriver({ frames: [of(view).frame], viewports: [first, next, next] });
+  const observation = await observeView(watched, view, null);
+  assert.deepEqual(watched.state.screenshotTimes, [1000]);
+  assert.deepEqual(observation.viewport, next);
+});
+
+for (const blocked of [
+  { name: 'clipping', viewport: { heights: [[215, 215], [215, 215]], viewport_height: 215, content_height: 948, active_animations: 0 } },
+  { name: 'animation', viewport: { heights: [[948, 954], [948, 948]], viewport_height: 948, content_height: 948, active_animations: 1 } },
+]) {
+  test(`persistent reference-host ${blocked.name} refuses within the existing bounded watch`, async () => {
+    const { of } = await goodObservations();
+    const view = VIEWS[2];
+    const watched = observationDriver({ frames: [of(view).frame], viewports: [blocked.viewport] });
+    await assert.rejects(observeView(watched, view, null, { timeoutMs: 2000, pollMs: 500 }),
+      (error) => error instanceof HarnessError && /viewport did not settle unclipped/.test(error.message));
+    assert.deepEqual(watched.state.screenshotTimes, [2000], 'retain the failure screenshot at the original deadline');
+    assert.equal(watched.state.clock, 2000);
+    assert.equal(watched.state.axe, 0);
+  });
+}
 
 /** Repo-relative files reachable from `entry` through relative or `@/` imports and `new URL(..., import.meta.url)`. */
 async function repoImportGraph(entry) {

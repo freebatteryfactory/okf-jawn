@@ -62,14 +62,8 @@ pub enum Detachment {
 /// the relay's terminal ([`Detachment`]), so an interrupt typed there does not reach it.
 /// Dropping the launcher does not stop it.
 ///
-/// Known limit, Windows only: the child is not cut loose from the relay's own streams. Windows
-/// hands a child every inheritable handle of its parent, and the pipes the MCP client gave
-/// the relay as standard input, output and error are inheritable. So the started server
-/// holds an end of each beside its own three closed streams, and a client that waits for the
-/// end of the relay's output does not see it while that server runs. Nothing the server
-/// prints goes there. Keeping the handles back takes `SetHandleInformation`, which is not
-/// safe Rust, or `CommandExt::inherit_handles`, which is not stable; on Unix the child holds
-/// none of them.
+/// On Windows the relay marks its own standard handles non-inheritable before spawning,
+/// so the server cannot hold the client's pipes open after the relay exits.
 #[derive(Debug)]
 pub struct ProcessLauncher {
     program: Option<PathBuf>,
@@ -249,6 +243,10 @@ impl Launcher for ProcessLauncher {
         else {
             return Err("the server executable's location is not known".to_owned());
         };
+        #[cfg(windows)]
+        keep_back_standard_handles().map_err(|error| {
+            format!("the relay's standard streams could not be kept back from the server: {error}")
+        })?;
         let child = command
             .spawn()
             .map_err(|error| format!("{} could not be started: {error}", program.display()))?;
@@ -264,6 +262,32 @@ impl Launcher for ProcessLauncher {
             Some(Err(error)) => ChildState::Unknown(error.to_string()),
         }
     }
+}
+
+/// Mark this process's own standard handles non-inheritable before creating the server.
+/// Missing standard streams are skipped. Std creates the child's separate null streams
+/// inside its spawn lock; clearing these flags does not change those child handles.
+///
+/// # Errors
+/// Returns the OS error rather than starting a child with an inherited client pipe.
+#[cfg(windows)]
+fn keep_back_standard_handles() -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+
+    let handles = [
+        std::io::stdin().as_raw_handle(),
+        std::io::stdout().as_raw_handle(),
+        std::io::stderr().as_raw_handle(),
+    ];
+    for handle in handles.into_iter().filter(|handle| !handle.is_null()) {
+        // SAFETY: these borrowed standard handles belong to this process and remain open
+        // during the call. It changes only the inheritance flag, not the stream or ownership.
+        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 /// Cut the process `command` starts loose from the relay's terminal, and say what was asked.

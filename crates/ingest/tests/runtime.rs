@@ -10,7 +10,7 @@
 #[path = "../../../tests/support/check.rs"]
 mod check;
 #[path = "support/records.rs"]
-mod records;
+pub mod records;
 
 mod job_runtime {
     use std::sync::{Arc, Mutex};

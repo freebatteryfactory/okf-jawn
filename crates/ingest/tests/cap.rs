@@ -23,7 +23,7 @@ mod memory_cap_mechanism {
     };
     use okf_jawn_core::conversion::{ConversionStatus, WindowCoverage};
     use okf_jawn_ingest::cap::{
-        ChildVerdict, cap_margin, classify, limit_self, spawn_capped, supervise,
+        ChildEnd, ChildVerdict, cap_margin, classify, limit_self, spawn_capped, supervise,
     };
     use okf_jawn_ingest::record::{ConvertedWindow, WindowOutcome, assemble, sha256_digest};
 
@@ -152,6 +152,66 @@ mod memory_cap_mechanism {
         let coverage = some(coverage, "the joined coverage")?;
         assert_eq!(coverage.converted, vec![pages(1, 4)]);
         assert_eq!(coverage.not_converted, vec![pages(5, 8)]);
+        Ok(())
+    }
+
+    /// The child of `a_child_past_the_cap_is_stopped_and_its_window_is_not_converted`, started
+    /// with `RUST_BACKTRACE=1` and `RUST_LIB_BACKTRACE=1` on its command, as a supervisor whose own
+    /// environment sets them would hand them down. With either, std's out-of-memory hook goes on
+    /// past "memory allocation of N bytes failed" (Rust 1.99.0 `library/std/src/alloc.rs`,
+    /// `default_alloc_error_hook`): it prints a backtrace, or, when that printing allocates and
+    /// fails, "skipping backtrace printing to avoid potential recursion". `spawn_capped` removes
+    /// both, so the child's stderr still ends with the message or std's note, and the end reads as
+    /// the cap. The stderr is read alone too (no peak), because on Windows the job's peak commit
+    /// reaches the cap and would answer the cap whatever the stderr says; under Linux's
+    /// `RLIMIT_DATA` the stderr is all the evidence there is.
+    #[test]
+    fn a_child_handed_rust_backtrace_still_ends_at_the_cap() -> TestResult {
+        if std::env::var_os(CHILD_ENV).is_some() {
+            // In a child: only the test `THIS_TEST` names runs (`--exact`), never this one.
+            return Ok(());
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let end = runtime.block_on(async {
+            let mut command = tokio::process::Command::new(std::env::current_exe()?);
+            let _configured = command
+                .args(["--exact", THIS_TEST, "--nocapture", "--test-threads=1"])
+                .env(CHILD_ENV, "1")
+                .env("RUST_BACKTRACE", "1")
+                .env("RUST_LIB_BACKTRACE", "1");
+            let child = spawn_capped(command, CAP)?;
+            let end = supervise(
+                child,
+                CAP,
+                Duration::from_secs(u64::from(TIME_LIMIT_SECONDS)),
+            )
+            .await?;
+            Ok::<_, Box<dyn std::error::Error>>(end)
+        })?;
+        assert!(
+            !end.killed_at_time_limit,
+            "the cap, not the time bound, stops the child"
+        );
+        let memory = ChildVerdict::Failed(FailureReason::MemoryLimit {
+            limit_bytes: CAP.to_string(),
+        });
+        assert_eq!(
+            classify(&end, CAP, TIME_LIMIT_SECONDS),
+            memory,
+            "child end: {end:?}"
+        );
+        let stderr_alone = ChildEnd {
+            peak_committed_bytes: None,
+            ..end.clone()
+        };
+        assert_eq!(
+            classify(&stderr_alone, CAP, TIME_LIMIT_SECONDS),
+            memory,
+            "the stderr alone: {:?}",
+            end.stderr_tail
+        );
         Ok(())
     }
 }

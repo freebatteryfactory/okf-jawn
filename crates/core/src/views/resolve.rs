@@ -169,6 +169,36 @@ pub async fn cite(
     Ok(())
 }
 
+/// Binding names whose cited content differs at `comparison`, in binding order. Attention
+/// passes its resolved snapshot here, not a newly read head. The caller bounds the View's
+/// bindings; this read neither refreshes them nor produces/retains datasets or receipts.
+/// Removed citations and missing current items remain distinct from newer source content.
+///
+/// # Errors
+/// Returns the same operational port errors as ordinary citation/freshness reads.
+pub(crate) async fn newer_sources(
+    ports: ViewPorts<'_>,
+    scope: &StorageScope,
+    view: &ViewDocument,
+    comparison: &Revision,
+) -> Result<Vec<String>, ApiError> {
+    let mut names = Vec::new();
+    for (index, saved) in view.bindings.iter().enumerate() {
+        let mut binding = saved.clone();
+        let Cited::Read(cited) = read_cited(ports, scope, &mut binding.source).await? else {
+            continue;
+        };
+        let at = format!("/bindings/{index}");
+        if freshness(ports, scope, &binding, &cited, comparison, &at)
+            .await?
+            .is_some_and(|warning| warning.code == "newer_source")
+        {
+            names.push(binding.name);
+        }
+    }
+    Ok(names)
+}
+
 /// Resolve the bindings of `view`, which `checked` is the verdict of (`views::validate`), at
 /// `inputs`; `head` is the workspace head read once at `as_of` (the module header).
 ///

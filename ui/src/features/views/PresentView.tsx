@@ -10,7 +10,7 @@ import {
   type zViewBinding,
 } from '../../api/generated/zod.gen';
 import type { ResolvedPresentation } from './Bindings';
-import { BindingsContext } from './Bindings';
+import { BindingsContext, linked, type SourceLink } from './Bindings';
 import { Chart, parseVegaLiteSpec } from './Chart';
 import { readDataset, readSource, type ViewData } from './data';
 import { Layout } from './Layout';
@@ -21,6 +21,8 @@ export interface PresentViewProps {
   response: z.infer<typeof zPresentResponse>;
   /** The host's reads of the sources and datasets the View cites. */
   data: ViewData;
+  /** The host's link to a cited source at the revision read; none, and sources are named as text. */
+  sourceLink?: SourceLink | undefined;
 }
 type Row = Readonly<Record<string, string | number | boolean | null>>;
 
@@ -216,7 +218,7 @@ type Resolved = { response: PresentViewProps['response']; data: ViewData } & (
   | { failure: string }
 );
 
-export function PresentView({ response, data }: PresentViewProps) {
+export function PresentView({ response, data, sourceLink }: PresentViewProps) {
   const [resolved, setResolved] = useState<Resolved | null>(null);
   useEffect(() => {
     let active = true;
@@ -296,7 +298,7 @@ export function PresentView({ response, data }: PresentViewProps) {
   if (current === null)
     return <p role="status">Resolving the presentation's exact source references…</p>;
   if ('failure' in current) return <p role="alert">{current.failure}</p>;
-  const { bindings } = current;
+  const bindings = { ...current.bindings, sourceLink };
   const view = response.view;
   // Either grammar: the View's own title and description, its drawing, then what it was read from.
   return (
@@ -309,7 +311,7 @@ export function PresentView({ response, data }: PresentViewProps) {
         ) : (
           <VegaLiteChart view={view} resolved={bindings} response={response} />
         )}
-        <Resolution response={response} />
+        <Resolution response={response} sourceLink={sourceLink} />
       </section>
     </BindingsContext.Provider>
   );
@@ -365,7 +367,13 @@ function VegaLiteChart({
       <Chart spec={chartSpec} datasets={datasets} derived={plan.derived} />
       {cited.map((binding) => (
         <p key={binding.name}>
-          {binding.source.path} @ <code>{binding.source.revision}</code>
+          {linked(
+            resolved.sourceLink,
+            binding.source,
+            <>
+              {binding.source.path} @ <code>{binding.source.revision}</code>
+            </>,
+          )}
         </p>
       ))}
     </>

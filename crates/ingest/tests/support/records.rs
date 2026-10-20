@@ -21,8 +21,9 @@
 //!
 //! Time does not pass by itself: `expire_running` marks every live claim expired, as a lease
 //! lapsing would. Purge records are kept as given (`get_purge`, `update_purge`, which a test
-//! may make fail once, `fail_purge_update`); review, receipt and derived-object records are
-//! not modelled; those methods answer `NotImplemented`, so a test that reaches one fails
+//! may make fail once, `fail_purge_update`); export tests supply recorded reviews and revision
+//! mappings, and may fail one artifact write. Receipt and derived-object records are not
+//! modelled; those methods answer `NotImplemented`, so a test that reaches one fails
 //! loudly.
 //!
 //! `FakeEvents` encodes the `EventLog::append` doc: with a mutation identity, an identical
@@ -94,6 +95,12 @@ pub struct FakeRecords {
     inserted: std::sync::atomic::AtomicUsize,
     /// The purge state whose next `update_purge` fails, writing nothing, once.
     failing_purge_update: Mutex<Option<PurgeState>>,
+    /// Reviews supplied by an export fixture, as recorded (coverage is not recomputed here).
+    reviews: Mutex<BTreeMap<ItemId, Vec<Review>>>,
+    /// Revision mappings supplied by an export fixture.
+    mappings: Mutex<BTreeMap<String, RevisionMapping>>,
+    /// One artifact-record failure after a successful put, for crash/retry tests.
+    artifact_failure: Mutex<Option<ApiError>>,
 }
 
 /// One notification as the fake log keeps it: its log, its mutation identity and the event.
@@ -196,6 +203,45 @@ impl EventLog for FakeEvents {
 }
 
 impl FakeRecords {
+    /// Keep a fixture review exactly as stored; the application/export owns coverage rules.
+    ///
+    /// # Errors
+    /// Returns when the fixture lock is poisoned.
+    pub fn add_review(&self, item: ItemId, review: Review) -> Result<(), ApiError> {
+        self.reviews
+            .lock()
+            .map_err(|_| poisoned())?
+            .entry(item)
+            .or_default()
+            .push(review);
+        Ok(())
+    }
+
+    /// A purge mapping makes any use of that old revision fail through the shared check.
+    ///
+    /// # Errors
+    /// Returns when the fixture lock is poisoned.
+    pub fn map_revision(
+        &self,
+        revision: &Revision,
+        mapping: RevisionMapping,
+    ) -> Result<(), ApiError> {
+        self.mappings
+            .lock()
+            .map_err(|_| poisoned())?
+            .insert(revision.as_str().to_owned(), mapping);
+        Ok(())
+    }
+
+    /// The next new artifact cannot be recorded; an already recorded replay still wins.
+    ///
+    /// # Errors
+    /// Returns when the fixture lock is poisoned.
+    pub fn fail_next_artifact(&self, error: ApiError) -> Result<(), ApiError> {
+        *self.artifact_failure.lock().map_err(|_| poisoned())? = Some(error);
+        Ok(())
+    }
+
     /// Register a queued job directly, as `create_job` would.
     ///
     /// # Errors
@@ -505,6 +551,18 @@ impl RecordStore for FakeRecords {
         Box::pin(async move { found })
     }
 
+    // "Read the immutable creating mutation of a known job identity within its scope."
+    fn job_mutation<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, MutationId> {
+        let found = self.entry(job).and_then(|entry| {
+            if entry.scope == *scope {
+                Ok(entry.created.mutation_id)
+            } else {
+                Err(not_found())
+            }
+        });
+        Box::pin(async move { found })
+    }
+
     // "List durable jobs of one scope, newest first, with bounded pagination."
     fn list_jobs<'a>(
         &'a self,
@@ -694,6 +752,9 @@ impl RecordStore for FakeRecords {
                 if let Some(prior) = artifacts.get(&mutation_id) {
                     return Ok(prior.clone());
                 }
+                if let Some(error) = self.artifact_failure.lock().map_err(|_| poisoned())?.take() {
+                    return Err(error);
+                }
                 let next = u128::try_from(artifacts.len())
                     .unwrap_or(u128::MAX)
                     .saturating_add(1);
@@ -781,9 +842,14 @@ impl RecordStore for FakeRecords {
     fn revision_mapping<'a>(
         &'a self,
         _scope: &'a StorageScope,
-        _revision: &'a Revision,
+        revision: &'a Revision,
     ) -> PortFuture<'a, Option<RevisionMapping>> {
-        unmodelled("revision_mapping")
+        let mapping = self
+            .mappings
+            .lock()
+            .map_err(|_| poisoned())
+            .map(|mappings| mappings.get(revision.as_str()).cloned());
+        Box::pin(async move { mapping })
     }
 
     fn record_derived_object<'a>(
@@ -816,9 +882,14 @@ impl RecordStore for FakeRecords {
     fn list_reviews<'a>(
         &'a self,
         _scope: &'a StorageScope,
-        _item: ItemId,
+        item: ItemId,
     ) -> PortFuture<'a, Vec<Review>> {
-        unmodelled("list_reviews")
+        let reviews = self
+            .reviews
+            .lock()
+            .map_err(|_| poisoned())
+            .map(|reviews| reviews.get(&item).cloned().unwrap_or_default());
+        Box::pin(async move { reviews })
     }
 
     fn insert_receipt<'a>(

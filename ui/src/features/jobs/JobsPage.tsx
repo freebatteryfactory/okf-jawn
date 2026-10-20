@@ -17,6 +17,9 @@
  * A listing that failed with nothing listed is a failure notice with its retry. One that failed
  * with jobs on screen (a later page, or a repeat) keeps them as last answered, with its notice.
  * "Show more jobs" moves keyboard focus to the first job it brought.
+ *
+ * The page also starts an export of the workspace (`ExportWorkspace`, above the list): the job it
+ * answers is told to the cache and listed here as every job is.
  */
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
@@ -25,6 +28,8 @@ import { Instant } from '../../lib/instant';
 import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, messageFor } from '../errors/failure';
 import { useRetry } from '../errors/retry';
+import { ExportWorkspace } from '../exports/ExportWorkspace';
+import { useWorkspaceChanges } from '../tree/context';
 import { type Feed, NotAnEventStream, useJobsFeed } from './feed';
 import { JobRow } from './JobRow';
 import { jobName, jobStateSaid } from './job-words';
@@ -83,6 +88,7 @@ export function JobsPage({ workspaceId }: JobsPageProps) {
   const headingRef = useRef<HTMLHeadingElement | null>(null);
   const listRef = useRef<HTMLUListElement | null>(null);
   const moreRef = useRef<HTMLButtonElement | null>(null);
+  const { head, rights } = useWorkspaceChanges();
   const feed = useJobsFeed(workspaceId);
   const jobs = useInfiniteQuery(jobsOptions(workspaceId, feed.live));
   const signedOut = sessionEnded(jobs.error) || sessionEnded(feed.error);
@@ -133,6 +139,7 @@ export function JobsPage({ workspaceId }: JobsPageProps) {
       <h2 id={heading} ref={headingRef} tabIndex={-1} className="page-heading">
         Jobs
       </h2>
+      <ExportWorkspace workspaceId={workspaceId} head={head} rights={rights} />
       <p className="meta">{describeFeed(feed, signedOut)}</p>
       <p className="page-actions">
         {/* aria-disabled rather than disabled: the button keeps focus while the list is asked. */}
@@ -165,7 +172,7 @@ export function JobsPage({ workspaceId }: JobsPageProps) {
         />
       )}
       {pages !== undefined && listed.length === 0 && (
-        <p>This workspace has no jobs yet. An import started here will be listed.</p>
+        <p>This workspace has no jobs yet. An import or an export started here will be listed.</p>
       )}
       {listed.length > 0 && (
         <ul ref={listRef} className="job-list" aria-labelledby={heading}>
