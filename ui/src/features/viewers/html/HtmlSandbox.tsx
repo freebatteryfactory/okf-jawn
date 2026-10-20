@@ -32,6 +32,14 @@
  * than this page's: the sandbox origin is never the application's (`SandboxOriginConfig`), and an
  * answer that breaks that is said in words, never framed.
  *
+ * What the file's links and forms do. The frame's sandbox stops its forms, its windows and any
+ * move of this page; the page policy's `frame-src` (`crates/server` `assets.rs`) stops a link to
+ * another site. A link the frame may still follow (to another address of the sandbox origin, or a
+ * refusal page the browser shows in a blocked one's place) loads something else in the frame,
+ * never in the page: the frame then fires another `load`, and the page says that the frame no
+ * longer shows the file and that a reload shows it again. Nothing is minted until the person
+ * reloads, so a file that keeps reloading itself cannot make the page ask for capabilities.
+ *
  * Failures read through `FailureNotice` and `useRetry`; a frame already shown stays beside the
  * failure of its reload. The reload button keeps keyboard focus while it mints (`aria-disabled`).
  */
@@ -129,6 +137,10 @@ function SandboxFrame({ name, ...binding }: Binding & { name: string }) {
   const [framed, setFramed] = useState<Framed | null>(null);
   // The address whose `expires_at` has passed while it was framed.
   const [expired, setExpired] = useState<string | null>(null);
+  // The address whose frame has loaded something else since the file: a link in it was followed.
+  const [left, setLeft] = useState<string | null>(null);
+  // How often the frame of the address shown has loaded.
+  const loads = useRef<{ url: string; count: number } | null>(null);
   const reloadRef = useRef<HTMLButtonElement | null>(null);
   // The last minting asked for: only its answer is framed.
   const asked = useRef(0);
@@ -185,6 +197,7 @@ function SandboxFrame({ name, ...binding }: Binding & { name: string }) {
   });
   const minting = mine && mint.isPending;
   const isExpired = shown !== null && expired === shown.url;
+  const hasLeft = shown !== null && left === shown.url;
 
   return (
     <section aria-label={`${name} in the sandbox`} className="grid gap-2">
@@ -211,6 +224,11 @@ function SandboxFrame({ name, ...binding }: Binding & { name: string }) {
             referrerPolicy="no-referrer"
             title={`${name}, as written, in the sandbox`}
             className="h-[32rem] w-full rounded border border-[color:GrayText] bg-white"
+            onLoad={() => {
+              const count = loads.current?.url === shown.url ? loads.current.count + 1 : 1;
+              loads.current = { url: shown.url, count };
+              if (count > 1) setLeft(shown.url);
+            }}
           />
           <p>
             <button
@@ -224,7 +242,12 @@ function SandboxFrame({ name, ...binding }: Binding & { name: string }) {
               {minting ? 'Reloading the page…' : 'Reload the page'}
             </button>{' '}
             <span role="status" className="meta">
-              {isExpired ? (
+              {hasLeft ? (
+                <>
+                  The frame no longer shows the file: a link in it was followed. Reload the page to
+                  show it again.
+                </>
+              ) : isExpired ? (
                 <>
                   Its address on the sandbox origin expired at <Instant value={shown.expires_at} />,
                   and reloading asks for a new one.
