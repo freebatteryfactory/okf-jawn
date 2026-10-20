@@ -1,40 +1,20 @@
-//! Durable records of object puts whose referencing record has not landed (`pending_puts`).
+//! Durable publication roots (`pending_puts`) written before CAS retention.
 //!
-//! Objects are shared inside a tenant, and the record that references a freshly stored object
-//! lands only later: a job's outputs when it completes, a card when its commit lands, an
-//! upload's object when it completes. So every workspace-scoped put writes a pending-put row
-//! (tenant, workspace, digest) before it retains the object, in the same transaction as its
-//! purge refusal (`LocalBlobs::put_pinned`). Apart from the purge of its own workspace, which
-//! clears them (`clear`), the rows of a digest are deleted (`land`) only in the transaction of a
-//! record of the workspace that names the object: a job completion, an artifact, a derived
-//! object, a sandbox capability, an upload completion, an import's rows. What lands is what the
-//! stored record names, read back after the write: a write answered by an earlier record (a
-//! replayed artifact, commit or candidate) lands only the objects that record names, and an
-//! import lands only the archive objects its restored history and rows name, or a conversion
-//! record among them names. A commit or candidate is a Git write, so its rows are deleted just after it landed; a
-//! crash between the two leaves a row naming an object that a record references, which costs
-//! nothing.
+//! Workspace puts record (tenant, workspace, digest) with their purge refusal. Only the
+//! transaction publishing a referencing record lands the digests that record actually names;
+//! Git commits/candidates land just after their reference moves, so a stop can leave a harmless
+//! extra pending root. A replay never lands unrelated attempted bytes.
 //!
-//! A put whose record never lands (a failed job, a failed retain, a refused record write, a
-//! crash, a replay of a record that names other bytes) leaves its row. The rows have no
-//! lifetime:
+//! Tenant archives instead record (tenant, NULL, digest, producing mutation). Their publication
+//! transaction lands every tenant-level pending put of that mutation, and no other mutation's.
+//! A retry can adopt its first retained pending object before creating a second archive.
 //!
-//! - a purge's objects step treats the target's rows as the target's own unreferenced bytes:
-//!   it deletes each object they name unless a surviving reference names it, then clears them;
-//! - another workspace's rows count as surviving references, so its objects stay, except a
-//!   copy of the target's own workspace archive (`references::except_archives`);
-//! - a leftover row that never gets a record is garbage of its workspace, collected by the next
-//!   purge of that workspace (until then it keeps an identical object of another purge, which
-//!   that purge counts as kept). No other sweep collects it.
-//!
-//! Cost: a put adds one immediate write transaction (the refusal and the row), so one more
-//! synced commit per workspace-scoped put; a Git write that names objects adds one more for
-//! its landing, and a replay reads the stored commit's appearances. Landing is one indexed
-//! `DELETE` per digest inside the record's transaction. Leftover rows accumulate until their
-//! workspace is purged, and every purge of the tenant reads all other workspaces' rows.
-
+//! The shared sweep snapshots pending puts together with other durable roots. Recorded-purged
+//! workspaces contribute no roots; only upload/pending copies of a removed workspace's archives
+//! are excluded. Pins cover publication after that snapshot. Dead writes' pending puts have no
+//! lifetime and are not reclaimed by age; this is an explicit lifecycle limit.
 use okf_jawn_contract::error::ApiError;
-use okf_jawn_contract::identity::Digest;
+use okf_jawn_contract::identity::{Digest, MutationId};
 use rusqlite::{Connection, Transaction, params};
 
 use crate::db::sql;
@@ -57,6 +37,65 @@ pub(crate) fn record(
         .map_err(|error| sql(&error))
 }
 
+/// A tenant archive is pending under its durable producing mutation before retention.
+pub(crate) fn record_tenant(
+    transaction: &Transaction<'_>,
+    tenant: &str,
+    mutation: MutationId,
+    digest: &Digest,
+) -> Result<(), ApiError> {
+    transaction
+        .execute(
+            "INSERT INTO pending_puts (tenant_id,workspace_id,digest,created_at,mutation_id)
+         VALUES (?1,NULL,?2,?3,?4)",
+            params![
+                tenant,
+                digest.as_str(),
+                seam::now()?.as_str(),
+                mutation.0.to_string()
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| sql(&error))
+}
+
+/// Landing a tenant record clears only that mutation's puts, including stopped earlier bytes.
+pub(crate) fn land_tenant(
+    transaction: &Transaction<'_>,
+    tenant: &str,
+    mutation: MutationId,
+) -> Result<(), ApiError> {
+    transaction.execute(
+        "DELETE FROM pending_puts WHERE tenant_id=?1 AND workspace_id IS NULL AND mutation_id=?2",
+        params![tenant,mutation.0.to_string()],
+    ).map(|_| ()).map_err(|error|sql(&error))
+}
+
+/// Retry candidates in original put order; the caller must pin before checking retention.
+pub(crate) fn tenant_pending(
+    connection: &Connection,
+    tenant: &str,
+    mutation: MutationId,
+) -> Result<Vec<Digest>, ApiError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT digest FROM pending_puts WHERE tenant_id=?1 AND workspace_id IS NULL
+         AND mutation_id=?2 ORDER BY put_id",
+        )
+        .map_err(|error| sql(&error))?;
+    let values = statement
+        .query_map(params![tenant, mutation.0.to_string()], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| sql(&error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| sql(&error))?;
+    values
+        .iter()
+        .map(|text| from_text!(text.as_str()))
+        .collect()
+}
+
 /// The records naming `digests` in `workspace` landed: delete their pending puts.
 pub(crate) fn land<'a>(
     transaction: &Transaction<'_>,
@@ -68,72 +107,10 @@ pub(crate) fn land<'a>(
         transaction
             .execute(
                 "DELETE FROM pending_puts
-                 WHERE tenant_id = ?1 AND workspace_id = ?2 AND digest = ?3",
+                 WHERE tenant_id = ?1 AND workspace_id IS ?2 AND digest = ?3",
                 params![tenant, workspace, digest.as_str()],
             )
             .map_err(|error| sql(&error))?;
     }
     Ok(())
-}
-
-/// The objects of `workspace`'s pending puts.
-pub(crate) fn of(
-    connection: &Connection,
-    tenant: &str,
-    workspace: &str,
-) -> Result<Vec<Digest>, ApiError> {
-    digests(
-        connection,
-        "SELECT DISTINCT digest FROM pending_puts WHERE tenant_id = ?1 AND workspace_id = ?2",
-        tenant,
-        workspace,
-    )
-}
-
-/// The objects of every pending put of `tenant` outside `workspace`: surviving references.
-pub(crate) fn others(
-    connection: &Connection,
-    tenant: &str,
-    workspace: &str,
-) -> Result<Vec<Digest>, ApiError> {
-    digests(
-        connection,
-        "SELECT DISTINCT digest FROM pending_puts WHERE tenant_id = ?1 AND workspace_id <> ?2",
-        tenant,
-        workspace,
-    )
-}
-
-/// Delete every pending put of `workspace`; a purge's objects step does, after it deleted
-/// the bytes they name.
-pub(crate) fn clear(
-    transaction: &Transaction<'_>,
-    tenant: &str,
-    workspace: &str,
-) -> Result<(), ApiError> {
-    transaction
-        .execute(
-            "DELETE FROM pending_puts WHERE tenant_id = ?1 AND workspace_id = ?2",
-            params![tenant, workspace],
-        )
-        .map(|_| ())
-        .map_err(|error| sql(&error))
-}
-
-fn digests(
-    connection: &Connection,
-    query: &str,
-    tenant: &str,
-    workspace: &str,
-) -> Result<Vec<Digest>, ApiError> {
-    let mut statement = connection.prepare(query).map_err(|error| sql(&error))?;
-    let found = statement
-        .query_map(params![tenant, workspace], |row| row.get::<_, String>(0))
-        .map_err(|error| sql(&error))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| sql(&error))?;
-    found
-        .iter()
-        .map(|digest| from_text!(digest.as_str()))
-        .collect()
 }

@@ -26,6 +26,7 @@ export const JOB_KIND: Record<JobKind, string> = {
   backup_installation: 'Backup of the installation',
   purge_workspace: 'Purge of the workspace',
   purge_item: 'Purge of an item',
+  clean_up: 'Cleanup of stored objects',
 };
 
 export const JOB_STATE: Record<JobState, string> = {

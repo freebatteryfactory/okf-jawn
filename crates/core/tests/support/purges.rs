@@ -696,6 +696,7 @@ fn tenant_job(id: JobId, target: &PurgeTarget, purge: PurgeId, job_state: JobSta
         artifact: None,
         restore: None,
         backup: None,
+        clean_up: None,
         created_at: None,
         started_at: None,
         finished_at: None,

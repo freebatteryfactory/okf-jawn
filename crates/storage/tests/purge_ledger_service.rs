@@ -379,6 +379,7 @@ async fn carry_out(storage: &Storage, purge: &Purge) -> Fallible<Result<(), ApiE
             artifact: None,
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: Vec::new(),
             warnings: Vec::new(),
         })
@@ -414,6 +415,7 @@ fn ledger_rows(data: &Path, workspace: WorkspaceId, state: &str) -> Fallible<Vec
     let mut statement = records.prepare(
         "SELECT operation FROM mutations
          WHERE workspace_id = ?1 AND state = ?2 AND (state = 'completed') = (response IS NOT NULL)
+             AND (state <> 'purged' OR (digest IS NULL AND purge_id IS NOT NULL))
          ORDER BY operation",
     )?;
     let rows = statement
@@ -851,14 +853,20 @@ async fn purge_ledger_service_a_retried_create_of_the_purged_workspace_is_refuse
     let (request, _) = purged.create_target.clone();
     let refused = err_of(call(&purged.composed, "create_workspace", request).await)?;
     assert_eq!(refused.code, ErrorCode::Conflict, "{}", refused.message);
+    assert!(
+        refused.message.contains(&purged.purge.id.0.to_string()),
+        "{}",
+        refused.message
+    );
     let runs = purged.composed.runs_of("create_workspace")?;
-    let (original, retry) = (
-        some(runs.first(), "the create")?,
-        some(runs.get(2), "the retry")?,
+    assert_eq!(
+        runs.len(),
+        2,
+        "both original creates ran once; begin refused the retry"
     );
     assert_eq!(
-        retry.mutation, original.mutation,
-        "the retry re-runs under the purged workspace's own mutation"
+        some(runs.first(), "the target create")?.attempt,
+        Attempt::First
     );
     let listed = purged
         .composed
@@ -889,7 +897,7 @@ async fn purge_ledger_service_no_file_keeps_a_response_of_the_purged_workspace()
         ["purge_workspace"]
     );
     assert_eq!(
-        ledger_rows(directory.path(), purged.target, "released")?,
+        ledger_rows(directory.path(), purged.target, "purged")?,
         ["create_item", "create_workspace", "save_draft"]
     );
     assert_eq!(

@@ -66,4 +66,6 @@ pub mod search;
 #[cfg(feature = "runtime")]
 mod storage;
 #[cfg(feature = "runtime")]
+mod sweep;
+#[cfg(feature = "runtime")]
 pub mod uploads;

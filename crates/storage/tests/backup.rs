@@ -829,6 +829,7 @@ async fn backup_a_workspace_archive_holds_every_object_its_records_name() -> Tes
             artifact: None,
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: vec![output.clone(), history.clone()],
             warnings: Vec::new(),
         })
@@ -2663,37 +2664,15 @@ async fn migrations_take_a_pre_migration_backup_set_before_an_upgrade() -> TestR
             &directory.path().join("records.sqlite"),
             "PRAGMA user_version"
         )?,
-        4,
+        5,
         "then the records are upgraded"
     );
     Ok(())
 }
 
-/// Put a records database back as records schema 1 left it: without the tables schemas 2 and 3
-/// add and the job column schema 4 adds, without the ledger's workspace column, and with the
-/// events table as it was before event keys.
+/// Build the fixture from released schema1 steps and copy its original columns only.
 fn as_records_schema_1(records: &Path) -> TestResult {
-    let connection = rusqlite::Connection::open(records)?;
-    connection.execute_batch(
-        "ALTER TABLE jobs DROP COLUMN sealed; DROP TABLE commit_warnings;
-         DROP TABLE purge_progress; DROP TABLE backup_archives; DROP TABLE restores;
-         DROP TABLE pending_puts; DROP TABLE replacement_restores;
-         DROP INDEX mutations_by_workspace; ALTER TABLE mutations DROP COLUMN workspace_id;
-         CREATE TABLE unkeyed_events (
-             seq INTEGER PRIMARY KEY AUTOINCREMENT,
-             tenant_id TEXT NOT NULL,
-             workspace_id TEXT,
-             replay_key TEXT UNIQUE,
-             record TEXT NOT NULL
-         ) STRICT;
-         INSERT INTO unkeyed_events SELECT seq, tenant_id, workspace_id, replay_key, record
-             FROM events;
-         DROP TABLE events;
-         ALTER TABLE unkeyed_events RENAME TO events;
-         CREATE INDEX events_by_log ON events (tenant_id, workspace_id, seq);
-         PRAGMA user_version = 1;",
-    )?;
-    Ok(())
+    legacy_schema::rebuild(records, 1)
 }
 
 /// The tenant `local`'s tenant-level events in `records`: (event key, record), by sequence.
@@ -3372,6 +3351,7 @@ async fn backup_a_restored_backup_job_advertises_no_download_it_lost() -> TestRe
                 artifact: Some(artifact.id),
                 restore: None,
                 backup: None,
+                clean_up: None,
                 outputs: Vec::new(),
                 warnings: Vec::new(),
             })
@@ -3480,8 +3460,13 @@ async fn backup_an_archive_missing_an_object_a_row_names_fails_and_records_nothi
     let directory = tempfile::tempdir()?;
     let fixture = fixture(directory.path()).await?;
     let records = directory.path().join("records.sqlite");
+    // Lifecycle design section 1.1 identifies source appearances by item, never by path.
+    let source_original = format!(
+        "the original of the source appearance of item {}",
+        uuid_text(11)
+    );
     for (n, digest, row) in [
-        (70_u32, &fixture.original, "a source card's original"),
+        (70_u32, &fixture.original, source_original.as_str()),
         (71, &fixture.export, "an artifact of kind export"),
     ] {
         let file = object_file(directory.path(), digest)?;
@@ -4254,6 +4239,7 @@ async fn rr4_missing_objects_of_every_named_kind_fail_the_archive() -> TestResul
             artifact: None,
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: vec![output.clone()],
             warnings: Vec::new(),
         })
@@ -4902,6 +4888,7 @@ async fn rr4_job_round_trip(control: bool, output: bool) -> TestResult {
                     artifact: None,
                     restore: None,
                     backup: None,
+                    clean_up: None,
                     outputs,
                     warnings: Vec::new(),
                 })
@@ -4986,6 +4973,7 @@ async fn rr4_rt_a_workspace_the_app_backed_up_once_restores_by_replacement() -> 
                 artifact: Some(artifact.id),
                 restore: None,
                 backup: None,
+                clean_up: None,
                 outputs: vec![archive.digest],
                 warnings: Vec::new(),
             })
@@ -5698,10 +5686,7 @@ async fn backup_a_records_schema_2_backup_set_restores_by_replacement_and_by_imp
     let fixture = fixture(directory.path()).await?;
     let workspace = fixture.workspace.clone();
     drop(fixture);
-    rusqlite::Connection::open(directory.path().join("records.sqlite"))?.execute_batch(
-        "DROP TABLE commit_warnings; ALTER TABLE jobs DROP COLUMN sealed;
-             PRAGMA user_version = 2;",
-    )?;
+    legacy_schema::rebuild(&directory.path().join("records.sqlite"), 2)?;
     let (installation, archive) = {
         let storage = Storage::open(directory.path())?;
         let sets: Vec<_> = std::fs::read_dir(storage.data().pre_migration_path())?
@@ -5744,7 +5729,7 @@ async fn backup_a_records_schema_2_backup_set_restores_by_replacement_and_by_imp
         .restore_replacement(&installation, std::slice::from_ref(&archive))
         .await?;
     let live = directory.path().join("records.sqlite");
-    assert_eq!(count(&live, "PRAGMA user_version")?, 4);
+    assert_eq!(count(&live, "PRAGMA user_version")?, 5);
     assert_eq!(count(&live, "SELECT count(*) FROM workspaces")?, 1);
     assert!(
         count(&live, "SELECT count(*) FROM drafts")? > 0,
@@ -5776,6 +5761,33 @@ async fn backup_a_records_schema_2_backup_set_restores_by_replacement_and_by_imp
     let imported = some(imported, "the import's commit")?;
     assert_eq!(imported.revision, versions.head(&target).await?);
     Ok(())
+}
+
+/// V9.4: the real import checker refuses a forged terminal ledger row before writes.
+/// Run after schema5 declarations exist: a missing `purge_id` column is fixture setup, not
+/// evidence that the real archive checker accepted the forged terminal state.
+#[tokio::test]
+async fn schema5_an_archive_with_a_purged_request_digest_is_invalid_input() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let forged = rr4_forged_records(
+        &bytes,
+        "PRAGMA ignore_check_constraints=ON;
+         INSERT INTO mutations (tenant_id,subject,client_key,operation,idempotency_key,
+             mutation_id,digest,state,token,lease_expires_ms,purge_id)
+         VALUES ('local','fixture','client','edit_item','forged','forged-mutation',
+             'forged-request-digest','purged',1,2,'forged-purge');",
+    )?;
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|name| (name == "records.sqlite").then(|| forged.clone()),
+        &[],
+    )?;
+    let outcome = import_crafted(&storage, crafted).await?;
+    assert_import_refused(&storage, outcome, "records database").await
 }
 
 /// Gap 2: a `records.sqlite` that is not a database is refused as invalid input.
@@ -6338,6 +6350,7 @@ async fn backup_a_conversion_before_its_completion_restores_with_its_exports_and
             artifact: None,
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: vec![export.clone(), asset.clone(), record.clone()],
             warnings: Vec::new(),
         })
@@ -7361,6 +7374,8 @@ async fn backup_a_source_appearance_that_does_not_read_fails_a_backup_and_a_purg
         &path,
         b"{\"object\": \"not a digest\", \"names\": []}",
     )?;
+    // Lifecycle design section 1.1 requires item identity rather than private paths.
+    let appearance = format!("the source appearance of item {}", uuid_text(15));
     let error = err_of(
         storage
             .backups()
@@ -7368,13 +7383,17 @@ async fn backup_a_source_appearance_that_does_not_read_fails_a_backup_and_a_purg
             .await,
     )?;
     assert_eq!(error.code, ErrorCode::Internal, "{error}");
-    assert!(error.message.contains(&path), "{error}");
+    assert!(error.message.contains(&appearance), "{error}");
     let error = err_of(rr8_purge(&storage, &other).await?)?;
     assert_eq!(error.code, ErrorCode::Internal, "{error}");
     assert!(
-        error.message.contains(&path)
+        error.message.contains(&appearance)
             && error.message.contains(&damaged.workspace_id.0.to_string()),
-        "names the path and the damaged workspace: {error}"
+        "names the item and the damaged workspace: {error}"
+    );
+    assert!(
+        !error.message.contains(&path),
+        "a private appearance path is not disclosed"
     );
     Ok(())
 }
@@ -7553,6 +7572,7 @@ async fn rr8_converted(
             artifact: None,
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: vec![
                 export.clone(),
                 render.clone(),
@@ -8210,6 +8230,7 @@ async fn n6_complete(storage: &Storage, claimed: ClaimedJob) -> TestResult {
             artifact: None,
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: Vec::new(),
             warnings: Vec::new(),
         })
@@ -8444,6 +8465,8 @@ async fn rr9_both_refuse(damage: &Rr9Damage<'_>, omit: &Rr9Omit<'_>, what: &str)
 #[tokio::test]
 async fn rr9_a_restore_refuses_an_appearance_that_does_not_read() -> TestResult {
     let path = format!(".okf/sources/{}.json", uuid_text(15));
+    // Lifecycle design section 1.1: reference errors name typed items rather than paths.
+    let appearance = format!("the source appearance of item {}", uuid_text(15));
     let digest = "a".repeat(64);
     for bytes in [
         b"not json at all".to_vec(),
@@ -8457,7 +8480,7 @@ async fn rr9_a_restore_refuses_an_appearance_that_does_not_read() -> TestResult 
                 Ok(Vec::new())
             },
             &|_| Ok(None),
-            &path,
+            &appearance,
         )
         .await?;
     }
@@ -8473,7 +8496,8 @@ async fn rr9_a_restore_refuses_a_folder_among_the_appearances() -> TestResult {
             Ok(Vec::new())
         },
         &|_| Ok(None),
-        ".okf/sources/nested",
+        // Lifecycle design section 1.1 hides an untyped appearance filename.
+        "a file of .okf/sources not named for an item is not a source appearance file",
     )
     .await
 }
@@ -8743,12 +8767,102 @@ async fn rr9_a_card_of_a_later_contract_is_read_by_purge_backup_and_restore() ->
     Ok(())
 }
 
-/// N-9, N-10: a workspace holds an appearance whose `object` is not a digest and a card-named
-/// conversion record that does not read. Another workspace's purge stops at its objects step,
-/// `Internal`, naming the damaged workspace and the path (its own rows are gone by then, as
-/// before; the message says where to look). The damaged workspace's own purge completes, and its
-/// plan records the path and the record digest it could not read. The other's purge, repeated,
-/// then completes: purging the damaged workspace is the in-product repair.
+/// Proves section 2.6's record-before-run survivor exclusion and complete object removal.
+async fn rr9_recorded_damage_purge_frees_sweep(
+    storage: &Storage,
+    directory: &Path,
+    damaged: &StorageScope,
+    other: &StorageScope,
+    other_purge: okf_jawn_contract::identity::PurgeId,
+    objects: [&Digest; 2],
+) -> TestResult {
+    // Section 2.6: recording, not running, the damaged workspace's purge frees the sweep.
+    let damaged_purge = storage
+        .records()
+        .create_purge(
+            &damaged.tenant_id,
+            uuid!(60)?,
+            NewPurge {
+                id: uuid!(61)?,
+                target: PurgeTarget::Workspace {
+                    workspace_id: damaged.workspace_id,
+                },
+                initiator: person("ana"),
+            },
+        )
+        .await?;
+    let repository = directory
+        .join("repositories")
+        .join("local")
+        .join(format!("{}.git", damaged.workspace_id.0));
+    assert!(
+        repository.is_dir(),
+        "the damaged workspace purge has not run"
+    );
+    assert_eq!(
+        count(
+            &directory.join("records.sqlite"),
+            &format!(
+                "SELECT count(*) FROM purge_progress WHERE purge_id='{}'",
+                damaged_purge.id.0
+            )
+        )?,
+        0,
+        "recording the purge has not planned or executed it"
+    );
+    storage
+        .purger()
+        .purge_workspace(
+            &damaged.tenant_id,
+            uuid!(72)?,
+            other_purge,
+            other.workspace_id,
+        )
+        .await?;
+    assert!(
+        repository.is_dir(),
+        "the other purge completes before the damaged one runs"
+    );
+    storage
+        .purger()
+        .purge_workspace(
+            &damaged.tenant_id,
+            uuid!(62)?,
+            damaged_purge.id,
+            damaged.workspace_id,
+        )
+        .await?;
+    let plan: serde_json::Value = serde_json::from_str(&rr9_text(
+        &directory.join("records.sqlite"),
+        &format!(
+            "SELECT plan FROM purge_progress WHERE purge_id='{}'",
+            damaged_purge.id.0
+        ),
+    )?)?;
+    assert!(
+        plan.get("unread").is_none(),
+        "section 2.6 keeps no unread plan"
+    );
+    for digest in objects {
+        assert!(
+            !object_file(directory, digest)?.exists(),
+            "every object named only by the purged workspace is gone: {digest:?}"
+        );
+    }
+    assert!(
+        !directory
+            .join("repositories")
+            .join("local")
+            .join(format!("{}.git", damaged.workspace_id.0))
+            .exists(),
+        "the damaged workspace's repository is gone"
+    );
+    Ok(())
+}
+
+/// Lifecycle design sections 1.1 and 2.6: damage names its item, never its private path.
+/// Recording the damaged workspace's purge excludes it from survivor roots immediately,
+/// before that purge runs. Both purges complete without an unread plan or retained originals.
 #[tokio::test]
 async fn rr9_a_damaged_workspace_purges_itself_and_frees_the_tenants_purges() -> TestResult {
     let directory = tempfile::tempdir()?;
@@ -8777,7 +8891,7 @@ async fn rr9_a_damaged_workspace_purges_itself_and_frees_the_tenants_purges() ->
     let path = format!(".okf/sources/{}.json", uuid_text(15));
     rr8_commit_raw_file(&storage, &damaged, &path, b"{\"object\": \"not a digest\"}")?;
     // Another workspace's purge, recorded under its own ids, stops at its objects step, naming
-    // the damaged workspace and the path.
+    // the damaged workspace and the item identity.
     let tenant = other.tenant_id.clone();
     let purge = storage
         .records()
@@ -8802,8 +8916,11 @@ async fn rr9_a_damaged_workspace_purges_itself_and_frees_the_tenants_purges() ->
     assert_eq!(error.code, ErrorCode::Internal, "{error}");
     assert!(
         error.message.contains(&damaged.workspace_id.0.to_string())
-            && error.message.contains(&path),
-        "names the damaged workspace and the path: {error}"
+            && error
+                .message
+                .contains(&format!("the source appearance of item {}", uuid_text(15)))
+            && !error.message.contains(&path),
+        "names the damaged workspace and item without its private path: {error}"
     );
     let live = directory.path().join("records.sqlite");
     assert_eq!(
@@ -8817,35 +8934,16 @@ async fn rr9_a_damaged_workspace_purges_itself_and_frees_the_tenants_purges() ->
         0,
         "the other workspace's rows are already gone"
     );
-    // The damaged workspace's own purge completes, recording what it could not read.
-    rr8_purge(&storage, &damaged).await??;
-    let unread: serde_json::Value = serde_json::from_str(&rr9_text(
-        &live,
-        &format!(
-            "SELECT json_extract(plan, '$.unread') FROM purge_progress WHERE purge_id = '{}'",
-            uuid_text(61)
-        ),
-    )?)?;
-    let unread = some(unread.as_array(), "the plan's unread list")?;
-    let mentions = |what: &str| {
-        unread
-            .iter()
-            .any(|entry| entry.as_str().is_some_and(|text| text.contains(what)))
-    };
-    assert!(
-        unread.len() == 2 && mentions(&path) && mentions(record.as_str()),
-        "the plan records the appearance's path and the record's digest: {unread:?}"
-    );
-    assert!(
-        !directory
-            .path()
-            .join("repositories")
-            .join("local")
-            .join(format!("{}.git", damaged.workspace_id.0))
-            .exists(),
-        "the damaged workspace's repository is gone"
-    );
-    // The other's purge, repeated, completes now that nothing of the tenant is damaged.
+    rr9_recorded_damage_purge_frees_sweep(
+        &storage,
+        directory.path(),
+        &damaged,
+        &other,
+        purge.id,
+        [&original, &record],
+    )
+    .await?;
+    // The other purge remains replayable after the damaged workspace is removed.
     storage
         .purger()
         .purge_workspace(&tenant, uuid!(72)?, purge.id, other.workspace_id)
@@ -9061,6 +9159,7 @@ async fn rr9_workspace_holding_its_own_backup(
             artifact: Some(artifact.id),
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: vec![archive.digest.clone()],
             warnings: Vec::new(),
         })
@@ -9214,6 +9313,7 @@ async fn finished_with_artifact(
             artifact: Some(artifact.id),
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: vec![object.digest],
             warnings: Vec::new(),
         })
@@ -9456,7 +9556,7 @@ async fn rr10_refused_import_leaves_the_backups_working(
     assert_eq!(sets, 1, "the pre-migration backup set was written");
     assert_eq!(
         count(&records, "PRAGMA user_version")?,
-        4,
+        5,
         "then the records are upgraded"
     );
     Ok(())
@@ -9622,6 +9722,7 @@ async fn rr10_rows_left_out_counts_only_the_workspaces_own_rows() -> TestResult 
                 artifact: Some(artifact.id),
                 restore: None,
                 backup: None,
+                clean_up: None,
                 outputs: vec![archive.digest.clone()],
                 warnings: Vec::new(),
             })
@@ -9740,6 +9841,9 @@ async fn rr10_a_survivor_whose_references_do_not_list_fails_the_purge_naming_it(
     })
     .await
 }
+
+#[path = "support/legacy_schema.rs"]
+mod legacy_schema;
 
 #[path = "../../../tests/support/check.rs"]
 mod check;

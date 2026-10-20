@@ -310,6 +310,9 @@ impl StorageBackups {
         if let Some(object) = self.recorded(mutation).await? {
             return Ok(object);
         }
+        if let Some(object) = self.adopt_installation(tenant, mutation).await? {
+            return Ok(object);
+        }
         let manifest = {
             let tenant = tenant.clone();
             self.storage
@@ -345,10 +348,49 @@ impl StorageBackups {
         let object = self
             .storage
             .blobs
-            .put_for(tenant, file_reader(Some(zip), 0, size), size, None)
+            .put_tracked(tenant, mutation, file_reader(Some(zip), 0, size), size)
             .await;
         let _ = std::fs::remove_dir_all(&directory);
-        record(&self.storage.records, mutation, tenant, None, object?).await
+        let (object, pinned) = object?;
+        #[cfg(test)]
+        crate::pause::point(&installation_stored_point(&self.storage, mutation)).await?;
+        let recorded = record(&self.storage.records, mutation, tenant, None, object).await;
+        pinned.end()?;
+        recorded
+    }
+
+    /// A retry adopts the first retained tenant archive under this mutation. Pin before
+    /// looking for its bytes; the pending row protects it while no writer is running.
+    async fn adopt_installation(
+        &self,
+        tenant: &TenantId,
+        mutation: MutationId,
+    ) -> Result<Option<ObjectInfo>, ApiError> {
+        let key = tenant.as_str().to_owned();
+        let pending = self
+            .storage
+            .records
+            .call(move |connection| puts::tenant_pending(connection, &key, mutation))
+            .await?;
+        for digest in pending {
+            let pinned = self
+                .storage
+                .blobs
+                .pins()
+                .pin_for(tenant.as_str(), None, &digest)?;
+            let object = match self.storage.blobs.open_for(tenant, &digest, 0, 0).await {
+                Ok(read) => read.object,
+                Err(error) if error.code == ErrorCode::NotFound => {
+                    pinned.end()?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let recorded = record(&self.storage.records, mutation, tenant, None, object).await;
+            pinned.end()?;
+            return recorded.map(Some);
+        }
+        Ok(None)
     }
 
     async fn open_installation(
@@ -441,6 +483,17 @@ impl StorageBackups {
 }
 
 impl Backups for StorageBackups {
+    fn managed_kind<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        digest: &'a Digest,
+    ) -> PortFuture<'a, Option<okf_jawn_core::storage::ManagedKind>> {
+        let tenant = tenant.as_str().to_owned();
+        let digest = digest.clone();
+        Box::pin(self.storage.records.call(move |connection| {
+            Ok(managed::objects(connection, &tenant, Some(&digest))?.remove(&digest))
+        }))
+    }
     fn write_workspace_archive<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -538,6 +591,8 @@ async fn record(
             // A workspace archive's record lands the pending put of the object it wrote.
             if let Some(workspace) = &workspace {
                 puts::land(transaction, &tenant, workspace, [&object.digest])?;
+            } else {
+                puts::land_tenant(transaction, &tenant, mutation)?;
             }
             let (digest, size): (String, i64) = transaction
                 .query_row(
@@ -807,6 +862,8 @@ fn event_key(
 }
 
 pub(crate) mod archive;
+pub(crate) mod fence;
+mod managed;
 mod restore;
 pub(crate) mod snapshot;
 
@@ -835,6 +892,15 @@ fn recorded_point(storage: &Storage, mutation: MutationId) -> String {
     )
 }
 
+/// Test-only publication boundary: bytes retained, before an installation archive is recorded.
+#[cfg(test)]
+fn installation_stored_point(storage: &Storage, mutation: MutationId) -> String {
+    format!(
+        "installation-stored|{}|{}",
+        storage.data.root().display(),
+        mutation.0
+    )
+}
 /// Unit tests here, not in `tests/`: they hold a workspace's write lock, which is private.
 /// They return `ApiError` like core's unit tests.
 #[cfg(test)]
@@ -881,6 +947,178 @@ mod tests {
         })
     }
 
+    /// Read the small private fixture's stored digest files independently of the root reader.
+    fn sweep_publication_objects(
+        storage: &Storage,
+        tenant: &TenantId,
+    ) -> Result<Vec<okf_jawn_contract::identity::Digest>, ApiError> {
+        let mut found = Vec::new();
+        for shard in std::fs::read_dir(storage.data().objects_path().join(tenant.as_str()))
+            .map_err(|error| fault(&error))?
+        {
+            let shard = shard.map_err(|error| fault(&error))?;
+            for entry in std::fs::read_dir(shard.path()).map_err(|error| fault(&error))? {
+                let entry = entry.map_err(|error| fault(&error))?;
+                let name = entry
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| fault(&"fixture object filename is not UTF-8"))?;
+                found.push(
+                    okf_jawn_contract::identity::Digest::try_from(name)
+                        .map_err(|error| fault(&error))?,
+                );
+            }
+        }
+        Ok(found)
+    }
+
+    /// DesignV6.2: a retained installation archive has both a durable pending row and a live
+    /// tenant pin before its referencing record exists. Both captured values are literal.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_publication_installation_archive_is_protected_before_its_record()
+    -> Result<(), ApiError> {
+        let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+        let storage = Storage::open(directory.path())?;
+        let scope = notes(&storage).await?;
+        let mutation = MutationId(uuid::Uuid::from_u128(40));
+        let (arrival, release) =
+            crate::pause::hold(super::installation_stored_point(&storage, mutation))?;
+        let first = {
+            let (backups, tenant) = (storage.backups(), scope.tenant_id.clone());
+            tokio::spawn(async move { backups.write_installation_archive(&tenant, mutation).await })
+        };
+        crate::pause::arrived(arrival).await?;
+        let objects = sweep_publication_objects(&storage, &scope.tenant_id)?;
+        let first_object = objects
+            .first()
+            .ok_or_else(|| fault(&"the retained installation object"))?;
+        let (watch, touched) = storage
+            .blobs
+            .pins()
+            .sweep(scope.tenant_id.as_str(), &scope.workspace_id.0.to_string())?;
+        let key = mutation.0.to_string();
+        let pending: i64 = storage.records.call(move |connection| connection.query_row(
+            "SELECT count(*) FROM pending_puts WHERE tenant_id='local' AND workspace_id IS NULL AND mutation_id=?1",
+            [key], |row| row.get(0),
+        ).map_err(|error| fault(&error))).await?;
+        let pinned = touched.contains(first_object);
+        drop(watch);
+        // Release and join before assertions so a behavioral RED leaves no blocked writer.
+        release.send(()).map_err(|error| fault(&error))?;
+        let recorded = first.await.map_err(|error| fault(&error))??;
+        assert_eq!(objects.len(), 1);
+        assert_eq!((pending, pinned), (1, true));
+        assert_eq!(&recorded.digest, first_object);
+        Ok(())
+    }
+
+    /// DesignV6.1: a stop after retention must be adopted under the same mutation, even after
+    /// the installation manifest changed. The failed attempt's one object is the result.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_publication_retry_adopts_the_first_unrecorded_installation_archive()
+    -> Result<(), ApiError> {
+        let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+        let storage = Storage::open(directory.path())?;
+        let scope = notes(&storage).await?;
+        let mutation = MutationId(uuid::Uuid::from_u128(40));
+        let (arrival, release) =
+            crate::pause::hold(super::installation_stored_point(&storage, mutation))?;
+        let first = {
+            let (backups, tenant) = (storage.backups(), scope.tenant_id.clone());
+            tokio::spawn(async move { backups.write_installation_archive(&tenant, mutation).await })
+        };
+        crate::pause::arrived(arrival).await?;
+        let objects = sweep_publication_objects(&storage, &scope.tenant_id)?;
+        drop(release); // The existing pause returns an error after bytes, before recording.
+        let stopped = first.await.map_err(|error| fault(&error))?;
+        assert!(
+            stopped.is_err(),
+            "the injected stop must not record an archive"
+        );
+        assert_eq!(objects.len(), 1);
+        storage
+            .records()
+            .create_purge(
+                &scope.tenant_id,
+                MutationId(uuid::Uuid::from_u128(80)),
+                okf_jawn_core::jobs::NewPurge {
+                    id: okf_jawn_contract::identity::PurgeId(uuid::Uuid::from_u128(81)),
+                    target: okf_jawn_contract::purge::PurgeTarget::Workspace {
+                        workspace_id: scope.workspace_id,
+                    },
+                    initiator: Provenance {
+                        subject: "ana".to_owned(),
+                        route: AccessRoute::LocalOwner,
+                        client_id: None,
+                    },
+                },
+            )
+            .await?;
+        let retried = storage
+            .backups()
+            .write_installation_archive(&scope.tenant_id, mutation)
+            .await?;
+        assert_eq!(
+            Some(&retried.digest),
+            objects.first(),
+            "adopt the first bytes, not the changed manifest"
+        );
+        assert_eq!(
+            sweep_publication_objects(&storage, &scope.tenant_id)?.len(),
+            1
+        );
+        let counts: (i64, i64) = storage.records.call(move |connection| connection.query_row(
+            "SELECT (SELECT count(*) FROM backup_archives WHERE mutation_id=?1), (SELECT count(*) FROM pending_puts WHERE workspace_id IS NULL AND mutation_id=?1)",
+            [mutation.0.to_string()], |row| Ok((row.get(0)?,row.get(1)?)),
+        ).map_err(|error| fault(&error))).await?;
+        assert_eq!(counts, (1, 0));
+        Ok(())
+    }
+    /// DesignV6.3: recording one archive lands only its own tenant pending puts, while the
+    /// other mutation's retained-but-unrecorded archive remains durable and protected.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_publication_one_archive_does_not_land_another_mutations_put()
+    -> Result<(), ApiError> {
+        let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+        let storage = Storage::open(directory.path())?;
+        let scope = notes(&storage).await?;
+        let first_id = MutationId(uuid::Uuid::from_u128(40));
+        let second_id = MutationId(uuid::Uuid::from_u128(41));
+        let (first_arrival, first_release) =
+            crate::pause::hold(super::installation_stored_point(&storage, first_id))?;
+        let (second_arrival, second_release) =
+            crate::pause::hold(super::installation_stored_point(&storage, second_id))?;
+        let first = {
+            let (backups, tenant) = (storage.backups(), scope.tenant_id.clone());
+            tokio::spawn(async move { backups.write_installation_archive(&tenant, first_id).await })
+        };
+        crate::pause::arrived(first_arrival).await?;
+        let second = {
+            let (backups, tenant) = (storage.backups(), scope.tenant_id.clone());
+            tokio::spawn(
+                async move { backups.write_installation_archive(&tenant, second_id).await },
+            )
+        };
+        crate::pause::arrived(second_arrival).await?;
+        first_release.send(()).map_err(|error| fault(&error))?;
+        first.await.map_err(|error| fault(&error))??;
+        let pending_other: i64 = storage.records.call(move |connection| connection.query_row(
+            "SELECT count(*) FROM pending_puts WHERE tenant_id='local' AND workspace_id IS NULL AND mutation_id=?1",
+            [second_id.0.to_string()], |row| row.get(0),
+        ).map_err(|error| fault(&error))).await?;
+        second_release.send(()).map_err(|error| fault(&error))?;
+        second.await.map_err(|error| fault(&error))??;
+        assert_eq!(
+            pending_other, 1,
+            "the other mutation remains pending until its own record"
+        );
+        let counts: (i64, i64) = storage.records.call(|connection| connection.query_row(
+            "SELECT (SELECT count(*) FROM backup_archives),(SELECT count(*) FROM pending_puts WHERE workspace_id IS NULL)",
+            [], |row| Ok((row.get(0)?,row.get(1)?)),
+        ).map_err(|error| fault(&error))).await?;
+        assert_eq!(counts, (2, 0));
+        Ok(())
+    }
     /// Backup re-review B1, deterministic: the first archive call under mutation 40 is held
     /// after its first checks (the pause point), a second call under the same mutation runs to
     /// completion and records its archive, a record of the workspace then changes, and the first

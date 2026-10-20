@@ -85,7 +85,9 @@ pub enum PurgeState {
 pub struct PurgeReport {
     /// Stored objects deleted, as a decimal string.
     pub objects_removed: String,
-    /// Objects kept because a surviving item still references them, as a decimal string.
+    /// Stored objects kept because a surviving record, retained history, pending put or running
+    /// write still references, pends or pins them, as a decimal string. Includes objects the
+    /// target never referenced.
     pub objects_kept_shared: String,
     /// Managed backups deleted (workspace archives, and their copies in pre-migration backups).
     pub backups_removed: u32,
@@ -97,7 +99,8 @@ pub struct PurgeReport {
     pub proposals_removed: u32,
     /// Drafts deleted.
     pub drafts_removed: u32,
-    /// Revisions that no longer exist or were rewritten.
+    /// Revisions the purge's records name for the workspace, including earlier item-purge
+    /// mappings. Every revision of a purged workspace is invalidated, whether counted or not.
     pub revisions_invalidated: u32,
     /// Stored citations of other items remapped to a rewritten revision.
     pub citations_remapped: u32,

@@ -451,6 +451,22 @@ async fn pending_cards(
             )
             .with_field(field.clone())
         })?;
+        if let Some(kind) = ports
+            .backups
+            .managed_kind(&scope.tenant_id, &object.digest)
+            .await?
+        {
+            use okf_jawn_core::storage::ManagedKind;
+            let label = match kind {
+                ManagedKind::WorkspaceArchive => "workspace archive",
+                ManagedKind::InstallationArchive => "installation archive",
+                ManagedKind::WrittenHistory => "written history",
+            };
+            return Err(ApiError::new(
+                ErrorCode::InvalidInput,
+                format!("upload {index} is a {label} this installation wrote; restore it instead of importing it"),
+            ).with_field(field));
+        }
         if upload.consumed_by.is_some_and(|consumer| consumer != job) {
             return Err(ApiError::new(
                 ErrorCode::Conflict,

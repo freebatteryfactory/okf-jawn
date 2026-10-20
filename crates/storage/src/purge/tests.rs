@@ -245,6 +245,40 @@ async fn held(storage: &Storage, scope: &StorageScope, digest: &Digest) -> Resul
     }
 }
 
+/// An actual survivor archive whose receipt cites the target, so purge must rewrite it.
+async fn sweep_rewrite_fixture(
+    storage: &Storage,
+) -> Result<(StorageScope, StorageScope, Digest), ApiError> {
+    let (target, revision) = create(storage, "local", 1, "Trip").await?;
+    let (survivor, _) = create(storage, "local", 2, "Garden").await?;
+    let receipt = serde_json::from_value(json!({
+        "id": uuid::Uuid::from_u128(40).to_string(),
+        "workspace_id": survivor.workspace_id,
+        "operation_id": "search_items",
+        "principal_subject": "ana",
+        "route": "local_owner",
+        "sources": [{
+            "workspace_id": target.workspace_id,
+            "item_id": item(10),
+            "path": "notes/trip.md",
+            "revision": revision,
+            "selection": {"kind": "all"}
+        }],
+        "returned_at": "2026-10-09T12:00:00.000Z",
+        "audience": "human_display"
+    }))
+    .map_err(|error| fault(&error))?;
+    storage
+        .records()
+        .insert_receipt(&survivor, None, receipt)
+        .await?;
+    let archive = storage
+        .backups()
+        .write_workspace_archive(&survivor, mutation(72))
+        .await?;
+    Ok((target, survivor, archive.object.digest))
+}
+
 /// The target and a survivor of tenant `tenant_name`; the target's card names `shared`.
 async fn target_with(
     storage: &Storage,
@@ -459,6 +493,7 @@ async fn a_job_output_completed_inside_the_objects_step_keeps_its_object() -> Re
             artifact: None,
             restore: None,
             backup: None,
+            clean_up: None,
             outputs: vec![stored],
             warnings: Vec::new(),
         })
@@ -630,17 +665,18 @@ async fn a_commit_waiting_for_the_workspace_lock_when_the_purge_is_recorded_is_r
     Ok(())
 }
 
-/// The plan reads the workspace under its write lock, so it waits for a Git write that holds
-/// the lock (and may land a commit) to end.
+/// Lifecycle design section 2.6: planning never reads or locks the target; repository
+/// deletion still waits for an earlier writer, then removes the repository before completion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_plan_waits_for_a_write_that_holds_the_workspace_lock() -> Result<(), ApiError> {
+async fn the_plan_proceeds_but_repository_deletion_waits_for_the_workspace_writer()
+-> Result<(), ApiError> {
     let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
     let storage = Storage::open(directory.path())?;
     let (target, _) = create(&storage, "local", 1, "Trip").await?;
     record_purge(&storage, &target).await?;
     let (release, holder) = hold_the_workspace(&storage, &target)?;
     let purging = spawn_purge(&storage, &target);
-    // The purge waits for the lock to plan.
+    // Reaching repository deletion proves the plan was recorded without the target lock.
     until_waiting_for_the_lock(&storage, &target).await?;
     let purge = purge_id().0.to_string();
     let planned: bool = storage
@@ -656,14 +692,26 @@ async fn the_plan_waits_for_a_write_that_holds_the_workspace_lock() -> Result<()
         })
         .await?;
     assert!(
-        !planned,
-        "no plan is recorded while a write holds the workspace"
+        planned,
+        "section 2.6 records the plan without reading the target"
+    );
+    assert!(
+        storage.repositories.path(&target).is_dir(),
+        "the writer still owns its repository"
+    );
+    assert!(
+        !purging.is_finished(),
+        "repository deletion must wait for the writer"
     );
     release.send(()).map_err(|error| fault(&error))?;
     holder
         .join()
         .map_err(|_| fault(&"the lock holder stopped"))??;
     purging.await.map_err(|error| fault(&error))??;
+    assert!(
+        !storage.repositories.path(&target).exists(),
+        "the purge removes the repository after its writer ends"
+    );
     Ok(())
 }
 
@@ -1186,7 +1234,7 @@ async fn a_put_cannot_pin_while_the_objects_step_deletes() -> Result<(), ApiErro
         }
         Ok(true)
     })?;
-    assert!(deleted, "the untouched object was deleted");
+    assert_eq!(deleted, Some(true), "the untouched object was deleted");
     Ok(())
 }
 
@@ -1442,4 +1490,201 @@ async fn an_upload_completion_pinned_before_the_purge_is_waited_for_and_its_byte
         "no byte of the target's upload remains"
     );
     Ok(())
+}
+
+/// Lifecycle design V2.10: a superseded archive is an ordinary sweep candidate. A concurrent
+/// survivor upload of its exact bytes must survive, even while the archive references move.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sweep_rewrite_preserves_a_concurrent_upload_of_the_superseded_archive()
+-> Result<(), ApiError> {
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let (target, survivor, old) = sweep_rewrite_fixture(&storage).await?;
+    let path = storage.blobs.local_path(&survivor.tenant_id, &old)?;
+    let bytes = std::fs::read(&path).map_err(|error| fault(&error))?;
+    let slot = received_upload(&storage, &survivor, &bytes).await?;
+    let (arrival, release) = crate::pause::hold(storage.blobs.pause_point(&old, "pinned"))?;
+    let uploading = spawn_completion(&storage, &survivor, slot, &old);
+    crate::pause::arrived(arrival).await?;
+    record_purge(&storage, &target).await?;
+    let result = spawn_purge(&storage, &target)
+        .await
+        .map_err(|error| fault(&error))?;
+    let protected = held(&storage, &survivor, &old).await;
+    release.send(()).map_err(|error| fault(&error))?;
+    let upload = uploading.await.map_err(|error| fault(&error))?;
+    let report = result?;
+    upload?;
+    assert!(
+        protected?,
+        "the held upload protects the old archive: {report:?}"
+    );
+    assert_eq!(report.backups_rewritten, 1);
+    assert!(held(&storage, &survivor, &old).await?);
+    Ok(())
+}
+
+/// Lifecycle design V6.4: retained rewrite bytes need a tenant pending put before the move.
+/// Stopping there and retrying must land this mutation's puts and sweep the superseded bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sweep_rewrite_tracks_retained_bytes_before_moving_records_and_resumes()
+-> Result<(), ApiError> {
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let (target, survivor, old) = sweep_rewrite_fixture(&storage).await?;
+    let (arrival, release) = crate::pause::hold(super::rewrite_stored_point(&storage, purge_id()))?;
+    record_purge(&storage, &target).await?;
+    let first = spawn_purge(&storage, &target);
+    crate::pause::arrived(arrival).await?;
+    let retained = storage
+        .records
+        .call(|connection| crate::puts::tenant_pending(connection, "local", mutation(61)))
+        .await;
+    drop(release);
+    let stopped = first.await.map_err(|error| fault(&error))?;
+    assert!(
+        stopped.is_err(),
+        "the injected stop precedes the archive move"
+    );
+    assert_eq!(
+        retained?.len(),
+        1,
+        "one retained rewrite is durably protected"
+    );
+    let report = spawn_purge(&storage, &target)
+        .await
+        .map_err(|error| fault(&error))??;
+    assert_eq!(report.backups_rewritten, 1);
+    assert!(!held(&storage, &survivor, &old).await?);
+    let counts = storage.records.call(|connection| {
+        connection.query_row(
+            "SELECT (SELECT count(*) FROM pending_puts WHERE workspace_id IS NULL AND mutation_id=?1),
+            (SELECT count(*) FROM backup_archives WHERE workspace_id IS NOT NULL)",
+            [mutation(61).0.to_string()], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        ).map_err(|error| fault(&error))
+    }).await?;
+    assert_eq!(counts, (0, 1));
+    let mut objects = 0;
+    for shard in std::fs::read_dir(storage.data.objects_path().join("local"))
+        .map_err(|error| fault(&error))?
+    {
+        for entry in std::fs::read_dir(shard.map_err(|error| fault(&error))?.path())
+            .map_err(|error| fault(&error))?
+        {
+            if entry
+                .map_err(|error| fault(&error))?
+                .file_type()
+                .map_err(|error| fault(&error))?
+                .is_file()
+            {
+                objects += 1;
+            }
+        }
+    }
+    assert_eq!(objects, 1, "only the published survivor archive remains");
+    Ok(())
+}
+
+/// Lifecycle design 1.1/R10: a broken ref tip is damage, never evidence of an empty history.
+/// The literal dangling ref is independent of the reader; neither CAS object may be removed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sweep_guard_a_missing_survivor_ref_tip_refuses_before_any_deletion() -> Result<(), ApiError>
+{
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let (target, survivor, _, target_object) =
+        target_with(&storage, "local", b"target only").await?;
+    let survivor_object = put(&storage, &survivor, b"survivor only").await?;
+    let repository = storage.repositories.open(&survivor)?;
+    let reference = repository.path().join("refs/heads/damaged");
+    std::fs::write(&reference, format!("{}\n", "f".repeat(40))).map_err(|error| fault(&error))?;
+    drop(repository);
+    record_purge(&storage, &target).await?;
+    let result = spawn_purge(&storage, &target)
+        .await
+        .map_err(|error| fault(&error))?;
+    let error = match result {
+        Ok(report) => {
+            return Err(fault(&format!(
+                "a broken survivor ref was silently ignored: {report:?}"
+            )));
+        }
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .message
+            .contains(&format!("workspace {}", survivor.workspace_id.0)),
+        "{error}"
+    );
+    assert!(
+        !error
+            .message
+            .contains(&directory.path().display().to_string()),
+        "{error}"
+    );
+    assert!(held(&storage, &target, &target_object).await?);
+    assert!(held(&storage, &survivor, &survivor_object).await?);
+    Ok(())
+}
+
+/// Lifecycle design 1.3: aborting the async owner cannot release tenant serialization while
+/// its detached blocking collector is still paused between deletion and durable accounting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sweep_guard_task_abort_keeps_the_tenant_lock_until_its_collector_finishes()
+-> Result<(), ApiError> {
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let (scope, _) = create(&storage, "local", 1, "Notes").await?;
+    storage
+        .blobs
+        .put_for(
+            &scope.tenant_id,
+            Box::pin(std::io::Cursor::new(b"orphan".to_vec())),
+            6,
+            None,
+        )
+        .await?;
+    let run = crate::sweep::SweepRun {
+        tenant: scope.tenant_id.clone(),
+        target: None,
+        key: "clean_up/abort-regression".to_owned(),
+        excluded: std::collections::BTreeSet::new(),
+    };
+    let point = |stage| {
+        format!(
+            "sweep|{}|{}|{stage}",
+            storage.data.root().display(),
+            run.key
+        )
+    };
+    let (batch, release_batch) = crate::pause::hold(point("batch"))?;
+    let (collected, release_collected) = crate::pause::hold(point("collected"))?;
+    let collecting = {
+        let storage = storage.clone();
+        tokio::spawn(async move { crate::sweep::run(&storage, run).await })
+    };
+    crate::pause::arrived(batch).await?;
+    collecting.abort();
+    let stopped = collecting.await;
+    let pins = storage.blobs.pins();
+    let mut next = Box::pin(pins.serial("local"));
+    let polled = std::future::poll_fn(|context| {
+        std::task::Poll::Ready(std::future::Future::poll(next.as_mut(), context))
+    })
+    .await;
+    drop(next);
+    release_batch.send(()).map_err(|error| fault(&error))?;
+    crate::pause::arrived(collected).await?;
+    release_collected.send(()).map_err(|error| fault(&error))?;
+    assert!(stopped.is_err_and(|error| error.is_cancelled()));
+    match polled {
+        std::task::Poll::Ready(guard) => {
+            drop(guard?);
+            Err(fault(
+                &"another same-tenant sweep acquired the lock while the aborted collector still ran",
+            ))
+        }
+        std::task::Poll::Pending => Ok(()),
+    }
 }

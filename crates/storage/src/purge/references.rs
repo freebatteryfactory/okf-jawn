@@ -55,12 +55,11 @@
 //!   digest (`damaged`), and a restore refuses an archive that holds it as invalid input
 //!   (`restore::refuse_unheld`), so no import plants damage;
 //! - a purge of another workspace stops at its objects step with `Internal` naming the damaged
-//!   workspace and the path or record digest (`refusing_in`): guessing could delete what the
+//!   workspace and item identity or record digest (`refusing_in`): guessing could delete what the
 //!   file names, and the message says where to look;
-//! - a purge of the damaged workspace itself goes on (`history_recording`): each unread file is
-//!   recorded in `History::unread` by its path or record digest, what was read stays read, and
-//!   the objects only an unread file named may remain stored once the purge completes. Purging
-//!   the damaged workspace is the in-product repair for a tenant whose purges its damage stopped.
+//! - a purge of the damaged workspace never opens its history: it removes rows/repository and
+//!   invokes the shared sweep over survivors only. Recording its purge already excludes it
+//!   from survivor roots, so its damage cannot stop another workspace's collection.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::BufRead;
@@ -68,7 +67,7 @@ use std::path::Path;
 
 use git2::{ObjectType, Oid, Repository, Sort};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::identity::{Digest, TenantId};
+use okf_jawn_contract::identity::{Digest, ItemId, TenantId};
 use rusqlite::{Connection, params};
 use serde_json::Value;
 
@@ -79,27 +78,12 @@ use crate::git::repo::{git, git_message};
 /// Every commit of a repository on the walked references, and the objects its cards name.
 #[derive(Debug, Default)]
 pub(crate) struct History {
-    /// Every commit reachable from a walked reference.
-    pub(crate) revisions: Vec<Oid>,
     /// Every object a source appearance on those commits names, its original (`object`) or its
     /// conversion record (`extraction.digest`), with what first names it.
     pub(crate) objects: BTreeMap<Digest, String>,
     /// The objects of `objects` a card names as its conversion record: the only objects ever
     /// opened as records.
     pub(crate) records: BTreeSet<Digest>,
-    /// What a recording walk (`history_recording`) could not read, each by its path or object
-    /// and why: the objects only it names are not in `objects`. Empty after a walk that refuses
-    /// damage, which stops at the first.
-    pub(crate) unread: Vec<String>,
-}
-
-/// Which rows of the tenant a record query reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Rows {
-    /// The target workspace's rows.
-    Target,
-    /// Every other row of the tenant: other workspaces and tenant records.
-    Survivors,
 }
 
 /// What a file that does not read structurally answers: `damaged` for the store's own files, a
@@ -107,8 +91,7 @@ pub(crate) enum Rows {
 pub(crate) type Unreadable = fn(&str) -> ApiError;
 
 /// What a reader does with damage, given its message (the path or object, and why): `refusing`
-/// answers an error, which stops the read at the first; a recording reader keeps the message and
-/// reads on (`history_recording`, for the workspace a purge removes).
+/// answers an error, which stops the read at the first.
 pub(crate) type Report<'a> = dyn FnMut(String) -> Result<(), ApiError> + 'a;
 
 /// A JSON reader over a conversion record of any size (`Scanner::record`). It holds at most
@@ -389,7 +372,7 @@ pub(crate) fn refusing(unreadable: Unreadable) -> impl FnMut(String) -> Result<(
 /// The `Report` that refuses damage in the surviving workspace `workspace`, read during another
 /// workspace's purge: `damaged`, naming the workspace before the path or record digest, so an
 /// operator knows where to look. The remedy is a fix of the damaged file or of this reader, or
-/// a purge of the damaged workspace, which its own damage does not stop (`history_recording`).
+/// a purge of the damaged workspace, which never reads its target history.
 pub(crate) fn refusing_in(workspace: &str) -> impl FnMut(String) -> Result<(), ApiError> {
     let workspace = workspace.to_owned();
     move |message| Err(damaged(&format!("in the workspace {workspace}, {message}")))
@@ -428,23 +411,6 @@ pub(crate) fn history_naming(
 ) -> Result<History, ApiError> {
     let tips = tips(repository).map_err(|error| naming(workspace, error))?;
     walk(repository, &tips, &mut refusing_in(workspace))
-}
-
-/// As `history`, for the workspace a purge removes: damage does not stop the walk. Each unread
-/// file is recorded in `History::unread` by its path or object and why, what was read stays
-/// read, and the walk goes on, so a workspace's own damage never keeps it from being purged. The
-/// objects only an unread file named are not in `History::objects`, and may remain stored.
-///
-/// # Errors
-/// Returns `Unavailable` for a failure of the version store itself; never for damage.
-pub(crate) fn history_recording(repository: &Repository) -> Result<History, ApiError> {
-    let mut unread = Vec::new();
-    let mut found = walk(repository, &tips(repository)?, &mut |message| {
-        unread.push(message);
-        Ok(())
-    })?;
-    found.unread = unread;
-    Ok(found)
 }
 
 /// The history of an uploaded archive, its pack indexed into `repository`, walked from the
@@ -604,10 +570,14 @@ fn tips(repository: &Repository) -> Result<Vec<Oid>, ApiError> {
     let mut tips = Vec::new();
     for reference in repository.references().map_err(|error| git(&error))? {
         let reference = reference.map_err(|error| git(&error))?;
-        if let Some(target) = reference.target()
-            && repository.find_commit(target).is_ok()
-        {
-            tips.push(target);
+        // Resolve symbolic refs and annotated tags. A valid tree/blob ref has no commits,
+        // but an unreadable ref object is damage, never evidence that history is empty.
+        let object = match reference.peel(ObjectType::Any) {
+            Ok(object) => object,
+            Err(error) => return Err(damaged(&missing(&error, "an object a reference names")?)),
+        };
+        if object.kind() == Some(ObjectType::Commit) {
+            tips.push(object.id());
         }
     }
     Ok(tips)
@@ -641,7 +611,6 @@ fn walk(
                 break;
             }
         };
-        found.revisions.push(oid);
         if let Some(sources) = sources_tree(repository, oid, report)?
             && trees.insert(sources)
         {
@@ -740,10 +709,9 @@ fn scan(
     };
     for entry in &sources {
         let name = String::from_utf8_lossy(entry.name_bytes()).into_owned();
+        let appearance = appearance_identity(&name);
         if entry.kind() != Some(ObjectType::Blob) {
-            report(format!(
-                "{SOURCES_TREE}/{name} is not a source appearance file"
-            ))?;
+            report(format!("{appearance} is not a source appearance file"))?;
             continue;
         }
         if !files.insert(entry.id()) {
@@ -752,34 +720,39 @@ fn scan(
         let blob = match repository.find_blob(entry.id()) {
             Ok(blob) => blob,
             Err(error) => {
-                report(missing(
-                    &error,
-                    &format!(
-                        "the source appearance {SOURCES_TREE}/{name} ({})",
-                        entry.id()
-                    ),
-                )?)?;
+                report(missing(&error, &format!("{appearance} ({})", entry.id()))?)?;
                 continue;
             }
         };
-        let item = name.strip_suffix(".json").unwrap_or(&name);
         match appearance_objects(blob.content()) {
             Ok((object, record)) => {
                 found
                     .objects
                     .entry(object)
-                    .or_insert_with(|| format!("a source card's original (item {item})"));
+                    .or_insert_with(|| format!("the original of {appearance}"));
                 if let Some(record) = record {
                     found.records.insert(record.clone());
-                    found.objects.entry(record).or_insert_with(|| {
-                        format!("a source card's conversion record (item {item})")
-                    });
+                    found
+                        .objects
+                        .entry(record)
+                        .or_insert_with(|| format!("the conversion record of {appearance}"));
                 }
             }
-            Err(why) => report(format!("the source appearance {SOURCES_TREE}/{name} {why}"))?,
+            Err(why) => report(format!("{appearance} {why}"))?,
         }
     }
     Ok(())
+}
+
+/// An appearance filename is private data unless it is exactly a typed item identity.
+fn appearance_identity(name: &str) -> String {
+    name.strip_suffix(".json")
+        .and_then(|name| uuid::Uuid::parse_str(name).ok())
+        .map(ItemId)
+        .map_or_else(
+            || "a file of .okf/sources not named for an item".to_owned(),
+            |item| format!("the source appearance of item {}", item.0),
+        )
 }
 
 /// The two objects a source appearance's bytes name, read by path and nothing else of the file:
@@ -813,20 +786,14 @@ fn digest_at(value: &Value, pointer: &str) -> Result<Option<Digest>, String> {
     }
 }
 
-/// The objects the records of `rows` reference. A survivor's upload slot whose object is in
-/// `not_surviving` (an archive of the target) is not a surviving reference (Stage 1b design
-/// section 6).
+/// The objects the restored workspace's own durable records reference. Tenant-wide collection
+/// uses `sweep`'s single snapshot, including recorded-purge filtering and archive exclusions.
 pub(crate) fn records(
     connection: &Connection,
     tenant: &str,
     workspace: &str,
-    rows: Rows,
-    not_surviving: &BTreeSet<Digest>,
 ) -> Result<BTreeSet<Digest>, ApiError> {
-    let side = match rows {
-        Rows::Target => "workspace_id = ?2",
-        Rows::Survivors => "workspace_id IS NOT ?2",
-    };
+    let side = "workspace_id = ?2";
     let mut found = BTreeSet::new();
     for (column, table) in [
         ("digest", "derived_objects"),
@@ -865,25 +832,8 @@ pub(crate) fn records(
         workspace,
         &mut uploads,
     )?;
-    match rows {
-        Rows::Target => found.extend(uploads),
-        Rows::Survivors => found.extend(except_archives(uploads, not_surviving)),
-    }
+    found.extend(uploads);
     Ok(found)
-}
-
-/// The objects of `held` that a survivor's upload slot or pending put may keep: all but the
-/// target's workspace archives (`archives`). A copy of the target's archive that another
-/// workspace holds in an upload slot or names in a pending put is no surviving reference
-/// (Stage 1b design section 6), so the archive goes with the target. A write of another
-/// workspace that is putting the same bytes during the objects step pins them, and keeps them as
-/// it keeps any pinned object (`pins`); this helper does not apply to pins.
-pub(crate) fn except_archives<'a>(
-    held: impl IntoIterator<Item = Digest> + 'a,
-    archives: &'a BTreeSet<Digest>,
-) -> impl Iterator<Item = Digest> + 'a {
-    held.into_iter()
-        .filter(move |digest| !archives.contains(digest))
 }
 
 fn collect(

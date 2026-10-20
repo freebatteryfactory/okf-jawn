@@ -16,11 +16,11 @@ use crate::blobs::LocalBlobs;
 use crate::catalog::GitCatalog;
 use crate::confirmations::SqliteConfirmations;
 use crate::credentials::SqliteCredentials;
-use crate::data::{DataDir, FormatState, INDEX_FILE, RECORDS_FILE};
+use crate::data::{DataDir, FormatState, INDEX_FILE};
 use crate::db::Db;
 use crate::drafts::SqliteDrafts;
 use crate::events::SqliteEvents;
-use crate::format::{migrate_database, needs_upgrade, refuse_newer};
+use crate::format::{migrate_database, migrate_records, needs_upgrade, refuse_newer};
 use crate::git::GitVersions;
 use crate::git::repo::Repositories;
 use crate::mutations::SqliteMutations;
@@ -81,7 +81,7 @@ impl Storage {
         if data.records_path().exists() && needs_upgrade(&data.records_path(), &schema::RECORDS)? {
             write_pre_migration_set(&data)?;
         }
-        let records = migrate_database(&data, RECORDS_FILE, &schema::RECORDS)?;
+        let records = migrate_records(&data)?;
         let index = migrate_database(&data, INDEX_FILE, &schema::INDEX)?;
         let records = Db::new(records.into_connection(), Arc::clone(&data));
         Ok(Self {

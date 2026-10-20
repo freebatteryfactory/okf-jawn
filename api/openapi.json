@@ -1021,6 +1021,32 @@
           }
         ]
       },
+      "CleanUpReport": {
+        "additionalProperties": false,
+        "description": "What a clean-up did; counts only.",
+        "properties": {
+          "objects_kept": {
+            "description": "Stored objects its last pass kept because something still references, pends or pins\nthem, as a decimal string.",
+            "type": "string"
+          },
+          "objects_removed": {
+            "description": "Stored objects removed, over every pass of the job, as a decimal string.",
+            "type": "string"
+          },
+          "upload_files_removed": {
+            "description": "Received bytes of discarded upload slots removed (files a stopped discard left).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "objects_removed",
+          "objects_kept",
+          "upload_files_removed"
+        ],
+        "type": "object"
+      },
       "CollisionPolicy": {
         "description": "How proposed naming collisions are handled.",
         "oneOf": [
@@ -4508,6 +4534,17 @@
             ],
             "description": "What a completed workspace backup left out of its archive."
           },
+          "clean_up": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CleanUpReport"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What a completed clean-up removed and kept."
+          },
           "created_at": {
             "anyOf": [
               {
@@ -4693,6 +4730,11 @@
           {
             "const": "purge_item",
             "description": "Remove one item permanently (tenant-level).",
+            "type": "string"
+          },
+          {
+            "const": "clean_up",
+            "description": "Reclaim the tenant's stored objects nothing references any more (tenant-level): queued\nby a discarded upload, never more than one queued or running at a time.",
             "type": "string"
           }
         ]
@@ -7021,7 +7063,7 @@
             "type": "integer"
           },
           "objects_kept_shared": {
-            "description": "Objects kept because a surviving item still references them, as a decimal string.",
+            "description": "Stored objects kept because a surviving record, retained history, pending put or running\nwrite still references, pends or pins them, as a decimal string. Includes objects the\ntarget never referenced.",
             "type": "string"
           },
           "objects_removed": {
@@ -7035,7 +7077,7 @@
             "type": "integer"
           },
           "revisions_invalidated": {
-            "description": "Revisions that no longer exist or were rewritten.",
+            "description": "Revisions the purge's records name for the workspace, including earlier item-purge\nmappings. Every revision of a purged workspace is invalidated, whether counted or not.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
@@ -12669,7 +12711,7 @@
         "x-mcp-tool": false,
         "x-operator-label": "Discard upload",
         "x-permission": "write",
-        "x-starts-job": null,
+        "x-starts-job": "clean_up",
         "x-tool-annotations": {
           "destructiveHint": true,
           "idempotentHint": false,
@@ -19155,7 +19197,7 @@
         ],
         "x-agent-alias": "",
         "x-agent-tool": false,
-        "x-allowed-while-archived": false,
+        "x-allowed-while-archived": true,
         "x-cli-alias": null,
         "x-human-session-only": false,
         "x-local-owner-only": true,
