@@ -28,8 +28,8 @@
 //!   hold (the catalog's `NotFound`) is an empty grant found without asking WorkOS, as the local
 //!   adapter answers it, so a flood of unknown workspace ids costs local reads, never API calls.
 //! - `grants` lists, for an admin, every workspace of the catalog (archived included); for a
-//!   member, the workspaces of its role assignments that the catalog holds, each with its
-//!   effective permissions, leaving out those with none.
+//!   member, every held workspace evaluated for effective permissions (including organization
+//!   and ancestor grants without a direct assignment), leaving out those with none.
 //! - `grant_creator` creates the workspace's resource (external id = the workspace id) when
 //!   WorkOS has none, and assigns `workspace-admin` on it when the creator has no such
 //!   assignment: it reads before it writes, so a retry of the same creation writes nothing.
@@ -69,7 +69,10 @@ use workos::resources::authorization::{
     ListRoleAssignmentsParams, ResourceTarget,
 };
 use workos::resources::organization_membership::ListOrganizationMembershipsParams;
-use workos::{AuthorizationAssignment, UserOrganizationMembershipBaseListDataStatus};
+use workos::{
+    AuthorizationAssignment, UserOrganizationMembershipBaseListDataStatus,
+    UserOrganizationMembershipStatus,
+};
 
 /// `AccessControl` over WorkOS role assignments and the workspace catalog.
 pub struct WorkosAccess {
@@ -169,7 +172,10 @@ impl WorkosAccess {
             Err(error) if error.is_not_found() => return Ok(None),
             Err(error) => return Err(provider(&error)),
         };
-        let mut memberships = page.data.into_iter();
+        let mut memberships = page
+            .data
+            .into_iter()
+            .filter(|membership| membership.status == UserOrganizationMembershipStatus::Active);
         let Some(first) = memberships.next() else {
             return Ok(None);
         };
@@ -277,15 +283,8 @@ impl WorkosAccess {
                 .map(|workspace| grant(scope(workspace.id), ALL.to_vec()))
                 .collect());
         }
-        let assigned = self.assigned(&membership, None).await?;
         let mut grants = Vec::new();
         for workspace in held {
-            if !assigned
-                .iter()
-                .any(|(external, _)| *external == workspace.id.0.to_string())
-            {
-                continue;
-            }
             let permissions = self.effective(&membership, workspace.id).await?;
             if !permissions.is_empty() {
                 grants.push(grant(scope(workspace.id), permissions));

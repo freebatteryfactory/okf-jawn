@@ -197,6 +197,17 @@ fn member(roles: &[&str]) -> Reply {
     Reply::Json(200, list(&[membership(MEMBERSHIP, USER, ORG, roles)], None))
 }
 
+/// A scripted nondefault status; the live list API defaults to active memberships only.
+fn membership_with_status(
+    membership_id: &str,
+    roles: &[&str],
+    status: &str,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let mut value = membership(membership_id, USER, ORG, roles);
+    *some(value.get_mut("status"), "the membership status")? = json!(status);
+    Ok(value)
+}
+
 fn permissions(slugs: &[&str], after: Option<&str>) -> Reply {
     let data: Vec<_> = slugs.iter().map(|slug| permission(slug)).collect();
     Reply::Json(200, list(&data, after))
@@ -385,6 +396,106 @@ async fn two_memberships_of_one_user_in_one_organization_are_a_fault() -> TestRe
     Ok(())
 }
 
+// These scripted unexpected statuses exercise the adapter's documented active-only boundary;
+// WorkOS defaults the real membership list to active, so this is not a live inactive exploit.
+#[tokio::test]
+async fn review_inactive_or_pending_admin_memberships_hold_no_authority() -> TestResult {
+    for status in ["inactive", "pending"] {
+        let row = membership_with_status(MEMBERSHIP, &["admin"], status)?;
+        let reply = Reply::Json(200, list(&[row], None));
+        let script = Scripted::new(vec![reply.clone(), reply.clone(), reply.clone(), reply]);
+        let adapter = access(&script, &[(A, false)], BOUND)?;
+        let principal = caller()?;
+        let grant = adapter
+            .authorize(&principal, id(A)?, Permission::Admin)
+            .await?;
+        assert_eq!(grant.permissions, [] as [Permission; 0], "{status}");
+        let tenant = adapter
+            .authorize_tenant(&principal, Permission::Admin)
+            .await?;
+        assert_eq!(tenant.permissions, [] as [Permission; 0], "{status}");
+        assert_eq!(adapter.grants(&principal).await?, [] as [WorkspaceGrant; 0]);
+        let refused = err_of(adapter.grant_creator(&principal, id(A)?).await)?;
+        assert_eq!(refused.code, ErrorCode::Forbidden);
+        assert_eq!(script.seen().len(), 4, "only the four membership reads");
+        exhausted(&script)?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn review_only_active_memberships_count_before_selection_or_duplicate_detection() -> TestResult
+{
+    for status in ["inactive", "pending"] {
+        for nonactive_first in [true, false] {
+            let ignored = membership_with_status("om_ignored", &["admin"], status)?;
+            let active = membership(MEMBERSHIP, USER, ORG, &["member"]);
+            let rows = if nonactive_first {
+                vec![ignored, active]
+            } else {
+                vec![active, ignored]
+            };
+            let script = Scripted::new(vec![
+                Reply::Json(200, list(&rows, None)),
+                permissions(&["workspace:read"], None),
+            ]);
+            let adapter = access(&script, &[(A, false)], BOUND)?;
+            let grant = adapter
+                .authorize(&caller()?, id(A)?, Permission::Read)
+                .await?;
+            assert_eq!(grant.permissions, vec![Permission::Read]);
+            assert_eq!(
+                some(script.seen().get(1), "the active member's permissions")?.path,
+                permissions_path(A)
+            );
+            exhausted(&script)?;
+        }
+    }
+    Ok(())
+}
+
+// SPEC11 and WorkOS effective access include organization/ancestor roles, even when no role
+// was assigned directly to this workspace. Every held workspace is evaluated, archived too.
+#[tokio::test]
+async fn review_inherited_permissions_list_held_workspaces_without_direct_assignments() -> TestResult
+{
+    let script = Scripted::new(vec![
+        member(&["member"]),
+        permissions(&["workspace:read"], None),
+        permissions(&[], None),
+        permissions(&["workspace:write"], None),
+    ]);
+    let adapter = access(&script, &[(A, false), (B, false), (C, true)], BOUND)?;
+    let grants = adapter.grants(&caller()?).await?;
+    let listed: Vec<_> = grants
+        .iter()
+        .map(|grant| (grant.scope.workspace_id, grant.permissions.clone()))
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            (id(A)?, vec![Permission::Read]),
+            (id(C)?, vec![Permission::Write])
+        ]
+    );
+    let paths: Vec<_> = script
+        .seen()
+        .iter()
+        .skip(1)
+        .map(|request| request.path.clone())
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            permissions_path(A),
+            permissions_path(B),
+            permissions_path(C)
+        ]
+    );
+    exhausted(&script)?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn an_organization_admin_holds_everything_without_asking_for_permissions() -> TestResult {
     for roles in [&["admin"][..], &["member", "admin"][..]] {
@@ -521,21 +632,9 @@ async fn an_admin_s_listing_is_every_workspace_the_tenant_holds() -> TestResult 
 }
 
 #[tokio::test]
-async fn a_member_s_listing_is_its_assigned_held_workspaces_with_permissions() -> TestResult {
+async fn a_member_s_listing_is_its_held_workspaces_with_permissions() -> TestResult {
     let script = Scripted::new(vec![
         member(&["member"]),
-        Reply::Json(
-            200,
-            list(
-                &[
-                    assignment(MEMBERSHIP, "workspace-editor", A),
-                    assignment(MEMBERSHIP, "workspace-viewer", B),
-                    assignment(MEMBERSHIP, "workspace-viewer", C),
-                    assignment(MEMBERSHIP, "workspace-viewer", "not-a-uuid"),
-                ],
-                None,
-            ),
-        ),
         permissions(
             &["workspace:read", "workspace:write", "workspace:propose"],
             None,
@@ -556,21 +655,18 @@ async fn a_member_s_listing_is_its_assigned_held_workspaces_with_permissions() -
         )]
     );
     let seen = script.seen();
-    let assignments = some(seen.get(1), "the assignments request")?;
+    let evaluated = some(
+        seen.get(1),
+        "the first held workspace's effective permissions",
+    )?;
+    assert_eq!(evaluated.path, permissions_path(A));
     assert_eq!(
-        assignments.path,
-        format!("/authorization/organization_memberships/{MEMBERSHIP}/role_assignments")
-    );
-    assert_eq!(
-        assignments
-            .query
-            .get("resource_type_slug")
-            .map(String::as_str),
-        Some("workspace")
+        evaluated.query.get("limit").map(String::as_str),
+        Some("100")
     );
     let paths: Vec<_> = seen
         .iter()
-        .skip(2)
+        .skip(1)
         .map(|request| request.path.clone())
         .collect();
     assert_eq!(paths, vec![permissions_path(A), permissions_path(B)]);
