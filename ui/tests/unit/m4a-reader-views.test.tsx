@@ -94,7 +94,7 @@ describe('the reader representations an item has', () => {
     renderAt(`/w/${WS}/i/${SOURCE}`);
     const article = await screen.findByRole('article', { name: 'Annual report' });
     await within(article).findByText('Whole report before choosing its outline');
-    await userEvent.click(within(article).getByRole('radio', { name: 'Outline', exact: true }));
+    await userEvent.click(within(article).getByRole('radio', { name: 'Outline' }));
     const outline = await within(article).findByRole('navigation', {
       name: 'Outline of this item',
     });
