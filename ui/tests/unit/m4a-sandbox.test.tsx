@@ -394,12 +394,14 @@ describe('the HTML sandbox viewer (A3)', () => {
     // A3: mint just before framing, even when this binding was shown earlier. The expected
     // addresses are independently numbered service answers, never derived from the viewer.
     let answerReturn: (reply: Reply) => void = () => undefined;
+    let answerHead: (reply: Reply) => void = () => undefined;
     let requests = 0;
     const api = mockApi({
       [CREATE_SANDBOX_CAPABILITY]: () => {
         requests += 1;
         if (requests === 1) return ok(capability(1));
         return new Promise<Reply>((resolve) => {
+          if (requests === 2) answerHead = resolve;
           if (requests === 3) answerReturn = resolve;
         });
       },
@@ -413,6 +415,8 @@ describe('the HTML sandbox viewer (A3)', () => {
     await waitFor(() => expect(api.callsTo(CREATE_SANDBOX_CAPABILITY)).toHaveLength(3));
     expect(document.querySelector('iframe')).toBeNull();
     answerReturn(ok(capability(3)));
+    expect((await frameShown()).getAttribute('src')).toBe(capability(3).url);
+    await act(async () => answerHead(ok(capability(2))));
     expect((await frameShown()).getAttribute('src')).toBe(capability(3).url);
     expect(api.violations).toEqual([]);
   });
