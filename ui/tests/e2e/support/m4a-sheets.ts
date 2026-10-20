@@ -1,6 +1,6 @@
 /** A2 fixtures: real viewer routes, bounded original bytes, and keyboard activation. */
 import { expect, type Locator, type Page } from '@playwright/test';
-import type { Selection } from '../../../src/api/generated/types.gen';
+import type { ItemDocument, Selection } from '../../../src/api/generated/types.gen';
 import { HEAD, ok, readAnswer, routeApi, SOURCE, summary, WS } from './explorer';
 import { tabTo } from './views';
 
@@ -22,31 +22,40 @@ export async function sourceFixture(
   const bytes = new TextEncoder().encode(options.original);
   const item = {
     ...summary(SOURCE, options.path, options.path, 'document', 'source'),
+    kind: 'source' as const,
+    status: 'stable' as const,
     media_type: options.mediaType,
-    extraction: { status: 'completed', text_origin: 'converter', corrected: false },
+    extraction: {
+      status: 'completed' as const,
+      text_origin: 'converter' as const,
+      corrected: false,
+    },
+  };
+  const document: ItemDocument = {
+    summary: item,
+    body: options.markdown,
+    content_digest: DIGEST,
+    properties: { type: 'document', okf_jawn: { id: SOURCE } },
+    source: {
+      object: OBJECT,
+      size: String(bytes.length),
+      media_type: options.mediaType,
+      names: [],
+      metadata: {},
+      extraction: {
+        corrected: false,
+        digest: DIGEST,
+        outcome: { status: 'completed' },
+        text_origin: 'converter',
+        warnings: options.sheets ? [{ kind: 'cell_values_only', sheets: options.sheets }] : [],
+      },
+    },
   };
   const reads: Record<string, unknown>[] = [];
   const ranges: Array<string | undefined> = [];
   await routeApi(page, {
-    '/api/items/get-item': () =>
-      ok({
-        summary: item,
-        properties: { type: 'document', okf_jawn: { id: SOURCE } },
-        source: {
-          object: OBJECT,
-          size: String(bytes.length),
-          media_type: options.mediaType,
-          names: [],
-          metadata: {},
-          extraction: {
-            corrected: false,
-            digest: DIGEST,
-            outcome: { status: 'completed' },
-            text_origin: 'converter',
-            warnings: options.sheets ? [{ kind: 'cell_values_only', sheets: options.sheets }] : [],
-          },
-        },
-      }),
+    '/api/items/list-items': () => ok({ folders: [], items: [item], revision: HEAD }),
+    '/api/items/get-item': () => ok(document),
     '/api/reads/read-item': (body) => {
       reads.push(body);
       const more = body.cursor === 'second-part';

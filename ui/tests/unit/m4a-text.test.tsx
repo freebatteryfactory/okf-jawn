@@ -47,6 +47,20 @@ async function editorNamed(name: string = LABEL): Promise<EditorView> {
 }
 
 describe('a text or code original (A2)', () => {
+  it('explicitly keeps the named read-only content in the tab order inside its scroll region', async () => {
+    // A2's keyboard/zero-axe requirement: CodeMirror's scroll region must contain one declared
+    // Tab stop. The expected tabindex is the accessible content's, never an extra wrapper stop.
+    const bytes = utf8('{"value": 1}\n');
+    const api = mockApi({});
+    answerBytes(bytes);
+    renderText(bytes, 'application/json');
+    const view = await editorNamed();
+    expect(view.contentDOM.getAttribute('tabindex')).toBe('0');
+    expect(view.scrollDOM.querySelectorAll('[tabindex="0"]')).toHaveLength(1);
+    expect(view.contentDOM.getAttribute('aria-readonly')).toBe('true');
+    expect(api.violations).toEqual([]);
+  });
+
   it('reads a short original in one range, decodes it as UTF-8 and shows it read-only, named', async () => {
     const text = 'Agenda\n\nBudget: 1.2 M €\nDone.\n';
     const bytes = utf8(text);

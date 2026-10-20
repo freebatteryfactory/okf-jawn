@@ -118,7 +118,9 @@ function markLines(range: TextRange): Extension {
 export function readOnlyText(label: string, mediaType: string, marked: TextRange | null) {
   return [
     EditorState.readOnly.of(true),
-    EditorView.contentAttributes.of({ 'aria-label': label }),
+    // The existing text box is the single declared Tab stop inside CodeMirror's scroll region.
+    // Do not make the scroller another stop: keyboard users read and scroll with this caret.
+    EditorView.contentAttributes.of({ 'aria-label': label, tabindex: '0' }),
     EditorView.lineWrapping,
     lineNumbers(),
     languageFor(mediaType),

@@ -31,6 +31,11 @@ test.describe('A2 text and code', () => {
     await tabTo(page, box);
     await page.keyboard.press('ArrowRight');
     await expectVisibleFocus(page);
+    // The real Tab target must also scroll the long code with its caret, not only receive focus.
+    await page.keyboard.press('Control+End');
+    await expect
+      .poll(() => original.locator('.cm-scroller').evaluate((element) => element.scrollTop))
+      .toBeGreaterThan(0);
     await page.keyboard.type('X');
     await expect(box).not.toContainText('X');
     await expectNoAxeViolations(page, 'JSON first bounded byte part');
