@@ -74,7 +74,7 @@ fn clean_up_counts_round_trip_as_strings_and_a_bounded_file_count() -> TestResul
     let mut numeric = raw.clone();
     report_field(&mut numeric, "objects_removed", json!(1))?;
     assert!(serde_json::from_value::<Job>(numeric).is_err());
-    report_field(&mut raw, "upload_files_removed", json!(4294967296_u64))?;
+    report_field(&mut raw, "upload_files_removed", json!(4_294_967_296_u64))?;
     assert!(serde_json::from_value::<Job>(raw).is_err());
     Ok(())
 }

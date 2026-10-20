@@ -665,17 +665,18 @@ async fn a_commit_waiting_for_the_workspace_lock_when_the_purge_is_recorded_is_r
     Ok(())
 }
 
-/// The plan reads the workspace under its write lock, so it waits for a Git write that holds
-/// the lock (and may land a commit) to end.
+/// Lifecycle design section 2.6: planning never reads or locks the target; repository
+/// deletion still waits for an earlier writer, then removes the repository before completion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_plan_waits_for_a_write_that_holds_the_workspace_lock() -> Result<(), ApiError> {
+async fn the_plan_proceeds_but_repository_deletion_waits_for_the_workspace_writer()
+-> Result<(), ApiError> {
     let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
     let storage = Storage::open(directory.path())?;
     let (target, _) = create(&storage, "local", 1, "Trip").await?;
     record_purge(&storage, &target).await?;
     let (release, holder) = hold_the_workspace(&storage, &target)?;
     let purging = spawn_purge(&storage, &target);
-    // The purge waits for the lock to plan.
+    // Reaching repository deletion proves the plan was recorded without the target lock.
     until_waiting_for_the_lock(&storage, &target).await?;
     let purge = purge_id().0.to_string();
     let planned: bool = storage
@@ -691,14 +692,26 @@ async fn the_plan_waits_for_a_write_that_holds_the_workspace_lock() -> Result<()
         })
         .await?;
     assert!(
-        !planned,
-        "no plan is recorded while a write holds the workspace"
+        planned,
+        "section 2.6 records the plan without reading the target"
+    );
+    assert!(
+        storage.repositories.path(&target).is_dir(),
+        "the writer still owns its repository"
+    );
+    assert!(
+        !purging.is_finished(),
+        "repository deletion must wait for the writer"
     );
     release.send(()).map_err(|error| fault(&error))?;
     holder
         .join()
         .map_err(|_| fault(&"the lock holder stopped"))??;
     purging.await.map_err(|error| fault(&error))??;
+    assert!(
+        !storage.repositories.path(&target).exists(),
+        "the purge removes the repository after its writer ends"
+    );
     Ok(())
 }
 
