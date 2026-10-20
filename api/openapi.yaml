@@ -13243,7 +13243,7 @@ paths:
       - session
       x-agent-alias: ''
       x-agent-tool: false
-      x-allowed-while-archived: false
+      x-allowed-while-archived: true
       x-cli-alias: null
       x-human-session-only: false
       x-local-owner-only: true

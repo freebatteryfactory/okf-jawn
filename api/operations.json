@@ -1361,7 +1361,7 @@
   },
   {
     "alias": "",
-    "allowed_while_archived": false,
+    "allowed_while_archived": true,
     "description": "Revoke a local connector credential immediately. Local owner only.",
     "destructive": true,
     "human_session_only": false,
