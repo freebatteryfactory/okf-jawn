@@ -986,6 +986,112 @@ mod export_workspace {
         Ok(())
     }
 
+    /// These are ordinary, portable committed folder indexes, not synthetic invalid paths.
+    fn add_committed_folder(files: &mut Vec<CommittedFile>, folder: &str) -> TestResult {
+        let mut prefix = String::new();
+        for segment in folder.split('/') {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(segment);
+            let path = format!("{prefix}/index.md");
+            let checked = WorkspacePath::try_from(path.clone())?;
+            assert_eq!(checked.as_str(), path);
+            if !files.iter().any(|file| file.path == path) {
+                files.push(plain_file(&path, b"# Subdirectories\n"));
+            }
+        }
+        Ok(())
+    }
+
+    async fn assert_generated_path_fault(
+        world: &World,
+        files: Vec<CommittedFile>,
+        include_history: bool,
+    ) -> TestResult {
+        world
+            .versions
+            .set_tree(&storage_scope()?, &base()?, files)?;
+        if include_history {
+            world
+                .versions
+                .set_history(world.blobs.insert(b"# v2 git bundle\nthe history")?)?;
+        }
+        let id = export_job(world, 30, include_history)?;
+        assert!(run(world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        let error = some(entry.job.error.as_ref(), "the layout refusal")?;
+        assert_eq!(error.code, ErrorCode::Internal);
+        assert_eq!(
+            error.message,
+            "the portable archive holds conflicting paths"
+        );
+        assert!(entry.completions.is_empty());
+        assert_eq!(world.records.artifacts()?, [] as [ArtifactRecord; 0]);
+        assert_eq!(world.blobs.puts()?, [] as [ObjectInfo; 0]);
+        Ok(())
+    }
+
+    /// SPEC3: generated files cannot occupy a committed directory's portable identity.
+    #[tokio::test]
+    async fn generated_path_refuses_a_committed_history_bundle_directory() -> TestResult {
+        let world = world()?;
+        let mut fixture = fixture(&world)?;
+        add_committed_folder(&mut fixture.files, "history.bundle")?;
+        assert_generated_path_fault(&world, fixture.files, true).await
+    }
+
+    #[tokio::test]
+    async fn generated_path_refuses_a_committed_directory_at_a_derivative_file() -> TestResult {
+        let world = world()?;
+        let mut fixture = fixture(&world)?;
+        let folder = format!("references/derived/{}.png", fixture.asset.digest.as_str());
+        add_committed_folder(&mut fixture.files, &folder)?;
+        assert_generated_path_fault(&world, fixture.files, false).await
+    }
+
+    #[tokio::test]
+    async fn generated_path_refuses_case_aliases_of_nested_directories() -> TestResult {
+        let world = world()?;
+        let mut fixture = fixture(&world)?;
+        add_committed_folder(&mut fixture.files, "references/Derived")?;
+        assert_generated_path_fault(&world, fixture.files, false).await
+    }
+
+    #[tokio::test]
+    async fn generated_path_refuses_unicode_case_aliases_at_an_original_file_prefix() -> TestResult
+    {
+        let world = world()?;
+        let mut fixture = fixture_named(&world, "café.pdf")?;
+        let folder = format!(
+            "references/originals/{}/CAFÉ.PDF",
+            fixture.original.digest.as_str()
+        );
+        add_committed_folder(&mut fixture.files, &folder)?;
+        assert_generated_path_fault(&world, fixture.files, false).await
+    }
+
+    /// A textual prefix that ends inside a segment is not a file/directory collision.
+    #[tokio::test]
+    async fn generated_path_keeps_a_sibling_with_a_longer_segment() -> TestResult {
+        let world = world()?;
+        let mut fixture = fixture(&world)?;
+        add_committed_folder(&mut fixture.files, "history.bundle-extra")?;
+        world
+            .versions
+            .set_tree(&storage_scope()?, &base()?, fixture.files)?;
+        world
+            .versions
+            .set_history(world.blobs.insert(b"# v2 git bundle\nthe history")?)?;
+        let id = export_job(&world, 30, true)?;
+        assert!(run(&world, id).await?);
+        let found = names(&entries(&archive_of(&world, id)?.0)?);
+        assert!(found.contains(&"history.bundle".to_owned()));
+        assert!(found.contains(&"history.bundle-extra/index.md".to_owned()));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn e13_cancellation_after_page_one_prevents_the_next_page_put_and_completion()
     -> TestResult {
