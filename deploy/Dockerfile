@@ -16,6 +16,7 @@ FROM foundation AS application-build
 RUN cargo build --locked --release --package okf-jawn-server --features runtime --bin okf-jawn-server
 RUN cargo build --locked --release --package okf-jawn-cli --bin okf-jawn
 RUN cargo build --locked --release --package okf-jawn-ingest --features runtime --bin okf-jawn-convert
+RUN mkdir -p /runtime-data
 FROM ${RUNTIME_IMAGE} AS application
 WORKDIR /app
 COPY --from=application-build /workspace/target/release/okf-jawn-server /app/okf-jawn-server
@@ -23,6 +24,8 @@ COPY --from=application-build /workspace/target/release/okf-jawn /app/okf-jawn
 COPY --from=application-build /workspace/target/release/okf-jawn-convert /app/okf-jawn-convert
 COPY --from=application-build /workspace/ui/dist /app/ui
 COPY --from=application-build /workspace/ui/dist-apps /app/mcp-apps
+# A fresh named volume copies this ownership; the runtime image needs no shell or chown.
+COPY --from=application-build --chown=65532:65532 /runtime-data /data
 ENV OKF_BIND=0.0.0.0:7711 OKF_SANDBOX_BIND=0.0.0.0:7712 OKF_DATA_DIR=/data
 USER 65532:65532
 EXPOSE 7711 7712

@@ -412,6 +412,13 @@ test('the application image ships the three connected binaries and requires exis
  assert.match(compose,/source: \$\{DOCLING_MODELS_DIR:\?/,'the operator must supply the qualified model directory');
  assert.match(compose,/target: \/opt\/docling\/models\s+read_only: true\s+bind:\s+create_host_path: false/,'a typo must not create an empty model directory');
 });
+test('the fresh data volume is populated with runtime-user ownership before switching users',async()=>{
+ const docker=await read('deploy/Dockerfile');
+ // SPEC section 12: the non-root hosted process must be able to create its persistent store.
+ assert.match(docker,/RUN mkdir -p \/runtime-data/);
+ assert.match(docker,/COPY --from=application-build --chown=65532:65532 \/runtime-data \/data/);
+ assert.ok(docker.indexOf('--chown=65532:65532 /runtime-data /data')<docker.indexOf('USER 65532:65532'));
+});
 test('README states the generated counts and tool names, and neither prose file remembers a number',async()=>{
  const readme=await read('README.md'),agents=await read('AGENTS.md');
  const operations=JSON.parse(await read('api/operations.json')),transports=JSON.parse(await read('api/transports.json'));
