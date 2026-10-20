@@ -10,10 +10,10 @@
 //! record, which classes it by its code.
 //!
 //! A long storage call runs under the same heartbeat as a conversion, so its lease stays live:
-//! the index rebuild, both archive writes, the restore and both purges each renew the lease
-//! every `HandlerLimits::heartbeat` while they run (`renewing`), and so do an import's two long
-//! reads of a replayed commit (the tree its check runs over again, and the outputs its card
-//! references). Unlike a conversion, such a call
+//! the index rebuild, both archive writes, the restore, both purges and clean-up each renew
+//! the lease every `HandlerLimits::heartbeat` while they run (`renewing`), and so do an
+//! import's two long reads of a replayed commit (the tree its check runs over again, and the
+//! outputs its card references). Unlike a conversion, such a call
 //! is never dropped when the job is found cancelled: storage's write is one transaction that
 //! must not be abandoned mid-call, so the cancellation is observed after it returns, and the job
 //! then stops without a completion. A purge's own record still states what the purge removed.
@@ -43,7 +43,8 @@
 //! job's `job_updated` goes to the tenant log: it has no workspace.
 //!
 //! Built: import and redigest (`import`), the portable workspace export (`portable_export`),
-//! index rebuild, both backups, restore, both purges. A View export still fails explicitly as
+//! index rebuild, both backups, restore, both purges and tenant clean-up dispatch. The storage
+//! clean-up sweep remains unimplemented. A View export still fails explicitly as
 //! `NotImplemented`, which the runtime records as a non-retryable failure (request R-I7).
 //! Nothing is reported as done that was not done.
 
@@ -92,7 +93,7 @@ pub struct HandlerPorts {
     pub events: Arc<dyn EventLog>,
     /// Workspace and installation archives.
     pub backups: Arc<dyn Backups>,
-    /// Purge execution.
+    /// Purge and clean-up execution.
     pub purger: Arc<dyn Purger>,
     /// Upload slots an import or a restore consumes.
     pub uploads: Arc<dyn UploadStore>,
@@ -133,6 +134,8 @@ pub(crate) struct Done {
     pub(crate) restore: Option<RestoreReport>,
     /// What a workspace backup left out of its archive.
     pub(crate) backup: Option<BackupReport>,
+    /// What a clean-up removed and kept.
+    pub(crate) clean_up: Option<okf_jawn_contract::import::CleanUpReport>,
     /// Findings of the checks the commits ran.
     pub(crate) warnings: Vec<Warning>,
     /// The job was found cancelled: no completion is written.
@@ -230,6 +233,7 @@ impl IngestHandler {
                 artifact: done.artifact,
                 restore: done.restore,
                 backup: done.backup,
+                clean_up: done.clean_up,
                 outputs: done.outputs,
                 warnings: done.warnings,
             })
@@ -314,13 +318,8 @@ impl IngestHandler {
                 JobSpec::PurgeWorkspace { .. } | JobSpec::PurgeItem { .. },
                 JobScope::Tenant(tenant),
             ) => self.purge_job(attempt, tenant).await,
-            (JobSpec::ExportView { .. }, _) => Err(ApiError::new(
-                ErrorCode::NotImplemented,
-                format!(
-                    "the ingest handler does not run {:?} jobs yet",
-                    attempt.claimed.spec.kind()
-                ),
-            )),
+            (JobSpec::CleanUp, JobScope::Tenant(tenant)) => self.clean_up(attempt, tenant).await,
+            (JobSpec::ExportView { .. }, _) => Err(unimplemented_job(&attempt.claimed.spec)),
             (
                 JobSpec::Import { .. }
                 | JobSpec::Redigest { .. }
@@ -330,12 +329,30 @@ impl IngestHandler {
                 | JobSpec::RestoreWorkspace { .. }
                 | JobSpec::BackupInstallation
                 | JobSpec::PurgeWorkspace { .. }
-                | JobSpec::PurgeItem { .. },
+                | JobSpec::PurgeItem { .. }
+                | JobSpec::CleanUp,
                 _,
             ) => Err(ApiError::new(
                 ErrorCode::Internal,
                 "the claimed job's specification does not fit its scope",
             )),
+        }
+    }
+
+    /// Run one tenant clean-up pass under the heartbeat and forward its count-only report.
+    async fn clean_up(&self, attempt: &Attempt<'_>, tenant: &TenantId) -> Result<Done, ApiError> {
+        match renewing(
+            &self.ports,
+            attempt,
+            self.ports.purger.clean_up(tenant, attempt.claimed.job.id),
+        )
+        .await?
+        {
+            Renewed::Done(report) => Ok(Done {
+                clean_up: Some(report),
+                ..Done::default()
+            }),
+            Renewed::Cancelled(_report) => Ok(Done::stopped()),
         }
     }
 
@@ -615,6 +632,7 @@ impl IngestHandler {
             | JobSpec::RestoreWorkspace { .. }
             | JobSpec::RebuildIndex
             | JobSpec::ExportView { .. }
+            | JobSpec::CleanUp
             | JobSpec::BackupInstallation => Err(ApiError::new(
                 ErrorCode::Internal,
                 "a purge job was expected",
@@ -810,12 +828,8 @@ impl IngestHandler {
                 };
                 // Only a running job is waited for. A sealed job that is queued had its lease lapse:
                 // its attempt died, and no worker can claim it while the purge is recorded, so
-                // waiting would hold the purge to its bound on every run, for nothing. Known limit
-                // (PR #40 review): if that attempt is in fact still alive (a renewal failed while
-                // `restore_import` kept running), its row import, which the purge guard does not
-                // cover, can overlap the purge. The cure is to fence a lapsed attempt's writes by
-                // its lease, checked in each write's own transaction; it is carried to the storage
-                // cleanup's lifecycle work item, which rebuilds the purge.
+                // waiting would hold the purge to its bound. A still-alive stale restore is
+                // fenced at object, history and row publication by its captured job lease.
                 if stands.state == JobState::Running {
                     running.push(job.id);
                 }
@@ -883,6 +897,14 @@ impl JobHandler for IngestHandler {
     fn handle<'a>(&'a self, claimed: &'a ClaimedJob) -> PortFuture<'a, ()> {
         Box::pin(self.run(claimed))
     }
+}
+
+/// The explicit refusal for a job kind whose handler has not been built.
+fn unimplemented_job(spec: &JobSpec) -> ApiError {
+    ApiError::new(
+        ErrorCode::NotImplemented,
+        format!("the ingest handler does not run {:?} jobs yet", spec.kind()),
+    )
 }
 
 /// Run a long storage call to its end while renewing the claim's lease every

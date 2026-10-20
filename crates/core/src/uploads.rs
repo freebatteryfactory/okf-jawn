@@ -81,6 +81,26 @@ pub trait UploadStore: Send + Sync {
         mutation_id: MutationId,
         upload: NewUpload,
     ) -> PortFuture<'a, UploadRecord>;
+    /// Remove a slot and its received bytes under `mutation_id`, and answer the slot as it stood.
+    ///
+    /// In one transaction: refused with `Conflict` naming the purge when a purge names the
+    /// workspace; `NotFound` when the workspace holds no such slot (one discarded under another
+    /// mutation included); `Conflict` when a job consumed the slot, or a queued or running job of
+    /// the workspace names it (an import's `upload_ids`, a restore's `upload_id`), naming the job;
+    /// `Conflict` while a transfer to the slot is in progress. Otherwise the slot's row is replaced
+    /// by a tombstone that keeps this mutation and the time, and then its part files are removed.
+    /// A repeat under the same mutation answers the record first answered and removes what is
+    /// left; afterwards `get`, `list`, `put_content`, `complete`, `consume` and `consume_batch`
+    /// answer as for a slot that never existed, and a `create` repeated under the slot's own
+    /// mutation is refused with `Conflict` rather than opening it again. A completed slot's object is
+    /// not removed here: stored bytes are the tenant's and content-addressed, and the tenant's
+    /// clean-up job removes them once nothing references them (`Purger::clean_up`).
+    fn discard<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        upload: UploadId,
+        mutation_id: MutationId,
+    ) -> PortFuture<'a, UploadRecord>;
     /// Read one slot; `NotFound` when the workspace has no such slot.
     fn get<'a>(&'a self, scope: &'a StorageScope, upload: UploadId)
     -> PortFuture<'a, UploadRecord>;

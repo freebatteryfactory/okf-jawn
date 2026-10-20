@@ -6,7 +6,7 @@
 //! carries the inputs, the initiator and the `MutationId` a handler needs to do the work again
 //! after a crash. Every insert is unique on `MutationId` and a repeated id returns the prior row.
 //!
-//! A job belongs to a workspace or, for an installation backup and a purge, to the tenant
+//! A job belongs to a workspace or, for an installation backup, purge or clean-up, to the tenant
 //! (`JobScope`); a tenant job outlives a purged workspace. `JobSpec::fits` holds the two
 //! together. Purge records and the revision map are tenant and workspace records the same store
 //! keeps (Stage 1b design sections 6 and 9.2); derived objects (a View's materialized dataset)
@@ -20,7 +20,7 @@ use okf_jawn_contract::{
         ArtifactId, Digest, ItemId, JobId, MutationId, PurgeId, ReceiptId, Revision, TenantId,
         Timestamp, UploadId, WorkspaceId, WorkspacePath,
     },
-    import::{Job, JobKind, ListJobsResponse},
+    import::{CleanUpReport, Job, JobKind, ListJobsResponse},
     purge::{Purge, PurgeTarget},
     review::Review,
     workspace::{ArtifactScope, BackupReport, DownloadArtifact, RestoreReport},
@@ -37,7 +37,7 @@ use crate::stored::{ValidatorCell, decode_stored};
 /// What a retained artifact is; the contract's, so the record and the wire agree.
 pub use okf_jawn_contract::workspace::ArtifactKind;
 
-/// Whose job or artifact a record is: the tenant's (an installation backup, a purge) or one
+/// Whose job or artifact a record is: the tenant's (an installation backup, purge or clean-up) or one
 /// workspace's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobScope {
@@ -132,6 +132,8 @@ pub enum JobSpec {
         /// Item removed.
         item_id: ItemId,
     },
+    /// Reclaim the tenant's unreferenced objects. Tenant-scoped.
+    CleanUp,
 }
 
 /// A job to register durably before it is enqueued or reported.
@@ -192,6 +194,8 @@ pub struct JobCompletion {
     /// What a workspace backup left out of its archive; present exactly for a
     /// `BackupWorkspace` job (`Backups::write_workspace_archive`).
     pub backup: Option<BackupReport>,
+    /// What a clean-up removed and kept; present exactly for a `CleanUp` job.
+    pub clean_up: Option<CleanUpReport>,
     /// Retained output objects, kept as garbage-collection roots.
     pub outputs: Vec<Digest>,
     /// Non-fatal issues recorded during the work.
@@ -292,6 +296,10 @@ pub trait RecordStore: Send + Sync {
     /// of an archived workspace, a repeated id included, in the insert's own transaction, so
     /// that an archive (`WorkspaceCatalog::archive`) and such an insert racing end with one of
     /// them refused (contract ruling 25).
+    ///
+    /// A `CleanUp` job of a tenant that already has one queued or running is not created:
+    /// that one is returned, and the request it absorbs is served by a pass that begins
+    /// after the request.
     fn create_job<'a>(&'a self, scope: &'a JobScope, job: NewJob) -> PortFuture<'a, Job>;
     /// Read one durable job within its scope.
     fn get_job<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, Job>;
@@ -323,6 +331,10 @@ pub trait RecordStore: Send + Sync {
     ///
     /// When `completion.artifact` is set, the returned and stored job shows
     /// `ArtifactRecord::download` of that record as its artifact.
+    /// A `CleanUp` job whose tenant asked for a clean-up after its pass began is queued again
+    /// instead of succeeding and returned queued; removed-object and upload-file counts
+    /// accumulate across passes, while the kept-object count is the last pass's count
+    /// (`CleanUpReport`, lifecycle design section 3.2). The runtime's next sweep delivers it.
     fn complete_job(&self, completion: JobCompletion) -> PortFuture<'_, Job>;
     /// Record the failure of the current claim: `error` is stored as `Job.error` as given (its
     /// code, message, `field` and `detail`), and `retryable` as `Job.retryable`, which says
@@ -434,6 +446,9 @@ pub trait RecordStore: Send + Sync {
     fn update_purge<'a>(&'a self, tenant: &'a TenantId, purge: Purge) -> PortFuture<'a, Purge>;
     /// What became of a revision a purge rewrote or removed; `None` when no purge touched it.
     /// Written by `Purger`.
+    /// A recorded workspace purge, in any state, answers its purge id and no replacement
+    /// for every revision of that workspace, including a never-committed revision and one
+    /// whose earlier per-revision mapping names a replacement. No target history is read.
     fn revision_mapping<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -562,6 +577,7 @@ impl JobSpec {
             Self::BackupInstallation => JobKind::BackupInstallation,
             Self::PurgeWorkspace { .. } => JobKind::PurgeWorkspace,
             Self::PurgeItem { .. } => JobKind::PurgeItem,
+            Self::CleanUp => JobKind::CleanUp,
         }
     }
 

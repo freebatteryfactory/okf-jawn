@@ -6,26 +6,29 @@
 //! and `list_uploads` answer the store's slots in their wire form, with the store's refusals
 //! unchanged.
 
-use okf_jawn_contract::access::AccessRoute;
+use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
 use okf_jawn_contract::common::PageRequest;
 use okf_jawn_contract::error::{ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::{Digest, IdempotencyKey, JobId, UploadId, WorkspaceId};
 use okf_jawn_contract::import::{
-    CompleteUploadRequest, CreateUploadRequest, GetUploadRequest, ListUploadsRequest,
-    ListUploadsResponse, MAX_UPLOAD_FILENAME_BYTES, Upload, UploadListState,
+    CompleteUploadRequest, CreateUploadRequest, DiscardUploadRequest, GetUploadRequest, JobKind,
+    ListUploadsRequest, ListUploadsResponse, MAX_UPLOAD_FILENAME_BYTES, Upload, UploadListState,
 };
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_core::application::ApplicationConfig;
 use okf_jawn_core::context::{Attempt, OperationContext};
+use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
+use okf_jawn_core::jobs::{JobScope, JobSpec};
 use okf_jawn_core::ports::Application;
 use okf_jawn_core::storage::{ObjectInfo, Page, Provenance, StorageScope};
 use okf_jawn_core::uploads::{UploadQuery, UploadRecord, UploadStore};
-use serde_json::json;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::check::{TestResult, err_of, some};
 use crate::fixture::{ALICE, Built, config, context, digest, instant, mutation, scope};
-use crate::tenancy::{Tenancy, sha256_of, uploader};
+use crate::support::FixtureMutations;
+use crate::tenancy::{Tenancy, sha256_of, uploader, workspace};
 
 /// The bytes the tests upload: ten of them.
 const BYTES: &[u8] = b"0123456789";
@@ -76,6 +79,40 @@ fn complete(upload: UploadId, sha256: Digest) -> Built<CompleteUploadRequest> {
         sha256,
         idempotency_key: key()?,
     })
+}
+
+fn discard(upload: UploadId) -> Built<DiscardUploadRequest> {
+    Ok(DiscardUploadRequest {
+        workspace_id: scope()?.workspace_id,
+        upload_id: upload,
+        idempotency_key: key()?,
+    })
+}
+
+/// The actual dispatch path with the neighboring job-control tests' fixture ledger.
+async fn dispatched_discard(
+    tenancy: &Tenancy,
+    ledger: &FixtureMutations,
+    upload: UploadId,
+) -> Built<Value> {
+    let principal = Principal {
+        subject: ALICE.to_owned(),
+        tenant_id: scope()?.tenant_id,
+        route: AccessRoute::LocalOwner,
+        client_id: None,
+        delegation: None,
+    };
+    let ports = DispatchPorts {
+        access: tenancy.access.as_ref(),
+        mutations: ledger,
+        events: tenancy.log.as_ref(),
+    };
+    let caller = Caller {
+        principal: &principal,
+        session_id: Some("discard-test"),
+    };
+    let input = serde_json::to_value(discard(upload)?)?;
+    Ok(dispatch(&tenancy.service, &ports, &caller, "discard_upload", input).await?)
 }
 
 fn listing(
@@ -516,5 +553,114 @@ async fn list_uploads_answers_the_stores_refusal_of_a_cursor_it_did_not_write() 
     )?;
     assert_eq!(refused.code, ErrorCode::InvalidInput);
     assert_eq!(refused.field.as_deref(), Some("/page/cursor"));
+    Ok(())
+}
+
+/// Lifecycle4.3/V4.8: answer the exact discarded occurrence, then create/wake tenant cleanup
+/// under42's literal R2 domain-separated UUID vector, carrying the discarding principal.
+#[tokio::test]
+async fn uploads_discard_returns_the_slot_and_wakes_a_derived_tenant_cleanup() -> TestResult {
+    let tenancy = Tenancy::new()?;
+    let slot = opened(&tenancy, 31).await?;
+    let prior = tenancy.uploads.get(&scope()?, slot.id).await?;
+    let result = tenancy
+        .service
+        .discard_upload(
+            &alice(OperationName::DiscardUpload, Some(42))?,
+            discard(slot.id)?,
+        )
+        .await?;
+    assert_wire(&result, &prior)?;
+    assert_eq!(
+        err_of(tenancy.uploads.get(&scope()?, slot.id).await)?.code,
+        ErrorCode::NotFound
+    );
+    let created = tenancy.jobs.created()?;
+    assert_eq!(created.len(), 1);
+    let (job_scope, request, job) = some(created.first(), "the cleanup job")?;
+    assert_eq!(job_scope, &JobScope::Tenant(scope()?.tenant_id));
+    assert_eq!(request.spec, JobSpec::CleanUp);
+    assert_eq!(
+        request.mutation_id.0.to_string(),
+        "5fc4dfc8-971a-8001-8493-310899fcd284"
+    );
+    assert_eq!(
+        request.initiator,
+        Provenance {
+            subject: ALICE.to_owned(),
+            route: AccessRoute::LocalOwner,
+            client_id: None
+        }
+    );
+    assert_eq!(job.kind, JobKind::CleanUp);
+    assert_eq!(job.workspace_id, None);
+    assert_eq!(tenancy.queue.woken()?, vec![(job_scope.clone(), job.id)]);
+    Ok(())
+}
+
+/// Lifecycle4.4/V4.8: a failed wake must not return success; a resumed handler asks discard
+/// again under the same mutation and wakes the same durable job, without reopening the slot.
+#[tokio::test]
+async fn uploads_discard_resumes_after_a_failed_wake_and_returns_the_same_occurrence() -> TestResult
+{
+    let tenancy = Tenancy::new()?;
+    let slot = opened(&tenancy, 31).await?;
+    let prior = tenancy.uploads.get(&scope()?, slot.id).await?;
+    let caller = alice(OperationName::DiscardUpload, Some(42))?;
+    tenancy.queue.fail_next();
+    let failed = err_of(
+        tenancy
+            .service
+            .discard_upload(&caller, discard(slot.id)?)
+            .await,
+    )?;
+    assert_eq!(failed.code, ErrorCode::Unavailable);
+    assert_eq!(
+        err_of(tenancy.uploads.get(&scope()?, slot.id).await)?.code,
+        ErrorCode::NotFound
+    );
+    let before = tenancy.jobs.created()?;
+    assert_eq!(before.len(), 1);
+    let (_, _, accepted) = some(before.first(), "the already-durable cleanup")?;
+    assert_eq!(tenancy.queue.woken()?, [] as [(JobScope, JobId); 0]);
+    let mut resumed = caller;
+    resumed.attempt = Attempt::Resumed;
+    let result = tenancy
+        .service
+        .discard_upload(&resumed, discard(slot.id)?)
+        .await?;
+    assert_wire(&result, &prior)?;
+    let after = tenancy.jobs.created()?;
+    assert_eq!(after.len(), 1);
+    let (_, _, repeated) = some(after.first(), "the same cleanup")?;
+    assert_eq!(repeated.id, accepted.id);
+    assert_eq!(
+        tenancy.queue.woken()?,
+        vec![(JobScope::Tenant(scope()?.tenant_id), accepted.id)]
+    );
+    Ok(())
+}
+
+/// LifecycleV4.8: an actual dispatch/ledger replay returns the recorded Upload without running
+/// the successful handler or waking its cleanup again. No direct-call replay claim is made.
+#[tokio::test]
+async fn uploads_discard_dispatch_replay_does_not_wake_cleanup_twice() -> TestResult {
+    let tenancy = Tenancy::new()?;
+    tenancy
+        .catalog
+        .put(&scope()?.tenant_id, workspace(1, "Notes", 'a', false)?)?;
+    tenancy.access.grant(
+        ALICE,
+        scope()?.workspace_id,
+        vec![Permission::Read, Permission::Write],
+    )?;
+    let slot = opened(&tenancy, 31).await?;
+    let ledger = FixtureMutations::new();
+    let first = dispatched_discard(&tenancy, &ledger, slot.id).await?;
+    assert_eq!(first, serde_json::to_value(&slot)?);
+    let replay = dispatched_discard(&tenancy, &ledger, slot.id).await?;
+    assert_eq!(replay, first);
+    assert_eq!(tenancy.jobs.created()?.len(), 1);
+    assert_eq!(tenancy.queue.woken()?.len(), 1);
     Ok(())
 }

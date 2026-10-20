@@ -2306,6 +2306,14 @@ impl AccessControl for Unused {
 }
 
 impl Backups for Unused {
+    fn managed_kind<'a>(
+        &'a self,
+        _tenant: &'a TenantId,
+        _digest: &'a Digest,
+    ) -> PortFuture<'a, Option<okf_jawn_core::storage::ManagedKind>> {
+        unused()
+    }
+
     fn write_workspace_archive<'a>(
         &'a self,
         _scope: &'a StorageScope,
@@ -2485,6 +2493,16 @@ impl ProposalStore for Unused {
 }
 
 impl UploadStore for Unused {
+    /// A slot discard is unused by this fixture.
+    fn discard<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _upload: UploadId,
+        _mutation_id: MutationId,
+    ) -> PortFuture<'a, UploadRecord> {
+        unused()
+    }
+
     fn create<'a>(
         &'a self,
         _scope: &'a StorageScope,
