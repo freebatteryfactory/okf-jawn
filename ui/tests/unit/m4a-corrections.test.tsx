@@ -317,6 +317,45 @@ describe('Correct text', () => {
     expect(within(section).queryByRole('button', { name: 'Correct text' })).toBeNull();
     expect(api.violations).toEqual([]);
   });
+
+  it('says the text box starts from supplied text, and a person’s correction of it is theirs', async () => {
+    const { api, section } = await open({
+      extraction: extractionOf({
+        outcome: PARTIAL,
+        text_origin: 'supplied_by_agent',
+        supplied: SUPPLIED,
+      }),
+      body: SUPPLIED_MARKDOWN.trimEnd(),
+    });
+    const box = await startCorrecting(section);
+    expect(describedBy(box)).toContain(
+      'It starts from the text shown: text an agent supplied and a person accepted, not the converter’s.',
+    );
+    typeInto(box, ' Checked against the scan.');
+    fireEvent.click(button(section, 'Save the correction'));
+    await within(section).findByText(/^Saved: your correction is revision/);
+    // A person's correction is said as theirs, not as the agent's text.
+    await says(
+      section,
+      'the text shown is a person’s correction, shown over the converter’s text.',
+    );
+    expect(bodies(api).at(0)?.adopts).toBeUndefined();
+    expect(api.violations).toEqual([]);
+  });
+
+  it('closes without sending on Cancel, with focus back on Correct text', async () => {
+    const { api, section } = await open();
+    const box = await startCorrecting(section);
+    typeInto(box, ' Not this.');
+    const cancel = button(section, 'Cancel');
+    cancel.focus();
+    fireEvent.click(cancel);
+    expect(within(section).queryByRole('textbox', { name: 'Your correction' })).toBeNull();
+    expect(document.activeElement).toBe(button(section, 'Correct text'));
+    expect(bodies(api)).toEqual([]);
+    // Opened again, it starts from the text shown, not from what was cancelled.
+    expect(textIn(await startCorrecting(section))).toBe(CONVERTED);
+  });
 });
 
 describe('Keep the supplied text', () => {
