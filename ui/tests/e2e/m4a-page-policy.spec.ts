@@ -37,7 +37,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { expect, type Page, test } from '@playwright/test';
+import { expect, type Locator, type Page, test } from '@playwright/test';
 import { adminWorkspace, localOwner, tenantLog, workspacePage } from './support/admin-security';
 import {
   type Answers,
@@ -135,8 +135,7 @@ const KNOWN_URLS: KnownUrl[] = [
     url: /^blob:/,
     where: /^(URL\.createObjectURL \(image\/png\)|<img> src)$/,
     screen: /^an original: image \(image\/png\)$/,
-    library:
-      'workspace ImageFrame/useObjectUrl (image/png original); img-src blob:; built observation pending integration',
+    library: 'workspace ImageFrame/useObjectUrl (image/png original); img-src blob:',
   },
 ];
 
@@ -162,6 +161,13 @@ interface Screen {
   /** This readiness check verifies the hostile file actually loaded in its capability frame. */
   hostileFrame?: boolean;
   screenshot?: string;
+}
+
+/** CodeMirror renders line divs without newline text nodes; retain every authored line exactly. */
+async function expectCodeMirrorLines(textbox: Locator, fixture: string) {
+  await expect
+    .poll(() => textbox.locator('.cm-line').allTextContents())
+    .toEqual(fixture.split('\n'));
 }
 
 const SCREENS: Screen[] = [
@@ -268,8 +274,8 @@ const SCREENS: Screen[] = [
       });
       await expect(left).toHaveAttribute('aria-readonly', 'true');
       await expect(right).toHaveAttribute('aria-readonly', 'true');
-      await expect(left).toHaveText(PLAIN_ORIGINAL);
-      await expect(right).toHaveText(PLAIN_DIGEST);
+      await expectCodeMirrorLines(left, PLAIN_ORIGINAL);
+      await expectCodeMirrorLines(right, PLAIN_DIGEST);
       await expect(comparison.locator('.cm-mergeView')).toBeVisible();
       await comparison.getByRole('button', { name: 'Next difference' }).click();
       await expect(comparison).toContainText('Difference 1 of 2:');
@@ -290,8 +296,8 @@ const SCREENS: Screen[] = [
       const shown = corrections.getByRole('textbox', { name: 'The text shown now' });
       const yours = corrections.getByRole('textbox', { name: 'Your correction' });
       await expect(shown).toHaveAttribute('aria-readonly', 'true');
-      await expect(shown).toHaveText(PLAIN_DIGEST);
-      await expect(yours).toHaveText(PLAIN_DIGEST);
+      await expectCodeMirrorLines(shown, PLAIN_DIGEST);
+      await expectCodeMirrorLines(yours, PLAIN_DIGEST);
       await yours.fill('# Agenda\n\nBudget: 1.4 M\n\nDone.\n');
       await expect(yours).toContainText('Budget: 1.4 M');
       await expect(corrections).toContainText(
@@ -378,7 +384,7 @@ async function originalShown(page: Page, original: Original) {
     case 'text': {
       const text = region.getByRole('textbox', { name: `Original text of ${original.path}` });
       await expect(text).toHaveAttribute('aria-readonly', 'true');
-      await expect(text).toHaveText(original.bytes.toString('utf8'));
+      await expectCodeMirrorLines(text, original.bytes.toString('utf8'));
       if (original.mediaType === 'application/json')
         await expect(text).toHaveAttribute('data-language', 'json');
       return;
