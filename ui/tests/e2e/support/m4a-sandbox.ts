@@ -286,3 +286,450 @@ export async function expectNoAxeViolationsBesideTheSandbox(page: Page, screen: 
   for (const title of titles)
     expect(title.trim(), `${screen}: a sandboxed frame’s name`).not.toBe('');
 }
+
+// ---------------------------------------------------------------------------------------------
+// The page policy spec (A5): an original of every kind the reader shows, and what the page does
+// under the policy.
+// ---------------------------------------------------------------------------------------------
+
+/** A one-page PDF with one line of text in a standard font, its cross-reference table exact. */
+export function onePagePdf(): Buffer {
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+    '',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+  ];
+  const text = 'BT /F1 18 Tf 24 72 Td (Annual report 2025) Tj ET';
+  objects[3] = `<< /Length ${text.length} >>\nstream\n${text}\nendstream`;
+  let body = '%PDF-1.4\n';
+  const offsets: number[] = [];
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.byteLength(body));
+    body += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+  const xref = Buffer.byteLength(body);
+  body += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (const offset of offsets) body += `${String(offset).padStart(10, '0')} 00000 n \n`;
+  body += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(body, 'latin1');
+}
+
+/** A one-pixel PNG. */
+export const ONE_PIXEL_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+/** One original the reader shows, of one kind (`original-kind.ts`). */
+export interface Original {
+  kind: 'pdf' | 'image' | 'html' | 'spreadsheet' | 'office' | 'text' | 'other';
+  id: string;
+  path: string;
+  title: string;
+  filename: string;
+  mediaType: string;
+  object: string;
+  bytes: Buffer;
+  /** The type `download_object` sends it as (`transfers.rs` `INERT_TYPES`, else octet-stream). */
+  sentAs: string;
+  text: string;
+}
+
+const PAGE_RENDER = '9'.repeat(64);
+
+/** An original of each kind; the HTML one is the hostile file, framed from the sandbox origin. */
+export const ORIGINALS: Original[] = [
+  {
+    kind: 'pdf',
+    id: 'a1a1a1a1-0000-4000-8000-000000000001',
+    path: 'annual-report.pdf.md',
+    title: 'Annual report 2025',
+    filename: 'annual-report.pdf',
+    mediaType: 'application/pdf',
+    object: '1'.repeat(64),
+    bytes: onePagePdf(),
+    sentAs: 'application/pdf',
+    text: 'Annual report 2025.',
+  },
+  {
+    kind: 'image',
+    id: 'a1a1a1a1-0000-4000-8000-000000000002',
+    path: 'whiteboard.png.md',
+    title: 'Whiteboard photo',
+    filename: 'whiteboard.png',
+    mediaType: 'image/png',
+    object: '2'.repeat(64),
+    bytes: ONE_PIXEL_PNG,
+    sentAs: 'image/png',
+    text: 'A photo of the whiteboard.',
+  },
+  {
+    kind: 'html',
+    id: HTML_ITEM,
+    path: HTML_PATH,
+    title: 'Workshop welcome page',
+    filename: HTML_FILE,
+    mediaType: 'text/html',
+    object: HTML_OBJECT,
+    bytes: Buffer.from(HOSTILE_HTML),
+    sentAs: 'application/octet-stream',
+    text: 'Welcome to the workshop.',
+  },
+  {
+    kind: 'spreadsheet',
+    id: 'a1a1a1a1-0000-4000-8000-000000000004',
+    path: 'revenue.csv.md',
+    title: 'Revenue by quarter',
+    filename: 'revenue.csv',
+    mediaType: 'text/csv',
+    object: '4'.repeat(64),
+    bytes: Buffer.from('quarter,revenue\nQ1,1.2\nQ2,1.4\nQ3,1.9\nQ4,2.3\n'),
+    sentAs: 'application/octet-stream',
+    text: '| quarter | revenue |\n| --- | --- |\n| Q1 | 1.2 |\n| Q2 | 1.4 |',
+  },
+  {
+    kind: 'office',
+    id: 'a1a1a1a1-0000-4000-8000-000000000005',
+    path: 'minutes.docx.md',
+    title: 'Minutes',
+    filename: 'minutes.docx',
+    mediaType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    object: '5'.repeat(64),
+    bytes: Buffer.from('PK\u0003\u0004 minutes'),
+    sentAs: 'application/octet-stream',
+    text: 'Minutes of the October workshop.',
+  },
+  {
+    kind: 'text',
+    id: 'a1a1a1a1-0000-4000-8000-000000000006',
+    path: 'tally.py.md',
+    title: 'Tally script',
+    filename: 'tally.py',
+    mediaType: 'text/x-python',
+    object: '6'.repeat(64),
+    bytes: Buffer.from('def tally(rows):\n    return sum(row["revenue"] for row in rows)\n'),
+    sentAs: 'application/octet-stream',
+    text: '```python\ndef tally(rows):\n    return sum(row["revenue"] for row in rows)\n```',
+  },
+  {
+    kind: 'other',
+    id: 'a1a1a1a1-0000-4000-8000-000000000007',
+    path: 'photos.zip.md',
+    title: 'Photos',
+    filename: 'photos.zip',
+    mediaType: 'application/zip',
+    object: '7'.repeat(64),
+    bytes: Buffer.from('PK\u0005\u0006'),
+    sentAs: 'application/octet-stream',
+    text: '',
+  },
+];
+
+function originalSummary(original: Original) {
+  return {
+    ...summary(original.id, original.path, original.title, 'source-file', 'source'),
+    extraction: {
+      status: original.kind === 'other' ? 'unsupported' : 'completed',
+      text_origin: original.kind === 'other' ? 'none' : 'converter',
+      corrected: false,
+    },
+    media_type: original.mediaType,
+  };
+}
+
+function originalAppearance(original: Original) {
+  const converted = original.kind !== 'other';
+  return {
+    extraction: {
+      corrected: false,
+      outcome: converted ? { status: 'completed' } : { status: 'unsupported' },
+      text_origin: converted ? 'converter' : 'none',
+      warnings: [],
+      ...(converted ? { digest: 'f'.repeat(64) } : {}),
+      ...(original.kind === 'pdf' ? { page_count: 1 } : {}),
+    },
+    media_type: original.mediaType,
+    metadata: {},
+    names: [
+      {
+        filename: original.filename,
+        folder: '',
+        observed_at: '2026-10-19T08:00:00.000Z',
+        supplied_by: 'upload',
+      },
+    ],
+    object: original.object,
+    size: String(original.bytes.length),
+  };
+}
+
+/** The Explorer's answers with every original at the root of the workspace. */
+export function originalsAnswers(): Answers {
+  const byId = new Map(ORIGINALS.map((original) => [original.id, original]));
+  return {
+    '/api/items/list-items': (body) =>
+      body.folder === 'notes'
+        ? ok({ folders: [], items: [], revision: HEAD })
+        : ok({ folders: ['notes'], items: ORIGINALS.map(originalSummary), revision: HEAD }),
+    '/api/items/get-item': (body) => {
+      const original = byId.get(String(body.item_id)) ?? ORIGINALS[0];
+      if (original === undefined) return { status: 404, body: { code: 'not_found', message: '' } };
+      return ok({
+        summary: originalSummary(original),
+        body: `# ${original.title}\n\n${original.text}`,
+        content_digest: 'c'.repeat(64),
+        properties: { type: 'source-file', okf_jawn: { id: original.id } },
+        source: originalAppearance(original),
+      });
+    },
+    '/api/reads/get-sources': () => ok({ revision: HEAD, sources: [], declared: [] }),
+    '/api/attention/get-attention': () => ok({ revision: HEAD, items: [], next_cursor: null }),
+    '/api/reads/read-item': (body) => {
+      const original = byId.get(String(body.item_id)) ?? ORIGINALS[0];
+      if (original === undefined) return { status: 404, body: { code: 'not_found', message: '' } };
+      const source = {
+        workspace_id: WS,
+        item_id: original.id,
+        path: original.path,
+        revision: HEAD,
+        selection: body.selection,
+        locations: [],
+      };
+      const pages =
+        original.kind === 'pdf' && (body.view === 'pages' || body.view === 'multimodal');
+      return ok({
+        markdown: original.text,
+        media: pages
+          ? [
+              {
+                media_type: 'image/png',
+                object: PAGE_RENDER,
+                role: 'page_image',
+                width: 1,
+                height: 1,
+                source: {
+                  ...source,
+                  selection: { kind: 'pages', range: { start: 1, end: 1 } },
+                  locations: [{ provenance: 'direct', locator: { kind: 'page', page_no: 1 } }],
+                },
+              },
+            ]
+          : [],
+        outline: [],
+        receipt_id: '55555555-5555-4555-8555-555555555555',
+        source,
+        truncated: false,
+        view: body.view ?? 'text',
+        warnings: [],
+        extraction: {
+          status: original.kind === 'other' ? 'unsupported' : 'completed',
+          text_origin: original.kind === 'other' ? 'none' : 'converter',
+          corrected: false,
+        },
+      });
+    },
+  };
+}
+
+/**
+ * Answer `download_object` for every original and the PDF's page render, as `transfers.rs` sends
+ * a download: an attachment, `sandbox; default-src 'none'`, `nosniff`, the declared type unless
+ * the stored one is inert, a single range when asked (206 with `Content-Range`). Registered after
+ * `routeApi`, so it answers before that route's `/api/**`.
+ */
+export async function routeObjects(page: Page) {
+  const bytes = new Map<string, { body: Buffer; type: string }>(
+    ORIGINALS.map((original) => [original.object, { body: original.bytes, type: original.sentAs }]),
+  );
+  bytes.set(PAGE_RENDER, { body: ONE_PIXEL_PNG, type: 'image/png' });
+  await page.route('**/api/workspaces/*/items/*/revisions/*/objects/*', async (route: Route) => {
+    const digest = new URL(route.request().url()).pathname.split('/').pop() ?? '';
+    const found = bytes.get(digest);
+    if (route.request().method() !== 'GET' || found === undefined) {
+      await route.fulfill({
+        status: 404,
+        contentType: 'application/json',
+        body: JSON.stringify({ code: 'not_found', message: 'No such object' }),
+      });
+      return;
+    }
+    const headers: Record<string, string> = {
+      'content-type': found.type,
+      'accept-ranges': 'bytes',
+      'content-disposition': 'attachment',
+      'content-security-policy': "sandbox; default-src 'none'",
+      'x-content-type-options': 'nosniff',
+    };
+    const range = /^bytes=(\d+)-(\d*)$/.exec((await route.request().allHeaders()).range ?? '');
+    if (range !== null) {
+      const start = Number(range[1]);
+      const end = Math.min(
+        range[2] === undefined || range[2] === '' ? found.body.length - 1 : Number(range[2]),
+        found.body.length - 1,
+      );
+      const part = found.body.subarray(start, end + 1);
+      await route.fulfill({
+        status: 206,
+        headers: {
+          ...headers,
+          'content-length': String(part.length),
+          'content-range': `bytes ${start}-${end}/${found.body.length}`,
+        },
+        body: part,
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      headers: { ...headers, 'content-length': String(found.body.length) },
+      body: found.body,
+    });
+  });
+}
+
+/** One Content-Security-Policy violation the page reported (`securitypolicyviolation`). */
+export interface Violation {
+  directive: string;
+  blocked: string;
+  source: string;
+  sample: string;
+  document: string;
+}
+
+/** A `<style>` element put in the page by script, with what it starts with and who made it. */
+export interface InsertedStyle {
+  text: string;
+  attributes: string;
+  stack: string;
+}
+
+/** Everything the page did under the policy that the spec reports. */
+export interface PolicyFindings {
+  violations: Violation[];
+  styles: InsertedStyle[];
+  /** Each `blob:` or `data:` address the page made or used, with where it was seen. */
+  urls: Array<{ url: string; where: string }>;
+  /** Each worker the page started, by its address. */
+  workers: string[];
+}
+
+/**
+ * Watch the page from before its first script, in its top document only (the sandboxed frame has
+ * its own policy and its own refusals): every `securitypolicyviolation`, every `<style>` element
+ * added (with the stack that made it, where `createElement` made it), every object URL made, and
+ * every worker started. `policyFindings` reads them, with the `blob:` and `data:` addresses then in
+ * the page's attributes, computed styles and stylesheets.
+ */
+export async function watchPolicy(page: Page) {
+  await page.addInitScript(() => {
+    if (window !== window.top) return;
+    const found = {
+      violations: [] as Array<Record<string, string>>,
+      styles: [] as Array<Record<string, string>>,
+      urls: [] as Array<{ url: string; where: string }>,
+      workers: [] as string[],
+    };
+    Object.defineProperty(window, '__okfPolicy', { value: found });
+    document.addEventListener(
+      'securitypolicyviolation',
+      (event) => {
+        found.violations.push({
+          directive: event.effectiveDirective || event.violatedDirective,
+          blocked: event.blockedURI,
+          source: `${event.sourceFile}:${event.lineNumber}:${event.columnNumber}`,
+          sample: event.sample,
+          document: event.documentURI,
+        });
+      },
+      true,
+    );
+    const made = new WeakMap<Node, string>();
+    const createElement = Document.prototype.createElement;
+    Document.prototype.createElement = function (
+      this: Document,
+      name: string,
+      options?: ElementCreationOptions,
+    ) {
+      const element = createElement.call(this, name, options);
+      if (name.toLowerCase() === 'style') made.set(element, new Error('style made').stack ?? '');
+      return element;
+    } as typeof Document.prototype.createElement;
+    const record = (node: Node) => {
+      if (!(node instanceof HTMLStyleElement)) return;
+      found.styles.push({
+        text: (node.textContent ?? '').replace(/\s+/g, ' ').slice(0, 200),
+        attributes: [...node.attributes].map((a) => `${a.name}=${a.value}`).join(' '),
+        stack: (made.get(node) ?? '').split('\n').slice(1, 6).join(' | '),
+      });
+    };
+    new MutationObserver((records) => {
+      for (const entry of records) for (const node of entry.addedNodes) record(node);
+    }).observe(document, { childList: true, subtree: true });
+    const createObjectURL = URL.createObjectURL;
+    URL.createObjectURL = (object: Blob | MediaSource) => {
+      const url = createObjectURL(object);
+      const type = object instanceof Blob ? object.type || 'no type' : 'a media source';
+      found.urls.push({ url: 'blob:', where: `URL.createObjectURL (${type})` });
+      return url;
+    };
+    const NativeWorker = window.Worker;
+    window.Worker = class extends NativeWorker {
+      constructor(url: string | URL, options?: WorkerOptions) {
+        found.workers.push(String(url));
+        super(url, options);
+      }
+    };
+  });
+}
+
+/** What the page did under the policy so far, with the `blob:` and `data:` addresses it holds. */
+export async function policyFindings(page: Page): Promise<PolicyFindings> {
+  return page.evaluate(() => {
+    const raw: unknown = Reflect.get(window, '__okfPolicy');
+    const empty = { violations: [], styles: [], urls: [], workers: [] };
+    const found = (typeof raw === 'object' && raw !== null ? raw : empty) as {
+      violations: Violation[];
+      styles: InsertedStyle[];
+      urls: Array<{ url: string; where: string }>;
+      workers: string[];
+    };
+    const urls = [...found.urls];
+    const scheme = /^(blob:|data:)/i;
+    const inCss = /url\(\s*["']?(blob:|data:)([^"')]{0,60})/gi;
+    for (const element of document.querySelectorAll('*')) {
+      for (const attribute of element.attributes) {
+        if (scheme.test(attribute.value.trim())) {
+          urls.push({
+            url: attribute.value.trim().slice(0, 60),
+            where: `<${element.localName}> ${attribute.name}`,
+          });
+        }
+      }
+      const style = getComputedStyle(element);
+      for (const property of ['background-image', 'mask-image', 'list-style-image', 'content']) {
+        for (const match of style.getPropertyValue(property).matchAll(inCss)) {
+          urls.push({ url: `${match[1]}${match[2]}`, where: `<${element.localName}> ${property}` });
+        }
+      }
+    }
+    for (const sheet of document.styleSheets) {
+      let rules: CSSRuleList;
+      try {
+        rules = sheet.cssRules;
+      } catch {
+        continue;
+      }
+      for (const rule of rules) {
+        for (const match of rule.cssText.matchAll(inCss)) {
+          urls.push({
+            url: `${match[1]}${match[2]}`,
+            where: `stylesheet ${sheet.href ?? '<style>'}: ${rule.cssText.slice(0, 60)}`,
+          });
+        }
+      }
+    }
+    return { ...found, urls };
+  });
+}
