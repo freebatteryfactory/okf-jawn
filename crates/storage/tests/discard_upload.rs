@@ -29,6 +29,13 @@ use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _, ReadBuf};
 
+/// The same fixed identities/body/scope idiom as the neighboring object-store tests.
+macro_rules! uuid {
+    ($n:expr) => {
+        serde_json::from_value(json!(uuid_text($n)))
+    };
+}
+
 /// Signals only after actual body bytes were read, under the store's real upload writer claim.
 struct StartedBody {
     reader: tokio::io::DuplexStream,
@@ -39,13 +46,6 @@ struct StartedBody {
 struct Accept;
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
-
-/// The same fixed identities/body/scope idiom as objects_and_credentials.rs.
-macro_rules! uuid {
-    ($n:expr) => {
-        serde_json::from_value(json!(uuid_text($n)))
-    };
-}
 
 impl AsyncRead for StartedBody {
     fn poll_read(
@@ -721,7 +721,7 @@ async fn discard_safety_keeps_card_rooted_bytes_through_real_cleanup() -> TestRe
 
 /// Section4.4's post-transaction recovery: a real unlink failure occurs after the tombstone
 /// commits, never success.
-/// An empty directory at the private incoming-file path fails remove_file on both platforms.
+/// An empty directory at the private incoming-file path makes file removal fail on both platforms.
 /// Repairing only that obstruction lets the same mutation answer the exact durable prior slot.
 #[tokio::test]
 async fn discard_safety_retries_after_a_real_post_tombstone_unlink_failure() -> TestResult {

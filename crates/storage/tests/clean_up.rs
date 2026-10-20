@@ -68,8 +68,8 @@ impl World {
             .await?)
     }
 
-    /// Legitimate legacy unreferenced bytes: retain through BlobStore, then remove exactly its
-    /// one pending root. This fixture does not claim that discard_upload is connected yet.
+    /// Legitimate legacy unreferenced bytes: retain through the blob store, then remove exactly its
+    /// one pending root. This fixture isolates cleanup from the discard operation.
     async fn orphan(&self, bytes: &[u8]) -> Fallible<Digest> {
         let object = self
             .storage

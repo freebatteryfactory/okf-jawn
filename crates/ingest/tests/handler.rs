@@ -28,8 +28,8 @@ mod job_handler {
         ConversionOutcome, ConversionSettings, FailureReason, TextOrigin,
     };
     use okf_jawn_contract::identity::{
-        Digest, ItemId, MutationId, PurgeId, Revision, TenantId, Timestamp, UploadId, WorkspaceId,
-        WorkspacePath,
+        Digest, ItemId, JobId, MutationId, PurgeId, Revision, TenantId, Timestamp, UploadId,
+        WorkspaceId, WorkspacePath,
     };
     use okf_jawn_contract::import::JobState;
     use okf_jawn_contract::purge::{Purge, PurgeReport, PurgeState};
@@ -1944,8 +1944,11 @@ mod job_handler {
             );
             assert_eq!(entry.failures.len(), 1);
             assert!(!some(entry.failures.first(), "the recorded refusal")?.1);
-            assert!(world.uploads.consumed()?.is_empty());
-            assert!(world.uploads.batches()?.is_empty());
+            assert_eq!(world.uploads.consumed()?, Vec::<(UploadId, JobId)>::new());
+            assert_eq!(
+                world.uploads.batches()?,
+                Vec::<(Vec<UploadId>, JobId)>::new()
+            );
             assert!(world.versions.written()?.is_empty());
             assert_eq!(world.converter.runs.load(Ordering::SeqCst), 0);
         }
@@ -1982,8 +1985,11 @@ mod job_handler {
             "upload 1 is a workspace archive this installation wrote; restore it instead of importing it"
         );
         assert!(!some(entry.failures.first(), "the recorded refusal")?.1);
-        assert!(world.uploads.consumed()?.is_empty());
-        assert!(world.uploads.batches()?.is_empty());
+        assert_eq!(world.uploads.consumed()?, Vec::<(UploadId, JobId)>::new());
+        assert_eq!(
+            world.uploads.batches()?,
+            Vec::<(Vec<UploadId>, JobId)>::new()
+        );
         assert!(world.versions.written()?.is_empty());
         assert_eq!(world.converter.runs.load(Ordering::SeqCst), 0);
         Ok(())

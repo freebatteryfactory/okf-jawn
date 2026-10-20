@@ -517,7 +517,7 @@ fn digest_key(digest: &Digest) -> Result<[u8; 32], ApiError> {
     let mut key = [0; 32];
     for (slot, pair) in key
         .iter_mut()
-        .zip(digest.as_str().as_bytes().chunks_exact(2))
+        .zip(digest.as_str().as_bytes().as_chunks::<2>().0.iter())
     {
         let text = std::str::from_utf8(pair)
             .map_err(|_| internal("an object identity is not hexadecimal"))?;

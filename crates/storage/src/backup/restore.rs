@@ -210,8 +210,7 @@ pub(crate) fn restore(
         checked,
         &mut pinned,
         staging,
-        mode,
-        fence,
+        (mode, fence),
     );
     for pin in pinned {
         pin.end()?;
@@ -559,9 +558,9 @@ fn put_back(
     checked: Checked,
     pinned: &mut Vec<Pinned>,
     staging: &Path,
-    mode: &Mode,
-    fence: Option<super::fence::Fence>,
+    attempt: (&Mode, Option<super::fence::Fence>),
 ) -> Result<(RestoreReport, WorkspaceManifest), ApiError> {
+    let (mode, fence) = attempt;
     let Checked {
         mut opened,
         manifest,

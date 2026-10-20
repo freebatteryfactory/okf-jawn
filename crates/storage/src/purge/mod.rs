@@ -177,7 +177,7 @@ impl StoragePurger {
                         Ok(()) => {
                             removed = removed.checked_add(1).ok_or_else(|| {
                                 internal("a clean-up file count exceeds its report")
-                            })?
+                            })?;
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                         Err(error) => return Err(io_error("remove", &path, &error)),

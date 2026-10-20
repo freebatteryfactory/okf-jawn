@@ -273,9 +273,8 @@ impl Sweep {
                 return Err(ApiError::new(
                     ErrorCode::Unavailable,
                     format!(
-                        "a write to workspace {} that began before the purge was recorded is \
-                         still running; repeat the purge to resume it",
-                        target
+                        "a write to workspace {target} that began before the purge was recorded is \
+                         still running; repeat the purge to resume it"
                     ),
                 ));
             }

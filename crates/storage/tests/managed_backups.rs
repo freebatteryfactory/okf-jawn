@@ -3,9 +3,6 @@
 //! classifier under test. No converter, bundle importer or live account is simulated here.
 #![cfg(feature = "runtime")]
 
-#[path = "../../../tests/support/check.rs"]
-mod check;
-
 use std::io::Cursor;
 
 use check::{TestResult, some};
@@ -326,3 +323,6 @@ async fn managed_backups_agree_with_the_workspace_archive_exclusion() -> TestRes
     );
     Ok(())
 }
+
+#[path = "../../../tests/support/check.rs"]
+mod check;
