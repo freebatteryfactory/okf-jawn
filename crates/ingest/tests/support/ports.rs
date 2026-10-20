@@ -1443,6 +1443,16 @@ impl Purger for FakePurger {
 }
 
 impl UploadStore for FakeUploads {
+    /// Remove a slot under its mutation; this handler fixture does not use discards.
+    fn discard<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _upload: UploadId,
+        _mutation_id: MutationId,
+    ) -> PortFuture<'a, UploadRecord> {
+        unused("discard")
+    }
+
     fn list<'a>(
         &'a self,
         _scope: &'a StorageScope,

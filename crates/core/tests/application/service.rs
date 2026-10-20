@@ -125,21 +125,9 @@ fn an_ipv6_sandbox_host_must_be_an_ipv6_address() -> TestResult {
 async fn the_rows_of_contract_batch_2_answer_not_implemented() -> TestResult {
     let world = World::new()?;
     let workspace = scope()?.workspace_id;
-    let upload = json!("77777777-7777-4777-8777-777777777777");
     let key = json!("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
     let base = json!("a".repeat(40));
     let refused = [
-        err_of(
-            world
-                .service
-                .discard_upload(
-                    &alice(OperationName::DiscardUpload, None)?,
-                    serde_json::from_value(json!({
-                        "workspace_id": workspace, "upload_id": upload, "idempotency_key": key
-                    }))?,
-                )
-                .await,
-        )?,
         err_of(
             world
                 .service
@@ -165,7 +153,7 @@ async fn the_rows_of_contract_batch_2_answer_not_implemented() -> TestResult {
                 .await,
         )?,
     ];
-    let names = ["discard_upload", "move_folder", "delete_folder"];
+    let names = ["move_folder", "delete_folder"];
     for (error, name) in refused.iter().zip(names) {
         assert_eq!(error.code, ErrorCode::NotImplemented, "{name}");
         assert!(error.message.contains(name), "{name}: {}", error.message);

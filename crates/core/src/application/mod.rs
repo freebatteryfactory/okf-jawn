@@ -263,6 +263,9 @@ macro_rules! route {
     (complete_upload) => {
         uploads::complete_upload
     };
+    (discard_upload) => {
+        uploads::discard_upload
+    };
     (get_upload) => {
         uploads::get_upload
     };

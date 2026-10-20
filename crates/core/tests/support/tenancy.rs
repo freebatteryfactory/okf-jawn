@@ -29,7 +29,9 @@
 //!   a completed slot's object is the received bytes' digest and length. `put_content` appends
 //!   a body within the slot's room (the smaller of the limit and the announced size, less what
 //!   it holds) with storage's refusals, and keeps each call's limit; `consume` and
-//!   `consume_batch` are not modelled.
+//!   `consume_batch` are not modelled. Discard keeps the scoped prior occurrence per mutation,
+//!   refuses a consumed slot, and prevents the original create from reopening it. Purge/job
+//!   reservation checks and writer/filesystem races belong to the real storage tests.
 //! - `FakeCredentials` issues connectors unique on the mutation with a counter for a secret
 //!   (storage draws 32 random bytes), and keeps their order for listing, newest first.
 //! - `FakeLog` keeps every append, except an identical notification already appended under the
@@ -181,6 +183,8 @@ pub struct FakeUploads {
 struct UploadState {
     /// Every slot, in the order it was opened or first put.
     slots: Vec<Slot>,
+    /// The discard mutation and prior slot; bytes are cleared when the slot is discarded.
+    discarded: Vec<(MutationId, Slot)>,
     /// Every listing asked for, with its workspace.
     queries: Vec<(StorageScope, UploadQuery)>,
     /// How many times `create` was called.
@@ -1432,6 +1436,56 @@ impl JobQueue for FakeQueue {
 }
 
 impl UploadStore for FakeUploads {
+    /// "A repeat under the same mutation answers the record first answered"; a missing
+    /// scoped slot is `NotFound`, a consumed one `Conflict`. The fake has no active writers,
+    /// queued-job reservations or filesystem; those refusals are real-adapter proofs.
+    fn discard<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        upload: UploadId,
+        mutation_id: MutationId,
+    ) -> PortFuture<'a, UploadRecord> {
+        Box::pin(async move {
+            let mut state = lock_api(&self.state)?;
+            if let Some((_, prior)) = state
+                .discarded
+                .iter()
+                .find(|(mutation, _)| *mutation == mutation_id)
+            {
+                if prior.scope != *scope {
+                    return Err(ApiError::new(ErrorCode::NotFound, "no such upload"));
+                }
+                return if prior.record.id == upload {
+                    Ok(prior.record.clone())
+                } else {
+                    Err(ApiError::new(
+                        ErrorCode::Conflict,
+                        "this mutation discarded another upload",
+                    ))
+                };
+            }
+            let position = state
+                .slots
+                .iter()
+                .position(|slot| slot.scope == *scope && slot.record.id == upload)
+                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such upload"))?;
+            if let Some(job) = state.slots[position].record.consumed_by {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    format!(
+                        "a job took this upload (job {}); it cannot be discarded",
+                        job.0
+                    ),
+                ));
+            }
+            let mut prior = state.slots.remove(position);
+            prior.bytes.clear();
+            let record = prior.record.clone();
+            state.discarded.push((mutation_id, prior));
+            Ok(record)
+        })
+    }
+
     /// "Open a slot before authenticated binary bytes arrive. Unique on `mutation_id`: a
     /// repeated id opens nothing and returns the prior slot." A prior slot of another workspace
     /// is `NotFound`, as storage reads the slot back within the workspace asked.
@@ -1444,6 +1498,16 @@ impl UploadStore for FakeUploads {
         Box::pin(async move {
             let mut state = lock_api(&self.state)?;
             state.creates = state.creates.saturating_add(1);
+            if state
+                .discarded
+                .iter()
+                .any(|(_, slot)| slot.mutation == Some(mutation_id))
+            {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "the slot this request opened was discarded",
+                ));
+            }
             if let Some(prior) = state
                 .slots
                 .iter()
