@@ -53,6 +53,9 @@ function Revisions() {
       <button type="button" onClick={() => setRevision(HEAD)}>
         Read the head
       </button>
+      <button type="button" onClick={() => setRevision(OLD)}>
+        Read the old revision
+      </button>
       <HtmlSandbox {...htmlProps({ revision })} />
     </>
   );
@@ -384,6 +387,33 @@ describe('the HTML sandbox viewer (A3)', () => {
     expect(asked).not.toContain(htmlAppearance().extraction.digest);
     const region = screen.getByRole('region', { name: 'welcome.html in the sandbox' });
     expect(within(region).getAllByTitle(/in the sandbox$/)).toHaveLength(1);
+    expect(api.violations).toEqual([]);
+  });
+
+  it('does not reuse an earlier capability when returning to its revision', async () => {
+    // A3: mint just before framing, even when this binding was shown earlier. The expected
+    // addresses are independently numbered service answers, never derived from the viewer.
+    let answerReturn: (reply: Reply) => void = () => undefined;
+    let requests = 0;
+    const api = mockApi({
+      [CREATE_SANDBOX_CAPABILITY]: () => {
+        requests += 1;
+        if (requests === 1) return ok(capability(1));
+        return new Promise<Reply>((resolve) => {
+          if (requests === 3) answerReturn = resolve;
+        });
+      },
+    });
+    await renderViewer(<Revisions />);
+    expect((await frameShown()).getAttribute('src')).toBe(capability(1).url);
+    await userEvent.click(screen.getByRole('button', { name: 'Read the head' }));
+    await waitFor(() => expect(api.callsTo(CREATE_SANDBOX_CAPABILITY)).toHaveLength(2));
+    expect(document.querySelector('iframe')).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Read the old revision' }));
+    await waitFor(() => expect(api.callsTo(CREATE_SANDBOX_CAPABILITY)).toHaveLength(3));
+    expect(document.querySelector('iframe')).toBeNull();
+    answerReturn(ok(capability(3)));
+    expect((await frameShown()).getAttribute('src')).toBe(capability(3).url);
     expect(api.violations).toEqual([]);
   });
 

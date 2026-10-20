@@ -79,7 +79,7 @@ class NotFramed extends Error {
 const NOT_FRAMED: FailureMessage = {
   title: 'The service answered an address this page does not frame.',
   advice:
-    'A file’s HTML is shown only from the separate sandbox origin, never from this page’s own origin. Nothing was framed.',
+    "A file's HTML is shown only from the separate sandbox origin, never from this page's own origin. Nothing was framed.",
   action: { kind: 'retry', label: 'Try again' },
 };
 
@@ -122,6 +122,13 @@ export function HtmlSandbox(props: OriginalProps) {
   }
   return (
     <SandboxFrame
+      // Returning to an earlier binding must mint again, never frame its old state first.
+      key={keyOf({
+        workspaceId: props.workspaceId,
+        itemId: props.itemId,
+        revision: props.revision,
+        object: props.appearance.object,
+      })}
       workspaceId={props.workspaceId}
       itemId={props.itemId}
       revision={props.revision}
