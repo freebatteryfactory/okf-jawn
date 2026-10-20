@@ -27,7 +27,15 @@
  */
 
 import { expect, type Locator, type Page, test } from '@playwright/test';
-import { expectVisibleFocus, routeApi, shot, useExplorerServer, WS } from './support/explorer';
+import {
+  expectVisibleFocus,
+  ok,
+  routeApi,
+  shot,
+  useExplorerServer,
+  WS,
+  workspace,
+} from './support/explorer';
 import {
   ELSEWHERE,
   expectNoAxeViolationsBesideTheSandbox,
@@ -74,12 +82,21 @@ async function watchPage(page: Page): Promise<Watched> {
 async function openHtmlSource(
   page: Page,
   origin: string,
-  options: { lifetimeMs?: number; isolation?: Record<string, string> } = {},
+  options: { lifetimeMs?: number; isolation?: Record<string, string>; archived?: boolean } = {},
 ): Promise<{ service: SandboxService; watched: Watched; original: Locator }> {
   const watched = await watchPage(page);
   await underPagePolicy(page, origin);
   const { service, answers } = await playSandbox(page, origin, options);
-  await routeApi(page, { ...htmlSourceAnswers(), ...answers });
+  await routeApi(page, {
+    ...htmlSourceAnswers(),
+    ...answers,
+    ...(options.archived
+      ? {
+          '/api/workspaces/open-workspace': () =>
+            ok({ ...workspace, archived_at: '2026-10-19T08:00:00.000Z' }),
+        }
+      : {}),
+  });
   await page.goto(`${origin}/w/${WS}/i/${HTML_ITEM}`);
   const original = await openOriginal(page);
   await expect(original).toBeVisible();
@@ -267,9 +284,33 @@ test.describe('an HTML source in the sandbox', () => {
     await expectNothingRan(page, service, watched);
   });
 
-  test('from the keyboard alone: into the frame and out, and a reload', async ({ page }) => {
+  test('from the keyboard alone: into the frame and out, and a reload', async ({
+    page,
+    browserName,
+  }) => {
     const { service, watched, original } = await openHtmlSource(page, server.origin());
     await expectFramed(page, original, service);
+
+    // E8: WebKit omits links from its default Tab order. Focus the link there, then exercise
+    // Enter; Chromium reaches it with Tab. No allow-popups token means neither opens a window.
+    const link = inside(page).getByRole('link', { name: 'Open the programme in a new window' });
+    if (browserName === 'webkit') await link.focus();
+    else await tabTo(page, link);
+    await expect(link).toBeFocused();
+    const outline = await link.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { style: style.outlineStyle, width: style.outlineWidth };
+    });
+    expect(outline.style).not.toBe('none');
+    expect(outline.width).not.toBe('0px');
+    const popup = page.waitForEvent('popup', { timeout: 2_000 }).then(
+      () => 'a window opened',
+      () => 'no window',
+    );
+    await page.keyboard.press('Enter');
+    // WebKit does not emit Chromium's popup refusal text; the observable contract is no popup.
+    expect(await popup).toBe('no window');
+    expect(page.context().pages()).toHaveLength(1);
 
     // Tab reaches the file's form inside the frame; Enter sends nothing.
     const send = inside(page).getByRole('button', { name: 'Send' });
@@ -288,6 +329,20 @@ test.describe('an HTML source in the sandbox', () => {
     await expectNothingRan(page, service, watched);
     await expectNoAxeViolationsBesideTheSandbox(page, 'the sandbox reloaded from the keyboard');
     await shot(page, 'm4a-sandbox-04-keyboard-reloaded');
+  });
+
+  test('an archived workspace still opens and reloads its HTML original', async ({ page }) => {
+    // A3's archived-workspace ruling allows reads, including capability minting. The service
+    // answer marks the workspace archived; the independently numbered capabilities prove both reads.
+    const { service, watched, original } = await openHtmlSource(page, server.origin(), {
+      archived: true,
+    });
+    await expectFramed(page, original, service);
+    await reload(original).click();
+    await expectFramed(page, original, service, 2);
+    await expectNothingRan(page, service, watched);
+    await expectNoAxeViolationsBesideTheSandbox(page, 'an archived workspace HTML read');
+    await shot(page, 'm4a-sandbox-05-archived');
   });
 
   test('without the sandbox origin’s headers, the frame’s own sandbox still stops every script', async ({
