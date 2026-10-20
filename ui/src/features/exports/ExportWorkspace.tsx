@@ -7,7 +7,9 @@
  * request, and the page says that this may be newer than the version it shows. The other choice is
  * a version of its history, picked from the versions of the head the page shows (M3's Timeline
  * reading, `history.ts` `logOptions`, asked only once that choice is made), and exported at its
- * resolved revision whatever has changed since. Its history is left out unless the person asks
+ * resolved revision whatever has changed since. A listing that fails is said with its retry: the
+ * first page in place of the list, a later page under the versions already listed, which stay, and
+ * its retry asks again from the same place. Its history is left out unless the person asks
  * for it (`include_history`). It is offered to a person who may write (the operation's permission)
  * and stays offered in an archived workspace, where the service runs it too (`allowedOperation`); a
  * person who may not is told why, in its place. Were the archive to stop it (the contract's list
@@ -74,6 +76,14 @@ export function ExportWorkspace({ workspaceId, head, rights }: ExportWorkspacePr
     failed: which === 'version' && log.isError && versions.length === 0,
     error: log.error,
     run: () => log.refetch(),
+    loaded: () => listRef.current,
+  });
+  // A later page that failed: the versions listed stay; its retry asks from the same cursor.
+  const older = useRetry({
+    request: `${workspaceId} ${head} after ${versions.length}`,
+    failed: which === 'version' && log.isFetchNextPageError && versions.length > 0,
+    error: log.error,
+    run: () => log.fetchNextPage(),
     loaded: () => listRef.current,
   });
   const at: At | null =
@@ -159,6 +169,14 @@ export function ExportWorkspace({ workspaceId, head, rights }: ExportWorkspacePr
               context="Listing the versions of this workspace"
               error={listing.error}
               retry={listing}
+              workspaceId={workspaceId}
+            />
+          )}
+          {which === 'version' && older.shown && (
+            <FailureNotice
+              context="Listing older versions of this workspace"
+              error={older.error}
+              retry={older}
               workspaceId={workspaceId}
             />
           )}

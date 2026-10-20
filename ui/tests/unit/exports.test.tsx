@@ -15,7 +15,16 @@ import {
   createRouter,
   RouterProvider,
 } from '@tanstack/react-router';
-import { act, cleanup, configure, fireEvent, render, screen, within } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  configure,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getJobOptions } from '../../src/api/generated/@tanstack/react-query.gen';
@@ -495,13 +504,15 @@ describe('"Export visual" is about the revision its tab reads now', () => {
 
 describe('"Export this workspace" at the version the person chooses (B3)', () => {
   /** The Jobs page of a workspace the person may change, its versions listed newest first. */
-  async function openJobsWithHistory() {
+  async function openJobsWithHistory(
+    log: (body: Json) => Reply = () => ok({ commits: VERSIONS, next_cursor: null }),
+  ) {
     const service = exportService();
     const api = mockApi(
       explorerHandlers({
         [OPEN]: () => ok(writableWorkspace),
         ...service.handlers,
-        [LOG]: () => ok({ commits: VERSIONS, next_cursor: null }),
+        [LOG]: log,
       }),
     );
     renderAt(`/w/${WS}/jobs`);
@@ -652,5 +663,42 @@ describe('"Export this workspace" at the version the person chooses (B3)', () =>
     expect(sent[2]?.idempotency_key).toBe(sent[0]?.idempotency_key);
     expect(sent[1]?.idempotency_key).not.toBe(sent[0]?.idempotency_key);
     expect(service.jobs()).toHaveLength(2);
+  });
+
+  it('says a failed listing of older versions, keeps those listed, and asks again from the same place', {
+    timeout: 15_000,
+  }, async () => {
+    let olderAsked = 0;
+    const { api } = await openJobsWithHistory((body) => {
+      const page = body.page as { cursor?: string };
+      if (page.cursor === undefined)
+        return ok({ commits: VERSIONS.slice(0, 2), next_cursor: 'older' });
+      olderAsked += 1;
+      return olderAsked === 1
+        ? // Not a transient failure: the query client does not ask again by itself.
+          fail(500, 'internal', 'the history store is busy')
+        : ok({ commits: VERSIONS.slice(2), next_cursor: null });
+    });
+    fireEvent.click(choice('A version from its history'));
+    const list = await within(section()).findByRole<HTMLSelectElement>('combobox', {
+      name: 'Version',
+    });
+    expect(list.options).toHaveLength(2);
+    const older = within(section()).getByRole('button', { name: 'Show older versions' });
+    older.focus();
+    fireEvent.click(older);
+    await within(section()).findByText(/the history store is busy/);
+    // The versions already listed stay, and so does the choice among them.
+    expect(list.options).toHaveLength(2);
+    expect(list.value).toBe(VERSIONS[0]?.revision);
+    expect(document.activeElement).not.toBe(document.body);
+    fireEvent.click(within(section()).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(list.options).toHaveLength(VERSIONS.length));
+    expect(within(section()).queryByText(/the history store is busy/)).toBeNull();
+    expect(api.callsTo(LOG).map((body) => (body.page as { cursor?: string }).cursor)).toEqual([
+      undefined,
+      'older',
+      'older',
+    ]);
   });
 });
