@@ -141,7 +141,7 @@ async fn deny(
     for _ in 0..times {
         let appended = events
             .append(
-                &tenant_scope(),
+                &EventScope::Tenant(who.tenant_id.clone()),
                 None,
                 NewEvent::permission_denied(who, OperationName::CreateItem),
             )
@@ -372,6 +372,113 @@ async fn past_its_source_bound_new_sources_share_one_counted_aggregate() -> Test
             .await,
     )?;
     assert_eq!(counted.code, ErrorCode::Unavailable);
+    Ok(())
+}
+
+/// SPEC 11 records every refusal in its tenant's log; the bounded overflow must rotate,
+/// rather than retain a new window per tenant/kind or reset an ordinary source's allowance.
+#[tokio::test]
+async fn overflow_rotation_preserves_tenant_kind_counts_and_existing_allowances() -> TestResult {
+    let clock = TestClock::new();
+    let inner = Arc::new(Recorded::default());
+    let events = SecurityEvents::with_bound(inner.clone(), clock.clone(), 2);
+    let ordinary = principal("ordinary");
+    assert_eq!(deny(&events, &ordinary, 12).await?, 2);
+    assert_eq!(deny(&events, &principal("second"), 1).await?, 0);
+    let mut alpha = principal("alpha-agent");
+    alpha.tenant_id = TenantId::try_from("org_alpha".to_owned())?;
+    let mut beta = principal("beta-agent");
+    beta.tenant_id = TenantId::try_from("org_beta".to_owned())?;
+    assert_eq!(deny(&events, &alpha, 3).await?, 3);
+    for _ in 0..2 {
+        events.refused(Some(&alpha.tenant_id), "sign-in").await?;
+    }
+    let early = inner.all()?;
+    let (_, mutation, aggregate) = some(early.last(), "the rotated alpha denial aggregate")?;
+    assert_eq!(early.len(), 12);
+    assert_eq!(mutation, &None);
+    assert_eq!(aggregate.kind, EventKind::PermissionDenied);
+    assert_eq!(aggregate.count, Some(3));
+    assert!(aggregate.actor.is_none());
+    assert_eq!(deny(&events, &beta, 4).await?, 4);
+    assert_eq!(deny(&events, &alpha, 5).await?, 5);
+    assert_eq!(deny(&events, &ordinary, 2).await?, 2);
+    events.flush_all().await;
+    let all = inner.all()?;
+    assert_eq!(all.len(), 16);
+    let mut aggregates = Vec::new();
+    for (scope, mutation, event) in all {
+        if let Some(count) = event.count {
+            assert_eq!(mutation, None);
+            assert_eq!(event.operation, None);
+            assert_eq!(event.transport, None);
+            aggregates.push((
+                scope,
+                event.kind,
+                count,
+                event.actor.map(|actor| actor.subject),
+            ));
+        }
+    }
+    assert_eq!(
+        aggregates,
+        vec![
+            (
+                EventScope::Tenant(alpha.tenant_id.clone()),
+                EventKind::PermissionDenied,
+                3,
+                None
+            ),
+            (
+                EventScope::Tenant(alpha.tenant_id.clone()),
+                EventKind::SignInRefused,
+                2,
+                None
+            ),
+            (
+                EventScope::Tenant(beta.tenant_id),
+                EventKind::PermissionDenied,
+                4,
+                None
+            ),
+            (
+                tenant_scope(),
+                EventKind::PermissionDenied,
+                4,
+                Some("ordinary".to_owned())
+            ),
+            (
+                EventScope::Tenant(alpha.tenant_id),
+                EventKind::PermissionDenied,
+                5,
+                None
+            ),
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn overflow_does_not_consume_a_free_ordinary_source_slot() -> TestResult {
+    let clock = TestClock::new();
+    let inner = Arc::new(Recorded::default());
+    let events = SecurityEvents::with_bound(inner.clone(), clock.clone(), 1);
+    assert_eq!(deny(&events, &principal("old"), 1).await?, 0);
+    clock.advance(Duration::from_millis(1))?;
+    let mut other = principal("other");
+    other.tenant_id = TenantId::try_from("org_other".to_owned())?;
+    assert_eq!(deny(&events, &other, 1).await?, 1);
+    clock.advance(Duration::from_millis(59_999))?;
+    assert_eq!(deny(&events, &principal("new"), 1).await?, 0);
+    events.flush_all().await;
+    let all = inner.all()?;
+    assert_eq!(all.len(), 3);
+    let (scope, mutation, aggregate) = some(all.last(), "the remaining overflow aggregate")?;
+    assert_eq!(scope, &EventScope::Tenant(other.tenant_id));
+    assert_eq!(mutation, &None);
+    assert_eq!(aggregate.kind, EventKind::PermissionDenied);
+    assert_eq!(aggregate.count, Some(1));
+    assert!(aggregate.actor.is_none());
     Ok(())
 }
 

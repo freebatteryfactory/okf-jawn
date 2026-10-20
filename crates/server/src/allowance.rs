@@ -22,9 +22,10 @@
 //! - **A counted append** answers `Unavailable` ("counted in an aggregate"). Every writer of
 //!   these two kinds ignores the answer by its own rule (core's dispatch: "a failed append does
 //!   not change the answer"); a new writer must too.
-//! - **Bounds.** At most [`MAX_SOURCES`] sources have open windows. Past that, a new source's
-//!   events are counted in one overflow window per tenant and kind, never appended one by one,
-//!   and its aggregate names no actor.
+//! - **Bounds.** At most [`MAX_SOURCES`] ordinary sources have open windows, plus one overflow
+//!   window. Past the ordinary bound, new sources are counted, never appended one by one.
+//!   The overflow aggregate names no actor; switching its tenant or kind flushes the previous
+//!   aggregate to its own tenant's log, without resetting ordinary allowances.
 //! - **A refused sign-in with no tenant** (hosted, before any tenant is known) belongs to no log.
 //!   It is counted, and once a minute the count is written on stderr.
 //!
@@ -63,8 +64,6 @@ enum Source {
     Actor(String, String, u8, Option<String>),
     /// The source of a refused sign-in in a tenant.
     SignIn(String, String),
-    /// Every new source past the bound, per tenant and kind.
-    Overflow(String, u8),
 }
 
 /// One source's minute.
@@ -80,6 +79,8 @@ struct Window {
 #[derive(Default)]
 struct State {
     windows: BTreeMap<Source, Window>,
+    /// The one overflow window, tagged by event kind; its tenant stays in the window.
+    overflow: Option<(u8, Window)>,
     no_tenant: Option<(Instant, u64)>,
 }
 
@@ -97,20 +98,22 @@ pub const ALLOWANCE: u32 = 10;
 /// How long one source's window lasts.
 pub const WINDOW: Duration = Duration::from_secs(60);
 
-/// The most sources with open windows.
+/// The most ordinary sources with open windows, in addition to one overflow window.
 pub const MAX_SOURCES: usize = 10_000;
 
 /// How often [`SecurityEvents::run`] writes the aggregates of windows that are over.
 const FLUSH_EVERY: Duration = Duration::from_secs(1);
 
 impl SecurityEvents {
-    /// The allowance over `inner`, timed by `clock`, with at most [`MAX_SOURCES`] sources.
+    /// The allowance over `inner`, timed by `clock`, with at most [`MAX_SOURCES`] ordinary
+    /// sources and one overflow window.
     #[must_use]
     pub fn new(inner: Arc<dyn EventLog>, clock: Arc<dyn Clock>) -> Self {
         Self::with_bound(inner, clock, MAX_SOURCES)
     }
 
-    /// [`Self::new`] with at most `bound` sources with open windows.
+    /// [`Self::new`] with at most `bound` ordinary sources and one overflow window.
+    /// A zero bound counts every refusal in the overflow window.
     #[must_use]
     pub fn with_bound(inner: Arc<dyn EventLog>, clock: Arc<dyn Clock>, bound: usize) -> Self {
         Self {
@@ -180,26 +183,43 @@ impl SecurityEvents {
             // Past the bound: windows that are over make room first.
             closed.extend(state.take_windows(|began| over(began, now)));
         }
-        let source = if state.windows.contains_key(&source) || state.windows.len() < self.bound {
-            source
-        } else {
-            Source::Overflow(tenant.as_str().to_owned(), overflow_kind)
-        };
-        let overflow = matches!(source, Source::Overflow(..));
-        let window = state.windows.entry(source).or_insert_with(|| Window {
+        let overflow = !state.windows.contains_key(&source) && state.windows.len() >= self.bound;
+        let make_window = |aggregate| Window {
             began: now,
             recorded: 0,
             counted: 0,
-            aggregate: if overflow {
-                NewEvent {
-                    actor: None,
-                    ..aggregate
-                }
-            } else {
-                aggregate
-            },
+            aggregate,
             tenant: tenant.clone(),
-        });
+        };
+        let window = if overflow {
+            if state.overflow.as_ref().is_some_and(|(kind, window)| {
+                *kind != overflow_kind || window.tenant != *tenant || over(window.began, now)
+            }) {
+                closed.extend(
+                    state
+                        .overflow
+                        .take()
+                        .and_then(|(_, window)| window.into_aggregate()),
+                );
+            }
+            &mut state
+                .overflow
+                .get_or_insert_with(|| {
+                    (
+                        overflow_kind,
+                        make_window(NewEvent {
+                            actor: None,
+                            ..aggregate
+                        }),
+                    )
+                })
+                .1
+        } else {
+            state
+                .windows
+                .entry(source)
+                .or_insert_with(|| make_window(aggregate))
+        };
         let admission = if !overflow && window.recorded < ALLOWANCE {
             window.recorded = window.recorded.saturating_add(1);
             Admission::Recorded
@@ -270,11 +290,23 @@ impl State {
             .filter(|(_, window)| done(window.began))
             .map(|(source, _)| source.clone())
             .collect();
-        finished
+        let mut aggregates: Vec<_> = finished
             .into_iter()
             .filter_map(|source| self.windows.remove(&source))
             .filter_map(Window::into_aggregate)
-            .collect()
+            .collect();
+        if self
+            .overflow
+            .as_ref()
+            .is_some_and(|(_, window)| done(window.began))
+        {
+            aggregates.extend(
+                self.overflow
+                    .take()
+                    .and_then(|(_, window)| window.into_aggregate()),
+            );
+        }
+        aggregates
     }
 }
 
