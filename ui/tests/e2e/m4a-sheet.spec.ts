@@ -47,7 +47,8 @@ test.describe('A2 spreadsheet ranges', () => {
     await expect(original.getByRole('table')).toHaveAccessibleName(
       'Table 1 of 1: 2 columns, 3 rows',
     );
-    await expect(header).toBeFocused();
+    // Continuation restores the table's existing keyboard stop, which we moved to Q1.
+    await expect(original.getByRole('cell', { name: 'Q1', exact: true })).toBeFocused();
     await page.keyboard.press('Control+End');
     await expect(original.getByRole('cell', { name: '1.9', exact: true })).toBeFocused();
     await expectVisibleFocus(page);
