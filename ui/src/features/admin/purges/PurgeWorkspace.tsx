@@ -57,7 +57,9 @@ export function PurgeWorkspace({ name }: { name: string }) {
   const words = purge.failure.shown ? purgeRefusedWords(purge.failure.error) : undefined;
   return (
     <section aria-labelledby={headingId}>
-      <h4 id={headingId}>Purge</h4>
+      <h4 id={headingId} className="mt-3 font-bold">
+        Purge
+      </h4>
       {can === 'no-permission' ? (
         <Missing action="Purging this workspace" permission="admin" />
       ) : (

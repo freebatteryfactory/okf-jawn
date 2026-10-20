@@ -40,7 +40,9 @@ export function RebuildIndex() {
         : `${acceptedWords('The rebuild', start.started)} The Jobs page lists it.`;
   return (
     <section aria-labelledby={headingId}>
-      <h4 id={headingId}>Search index</h4>
+      <h4 id={headingId} className="mt-3 font-bold">
+        Search index
+      </h4>
       {can === 'no-permission' ? (
         <Missing action="Rebuilding the search index" permission="admin" />
       ) : (

@@ -65,7 +65,9 @@ export function WorkspaceDetails({ workspace }: { workspace: Workspace }) {
   if (can === 'no-permission') {
     return (
       <section aria-labelledby={headingId}>
-        <h4 id={headingId}>Name and description</h4>
+        <h4 id={headingId} className="mt-3 font-bold">
+          Name and description
+        </h4>
         <p>
           <strong>{workspace.name}</strong>
           {workspace.description.length > 0 ? `: ${workspace.description}` : ''}
@@ -111,7 +113,9 @@ export function WorkspaceDetails({ workspace }: { workspace: Workspace }) {
   const descriptionDescribedBy = describedBy(descriptionError, descriptionErrorId);
   return (
     <section aria-labelledby={headingId}>
-      <h4 id={headingId}>Name and description</h4>
+      <h4 id={headingId} className="mt-3 font-bold">
+        Name and description
+      </h4>
       <form noValidate onSubmit={submit}>
         <div className="change-field">
           <label htmlFor={nameId}>Name</label>

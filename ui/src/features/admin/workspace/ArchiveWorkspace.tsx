@@ -64,7 +64,9 @@ export function ArchiveWorkspace() {
   if (can === 'no-permission') {
     return (
       <section aria-labelledby={headingId}>
-        <h4 id={headingId}>Archive</h4>
+        <h4 id={headingId} className="mt-3 font-bold">
+          Archive
+        </h4>
         <Missing
           action={archived ? 'Unarchiving this workspace' : 'Archiving this workspace'}
           permission="admin"
@@ -89,7 +91,9 @@ export function ArchiveWorkspace() {
         .join(' ');
   return (
     <section aria-labelledby={headingId}>
-      <h4 id={headingId}>Archive</h4>
+      <h4 id={headingId} className="mt-3 font-bold">
+        Archive
+      </h4>
       <p id={aboutId} className="meta">
         {when === null
           ? 'Archiving is reversible and keeps the history. An archived workspace can still be read, exported and backed up; nothing in it can be changed until it is unarchived.'

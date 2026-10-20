@@ -32,7 +32,9 @@ export function WorkspaceLifecycle({ workspaceId }: { workspaceId: string }) {
   });
   return (
     <section aria-labelledby={headingId}>
-      <h3 id={headingId}>This workspace</h3>
+      <h3 id={headingId} className="mt-2 text-lg font-bold">
+        This workspace
+      </h3>
       {workspace.data === undefined ? (
         <p role="status">Reading this workspace…</p>
       ) : (

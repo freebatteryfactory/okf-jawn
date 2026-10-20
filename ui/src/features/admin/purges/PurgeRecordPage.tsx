@@ -148,8 +148,10 @@ function PurgeRecord({ purge }: { purge: Purge }) {
         <p className="meta">Its counts are shown once it has completed.</p>
       ) : (
         <>
-          <h2 id={reportId}>What it removed</h2>
-          <ul aria-labelledby={reportId}>
+          <h2 id={reportId} className="mt-3 font-bold">
+            What it removed
+          </h2>
+          <ul aria-labelledby={reportId} className="list-disc pl-6">
             {reportWords(report).map((sentence) => (
               <li key={sentence}>{sentence}</li>
             ))}
