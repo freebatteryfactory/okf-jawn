@@ -6,6 +6,15 @@ models, a file-hash manifest and the observed demo-readiness report. It contains
 data, browser session, connector credential or AI account key. It is not an installer or a
 completed release-qualification claim.
 
+The rehearsal of application revision `71b9127a` built all three binaries on x86-64 Ubuntu
+24.04.4 under WSL. Seventeen model files matched the recorded hashes. Real DOCX-with-picture,
+PDF and XLSX imports and pinned reads passed; Windows Chromium rendered the Linux server's
+PDF canvas and spreadsheet original. The complete protected draft/review/proposal journey,
+Linux stdio MCP discovery and pinned read, and an orderly restart with retained content also
+passed. External-driver failures and their scoped repairs remain recorded in the bundle's
+readiness report. No application repair was required. This is not a Pop!_OS-native or real
+AI-model/client pass.
+
 ## On the laptop
 
 1. Inspect `cat /etc/os-release` and `uname -m`. Extract the archive into a directory you own.
