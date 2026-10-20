@@ -182,7 +182,9 @@ describe('ViewDocument json-render round-trip', { timeout: TEST_TIMEOUT_MS }, ()
     // SourceExcerpt: the path and revision of the source it was given, and its words as rendered Markdown.
     expect(only('header strong', excerpt).textContent).toBe('fixtures/qualification-source.md');
     expect(only('header code', excerpt).textContent).toBe(source.source.revision);
-    expect(only('h1', excerpt).textContent).toBe('Qualification source');
+    // Under the Stack's h2, the source's `#` is an h3: the page's outline skips no level.
+    expect(only('h3', excerpt).textContent).toBe('Qualification source');
+    expect(excerpt.querySelector('h1, h2')).toBeNull();
     expect(only('p', excerpt).textContent).toBe(
       'Contract-valid ReadItemResponse fixture for the MCP Apps harness.',
     );
@@ -1162,6 +1164,32 @@ describe('a json_render View shows its own title and description, as a vega_lite
     expect(screen.getByText(presented.view.description)).toBeTruthy();
     // The composition's own Stack title is still there, under the View's.
     expect(screen.getByRole('heading', { name: 'Six-component catalog' })).toBeTruthy();
+  });
+
+  it("draws its description as Markdown, a heading in it below the View's title", async () => {
+    const presented = zPresentResponse.parse(presentResponseFixture);
+    const described = {
+      ...presented,
+      view: {
+        ...presented.view,
+        description: '# Scope\n\nRevenue **grew** in 2025.\n\nA second paragraph.',
+      },
+    };
+    const refusing = serverToolData(async () => ({ isError: true, content: [] }));
+    const { container } = render(<PresentView response={described} data={refusing} />);
+    const title = await screen.findByRole('heading', {
+      name: 'Six-component catalog view',
+      level: 2,
+    });
+    const view = title.closest('section');
+    expect(view).not.toBeNull();
+    // A `#` in the description is an h3 under the View's h2, never an h1 above it.
+    expect(screen.getByRole('heading', { name: 'Scope', level: 3 })).toBeTruthy();
+    expect(container.querySelector('h1')).toBeNull();
+    expect(view?.querySelector('strong')?.textContent).toBe('grew');
+    expect(screen.getByText('A second paragraph.').tagName).toBe('P');
+    expect(view?.textContent).not.toContain('**');
+    expect(view?.textContent).not.toContain('# Scope');
   });
 });
 
