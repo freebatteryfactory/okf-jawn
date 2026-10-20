@@ -2,6 +2,7 @@
 import { expect, type Locator, type Page } from '@playwright/test';
 import type { Selection } from '../../../src/api/generated/types.gen';
 import { HEAD, ok, readAnswer, routeApi, SOURCE, summary, WS } from './explorer';
+import { tabTo } from './views';
 
 export const OBJECT = 'b'.repeat(64);
 export const DIGEST = 'c'.repeat(64);
@@ -49,19 +50,20 @@ export async function sourceFixture(
     '/api/reads/read-item': (body) => {
       reads.push(body);
       const more = body.cursor === 'second-part';
+      const textView = body.view === 'text' || body.view === 'multimodal';
       return ok(
         readAnswer(item, body, {
           view: body.view,
-          markdown: more ? options.secondPart : options.markdown,
+          markdown: textView ? (more ? options.secondPart : options.markdown) : '',
           extraction: item.extraction,
-          truncated: !more && options.secondPart !== undefined,
-          next_cursor: !more && options.secondPart !== undefined ? 'second-part' : null,
+          truncated: textView && !more && options.secondPart !== undefined,
+          next_cursor: textView && !more && options.secondPart !== undefined ? 'second-part' : null,
           source: {
             workspace_id: WS,
             item_id: SOURCE,
             path: options.path,
             revision: HEAD,
-            digest: DIGEST,
+            digest: body.view === 'original' ? OBJECT : DIGEST,
             selection: body.selection,
             locations: [],
           },
@@ -90,9 +92,9 @@ export async function sourceFixture(
   return { reads, ranges };
 }
 
-/** Direct focus plus Enter is E8's WebKit link accommodation; all activation is keyboard. */
+/** Reach controls through the real Tab order, then activate with Enter. */
 export async function activate(page: Page, control: Locator) {
-  await control.focus();
+  await tabTo(page, control);
   await expect(control).toBeFocused();
   await page.keyboard.press('Enter');
 }

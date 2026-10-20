@@ -11,6 +11,7 @@ import {
 } from './support/explorer';
 import { activate, sourceFixture, sourceUrl } from './support/m4a-sheets';
 import { openOriginal } from './support/reader';
+import { tabTo } from './support/views';
 
 test.describe('A2 spreadsheet ranges', () => {
   const server = useExplorerServer();
@@ -30,7 +31,7 @@ test.describe('A2 spreadsheet ranges', () => {
       sheets: ['Q1', 'Costs'],
     });
     await page.goto(sourceUrl(server.origin(), selection));
-    const original = await openOriginal(page);
+    const original = await openOriginal(page, { keyboard: true });
     await expect(original.getByRole('table')).toHaveAccessibleName(
       'Table 1 of 1 read so far: 2 columns, 1 row',
     );
@@ -39,7 +40,7 @@ test.describe('A2 spreadsheet ranges', () => {
     await expect(original).toContainText('Range asked: sheet “Q1”, rows 2–3, columns 1–2.');
     await expectNoAxeViolations(page, 'spreadsheet first bounded range');
     const header = original.getByRole('columnheader', { name: 'Quarter', exact: true });
-    await header.focus();
+    await tabTo(page, header);
     await page.keyboard.press('ArrowDown');
     await expect(original.getByRole('cell', { name: 'Q1', exact: true })).toBeFocused();
     await expectVisibleFocus(page);
@@ -52,7 +53,9 @@ test.describe('A2 spreadsheet ranges', () => {
     await page.keyboard.press('Control+End');
     await expect(original.getByRole('cell', { name: '1.9', exact: true })).toBeFocused();
     await expectVisibleFocus(page);
-    expect(fixture.reads).toEqual([
+    // The radio group's keyboard path also reads Outline, pictures and Original; only text
+    // requests back these tables. Both text parts must retain this exact selection and budget.
+    expect(fixture.reads.filter((read) => read.view === 'text')).toEqual([
       {
         workspace_id: WS,
         item_id: SOURCE,

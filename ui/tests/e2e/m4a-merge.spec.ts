@@ -21,7 +21,7 @@ test.describe('A2 original beside digest', () => {
       markdown: '# Agenda\n\nBudget: 1.2 M\n\nDone.\n',
     });
     await page.goto(sourceUrl(server.origin()));
-    const original = await openOriginal(page);
+    const original = await openOriginal(page, { keyboard: true });
     await activate(
       page,
       original.getByRole('button', { name: 'Compare the original with its converted text' }),

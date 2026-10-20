@@ -8,6 +8,7 @@ import {
 } from './support/explorer';
 import { activate, sourceFixture, sourceUrl } from './support/m4a-sheets';
 import { openOriginal } from './support/reader';
+import { tabTo } from './support/views';
 
 test.describe('A2 text and code', () => {
   const server = useExplorerServer();
@@ -21,13 +22,13 @@ test.describe('A2 text and code', () => {
       markdown: 'Converted JSON data.\n',
     });
     await page.goto(sourceUrl(server.origin()));
-    const original = await openOriginal(page);
+    const original = await openOriginal(page, { keyboard: true });
     const box = original.getByRole('textbox', { name: 'Original text of data.json' });
     await expect(box).toHaveAttribute('aria-readonly', 'true');
     await expect(box).toHaveAttribute('data-language', 'json');
     await expect(original).toContainText('Bytes 1–65,536 of 70,013 of the original are shown');
     expect(fixture.ranges).toEqual(['bytes=0-65535']);
-    await box.focus();
+    await tabTo(page, box);
     await page.keyboard.press('ArrowRight');
     await expectVisibleFocus(page);
     await page.keyboard.type('X');
