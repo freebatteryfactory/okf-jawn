@@ -1489,7 +1489,12 @@ impl UploadStore for FakeUploads {
                 .iter()
                 .position(|slot| slot.scope == *scope && slot.record.id == upload)
                 .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such upload"))?;
-            if let Some(job) = state.slots[position].record.consumed_by {
+            if let Some(job) =
+                crate::check::some(state.slots.get(position), "the upload slot found above")
+                    .map_err(internal)?
+                    .record
+                    .consumed_by
+            {
                 return Err(ApiError::new(
                     ErrorCode::Conflict,
                     format!(

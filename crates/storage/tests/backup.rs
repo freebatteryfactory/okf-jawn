@@ -3460,8 +3460,13 @@ async fn backup_an_archive_missing_an_object_a_row_names_fails_and_records_nothi
     let directory = tempfile::tempdir()?;
     let fixture = fixture(directory.path()).await?;
     let records = directory.path().join("records.sqlite");
+    // Lifecycle design section 1.1 identifies source appearances by item, never by path.
+    let source_original = format!(
+        "the original of the source appearance of item {}",
+        uuid_text(11)
+    );
     for (n, digest, row) in [
-        (70_u32, &fixture.original, "a source card's original"),
+        (70_u32, &fixture.original, source_original.as_str()),
         (71, &fixture.export, "an artifact of kind export"),
     ] {
         let file = object_file(directory.path(), digest)?;
@@ -7369,6 +7374,8 @@ async fn backup_a_source_appearance_that_does_not_read_fails_a_backup_and_a_purg
         &path,
         b"{\"object\": \"not a digest\", \"names\": []}",
     )?;
+    // Lifecycle design section 1.1 requires item identity rather than private paths.
+    let appearance = format!("the source appearance of item {}", uuid_text(15));
     let error = err_of(
         storage
             .backups()
@@ -7376,13 +7383,17 @@ async fn backup_a_source_appearance_that_does_not_read_fails_a_backup_and_a_purg
             .await,
     )?;
     assert_eq!(error.code, ErrorCode::Internal, "{error}");
-    assert!(error.message.contains(&path), "{error}");
+    assert!(error.message.contains(&appearance), "{error}");
     let error = err_of(rr8_purge(&storage, &other).await?)?;
     assert_eq!(error.code, ErrorCode::Internal, "{error}");
     assert!(
-        error.message.contains(&path)
+        error.message.contains(&appearance)
             && error.message.contains(&damaged.workspace_id.0.to_string()),
-        "names the path and the damaged workspace: {error}"
+        "names the item and the damaged workspace: {error}"
+    );
+    assert!(
+        !error.message.contains(&path),
+        "a private appearance path is not disclosed"
     );
     Ok(())
 }
@@ -8454,6 +8465,8 @@ async fn rr9_both_refuse(damage: &Rr9Damage<'_>, omit: &Rr9Omit<'_>, what: &str)
 #[tokio::test]
 async fn rr9_a_restore_refuses_an_appearance_that_does_not_read() -> TestResult {
     let path = format!(".okf/sources/{}.json", uuid_text(15));
+    // Lifecycle design section 1.1: reference errors name typed items rather than paths.
+    let appearance = format!("the source appearance of item {}", uuid_text(15));
     let digest = "a".repeat(64);
     for bytes in [
         b"not json at all".to_vec(),
@@ -8467,7 +8480,7 @@ async fn rr9_a_restore_refuses_an_appearance_that_does_not_read() -> TestResult 
                 Ok(Vec::new())
             },
             &|_| Ok(None),
-            &path,
+            &appearance,
         )
         .await?;
     }
@@ -8483,7 +8496,8 @@ async fn rr9_a_restore_refuses_a_folder_among_the_appearances() -> TestResult {
             Ok(Vec::new())
         },
         &|_| Ok(None),
-        ".okf/sources/nested",
+        // Lifecycle design section 1.1 hides an untyped appearance filename.
+        "a file of .okf/sources not named for an item is not a source appearance file",
     )
     .await
 }
@@ -8753,12 +8767,102 @@ async fn rr9_a_card_of_a_later_contract_is_read_by_purge_backup_and_restore() ->
     Ok(())
 }
 
-/// N-9, N-10: a workspace holds an appearance whose `object` is not a digest and a card-named
-/// conversion record that does not read. Another workspace's purge stops at its objects step,
-/// `Internal`, naming the damaged workspace and the path (its own rows are gone by then, as
-/// before; the message says where to look). The damaged workspace's own purge completes, and its
-/// plan records the path and the record digest it could not read. The other's purge, repeated,
-/// then completes: purging the damaged workspace is the in-product repair.
+/// Proves section 2.6's record-before-run survivor exclusion and complete object removal.
+async fn rr9_recorded_damage_purge_frees_sweep(
+    storage: &Storage,
+    directory: &Path,
+    damaged: &StorageScope,
+    other: &StorageScope,
+    other_purge: okf_jawn_contract::identity::PurgeId,
+    objects: [&Digest; 2],
+) -> TestResult {
+    // Section 2.6: recording, not running, the damaged workspace's purge frees the sweep.
+    let damaged_purge = storage
+        .records()
+        .create_purge(
+            &damaged.tenant_id,
+            uuid!(60)?,
+            NewPurge {
+                id: uuid!(61)?,
+                target: PurgeTarget::Workspace {
+                    workspace_id: damaged.workspace_id,
+                },
+                initiator: person("ana"),
+            },
+        )
+        .await?;
+    let repository = directory
+        .join("repositories")
+        .join("local")
+        .join(format!("{}.git", damaged.workspace_id.0));
+    assert!(
+        repository.is_dir(),
+        "the damaged workspace purge has not run"
+    );
+    assert_eq!(
+        count(
+            &directory.join("records.sqlite"),
+            &format!(
+                "SELECT count(*) FROM purge_progress WHERE purge_id='{}'",
+                damaged_purge.id.0
+            )
+        )?,
+        0,
+        "recording the purge has not planned or executed it"
+    );
+    storage
+        .purger()
+        .purge_workspace(
+            &damaged.tenant_id,
+            uuid!(72)?,
+            other_purge,
+            other.workspace_id,
+        )
+        .await?;
+    assert!(
+        repository.is_dir(),
+        "the other purge completes before the damaged one runs"
+    );
+    storage
+        .purger()
+        .purge_workspace(
+            &damaged.tenant_id,
+            uuid!(62)?,
+            damaged_purge.id,
+            damaged.workspace_id,
+        )
+        .await?;
+    let plan: serde_json::Value = serde_json::from_str(&rr9_text(
+        &directory.join("records.sqlite"),
+        &format!(
+            "SELECT plan FROM purge_progress WHERE purge_id='{}'",
+            damaged_purge.id.0
+        ),
+    )?)?;
+    assert!(
+        plan.get("unread").is_none(),
+        "section 2.6 keeps no unread plan"
+    );
+    for digest in objects {
+        assert!(
+            !object_file(directory, digest)?.exists(),
+            "every object named only by the purged workspace is gone: {digest:?}"
+        );
+    }
+    assert!(
+        !directory
+            .join("repositories")
+            .join("local")
+            .join(format!("{}.git", damaged.workspace_id.0))
+            .exists(),
+        "the damaged workspace's repository is gone"
+    );
+    Ok(())
+}
+
+/// Lifecycle design sections 1.1 and 2.6: damage names its item, never its private path.
+/// Recording the damaged workspace's purge excludes it from survivor roots immediately,
+/// before that purge runs. Both purges complete without an unread plan or retained originals.
 #[tokio::test]
 async fn rr9_a_damaged_workspace_purges_itself_and_frees_the_tenants_purges() -> TestResult {
     let directory = tempfile::tempdir()?;
@@ -8787,7 +8891,7 @@ async fn rr9_a_damaged_workspace_purges_itself_and_frees_the_tenants_purges() ->
     let path = format!(".okf/sources/{}.json", uuid_text(15));
     rr8_commit_raw_file(&storage, &damaged, &path, b"{\"object\": \"not a digest\"}")?;
     // Another workspace's purge, recorded under its own ids, stops at its objects step, naming
-    // the damaged workspace and the path.
+    // the damaged workspace and the item identity.
     let tenant = other.tenant_id.clone();
     let purge = storage
         .records()
@@ -8812,8 +8916,11 @@ async fn rr9_a_damaged_workspace_purges_itself_and_frees_the_tenants_purges() ->
     assert_eq!(error.code, ErrorCode::Internal, "{error}");
     assert!(
         error.message.contains(&damaged.workspace_id.0.to_string())
-            && error.message.contains(&path),
-        "names the damaged workspace and the path: {error}"
+            && error
+                .message
+                .contains(&format!("the source appearance of item {}", uuid_text(15)))
+            && !error.message.contains(&path),
+        "names the damaged workspace and item without its private path: {error}"
     );
     let live = directory.path().join("records.sqlite");
     assert_eq!(
@@ -8827,35 +8934,16 @@ async fn rr9_a_damaged_workspace_purges_itself_and_frees_the_tenants_purges() ->
         0,
         "the other workspace's rows are already gone"
     );
-    // The damaged workspace's own purge completes, recording what it could not read.
-    rr8_purge(&storage, &damaged).await??;
-    let unread: serde_json::Value = serde_json::from_str(&rr9_text(
-        &live,
-        &format!(
-            "SELECT json_extract(plan, '$.unread') FROM purge_progress WHERE purge_id = '{}'",
-            uuid_text(61)
-        ),
-    )?)?;
-    let unread = some(unread.as_array(), "the plan's unread list")?;
-    let mentions = |what: &str| {
-        unread
-            .iter()
-            .any(|entry| entry.as_str().is_some_and(|text| text.contains(what)))
-    };
-    assert!(
-        unread.len() == 2 && mentions(&path) && mentions(record.as_str()),
-        "the plan records the appearance's path and the record's digest: {unread:?}"
-    );
-    assert!(
-        !directory
-            .path()
-            .join("repositories")
-            .join("local")
-            .join(format!("{}.git", damaged.workspace_id.0))
-            .exists(),
-        "the damaged workspace's repository is gone"
-    );
-    // The other's purge, repeated, completes now that nothing of the tenant is damaged.
+    rr9_recorded_damage_purge_frees_sweep(
+        &storage,
+        directory.path(),
+        &damaged,
+        &other,
+        purge.id,
+        [&original, &record],
+    )
+    .await?;
+    // The other purge remains replayable after the damaged workspace is removed.
     storage
         .purger()
         .purge_workspace(&tenant, uuid!(72)?, purge.id, other.workspace_id)

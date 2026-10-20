@@ -336,10 +336,10 @@ fn clean_up_spec_is_a_strict_tenant_unit_and_round_trips() -> TestResult {
     Ok(())
 }
 
-/// R2's domain-separated SHA-256 identity: literal vector from the ruled clean_up label,
+/// R2's domain-separated SHA-256 identity: literal vector from the ruled `clean_up` label,
 /// derived-identity prefix and UUID42 bytes, with no ordinal or job input.
 #[test]
-fn clean_up_mutation_is_stable_per_discard_and_separate_from_other_effects() -> TestResult {
+fn clean_up_mutation_is_stable_per_discard_and_separate_from_other_effects() {
     use okf_jawn_core::storage::derive_clean_up_mutation_id;
     let discard = MutationId(Uuid::from_u128(42));
     let actual = derive_clean_up_mutation_id(discard);
@@ -355,7 +355,6 @@ fn clean_up_mutation_is_stable_per_discard_and_separate_from_other_effects() -> 
         actual,
         derive_drain_mutation_id(discard, JobId(Uuid::from_u128(7)))
     );
-    Ok(())
 }
 
 #[path = "../../../tests/support/check.rs"]
