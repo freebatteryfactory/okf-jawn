@@ -119,32 +119,6 @@ impl Repositories {
         })
     }
 
-    /// The repository directory of every workspace of `tenant` except `except`.
-    pub(crate) fn others(
-        &self,
-        tenant: &okf_jawn_contract::identity::TenantId,
-        except: &StorageScope,
-    ) -> Result<Vec<PathBuf>, ApiError> {
-        let directory = self.root.join(tenant.as_str());
-        let excluded = self.path(except);
-        let entries = match std::fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(io_error("read", &directory, &error)),
-        };
-        let mut found = Vec::new();
-        for entry in entries {
-            let path = entry
-                .map_err(|error| io_error("read", &directory, &error))?
-                .path();
-            if path != excluded && path.extension().is_some_and(|extension| extension == "git") {
-                found.push(path);
-            }
-        }
-        found.sort();
-        Ok(found)
-    }
-
     /// Hold the workspace's write lock while `work` runs.
     pub(crate) fn locked<T>(
         &self,

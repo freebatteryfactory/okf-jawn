@@ -185,6 +185,7 @@ async fn an_archive_is_refused_while_a_content_job_is_queued_or_running_and_only
                     artifact: None,
                     restore: None,
                     backup: None,
+                    clean_up: None,
                     outputs: Vec::new(),
                     warnings: Vec::new(),
                 })

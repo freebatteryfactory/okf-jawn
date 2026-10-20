@@ -90,6 +90,32 @@
       ],
       "type": "object"
     },
+    "CleanUpReport": {
+      "additionalProperties": false,
+      "description": "What a clean-up did; counts only.",
+      "properties": {
+        "objects_kept": {
+          "description": "Stored objects its last pass kept because something still references, pends or pins\nthem, as a decimal string.",
+          "type": "string"
+        },
+        "objects_removed": {
+          "description": "Stored objects removed, over every pass of the job, as a decimal string.",
+          "type": "string"
+        },
+        "upload_files_removed": {
+          "description": "Received bytes of discarded upload slots removed (files a stopped discard left).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "objects_removed",
+        "objects_kept",
+        "upload_files_removed"
+      ],
+      "type": "object"
+    },
     "ConnectorId": {
       "description": "Identity of one local MCP connector credential, never the owner's browser session.",
       "format": "uuid",
@@ -555,6 +581,11 @@
         {
           "const": "purge_item",
           "description": "Remove one item permanently (tenant-level).",
+          "type": "string"
+        },
+        {
+          "const": "clean_up",
+          "description": "Reclaim the tenant's stored objects nothing references any more (tenant-level): queued\nby a discarded upload, never more than one queued or running at a time.",
           "type": "string"
         }
       ]
@@ -1130,6 +1161,17 @@
         }
       ],
       "description": "What a completed workspace backup left out of its archive."
+    },
+    "clean_up": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CleanUpReport"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "What a completed clean-up removed and kept."
     },
     "created_at": {
       "anyOf": [

@@ -62,9 +62,11 @@ pub(crate) const WORKSPACE_TABLES: &[&str] = &[
 /// puts, which belong to writes of this installation.
 pub(crate) const NOT_IN_WORKSPACE_ARCHIVE: &[&str] = &[
     "backup_archives",
+    "clean_up_requests",
     "commit_warnings",
     "confirmations",
     "connectors",
+    "discarded_uploads",
     "draft_mutations",
     "history_exports",
     "installation",
@@ -76,6 +78,7 @@ pub(crate) const NOT_IN_WORKSPACE_ARCHIVE: &[&str] = &[
     "restores",
     "sandbox_capabilities",
     "sessions",
+    "sweep_removals",
     "workspace_mutations",
 ];
 
@@ -95,34 +98,9 @@ pub(crate) fn copy_live(live: &Connection, directory: &Path) -> Result<FullCopy,
 /// backup embeds another. Retained exports and View exports are not among them.
 pub(crate) fn archive_objects(full: &FullCopy, tenant: &str) -> Result<BTreeSet<Digest>, ApiError> {
     let connection = read_only(&full.path)?;
-    let mut found = BTreeSet::new();
-    let present = tables(&connection)?;
-    let backups = format!(
-        "kind IN ('{}', '{}')",
-        variant_text!(&ArtifactKind::WorkspaceBackup)?,
-        variant_text!(&ArtifactKind::InstallationBackup)?
-    );
-    // An older copy (before a migration) may lack a table; it then holds none of those.
-    for (table, only) in [
-        ("artifacts", backups.as_str()),
-        ("history_exports", "1"),
-        ("backup_archives", "1"),
-    ] {
-        if !present.iter().any(|name| name == table) {
-            continue;
-        }
-        let query = format!("SELECT digest FROM {table} WHERE tenant_id = ?1 AND {only}");
-        let mut statement = connection.prepare(&query).map_err(|error| sql(&error))?;
-        let values = statement
-            .query_map([tenant], |row| row.get::<_, String>(0))
-            .map_err(|error| sql(&error))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| sql(&error))?;
-        for value in values {
-            found.insert(from_text!(value.as_str())?);
-        }
-    }
-    Ok(found)
+    Ok(super::managed::objects(&connection, tenant, None)?
+        .into_keys()
+        .collect())
 }
 
 /// Filter the full copy to the workspace and vacuum it into `directory/records.sqlite`,

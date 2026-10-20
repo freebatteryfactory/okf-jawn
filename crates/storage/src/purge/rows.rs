@@ -12,22 +12,13 @@
 //! - a table keyed by `job_id` without a workspace column loses the rows of the workspace's
 //!   jobs, before the jobs go;
 //! - every connector's `workspace_ids` loses the workspace;
-//! - every completed mutation-ledger row of the workspace (`mutations.workspace_id`, the
-//!   workspace its request writes or its response names at `RequestScope::RESPONSE_WORKSPACE`)
-//!   is emptied: its stored response (which may hold the workspace's name or an item's title)
-//!   is dropped and the row released, its identity kept. A retry under its key then re-runs
-//!   under the same `MutationId` and is refused by the purge (`guard`, and the catalog for a
-//!   `create_workspace`); a deleted row would let the retry start a new mutation, and a
-//!   `create_workspace` retry would create a second workspace. The rows of purges
-//!   (`purge_workspace`, `purge_item`) are kept: their response is the purge record, identities
-//!   and counts only, which outlives the workspace as `purges` does, so a retry of the purge
-//!   replays it. The response text is never searched, so another workspace's row that quotes
-//!   the workspace's identity is not touched;
-//! - in a ledger without the workspace column (a copy older than records schema 2) no row can
-//!   be attributed, so every completed row of the tenant but a purge's is emptied the same way,
-//!   whichever workspace it belonged to. Such a copy is a backup: its ledger is never consulted
-//!   for a replay, and a purge does not complete while a managed backup that holds the
-//!   workspace can be restored (SPEC section 8);
+//! - completed and released mutation rows of the workspace become terminally purged:
+//!   response and request digest are removed, while retry identity, token and clocks stay.
+//!   Purge-operation rows and leased rows remain untouched. A late completion/release
+//!   checks the purge in its own transaction (mutations.rs); a retry is refused there;
+//! - older copies cannot represent the purged state: their finished rows are released
+//!   with NULL response and an empty digest. Without a workspace column, every such
+//!   non-purge row of the tenant is scrubbed. Already-empty rows are not selected again;
 //! - a receipt or review of another workspace of the tenant that cites the workspace is marked
 //!   invalidated (a receipt's `invalidated_by`, a review's coverage), and each citing source
 //!   becomes the invalidated citation (`scrub_source`): its path `purged/<item id>`, its
@@ -36,28 +27,17 @@
 //! "Holds" means holds something a purge still removes or scrubs, so a database or archive
 //! already scrubbed of the workspace no longer holds it.
 //!
-//! Known limits of the ledger step (the first two concern the live database only):
-//!
-//! - A row completed before records schema 2 has no `workspace_id`, so the purge leaves its
-//!   response in place until the ledger drops the row: at the first `begin` that comes seven
-//!   days or more after the row completed (`mutations::RETENTION_SECONDS`).
-//! - A row whose `complete` lands after the purge's last pass over the rows (its step 5) keeps
-//!   its response until the ledger drops it the same way.
-//! - An emptied row keeps the digest of the request and its idempotency key. The digest is a
-//!   SHA-256 of the canonical request (a workspace's name and description, a draft's body, a
-//!   comment's text), so a guessed text could be confirmed against it.
-//! - A retry of an emptied row restarts that row's seven days: the refused retry resumes it
-//!   (`finished_ms` cleared) and releases it again (`finished_ms` now).
-//! - A `mutations` table that lacks one of the four columns the purge reads (`tenant_id`,
-//!   `operation`, `state`, `response`) is not looked at, by `holds` or by `remove`.
-
+//! No installation predates records schema 2 (owner lifecycle ruling 9). The schema-5
+//! upgrade sanitizes the one pre-upgrade copy. Required ledger columns are checked before
+//! inspecting or changing any table: a malformed copy stops the purge instead of being skipped.
+//! Retained caller-supplied idempotency keys are retry identities; no request hash remains.
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::identity::PurgeId;
 use okf_jawn_contract::metadata::OperationName;
 use rusqlite::{Connection, OptionalExtension, ToSql, params};
 use serde_json::Value;
 
-use crate::db::{json, sql};
+use crate::db::{internal, json, sql};
 
 /// One table and its column names.
 struct Table {
@@ -86,13 +66,15 @@ const PURGES: [OperationName; 2] = [OperationName::PurgeWorkspace, OperationName
 
 /// The completed ledger rows of the workspace (`?1` tenant, `?2` workspace) whose stored
 /// response a purge drops: every one but a purge's (`?3`, `?4`, `PURGES`).
-const LEDGER_ROWS: &str = "tenant_id = ?1 AND workspace_id = ?2 AND state = 'completed'
+const LEDGER_ROWS: &str =
+    "tenant_id = ?1 AND workspace_id = ?2 AND state IN ('completed', 'released')
      AND operation NOT IN (?3, ?4)";
 
 /// The same rows in a ledger that records no workspace (a copy older than records schema 2):
 /// none can be attributed, so every completed row of the tenant but a purge's. `?2` is bound
 /// like `LEDGER_ROWS`' and compared with nothing.
-const UNATTRIBUTED_ROWS: &str = "tenant_id = ?1 AND ?2 IS NOT NULL AND state = 'completed'
+const UNATTRIBUTED_ROWS: &str =
+    "tenant_id = ?1 AND ?2 IS NOT NULL AND state IN ('completed', 'released')
      AND operation NOT IN (?3, ?4)";
 
 impl Table {
@@ -111,22 +93,24 @@ impl Table {
     /// For the mutation ledger, the predicate of the rows a purge empties: by the workspace
     /// each row records, or, where the ledger has no such column, every row of the tenant.
     /// `None` for any other table.
-    fn ledger_rows(&self) -> Option<&'static str> {
-        let ledger = self.name == LEDGER
-            && ["tenant_id", "operation", "state", "response"]
-                .iter()
-                .all(|column| self.has(column));
-        if !ledger {
+    fn ledger_rows(&self) -> Option<String> {
+        if self.name != LEDGER {
             return None;
         }
-        Some(if self.has("workspace_id") {
+        let rows = if self.has("workspace_id") {
             LEDGER_ROWS
         } else {
             UNATTRIBUTED_ROWS
+        };
+        Some(if self.has("purge_id") {
+            rows.to_owned()
+        } else {
+            // Old schemas cannot represent purged/NULL digest. An emptied released row
+            // is no longer content, so a rewritten copy is not selected again.
+            format!("{rows} AND (response IS NOT NULL OR digest <> '')")
         })
     }
 }
-
 /// Whether the database holds anything of the workspace a purge removes or scrubs.
 pub(crate) fn holds(
     connection: &Connection,
@@ -207,16 +191,23 @@ pub(crate) fn remove(
             )?;
         }
     }
-    if let Some(rows) = tables.iter().find_map(Table::ledger_rows) {
+    if let Some(table) = tables.iter().find(|table| table.name == LEDGER)
+        && let Some(rows) = table.ledger_rows()
+    {
         let [purge_workspace, purge_item] = PURGES.map(OperationName::as_str);
-        // Keep `finished_ms`: the emptied row expires when the completed one would have.
+        let purge = purge.0.to_string();
+        let mut values: Vec<&dyn ToSql> = vec![&tenant, &workspace, &purge_workspace, &purge_item];
+        let assignment = if table.has("purge_id") {
+            values.push(&purge);
+            "state = 'purged', digest = NULL, response = NULL, purge_id = ?5"
+        } else {
+            "state = 'released', digest = '', response = NULL"
+        };
+        // Identity, token, lease and the original retention clock remain exact.
         connection
             .execute(
-                &format!(
-                    "UPDATE {LEDGER} SET state = 'released', response = NULL
-                     WHERE {rows}"
-                ),
-                params![tenant, workspace, purge_workspace, purge_item],
+                &format!("UPDATE {LEDGER} SET {assignment} WHERE {rows}"),
+                values.as_slice(),
             )
             .map_err(|error| sql(&error))?;
     }
@@ -401,7 +392,17 @@ fn tables(connection: &Connection) -> Result<Vec<Table>, ApiError> {
                 .map_err(|error| sql(&error))?
                 .collect::<Result<_, _>>()
                 .map_err(|error| sql(&error))?;
-            Ok(Table { name, columns })
+            let table = Table { name, columns };
+            if table.name == LEDGER {
+                for column in ["tenant_id", "operation", "state", "response", "digest"] {
+                    if !table.has(column) {
+                        return Err(internal(format!(
+                            "the records copy holds a ledger without {column}"
+                        )));
+                    }
+                }
+            }
+            Ok(table)
         })
         .collect()
 }
@@ -430,13 +431,7 @@ mod tests {
     fn ledger_without_workspaces(rows: &[(&str, &str)]) -> Result<Connection, ApiError> {
         let mut connection = Connection::open_in_memory().map_err(|error| fault(&error))?;
         crate::schema::RECORDS
-            .to_latest(&mut connection)
-            .map_err(|error| fault(&error))?;
-        connection
-            .execute_batch(
-                "DROP INDEX mutations_by_workspace;
-                 ALTER TABLE mutations DROP COLUMN workspace_id;",
-            )
+            .to_version(&mut connection, 1)
             .map_err(|error| fault(&error))?;
         for (number, (tenant, operation)) in rows.iter().enumerate() {
             connection
@@ -479,6 +474,104 @@ mod tests {
         )
     }
 
+    /// One V5 ledger with literal target, purge-operation, leased and other-scope rows.
+    fn v5_ledger() -> Result<Connection, ApiError> {
+        let mut connection = Connection::open_in_memory().map_err(|error| fault(&error))?;
+        crate::schema::RECORDS
+            .to_latest(&mut connection)
+            .map_err(|error| fault(&error))?;
+        for (key, tenant, workspace, operation, state, response, finished) in [
+            (
+                "1",
+                "local",
+                TARGET,
+                "update_workspace",
+                "completed",
+                Some("completed"),
+                Some(11),
+            ),
+            (
+                "2",
+                "local",
+                TARGET,
+                "save_draft",
+                "released",
+                None,
+                Some(12),
+            ),
+            ("3", "local", TARGET, "save_draft", "leased", None, None),
+            (
+                "4",
+                "local",
+                TARGET,
+                "purge_workspace",
+                "completed",
+                Some("purge"),
+                Some(14),
+            ),
+            (
+                "5",
+                "local",
+                TARGET,
+                "purge_item",
+                "completed",
+                Some("item purge"),
+                Some(15),
+            ),
+            (
+                "6",
+                "local",
+                "other-workspace",
+                "save_draft",
+                "completed",
+                Some("other workspace"),
+                Some(16),
+            ),
+            (
+                "7",
+                "other-tenant",
+                TARGET,
+                "save_draft",
+                "completed",
+                Some("other tenant"),
+                Some(17),
+            ),
+        ] {
+            connection.execute(
+                "INSERT INTO mutations (tenant_id,subject,client_key,operation,idempotency_key,
+                     mutation_id,digest,state,token,lease_expires_ms,response,finished_ms,workspace_id)
+                 VALUES (?1,'ana','-',?2,?3,?3,'request-digest',?4,7,99,?5,?6,?7)",
+                params![tenant,operation,key,state,response,finished,workspace],
+            ).map_err(|error| fault(&error))?;
+        }
+        Ok(connection)
+    }
+
+    /// Deliberately corrupt schema, not a claimed released fixture. Closed literal column
+    /// names alone build the SQL; no caller-provided identifiers enter this helper.
+    fn malformed_ledger(missing: &str) -> Result<Connection, ApiError> {
+        let connection = Connection::open_in_memory().map_err(|error| fault(&error))?;
+        let columns = ["tenant_id", "operation", "state", "response", "digest"]
+            .into_iter()
+            .filter(|column| *column != missing)
+            .map(|column| format!("{column} TEXT"))
+            .collect::<Vec<_>>()
+            .join(",");
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE mutations ({columns});
+             CREATE TABLE a_scoped (tenant_id TEXT,workspace_id TEXT,body TEXT);"
+            ))
+            .map_err(|error| fault(&error))?;
+        connection
+            .execute(
+                "INSERT INTO a_scoped VALUES ('local',?1,'preserved')",
+                [TARGET],
+            )
+            .map_err(|error| fault(&error))?;
+        Ok(connection)
+    }
+
     /// A ledger that records no workspace cannot attribute a row, so a purge empties every
     /// completed row of the tenant but a purge's, and after that one pass the database no
     /// longer holds the workspace: the purge's second look at its backups finds nothing to do.
@@ -509,6 +602,17 @@ mod tests {
                 row("local", "purge_item", "completed", true),
                 row("elsewhere", "update_workspace", "completed", true),
             ]
+        );
+        let digest: String = connection
+            .query_row(
+                "SELECT digest FROM mutations WHERE tenant_id='local' AND operation='update_workspace'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| fault(&error))?;
+        assert_eq!(
+            digest, "",
+            "section5.2: no request digest survives in the legacy copy"
         );
         assert!(
             !holds(&connection, "local", TARGET)?,
@@ -562,6 +666,143 @@ mod tests {
             ("elsewhere", "update_workspace"),
         ])?;
         assert!(!holds(&connection, "local", TARGET)?);
+        Ok(())
+    }
+
+    /// Section5.2: live rows retain identity, clocks and leases while losing only the target's
+    /// completed/released payloads. Purge operations, leased rows and other scopes stay exact.
+    #[test]
+    fn ledger_rows_v5_scrubs_both_finished_states_and_preserves_every_other_row()
+    -> Result<(), ApiError> {
+        let connection = v5_ledger()?;
+        let purge = PurgeId(uuid::Uuid::from_u128(60));
+        remove(&connection, "local", TARGET, purge)?;
+        let mut statement = connection.prepare(
+            "SELECT json_array(idempotency_key,state,digest,response,purge_id,token,lease_expires_ms,finished_ms)
+             FROM mutations ORDER BY idempotency_key",
+        ).map_err(|error| fault(&error))?;
+        let actual = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| fault(&error))?
+            .map(|row| {
+                row.map_err(|error| fault(&error)).and_then(|text| {
+                    serde_json::from_str::<serde_json::Value>(&text).map_err(|error| fault(&error))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            serde_json::Value::Array(actual),
+            serde_json::json!([
+                ["1", "purged", null, null, purge.0.to_string(), 7, 99, 11],
+                ["2", "purged", null, null, purge.0.to_string(), 7, 99, 12],
+                ["3", "leased", "request-digest", null, null, 7, 99, null],
+                ["4", "completed", "request-digest", "purge", null, 7, 99, 14],
+                [
+                    "5",
+                    "completed",
+                    "request-digest",
+                    "item purge",
+                    null,
+                    7,
+                    99,
+                    15
+                ],
+                [
+                    "6",
+                    "completed",
+                    "request-digest",
+                    "other workspace",
+                    null,
+                    7,
+                    99,
+                    16
+                ],
+                [
+                    "7",
+                    "completed",
+                    "request-digest",
+                    "other tenant",
+                    null,
+                    7,
+                    99,
+                    17
+                ]
+            ])
+        );
+        assert!(holds(&connection, "local", "other-workspace")?);
+        assert!(!holds(&connection, "local", TARGET)?);
+        remove(&connection, "local", TARGET, purge)?;
+        Ok(())
+    }
+
+    /// Section5.2: a released old-copy row can still hold a request digest without a response.
+    /// Once scrubbed it is not held again; its original finish clock never moves.
+    #[test]
+    fn ledger_rows_legacy_released_digest_is_held_until_emptied() -> Result<(), ApiError> {
+        let connection = ledger_without_workspaces(&[("local", "save_draft")])?;
+        connection
+            .execute(
+                "UPDATE mutations SET state='released',response=NULL,finished_ms=42",
+                [],
+            )
+            .map_err(|error| fault(&error))?;
+        assert!(
+            holds(&connection, "local", TARGET)?,
+            "the request digest is still content"
+        );
+        remove(
+            &connection,
+            "local",
+            TARGET,
+            PurgeId(uuid::Uuid::from_u128(60)),
+        )?;
+        let actual: (String, String, bool, i64) = connection
+            .query_row(
+                "SELECT state,digest,response IS NULL,finished_ms FROM mutations",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|error| fault(&error))?;
+        assert_eq!(actual, ("released".to_owned(), String::new(), true, 42));
+        assert!(!holds(&connection, "local", TARGET)?);
+        Ok(())
+    }
+
+    /// Section5.3 limit6: even a different table holding the target cannot hide a malformed
+    /// ledger. These names are precisely the nonoptional columns the scrub reads/writes.
+    #[test]
+    fn ledger_rows_holds_refuses_each_missing_required_ledger_column() -> Result<(), ApiError> {
+        for missing in ["tenant_id", "operation", "state", "response", "digest"] {
+            let connection = malformed_ledger(missing)?;
+            let refused = holds(&connection, "local", TARGET)
+                .err()
+                .ok_or_else(|| fault(&format!("holds accepted a ledger without {missing}")))?;
+            assert_eq!(refused.code, ErrorCode::Internal);
+            assert!(refused.message.contains(missing), "{}", refused.message);
+        }
+        Ok(())
+    }
+
+    /// The same schema refusal must happen before remove can alter any other scoped table.
+    #[test]
+    fn ledger_rows_remove_refuses_each_missing_required_ledger_column() -> Result<(), ApiError> {
+        for missing in ["tenant_id", "operation", "state", "response", "digest"] {
+            let connection = malformed_ledger(missing)?;
+            let refused = remove(
+                &connection,
+                "local",
+                TARGET,
+                PurgeId(uuid::Uuid::from_u128(60)),
+            )
+            .err()
+            .ok_or_else(|| fault(&format!("remove accepted a ledger without {missing}")))?;
+            assert_eq!(refused.code, ErrorCode::Internal);
+            assert!(refused.message.contains(missing), "{}", refused.message);
+            let remaining: i64 = connection
+                .query_row("SELECT count(*) FROM a_scoped", [], |row| row.get(0))
+                .map_err(|error| fault(&error))?;
+            assert_eq!(remaining, 1, "a schema refusal writes nothing");
+        }
         Ok(())
     }
 }

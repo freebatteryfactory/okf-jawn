@@ -76,7 +76,10 @@ pub(crate) fn plan(directory: &Path, tenant: &str, workspace: &str) -> Result<Co
         {
             let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .map_err(|error| sql(&error))?;
-            if rows::holds(&connection, tenant, workspace)? {
+            if rows::holds(&connection, tenant, workspace).map_err(|mut error| {
+                error.message = format!("pre-migration copy {name}: {}", error.message);
+                error
+            })? {
                 if name.starts_with("records") {
                     plan.rewrite.push(name);
                 } else {

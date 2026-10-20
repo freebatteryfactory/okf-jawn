@@ -22,16 +22,21 @@
 //! The same replacement is what clears a row an attempt left without a commit, so it stays.
 //!
 //! The rows are removed only by the purge of their workspace (`purge::rows`).
+//! The same transaction retains the attempt's base revision as a domain-separated
+//! `workspace_mutations` record, not an extra warning. This lets purge count known predecessor
+//! revisions without walking Git; a blank workspace invents no named content revision.
 
 use git2::Oid;
 use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::identity::MutationId;
-use okf_jawn_core::storage::{Committed, StorageScope, replay_warnings_unavailable};
+use okf_jawn_core::storage::{
+    Committed, StorageScope, derive_commit_base_mutation_id, replay_warnings_unavailable,
+};
 use rusqlite::{OptionalExtension, params};
 
 use super::repo::revision_of;
-use crate::db::{Db, json, scope_key, sql};
+use crate::db::{Db, internal, json, scope_key, sql};
 
 /// Why a replay has no warnings to answer: the store holds no row for the commit.
 const NOT_KEPT: &str = "the store kept none for this commit";
@@ -50,11 +55,14 @@ pub(super) fn keep(
     scope: &StorageScope,
     mutation: MutationId,
     commit: Oid,
+    base: Oid,
     warnings: &[Warning],
 ) -> Result<(), ApiError> {
     let (tenant, workspace) = scope_key(scope);
+    let base_mutation = derive_commit_base_mutation_id(scope, mutation);
     let warnings = serde_json::to_string(warnings).map_err(|error| json(&error))?;
     let commit = commit.to_string();
+    let base = serde_json::to_string(&base.to_string()).map_err(|error| json(&error))?;
     tokio::runtime::Handle::current().block_on(records.transaction(move |transaction| {
         transaction
             .execute(
@@ -65,8 +73,24 @@ pub(super) fn keep(
                  DO UPDATE SET commit_id = excluded.commit_id, warnings = excluded.warnings",
                 params![tenant, workspace, mutation.0.to_string(), commit, warnings],
             )
-            .map(|_| ())
-            .map_err(|error| sql(&error))
+            .map_err(|error| sql(&error))?;
+        let written = transaction
+            .execute(
+                "INSERT INTO workspace_mutations
+                     (mutation_id, tenant_id, workspace_id, action, result)
+                 VALUES (?1, ?2, ?3, 'commit_base', ?4)
+                 ON CONFLICT (mutation_id) DO UPDATE SET result=excluded.result
+                 WHERE action='commit_base' AND tenant_id=excluded.tenant_id
+                     AND workspace_id=excluded.workspace_id",
+                params![base_mutation.0.to_string(), tenant, workspace, base],
+            )
+            .map_err(|error| sql(&error))?;
+        if written != 1 {
+            return Err(internal(
+                "a commit base identity already names another record",
+            ));
+        }
+        Ok(())
     }))
 }
 

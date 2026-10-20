@@ -63,7 +63,7 @@ use crate::git::repo::{
     trailer_of,
 };
 use crate::pins::Pinned;
-use crate::purge::references::{self, Rows};
+use crate::purge::references;
 use crate::puts;
 use crate::storage::Storage;
 
@@ -93,6 +93,8 @@ struct Target {
     replaced_from: Option<Digest>,
     /// Rows the archive's own backup left out (its manifest's `rows_left_out`); not restored.
     rows_left_out: u32,
+    /// The job claim captured at entry, checked with the copied rows.
+    fence: Option<super::fence::Fence>,
     /// This build's schema and table order, which the rows are copied with.
     live: Live,
 }
@@ -176,6 +178,16 @@ pub(crate) fn restore(
     staging: &Path,
     mode: &Mode,
 ) -> Result<(RestoreReport, WorkspaceManifest), ApiError> {
+    let fence = match mode {
+        Mode::Import(_, mutation) => {
+            let scope = scope.clone();
+            let mutation = *mutation;
+            runtime.block_on(storage.records.call(move |connection| {
+                super::fence::Fence::capture(connection, &scope, mutation)
+            }))?
+        }
+        Mode::Replace(_) => None,
+    };
     let checked = checked(
         storage,
         runtime,
@@ -191,7 +203,15 @@ pub(crate) fn restore(
     // Each object is pinned to the restored workspace while the import runs, and recorded as a
     // pending put (`puts`) until the import's rows land.
     let mut pinned = Vec::new();
-    let restored = put_back(storage, runtime, scope, checked, &mut pinned, staging, mode);
+    let restored = put_back(
+        storage,
+        runtime,
+        scope,
+        checked,
+        &mut pinned,
+        staging,
+        (mode, fence),
+    );
     for pin in pinned {
         pin.end()?;
     }
@@ -538,8 +558,9 @@ fn put_back(
     checked: Checked,
     pinned: &mut Vec<Pinned>,
     staging: &Path,
-    mode: &Mode,
+    attempt: (&Mode, Option<super::fence::Fence>),
 ) -> Result<(RestoreReport, WorkspaceManifest), ApiError> {
+    let (mode, fence) = attempt;
     let Checked {
         mut opened,
         manifest,
@@ -554,19 +575,34 @@ fn put_back(
         let size = std::fs::metadata(&file)
             .map_err(|error| io_error("read", &file, &error))?
             .len();
-        let (_, pin) = runtime.block_on(storage.blobs.put_pinned(
+        let (_, pin) = runtime.block_on(storage.blobs.put_restore(
             scope,
             file_reader(Some(file.clone()), 0, size),
             size,
             Some(digest.clone()),
+            fence.clone(),
         ))?;
         pinned.push(pin);
+        #[cfg(test)]
+        runtime.block_on(crate::pause::point(&fencing_point(
+            storage, scope, "object",
+        )))?;
         std::fs::remove_file(&file).map_err(|error| io_error("remove", &file, &error))?;
     }
     // The history restored is the checked one: the archive's commits on exactly the references
     // its manifest names (and an import's restore commit, which keeps the head's tree), so what
     // its cards and records name is what the check read (`refuse_unheld`).
-    let items = history(storage, runtime, scope, &manifest, &pack, mode)?;
+    let items = history(
+        storage,
+        runtime,
+        scope,
+        &manifest,
+        &pack,
+        mode,
+        fence.as_ref(),
+    )?;
+    #[cfg(test)]
+    runtime.block_on(crate::pause::point(&fencing_point(storage, scope, "rows")))?;
     let report = {
         let path = text(&records)?.to_owned();
         let target = Target {
@@ -575,6 +611,7 @@ fn put_back(
             original: manifest.workspace_id.0.to_string(),
             objects: manifest.objects.clone(),
             rows_left_out: manifest.rows_left_out,
+            fence,
             history: named.history,
             followed: named.followed,
             replaced_from: match mode {
@@ -998,6 +1035,7 @@ fn history(
     manifest: &WorkspaceManifest,
     pack: &Path,
     mode: &Mode,
+    fence: Option<&super::fence::Fence>,
 ) -> Result<u32, ApiError> {
     let main = manifest
         .references
@@ -1006,6 +1044,7 @@ fn history(
         .map(|(_, commit)| oid(commit))
         .transpose()?
         .ok_or_else(|| invalid("it has no accepted head"))?;
+    check_fence(storage, runtime, scope, fence)?;
     let repository = match mode {
         Mode::Import(..) => {
             runtime.block_on(crate::purge::guard::refuse_scope(&storage.records, scope))?;
@@ -1027,6 +1066,7 @@ fn history(
             }
             // Once the head is at the archive's, the pack was indexed before any reference
             // was set, so a resumed restore does not index it again.
+            check_fence(storage, runtime, scope, fence)?;
             read_pack(&repository, pack)?;
         }
         // Every other reference first, each write repeatable, and the accepted head last: a
@@ -1037,11 +1077,13 @@ fn history(
             .iter()
             .filter(|(name, _)| name.as_str() != HEAD_REF)
         {
+            check_fence(storage, runtime, scope, fence)?;
             repository
                 .reference(name, oid(commit)?, true, "okf-jawn restore")
                 .map_err(|error| git(&error))?;
         }
         if current != Some(main) {
+            check_fence(storage, runtime, scope, fence)?;
             let moved = match current {
                 Some(current) => {
                     repository.reference_matching(HEAD_REF, main, true, current, "okf-jawn restore")
@@ -1056,6 +1098,7 @@ fn history(
     if let Mode::Import(_, mutation) = mode
         && !committed
     {
+        check_fence(storage, runtime, scope, fence)?;
         restore_commit(&repository, main, *mutation)?;
     }
     let tree = repository
@@ -1066,6 +1109,27 @@ fn history(
         .map_err(|_| internal("too many items to count"))
 }
 
+/// Git is protected by the caller's workspace lock; check immediately before each write.
+fn check_fence(
+    storage: &Storage,
+    runtime: &Handle,
+    scope: &StorageScope,
+    fence: Option<&super::fence::Fence>,
+) -> Result<(), ApiError> {
+    let scope = scope.clone();
+    let fence = fence.cloned();
+    runtime.block_on(storage.records.call(move |connection| {
+        crate::purge::guard::refuse(
+            connection,
+            scope.tenant_id.as_str(),
+            &scope.workspace_id.0.to_string(),
+        )?;
+        if let Some(fence) = fence {
+            fence.check(connection)?;
+        }
+        Ok(())
+    }))
+}
 /// Whether `current` is the restore commit of `mutation` on the archive head `main`: its only
 /// parent is `main` and its trailer names `mutation`.
 fn is_restore_commit(
@@ -1181,6 +1245,12 @@ fn copy_tables(
     mutation: Option<MutationId>,
 ) -> Result<RestoreReport, ApiError> {
     let transaction = connection.transaction().map_err(|error| sql(&error))?;
+    if editors.is_some() {
+        crate::purge::guard::refuse(&transaction, &target.tenant, &target.workspace)?;
+        if let Some(fence) = &target.fence {
+            fence.check(&transaction)?;
+        }
+    }
     match write_tables(&transaction, target, editors, items, mutation) {
         Ok(report) => {
             transaction.commit().map_err(|error| sql(&error))?;
@@ -1269,8 +1339,6 @@ fn write_tables(
         transaction,
         &target.tenant,
         &target.workspace,
-        Rows::Target,
-        &BTreeSet::new(),
     )?);
     let followed: Vec<Digest> = named
         .iter()
@@ -1427,6 +1495,17 @@ fn rewrite_identity(value: &mut serde_json::Value, original: &str, workspace: &s
     changed
 }
 
+/// Private test coordination only; each data path makes its holds independent.
+#[cfg(test)]
+fn fencing_point(storage: &Storage, scope: &StorageScope, step: &str) -> String {
+    format!(
+        "restore-fence|{}|{}|{}|{step}",
+        storage.data.root().display(),
+        scope.tenant_id.as_str(),
+        scope.workspace_id.0,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -1497,6 +1576,7 @@ mod tests {
             followed: BTreeMap::new(),
             replaced_from: None,
             rows_left_out: 0,
+            fence: None,
             live: Live {
                 schema: schema_of(&live)?,
                 order: parents_first(&live, WORKSPACE_TABLES)?,
@@ -1610,6 +1690,459 @@ mod tests {
                 "text": "a"}"#,
         )?;
         assert_eq!(value, expected);
+        Ok(())
+    }
+}
+
+/// Real Git/SQLite/CAS regressions for lifecycle design §8 V8.1–V8.5.
+/// These use private pause coordination, never a simulated job or restore port.
+#[cfg(test)]
+mod fencing_tests {
+    use std::collections::BTreeMap;
+    use std::error::Error;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use okf_jawn_contract::access::AccessRoute;
+    use okf_jawn_contract::common::Warning;
+    use okf_jawn_contract::error::{ApiError, ErrorCode};
+    use okf_jawn_contract::identity::{
+        Digest, ItemId, MutationId, TenantId, UploadId, WorkspacePath,
+    };
+    use okf_jawn_contract::purge::PurgeTarget;
+    use okf_jawn_core::drafts::{DraftStore, DraftWrite};
+    use okf_jawn_core::jobs::{ClaimedJob, JobScope, JobSpec, NewJob, NewPurge, RecordStore};
+    use okf_jawn_core::storage::{
+        Backups, BlobStore, CandidateCheck, CommitChanges, NewWorkspace, ObjectInfo, Provenance,
+        SourceCard, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
+    };
+    use rusqlite::{Connection, params};
+    use serde_json::json;
+
+    use crate::storage::Storage;
+
+    type TestResult = Result<(), Box<dyn Error>>;
+    type Fallible<T> = Result<T, Box<dyn Error>>;
+
+    struct Accept;
+
+    struct Fixture {
+        storage: Storage,
+        target: StorageScope,
+        archive: Digest,
+        objects: Vec<Digest>,
+        mutation: MutationId,
+    }
+
+    impl CandidateCheck for Accept {
+        fn check(
+            &self,
+            _root: &Path,
+            _rewritten: &[WorkspacePath],
+        ) -> Result<Vec<Warning>, ApiError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn some<T>(value: Option<T>, message: &str) -> Fallible<T> {
+        value.ok_or_else(|| std::io::Error::other(message).into())
+    }
+
+    fn err_of<T>(result: Result<T, ApiError>) -> Fallible<ApiError> {
+        match result {
+            Err(error) => Ok(error),
+            Ok(_) => Err(std::io::Error::other("expected a restore refusal").into()),
+        }
+    }
+
+    fn identity<T: serde::de::DeserializeOwned>(number: u32) -> Fallible<T> {
+        Ok(serde_json::from_value(json!(format!(
+            "00000000-0000-4000-8000-{number:012}"
+        )))?)
+    }
+
+    fn actor() -> Provenance {
+        Provenance {
+            subject: "ana".to_owned(),
+            route: AccessRoute::LocalOwner,
+            client_id: None,
+        }
+    }
+
+    async fn workspace(
+        storage: &Storage,
+        tenant: &str,
+        number: u32,
+    ) -> Fallible<(StorageScope, okf_jawn_contract::identity::Revision)> {
+        let tenant = TenantId::try_from(tenant.to_owned())?;
+        let created = storage
+            .catalog()
+            .create(
+                &tenant,
+                identity(number)?,
+                NewWorkspace {
+                    name: "Lease fixture".to_owned(),
+                    description: String::new(),
+                    creator: actor(),
+                },
+            )
+            .await?;
+        Ok((
+            StorageScope {
+                tenant_id: tenant,
+                workspace_id: created.id,
+            },
+            created.head,
+        ))
+    }
+
+    async fn fixture(directory: &Path) -> Fallible<Fixture> {
+        let storage = Storage::open(directory)?;
+        let (source, head) = workspace(&storage, "source-tenant", 1).await?;
+        let (target, _) = workspace(&storage, "target-tenant", 2).await?;
+        let mut objects = Vec::new();
+        let mut edits = Vec::new();
+        for (number, body) in [
+            (10, b"first original".as_slice()),
+            (11, b"second original".as_slice()),
+        ] {
+            let object: ObjectInfo = storage
+                .blobs()
+                .put(
+                    &source,
+                    Box::pin(std::io::Cursor::new(body.to_vec())),
+                    1024,
+                    None,
+                )
+                .await?;
+            objects.push(object.digest.clone());
+            edits.push(TreeEdit::WriteSourceCard(Box::new(SourceCard {
+                item_id:identity(number)?,path:WorkspacePath::try_from(format!("source-{number}.md"))?,
+                title:format!("original-{number}.bin"),type_name:"Source".to_owned(),
+                body:"Retained source".to_owned(),properties:BTreeMap::new(),
+                appearance:serde_json::from_value(json!({
+                    "object":object.digest.as_str(),
+                    "names":[{"filename":format!("original-{number}.bin"),"folder":"","observed_at":"2026-10-19T12:00:00.000Z","supplied_by":"ana"}],
+                    "media_type":"application/octet-stream","size":object.size.to_string(),"metadata":{},
+                    "extraction":{"outcome":{"status":"unsupported"},"text_origin":"none","corrected":false,"warnings":[]}
+                }))?,
+            })));
+        }
+        let committed = storage
+            .versions()
+            .commit(
+                &source,
+                CommitChanges {
+                    mutation_id: identity(3)?,
+                    expected_head: head,
+                    author: actor(),
+                    message: "Source archive fixture".to_owned(),
+                    edits,
+                },
+                Arc::new(Accept),
+            )
+            .await?
+            .revision;
+        let properties = BTreeMap::new();
+        let body = "Archived draft is copied only under a live lease.";
+        storage
+            .drafts()
+            .save(
+                &source,
+                identity(4)?,
+                DraftWrite {
+                    item_id: identity::<ItemId>(10)?,
+                    editor: "ana".to_owned(),
+                    base_revision: committed,
+                    body: body.to_owned(),
+                    content_digest: okf_jawn_core::portable::draft_digest(body, &properties)?,
+                    properties,
+                },
+            )
+            .await?;
+        let archive = storage
+            .backups()
+            .write_workspace_archive(&source, identity(5)?)
+            .await?
+            .object;
+        let prefix = some(archive.digest.as_str().get(..2), "archive shard")?;
+        let bytes = std::fs::read(
+            storage
+                .data()
+                .objects_path()
+                .join(source.tenant_id.as_str())
+                .join(prefix)
+                .join(archive.digest.as_str()),
+        )?;
+        let uploaded = storage
+            .blobs()
+            .put(
+                &target,
+                Box::pin(std::io::Cursor::new(bytes)),
+                1 << 24,
+                None,
+            )
+            .await?;
+        objects.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        Ok(Fixture {
+            storage,
+            target,
+            archive: uploaded.digest,
+            objects,
+            mutation: identity(6)?,
+        })
+    }
+
+    async fn claimed(fixture: &Fixture) -> Fallible<ClaimedJob> {
+        let records = fixture.storage.records();
+        let job = records
+            .create_job(
+                &JobScope::Workspace(fixture.target.clone()),
+                NewJob {
+                    mutation_id: fixture.mutation,
+                    initiator: actor(),
+                    spec: JobSpec::RestoreWorkspace {
+                        upload_id: identity::<UploadId>(7)?,
+                        archive: fixture.archive.clone(),
+                        editors: vec!["ana".to_owned()],
+                    },
+                },
+            )
+            .await?;
+        let claim = some(records.claim_job(job.id).await?, "real restore claim")?;
+        records.seal(&claim.lease).await?;
+        Ok(claim)
+    }
+
+    fn expire(fixture: &Fixture, claim: &ClaimedJob) -> TestResult {
+        let connection = Connection::open(fixture.storage.data().root().join("records.sqlite"))?;
+        assert_eq!(
+            connection.execute(
+                "UPDATE jobs SET lease_expires_ms=0 WHERE job_id=?1",
+                [claim.job.id.0.to_string()]
+            )?,
+            1
+        );
+        Ok(())
+    }
+
+    fn absent_rows(fixture: &Fixture) -> TestResult {
+        let connection = Connection::open(fixture.storage.data().root().join("records.sqlite"))?;
+        for table in ["drafts", "restores"] {
+            let count: i64 = connection.query_row(
+                &format!("SELECT count(*) FROM {table} WHERE tenant_id=?1 AND workspace_id=?2"),
+                params![
+                    fixture.target.tenant_id.as_str(),
+                    fixture.target.workspace_id.0.to_string()
+                ],
+                |row| row.get(0),
+            )?;
+            assert_eq!(
+                count, 0,
+                "no target {table} row may be published by the stale attempt"
+            );
+        }
+        Ok(())
+    }
+
+    async fn arrived(receiver: std::sync::mpsc::Receiver<()>) -> TestResult {
+        tokio::time::timeout(Duration::from_secs(30), crate::pause::arrived(receiver)).await??;
+        Ok(())
+    }
+
+    fn start(
+        fixture: &Fixture,
+    ) -> tokio::task::JoinHandle<Result<okf_jawn_contract::workspace::RestoreReport, ApiError>>
+    {
+        let storage = fixture.storage.clone();
+        let scope = fixture.target.clone();
+        let archive = fixture.archive.clone();
+        let mutation = fixture.mutation;
+        tokio::spawn(async move {
+            storage
+                .backups()
+                .restore_import(&scope, archive, mutation, vec!["ana".to_owned()])
+                .await
+        })
+    }
+
+    fn object_exists(fixture: &Fixture, digest: &Digest) -> Fallible<bool> {
+        let prefix = some(digest.as_str().get(..2), "object shard")?;
+        Ok(fixture
+            .storage
+            .data()
+            .objects_path()
+            .join(fixture.target.tenant_id.as_str())
+            .join(prefix)
+            .join(digest.as_str())
+            .is_file())
+    }
+
+    #[tokio::test]
+    async fn restore_fencing_expired_claim_cannot_copy_rows() -> TestResult {
+        // V8.1's literal oracle: an expired sealed claim publishes neither draft nor restore.
+        let directory = tempfile::tempdir()?;
+        let fixture = fixture(directory.path()).await?;
+        let claim = claimed(&fixture).await?;
+        let (arrival, release) = crate::pause::hold(super::fencing_point(
+            &fixture.storage,
+            &fixture.target,
+            "rows",
+        ))?;
+        let attempt = start(&fixture);
+        arrived(arrival).await?;
+        expire(&fixture, &claim)?;
+        release.send(())?;
+        let error = err_of(attempt.await?)?;
+        assert_eq!(error.code, ErrorCode::Conflict);
+        assert!(error.message.contains("current lease"), "{error}");
+        absent_rows(&fixture)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_fencing_replaced_claim_cannot_retain_the_next_object() -> TestResult {
+        // V8.2: RecordStore, not a trigger, issues the actual second attempt/token.
+        let directory = tempfile::tempdir()?;
+        let fixture = fixture(directory.path()).await?;
+        let claim = claimed(&fixture).await?;
+        let (arrival, release) = crate::pause::hold(super::fencing_point(
+            &fixture.storage,
+            &fixture.target,
+            "object",
+        ))?;
+        let attempt = start(&fixture);
+        arrived(arrival).await?;
+        let mut retained = Vec::new();
+        let mut missing = Vec::new();
+        for digest in &fixture.objects {
+            if object_exists(&fixture, digest)? {
+                retained.push(digest);
+            } else {
+                missing.push(digest);
+            }
+        }
+        assert_eq!(retained.len(), 1, "exactly one put reached the pause");
+        assert_eq!(missing.len(), 1, "the next original has not been retained");
+        let second = some(missing.first(), "the not-yet-retained original")?;
+        expire(&fixture, &claim)?;
+        let next = some(
+            fixture.storage.records().claim_job(claim.job.id).await?,
+            "replacement real claim",
+        )?;
+        assert_ne!(next.lease.token, claim.lease.token);
+        release.send(())?;
+        let error = err_of(attempt.await?)?;
+        assert_eq!(error.code, ErrorCode::Conflict);
+        assert!(error.message.contains("current lease"), "{error}");
+        assert!(
+            !object_exists(&fixture, second)?,
+            "a stale attempt retained the next original"
+        );
+        absent_rows(&fixture)?;
+        // The new live attempt resumes the same durable restore instead of losing the import.
+        let restored = fixture
+            .storage
+            .backups()
+            .restore_import(
+                &fixture.target,
+                fixture.archive.clone(),
+                fixture.mutation,
+                vec!["ana".to_owned()],
+            )
+            .await?;
+        assert_eq!(restored.items, 2);
+        assert_eq!(restored.drafts_restored, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_fencing_purge_before_rows_refuses_publication() -> TestResult {
+        // V8.3: history is already copied; a newly recorded purge still prevents row copying.
+        let directory = tempfile::tempdir()?;
+        let fixture = fixture(directory.path()).await?;
+        claimed(&fixture).await?;
+        let (arrival, release) = crate::pause::hold(super::fencing_point(
+            &fixture.storage,
+            &fixture.target,
+            "rows",
+        ))?;
+        let attempt = start(&fixture);
+        arrived(arrival).await?;
+        let purge = fixture
+            .storage
+            .records()
+            .create_purge(
+                &fixture.target.tenant_id,
+                identity(8)?,
+                NewPurge {
+                    id: identity(9)?,
+                    target: PurgeTarget::Workspace {
+                        workspace_id: fixture.target.workspace_id,
+                    },
+                    initiator: actor(),
+                },
+            )
+            .await?;
+        release.send(())?;
+        let error = err_of(attempt.await?)?;
+        assert_eq!(error.code, ErrorCode::Conflict);
+        assert!(error.message.contains(&purge.id.0.to_string()), "{error}");
+        absent_rows(&fixture)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_fencing_live_sealed_claim_restores_the_archive() -> TestResult {
+        // V8.4: fencing must retain the existing sealed/cancellation behavior.
+        let directory = tempfile::tempdir()?;
+        let fixture = fixture(directory.path()).await?;
+        let claim = claimed(&fixture).await?;
+        let cancelled = err_of(
+            fixture
+                .storage
+                .records()
+                .cancel_job(
+                    &JobScope::Workspace(fixture.target.clone()),
+                    identity(8)?,
+                    claim.job.id,
+                )
+                .await,
+        )?;
+        assert_eq!(cancelled.code, ErrorCode::Conflict);
+        let report = fixture
+            .storage
+            .backups()
+            .restore_import(
+                &fixture.target,
+                fixture.archive,
+                fixture.mutation,
+                vec!["ana".to_owned()],
+            )
+            .await?;
+        assert_eq!(report.items, 2);
+        assert_eq!(report.drafts_restored, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_fencing_without_a_job_remains_a_documented_fixture_path() -> TestResult {
+        // V8.5: a direct no-job test import is explicitly unfenced, not silently rejected.
+        let directory = tempfile::tempdir()?;
+        let fixture = fixture(directory.path()).await?;
+        let report = fixture
+            .storage
+            .backups()
+            .restore_import(
+                &fixture.target,
+                fixture.archive,
+                fixture.mutation,
+                vec!["ana".to_owned()],
+            )
+            .await?;
+        assert_eq!(report.items, 2);
+        assert_eq!(report.drafts_restored, 1);
         Ok(())
     }
 }

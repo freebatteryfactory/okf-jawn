@@ -149,7 +149,8 @@ pub const LOCAL_OWNER_ONLY: &[OperationName] = &[
 /// is not a mutation, and the mutations named here by decision (a repeated archive, unarchive,
 /// export, backup, purge, cancelling a job, rebuilding the index, and issuing a connector that
 /// lists the workspace: owner decision 2026-10-17, since issuing one changes no content and an
-/// archived workspace stays readable).
+/// archived workspace stays readable). Revoking a connector stays allowed too: a connector
+/// can still read an archived workspace, so archiving must never prevent its revocation.
 ///
 /// It is an allow-list: an operation added later is refused in an archived workspace until
 /// someone decides otherwise. A refused operation answers `conflict` with
@@ -207,6 +208,7 @@ pub const ALLOWED_WHILE_ARCHIVED: &[OperationName] = &[
     OperationName::GetSession,
     OperationName::CreateConnector,
     OperationName::ListConnectors,
+    OperationName::RevokeConnector,
     OperationName::GetHealth,
     OperationName::GetReadiness,
 ];
