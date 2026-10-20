@@ -28,7 +28,7 @@ import type { Extraction, ItemDocument, Revision } from '../../api/generated/typ
 import { allowed, archivedWords, Missing } from '../explorer/rights';
 import { useWorkspaceChanges } from '../tree/context';
 import { CorrectText } from './CorrectText';
-import { acceptedOn, claimedPages, short, whoseText } from './corrections';
+import { acceptedOn, claimedPages, short, whoseText } from './correction-requests';
 import { KeepSupplied } from './KeepSupplied';
 import { Reconvert } from './Reconvert';
 
@@ -54,7 +54,7 @@ function SuppliedBy({ workspaceId, extraction }: { workspaceId: string; extracti
     <p>
       {shown
         ? `${supplied.supplied_by} supplied it${through}; ${supplied.approved_by} accepted it on ${acceptedOn(supplied.approved_at)}.`
-        : `Text an agent supplied, which ${supplied.approved_by} accepted on ${acceptedOn(supplied.approved_at)}, is kept in the history: ${extraction.corrected ? 'a person’s correction' : 'this conversion’s text'} is shown in its place.`}
+        : `${supplied.supplied_by} supplied text${through}; ${supplied.approved_by} accepted it on ${acceptedOn(supplied.approved_at)}. It is kept in the history: ${extraction.corrected ? 'a person’s correction' : 'this conversion’s text'} is shown in its place.`}
       {claim === null ? null : ` ${claim}`}{' '}
       <Link
         to="/w/$workspaceId/proposals/$proposalId"

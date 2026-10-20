@@ -1,6 +1,6 @@
 /**
  * Reconvert (`redigest_item`): convert the original again with the settings of its current
- * conversion, the only settings the wire reports (`corrections.ts`), said in words before the
+ * conversion, the only settings the wire reports (`correction-requests.ts`), said in words before the
  * button. Where the conversion names pages it did not convert, "Convert only the pages not
  * converted" asks for those alone (`unconverted_only`), with the same settings; it is offered
  * nowhere else. A source no converter ran on has no settings to reconvert with, and the group
@@ -40,7 +40,7 @@ import {
   settingsWords,
   short,
   showMade,
-} from './corrections';
+} from './correction-requests';
 
 export interface ReconvertProps {
   workspaceId: string;

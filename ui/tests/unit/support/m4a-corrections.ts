@@ -201,7 +201,7 @@ export interface CorrectionsService {
   /** The head the service holds now. */
   head: () => string;
   /** Move the head, as someone else's change does. */
-  moveHead: (to: string) => void;
+  moveHead: (to: string, extraction?: Extraction) => void;
 }
 
 export interface ServiceOptions {
@@ -332,10 +332,15 @@ export function correctionsService(options: ServiceOptions = {}): CorrectionsSer
   return {
     handlers,
     head: () => state.head,
-    moveHead: (to: string) => {
+    moveHead: (to: string, extraction?: Extraction) => {
       const current = at(state.head);
       if (current !== undefined) {
-        revisions.set(to, { ...current, summary: { ...current.summary, revision: to } });
+        revisions.set(
+          to,
+          extraction === undefined
+            ? { ...current, summary: { ...current.summary, revision: to } }
+            : sourceDocument(to, extraction, current.body),
+        );
       }
       state.head = to;
     },

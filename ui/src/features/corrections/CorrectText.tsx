@@ -1,6 +1,6 @@
 /**
  * Correct text (`correct_digest`): a text box beside the text shown, started from it, saved on
- * the head the workspace shows with the item's digest there (`corrections.ts`).
+ * the head the workspace shows with the item's digest there (`correction-requests.ts`).
  *
  * "Correct text" opens the editor in place and puts keyboard focus in the person's text box; the
  * button stays (`aria-expanded`), and pressing it again puts focus back in the text box. The text
@@ -49,7 +49,7 @@ import {
   short,
   tooLong,
   whoseText,
-} from './corrections';
+} from './correction-requests';
 
 export interface CorrectTextProps {
   workspaceId: string;

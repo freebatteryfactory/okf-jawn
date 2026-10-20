@@ -26,7 +26,7 @@ import { getChunks, MergeView } from '@codemirror/merge';
 import { Compartment, EditorState, type Text } from '@codemirror/state';
 import { EditorView, keymap, lineNumbers, type ViewUpdate } from '@codemirror/view';
 import { useEffect, useLayoutEffect, useRef } from 'react';
-import type { LineSpan } from './corrections';
+import type { LineSpan } from './correction-requests';
 
 export interface CorrectionEditorProps {
   /** The text shown now: the left side, and the person's first text. */

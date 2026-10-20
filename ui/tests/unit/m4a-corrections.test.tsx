@@ -29,6 +29,7 @@ import {
   extractionOf,
   GET_PROPOSAL,
   ITEM,
+  LATER_DIGEST,
   PARTIAL,
   PROPOSAL,
   READ,
@@ -138,10 +139,20 @@ describe('whose text is shown', () => {
     await says(section, 'the text shown is the converter’s text.');
     await says(
       section,
-      'Text an agent supplied, which ada accepted on',
+      'agent-7 supplied text, through desk-client; ada accepted it on',
       // The rest of the sentence follows the date.
     );
     await says(section, 'is kept in the history: this conversion’s text is shown in its place.');
+  });
+
+  it('keeps the supplied agent identity visible when a human correction is shown instead', async () => {
+    // SPEC section 5 requires supplied text to be labelled by its agent even while retained in history.
+    const { api, section } = await open({
+      extraction: extractionOf({ supplied: SUPPLIED, corrected: true }),
+    });
+    await says(section, 'agent-7 supplied text, through desk-client; ada accepted it on');
+    await says(section, 'is kept in the history: a person’s correction is shown in its place.');
+    expect(api.violations).toEqual([]);
   });
 });
 
@@ -254,7 +265,8 @@ describe('Correct text', () => {
     const box = await startCorrecting(section);
     typeInto(box, ' Fixed.');
     // Someone else changed the workspace meanwhile.
-    act(() => service.moveHead(ELSEWHERE));
+    // A later conversion changes both the revision and its digest, as SPEC section 5 permits.
+    act(() => service.moveHead(ELSEWHERE, extractionOf({ digest: LATER_DIGEST })));
     fireEvent.click(button(section, 'Save the correction'));
     await says(
       section,
@@ -280,7 +292,9 @@ describe('Correct text', () => {
     await within(section).findByText(/^Saved: your correction is revision/);
     const [stale, saved] = bodies(api);
     expect(stale?.base_revision).toBe(HEAD);
+    expect(stale?.digest).toBe(DIGEST);
     expect(saved?.base_revision).toBe(ELSEWHERE);
+    expect(saved?.digest).toBe(LATER_DIGEST);
     expect(saved?.idempotency_key).not.toBe(stale?.idempotency_key);
     expect(api.violations).toEqual([]);
   });

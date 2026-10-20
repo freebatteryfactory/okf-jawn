@@ -11,7 +11,7 @@
  * is said, and nothing is offered. Where the supplied text is not the one shown, it can be read
  * here before it is kept.
  *
- * The request is a correction's (`corrections.ts` `correct`): on the head shown, repeated under
+ * The request is a correction’s (`correction-requests.ts` `correct`): on the head shown, repeated under
  * its key while it is tried again, a new key after an answer. Once kept, the workspace shows the
  * revision it made, and keyboard focus goes to the words that say so. A refusal is said in words
  * with the service's own: a `conflict` on `/adopts` (the proposal is not accepted, supplies no
@@ -33,7 +33,13 @@ import { proposalOptions } from '../proposals/proposals';
 import { Committed } from '../tree/Committed';
 import { type Attempt, attemptFor } from '../tree/changes';
 import { useWorkspaceChanges } from '../tree/context';
-import { type Corrected, type Correction, correct, short, suppliedTextOf } from './corrections';
+import {
+  type Corrected,
+  type Correction,
+  correct,
+  short,
+  suppliedTextOf,
+} from './correction-requests';
 
 export interface KeepSuppliedProps {
   workspaceId: string;
