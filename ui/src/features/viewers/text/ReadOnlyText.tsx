@@ -59,7 +59,7 @@ export const NOT_UTF8_TITLE =
   'The replacement character “�”: bytes of the original that are not UTF-8, or the character itself';
 
 const look = EditorView.theme({
-  '&': { border: '1px solid GrayText', borderRadius: '0.25rem', maxHeight: '32rem' },
+  '&': { border: '1px solid GrayText', borderRadius: '0.25rem' },
   '&.cm-focused': { outline: 'none' },
   '.cm-scroller': { fontFamily: 'ui-monospace, monospace', lineHeight: '1.5', overflow: 'auto' },
   // The text box itself shows keyboard focus, like every other control of the workspace.
@@ -71,6 +71,9 @@ const look = EditorView.theme({
   },
   '.cm-not-utf8': { outline: '1px solid CanvasText', backgroundColor: 'Mark', color: 'MarkText' },
 });
+
+/** A text shown alone scrolls inside its own box; a merge view's panes scroll together. */
+const scrolls = EditorView.theme({ '&': { maxHeight: '32rem' } });
 
 const replacements = new MatchDecorator({
   regexp: /�/g,
@@ -183,6 +186,7 @@ export function ReadOnlyText({
         doc: start.text,
         extensions: [
           readOnlyText(start.label, start.mediaType, start.marked),
+          scrolls,
           start.describedBy === undefined
             ? []
             : EditorView.contentAttributes.of({ 'aria-describedby': start.describedBy }),

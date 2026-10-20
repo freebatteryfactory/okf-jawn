@@ -13,6 +13,8 @@
  * lines count: a selection names lines of the item's text, which are the original's lines only
  * where the conversion kept them line for line. Lines past what is shown, or past the end, are
  * said to be.
+ *
+ * The original is offered beside the text the reader shows for it (`OriginalBesideDigest.tsx`).
  */
 import { useLayoutEffect, useRef } from 'react';
 import type { Selection } from '../../../api/generated/types.gen';
@@ -20,6 +22,7 @@ import { FailureNotice } from '../../errors/FailureNotice';
 import { useRetry } from '../../errors/retry';
 import { describeSize } from '../../imports/files';
 import type { OriginalProps } from '../types';
+import { OriginalBesideDigest } from './OriginalBesideDigest';
 import { decodeOriginal, lineCount, useOriginalText } from './original-text';
 import { ReadOnlyText, type ReadOnlyTextHandle } from './ReadOnlyText';
 
@@ -174,6 +177,13 @@ export function TextOriginal({
           workspaceId={workspaceId}
         />
       )}
+      <OriginalBesideDigest
+        workspaceId={workspaceId}
+        itemId={itemId}
+        revision={revision}
+        path={path}
+        appearance={appearance}
+      />
     </div>
   );
 }

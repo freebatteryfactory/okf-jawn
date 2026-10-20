@@ -22,6 +22,9 @@
  * table again. After the next part is read, keyboard focus goes to the first table that grew or
  * is new (else to the end of the reading), never to the page body; a part that fails leaves focus
  * on the button, under the failure's notice.
+ *
+ * A CSV or TSV original is text: it is offered beside the converted text as well
+ * (`text/OriginalBesideDigest.tsx`).
  */
 import { useId, useLayoutEffect, useRef } from 'react';
 import type { Selection } from '../../../api/generated/types.gen';
@@ -29,10 +32,16 @@ import { describeCells, describeSelection, textLabels } from '../../documents/de
 import { FailureNotice } from '../../errors/FailureNotice';
 import { useRetry } from '../../errors/retry';
 import { continuationStatus, joinedText, useItemText } from '../text/item-text';
+import { OriginalBesideDigest } from '../text/OriginalBesideDigest';
 import type { OriginalProps } from '../types';
 import { SheetMarkdown } from './SheetMarkdown';
 import { focusTable } from './SheetTable';
 import { quoted, sheetNames, valuesOnlySheets } from './sheet-read';
+
+/** Spreadsheets whose original is itself text, so it can stand beside the converted text. */
+const TEXT_SHEETS: ReadonlySet<string> = new Set(['text/csv', 'text/tab-separated-values']);
+
+const essence = (mediaType: string) => (mediaType.split(';', 1)[0] ?? '').trim().toLowerCase();
 
 /** The rows of each table on the page, by its number. */
 function tableRows(root: HTMLElement | null): Map<string, string> {
@@ -201,6 +210,15 @@ export function SpreadsheetView({
             ? `Read to the end of ${asked}${pages.length > 1 ? `, in ${pages.length} parts` : ''}.`
             : `${pages.length === 1 ? 'One part' : `${pages.length} parts`} of ${asked} read so far.`}
         </p>
+      )}
+      {TEXT_SHEETS.has(essence(appearance.media_type)) && (
+        <OriginalBesideDigest
+          workspaceId={workspaceId}
+          itemId={itemId}
+          revision={revision}
+          path={path}
+          appearance={appearance}
+        />
       )}
     </div>
   );
