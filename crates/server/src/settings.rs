@@ -198,18 +198,18 @@ impl Settings {
     /// application's, is one of its hosts, or has another scheme; and, hosted, naming
     /// `WORKOS_REDIRECT_URI` or `WORKOS_MCP_RESOURCE` when it is not under the public origin.
     pub fn resolve(&self, app: SocketAddr, sandbox: SocketAddr) -> Result<Resolved, ApiError> {
-        let public_origin = self
-            .public_origin
-            .clone()
-            .unwrap_or_else(|| format!("http://{app}"));
+        let public_origin = match &self.public_origin {
+            Some(origin) => origin.clone(),
+            None => bound_origin("OKF_PUBLIC_ORIGIN", app)?,
+        };
         let hosts = match &self.allowed_hosts {
             Some(hosts) => hosts.clone(),
             None => vec![authority_of(&public_origin).to_owned()],
         };
-        let sandbox_origin = self
-            .sandbox_origin
-            .clone()
-            .unwrap_or_else(|| format!("http://{sandbox}"));
+        let sandbox_origin = match &self.sandbox_origin {
+            Some(origin) => origin.clone(),
+            None => bound_origin("OKF_SANDBOX_ORIGIN", sandbox)?,
+        };
         let sandbox_host = authority_of(&sandbox_origin).to_owned();
         if sandbox_origin == public_origin {
             return Err(invalid(
@@ -378,6 +378,17 @@ fn origin_setting(
             "is required when its listener's address is not a loopback address",
         )),
     }
+}
+
+/// A bound address's local HTTP origin, written exactly as a browser writes it.
+fn bound_origin(name: &str, address: SocketAddr) -> Result<String, ApiError> {
+    let url = Url::parse(&format!("http://{address}")).map_err(|_| {
+        invalid(
+            name,
+            "could not derive an HTTP origin from the bound address",
+        )
+    })?;
+    Ok(url.origin().ascii_serialization())
 }
 
 /// `text` parsed, when it is an `http` or `https` origin written exactly as its ASCII

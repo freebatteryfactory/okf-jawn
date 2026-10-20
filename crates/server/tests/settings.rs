@@ -124,6 +124,62 @@ fn a_port_zero_bind_takes_its_origins_from_the_bound_addresses() -> TestResult {
     Ok(())
 }
 
+// server-m2-design.md section 1.2: derived origins follow the same browser ASCII
+// serialization rule as explicit settings. HTTP's default port is absent in both families.
+#[test]
+fn derived_http_default_port_public_origins_omit_port_eighty() -> TestResult {
+    for (bind, origin, host, sandbox_origin, sandbox_host) in [
+        (
+            "127.0.0.1:80",
+            "http://127.0.0.1",
+            "127.0.0.1",
+            "http://127.0.0.1:81",
+            "127.0.0.1:81",
+        ),
+        (
+            "[::1]:80",
+            "http://[::1]",
+            "[::1]",
+            "http://[::1]:81",
+            "[::1]:81",
+        ),
+    ] {
+        let resolved = resolve(&values(&[("OKF_BIND", bind)]))?;
+        assert_eq!(resolved.public_origin, origin, "{bind}");
+        assert_eq!(resolved.hosts, vec![host.to_owned()], "{bind}");
+        assert_eq!(resolved.sandbox_origin, sandbox_origin, "{bind}");
+        assert_eq!(resolved.sandbox_host, sandbox_host, "{bind}");
+    }
+    Ok(())
+}
+
+#[test]
+fn derived_http_default_port_sandbox_origins_omit_port_eighty() -> TestResult {
+    for (bind, origin, host, sandbox_origin, sandbox_host) in [
+        (
+            "127.0.0.1:79",
+            "http://127.0.0.1:79",
+            "127.0.0.1:79",
+            "http://127.0.0.1",
+            "127.0.0.1",
+        ),
+        (
+            "[::1]:79",
+            "http://[::1]:79",
+            "[::1]:79",
+            "http://[::1]",
+            "[::1]",
+        ),
+    ] {
+        let resolved = resolve(&values(&[("OKF_BIND", bind)]))?;
+        assert_eq!(resolved.public_origin, origin, "{bind}");
+        assert_eq!(resolved.hosts, vec![host.to_owned()], "{bind}");
+        assert_eq!(resolved.sandbox_origin, sandbox_origin, "{bind}");
+        assert_eq!(resolved.sandbox_host, sandbox_host, "{bind}");
+    }
+    Ok(())
+}
+
 #[test]
 fn a_bind_must_be_an_ip_and_a_port() -> TestResult {
     for bad in [
