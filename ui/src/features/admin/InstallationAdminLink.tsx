@@ -14,11 +14,19 @@ import { Link } from '@tanstack/react-router';
 import type { Workspace } from '../../api/generated/types.gen';
 import { sessionOptions } from '../imports/limits';
 
-export function InstallationAdminLink({ workspaces }: { workspaces: readonly Workspace[] }) {
+/**
+ * Whether the installation's Administration is offered: the person holds `admin` on a workspace
+ * listed here, or is the local owner. False while the session is not known. The ways to that page
+ * (this link, `installation/NewWorkspaceLink.tsx`) all ask this one rule.
+ */
+export function useOffersInstallationAdmin(workspaces: readonly Workspace[]): boolean {
   const session = useQuery(sessionOptions());
   const administers = workspaces.some((workspace) => workspace.permissions.includes('admin'));
-  const localOwner = session.data?.principal.route === 'local_owner';
-  if (!administers && !localOwner) return null;
+  return administers || session.data?.principal.route === 'local_owner';
+}
+
+export function InstallationAdminLink({ workspaces }: { workspaces: readonly Workspace[] }) {
+  if (!useOffersInstallationAdmin(workspaces)) return null;
   return (
     <p>
       <Link to="/admin">Administration of this installation</Link>
