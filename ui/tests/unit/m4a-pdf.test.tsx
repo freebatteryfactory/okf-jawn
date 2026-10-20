@@ -408,6 +408,20 @@ describe('a selection of pages', () => {
 });
 
 describe('letting the PDF go', () => {
+  it('releases the canvas backing buffer when the viewer is closed', async () => {
+    // SPEC section 7 / A2: closing a page releases its resources, including the browser-owned
+    // canvas allocation. Zero dimensions are the canvas API's explicit buffer release.
+    answerBytes(BYTES);
+    const { unmount } = renderViewer();
+    await drawn(1);
+    const canvas = document.querySelector('canvas');
+    expect(canvas?.width).toBeGreaterThan(0);
+    expect(canvas?.height).toBeGreaterThan(0);
+    unmount();
+    expect(canvas?.width).toBe(0);
+    expect(canvas?.height).toBe(0);
+  });
+
   it('destroys the loading task, cancels the drawing and cleans up the page when the viewer is closed', async () => {
     answerBytes(BYTES);
     const { unmount } = renderViewer();
@@ -418,11 +432,14 @@ describe('letting the PDF go', () => {
     const task = lastTask();
     const page = pagesNumbered(2).at(0);
     const layer = pdf.textLayers.at(-1);
+    const canvas = document.querySelector('canvas');
     unmount();
     expect(task.destroy).toHaveBeenCalledTimes(1);
     expect(page?.renders.at(0)?.cancel).toHaveBeenCalled();
     expect(page?.cleanup).toHaveBeenCalled();
     expect(layer?.cancel).toHaveBeenCalled();
+    expect(canvas?.width).toBe(0);
+    expect(canvas?.height).toBe(0);
     // Once the task is gone, the shared text-layer measuring is cleared.
     await waitFor(() => expect(TextLayer.cleanup).toHaveBeenCalled());
   });

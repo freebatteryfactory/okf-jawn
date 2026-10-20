@@ -107,6 +107,10 @@ export function PdfPage({ document, library, pageNumber, count, name }: PdfPageP
       text?.cancel();
       page?.cleanup();
       layer.replaceChildren();
+      // A detached canvas still owns its pixel buffer while a browser/reader retains it. Release
+      // that allocation on cancellation as well as tab close; the next draw sets its dimensions.
+      canvas.width = 0;
+      canvas.height = 0;
     };
   }, [document, library, pageNumber, width, key]);
 
