@@ -1441,10 +1441,18 @@ pub fn derive_commit_mutation_id(mutation_id: MutationId, ordinal: u32) -> Mutat
 }
 
 /// Stable identity of a commit attempt's retained base-revision record, separate from the
-/// commit and catalog mutations. Lifecycle ruling Q1 counts it without reopening target Git.
+/// commit and catalog mutations. Its tenant/workspace scope matches the warning record's key;
+/// the same mutation in another workspace must retain its own base. Lifecycle ruling Q1 counts
+/// these records without reopening target Git.
 #[must_use]
-pub fn derive_commit_base_mutation_id(mutation_id: MutationId) -> MutationId {
-    MutationId(derived_uuid(b"commit_base", mutation_id, 0))
+pub fn derive_commit_base_mutation_id(scope: &StorageScope, mutation_id: MutationId) -> MutationId {
+    let mut hasher = Sha256::new();
+    hasher.update(b"okf-jawn derived identity\0commit_base\0");
+    // A fixed-length tenant hash keeps the tuple unambiguous for every valid tenant string.
+    hasher.update(Sha256::digest(scope.tenant_id.as_str().as_bytes()));
+    hasher.update(scope.workspace_id.0.as_bytes());
+    hasher.update(mutation_id.0.as_bytes());
+    MutationId(version_8(hasher.finalize().into()))
 }
 
 /// The identity of the workspace created under one mutation.

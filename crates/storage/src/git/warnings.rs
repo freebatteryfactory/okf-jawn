@@ -59,6 +59,7 @@ pub(super) fn keep(
     warnings: &[Warning],
 ) -> Result<(), ApiError> {
     let (tenant, workspace) = scope_key(scope);
+    let base_mutation = derive_commit_base_mutation_id(scope, mutation);
     let warnings = serde_json::to_string(warnings).map_err(|error| json(&error))?;
     let commit = commit.to_string();
     let base = serde_json::to_string(&base.to_string()).map_err(|error| json(&error))?;
@@ -81,12 +82,7 @@ pub(super) fn keep(
                  ON CONFLICT (mutation_id) DO UPDATE SET result=excluded.result
                  WHERE action='commit_base' AND tenant_id=excluded.tenant_id
                      AND workspace_id=excluded.workspace_id",
-                params![
-                    derive_commit_base_mutation_id(mutation).0.to_string(),
-                    tenant,
-                    workspace,
-                    base
-                ],
+                params![base_mutation.0.to_string(), tenant, workspace, base],
             )
             .map_err(|error| sql(&error))?;
         if written != 1 {
