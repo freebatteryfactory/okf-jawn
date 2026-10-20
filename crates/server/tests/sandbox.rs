@@ -154,6 +154,21 @@ fn sandbox_of(
     })?)
 }
 
+#[test]
+fn the_service_does_not_start_with_an_empty_or_spaced_host() -> TestResult {
+    for host in ["", " ", " sandbox.example.test", "sandbox.example.test "] {
+        let refused = err_of(service(SandboxParts {
+            capabilities: Arc::new(Capabilities::default()),
+            blobs: Arc::new(Blobs::default()),
+            host: host.to_owned(),
+            app_origin: "http://127.0.0.1:7711".to_owned(),
+        }))?;
+        assert_eq!(refused.code, ErrorCode::InvalidInput, "{host:?}");
+        assert_eq!(refused.field.as_deref(), Some("host"));
+    }
+    Ok(())
+}
+
 fn get(path: &str, host: &str) -> Result<Request<Body>, axum::http::Error> {
     Request::get(path)
         .header("host", host)

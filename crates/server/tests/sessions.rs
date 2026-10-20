@@ -17,8 +17,9 @@ use okf_jawn_contract::identity::{MutationId, TenantId, Timestamp};
 use okf_jawn_core::credentials::{CredentialStore, SessionRecord};
 use okf_jawn_core::events::{EventLog, EventQuery, EventScope, NewEvent};
 use okf_jawn_core::ports::PortFuture;
+use okf_jawn_server::grants::SystemClock;
 use okf_jawn_server::identity::{csrf_token_of, session_id_of};
-use okf_jawn_server::local::{LaunchTokens, SecretSource};
+use okf_jawn_server::local::{LAUNCH_TOKEN_LIFETIME, LaunchTokens, SecretSource};
 use okf_jawn_server::sessions::{SessionEntry, SessionParts, Sessions, routes};
 use serde_json::json;
 use tower::ServiceExt;
@@ -41,6 +42,7 @@ struct Local {
     app: Router,
     base: LocalApp,
     token: String,
+    tokens: Arc<LaunchTokens>,
 }
 
 const SESSION_SECRET: &str = "session-secret-of-the-test";
@@ -96,7 +98,10 @@ impl Local {
             "list_drafts",
             json!({ "revision": "a".repeat(40), "items": [] }),
         )?;
-        let tokens = Arc::new(LaunchTokens::new());
+        let tokens = Arc::new(LaunchTokens::new(
+            LAUNCH_TOKEN_LIFETIME,
+            Arc::new(SystemClock),
+        ));
         // One secret more than one sign-in needs, so a second sign-in would show.
         let secrets = Arc::new(Sequence(Mutex::new(vec![
             "second-session-secret",
@@ -110,12 +115,20 @@ impl Local {
             credentials: base.credentials.clone(),
             events: events.unwrap_or_else(|| base.ports.events.clone()),
             secrets,
+            refusals: base.refusals.clone(),
             policy: identity.cookie_policy(Duration::from_secs(3600)),
-            entry: SessionEntry::Local { tokens },
+            entry: SessionEntry::Local {
+                tokens: tokens.clone(),
+            },
         });
         let extra = routes(sessions).merge(okf_jawn_server::schemas::routes());
         let app = base.service_behind(identity, extra, Vec::new(), None)?;
-        Ok(Self { app, base, token })
+        Ok(Self {
+            app,
+            base,
+            token,
+            tokens,
+        })
     }
 
     async fn launch(&self) -> Result<Response, Box<dyn std::error::Error>> {
@@ -163,6 +176,73 @@ fn set_cookies(response: &Response) -> Vec<String> {
 
 fn cookie() -> String {
     format!("okf-session={SESSION_SECRET}")
+}
+
+#[tokio::test]
+async fn a_refused_launch_link_or_bearer_is_recorded_as_a_refused_sign_in() -> TestResult {
+    let local = Local::new()?;
+    let refused = Request::get("/auth/local?token=not-the-token")
+        .header("host", HOST)
+        .body(Body::empty())?;
+    assert_eq!(
+        local.app.clone().oneshot(refused).await?.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let bearer = Request::post(LIST_DRAFTS)
+        .header("host", HOST)
+        .header("authorization", "Bearer not-a-connector-secret")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))?;
+    assert_eq!(
+        local.app.clone().oneshot(bearer).await?.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let recorded: Vec<(EventScope, NewEvent)> = local
+        .base
+        .ports
+        .events
+        .appended()?
+        .into_iter()
+        .filter(|(_, event)| event.kind == EventKind::SignInRefused)
+        .collect();
+    assert_eq!(recorded.len(), 2);
+    for (scope, event) in recorded {
+        assert_eq!(scope, EventScope::Tenant(TenantId::local()));
+        assert!(event.actor.is_none());
+        assert!(event.count.is_none());
+    }
+    // A good launch link is no refusal.
+    local.launch().await?;
+    let refused_now = local
+        .base
+        .ports
+        .events
+        .appended()?
+        .into_iter()
+        .filter(|(_, event)| event.kind == EventKind::SignInRefused)
+        .count();
+    assert_eq!(refused_now, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn only_a_completed_sign_in_tells_the_launch_link_to_publish_the_next() -> TestResult {
+    let local = Local::new()?;
+    let refused = Request::get("/auth/local?token=not-the-token")
+        .header("host", HOST)
+        .body(Body::empty())?;
+    let response = local.app.clone().oneshot(refused).await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), local.tokens.signed_in())
+            .await
+            .is_err(),
+        "a refused exchange asked for a new launch link"
+    );
+    let response = local.launch().await?;
+    assert_eq!(response.status(), StatusCode::FOUND);
+    tokio::time::timeout(Duration::from_secs(10), local.tokens.signed_in()).await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -296,6 +376,61 @@ async fn a_cookie_request_without_the_csrf_token_is_refused_and_recorded() -> Te
         .filter(|(_, event)| event.kind == EventKind::PermissionDenied)
         .count();
     assert_eq!(refusals, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_refused_cookie_write_names_its_operation_or_its_transport_in_the_tenant_log()
+-> TestResult {
+    let local = Local::new()?;
+    local.launch().await?;
+    let response = local
+        .list_drafts(Some(&cookie()), None, Some(ORIGIN))
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let upload = Request::put(
+        "/api/workspaces/11111111-1111-4111-8111-111111111111/uploads/22222222-2222-4222-8222-222222222222/content",
+    )
+    .header("host", HOST)
+    .header("cookie", cookie())
+    .header("origin", ORIGIN)
+    .body(Body::from("bytes"))?;
+    let response = local.app.clone().oneshot(upload).await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let refusals: Vec<(EventScope, NewEvent)> = local
+        .base
+        .ports
+        .events
+        .appended()?
+        .into_iter()
+        .filter(|(_, event)| event.kind == EventKind::PermissionDenied)
+        .collect();
+    let tenant = EventScope::Tenant(TenantId::local());
+    let named: Vec<_> = refusals
+        .iter()
+        .map(|(scope, event)| (scope == &tenant, event.operation, event.transport))
+        .collect();
+    assert_eq!(
+        named,
+        vec![
+            (
+                true,
+                Some(okf_jawn_contract::metadata::OperationName::ListDrafts),
+                None
+            ),
+            (
+                true,
+                None,
+                Some(okf_jawn_contract::transport::TransportName::UploadContent)
+            ),
+        ]
+    );
+    for (_, event) in &refusals {
+        assert_eq!(
+            event.actor.as_ref().map(|actor| actor.route.clone()),
+            Some(AccessRoute::LocalOwner)
+        );
+    }
     Ok(())
 }
 

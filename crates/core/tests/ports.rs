@@ -416,6 +416,7 @@ async fn record_store_calls(
     let job_scope = JobScope::Workspace(scope.clone());
     let job = records.create_job(&job_scope, new_job).await?;
     records.get_job(&job_scope, job.id).await?;
+    records.job_mutation(&job_scope, job.id).await?;
     let page = Page {
         cursor: None,
         limit: 50,

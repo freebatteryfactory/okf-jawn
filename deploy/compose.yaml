@@ -12,7 +12,14 @@ services:
     env_file: ../.env
     environment:
       OKF_BIND: 0.0.0.0:7711
+      OKF_PUBLIC_ORIGIN: ${OKF_PUBLIC_ORIGIN:?Set the public HTTPS origin}
+      OKF_SANDBOX_BIND: 0.0.0.0:7712
+      OKF_SANDBOX_ORIGIN: ${OKF_SANDBOX_ORIGIN:?Set the sandbox HTTPS origin on a different host}
+      # The server validates HTTPS and distinct hosts before opening the data directory.
+      # Set only the ingress proxy IPs; forward Host and Origin unchanged.
+      OKF_TRUSTED_PROXIES: ${OKF_TRUSTED_PROXIES:?Set the trusted ingress proxy IPs}
       OKF_DATA_DIR: /data
+      DOCLING_RS_MODELS_DIR: /opt/docling/models
       OKF_AUTH_MODE: workos
       WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:?Configure WorkOS}
       WORKOS_ISSUER: ${WORKOS_ISSUER:?Configure the WorkOS issuer}
@@ -20,8 +27,17 @@ services:
       WORKOS_REDIRECT_URI: ${WORKOS_REDIRECT_URI:?Configure the browser callback}
     ports:
       - "127.0.0.1:7711:7711"
+      # Route the sandbox host here, separately from the public application host.
+      - "127.0.0.1:7712:7712"
     volumes:
       - okf-data:/data
+      # Use the qualified model bytes; do not download or invent models at startup.
+      - type: bind
+        source: ${DOCLING_MODELS_DIR:?Set the absolute directory of qualified Docling models}
+        target: /opt/docling/models
+        read_only: true
+        bind:
+          create_host_path: false
     restart: unless-stopped
     init: true
     security_opt:

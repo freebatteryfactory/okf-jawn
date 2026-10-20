@@ -763,6 +763,127 @@ async fn the_transport_holds_an_answer_only_in_room_it_took() -> TestResult {
     Ok(())
 }
 
+/// The most memory the process `pid` has held so far, in bytes: on Linux its peak resident set
+/// (`VmHWM` in `/proc/<pid>/status`).
+#[cfg(target_os = "linux")]
+fn peak_bytes(pid: u32) -> Outcome<u64> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status"))?;
+    let line = some(
+        status.lines().find(|line| line.starts_with("VmHWM:")),
+        "the VmHWM line",
+    )?;
+    let kib: u64 = some(line.split_whitespace().nth(1), "a number of KiB")?.parse()?;
+    Ok(kib.saturating_mul(1024))
+}
+
+/// The most memory the process `pid` has held so far, in bytes: on Windows its peak private
+/// bytes, which Windows PowerShell's `Get-Process` calls `PeakPagedMemorySize64` (no API of the
+/// standard library reads another process's memory).
+#[cfg(windows)]
+fn peak_bytes(pid: u32) -> Outcome<u64> {
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!("(Get-Process -Id {pid}).PeakPagedMemorySize64"),
+        ])
+        .output()?;
+    Ok(String::from_utf8(output.stdout)?.trim().parse()?)
+}
+
+/// Start the built relay against `origin`, give it `line` and a line feed, and read its first
+/// output line; returns its peak memory then, what it wrote to its error stream once its input
+/// was closed and it had ended (with exit code 0), and that output line.
+#[cfg(any(target_os = "linux", windows))]
+fn relay_one_line(origin: &str, line: String) -> Outcome<(u64, String, String)> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(crate::support::EXECUTABLE)
+        .args(["mcp", "--stdio", "--server", origin])
+        .env("OKF_JAWN_TOKEN", TOKEN)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdin = some(child.stdin.take(), "stdin")?;
+    let feeding = std::thread::spawn(move || -> std::io::Result<std::process::ChildStdin> {
+        stdin.write_all(line.as_bytes())?;
+        stdin.write_all(b"\n")?;
+        stdin.flush()?;
+        Ok(stdin)
+    });
+    let mut written = String::new();
+    BufReader::new(some(child.stdout.take(), "stdout")?).read_line(&mut written)?;
+    let peak = peak_bytes(child.id());
+    let stdin = feeding.join().map_err(|_| "the feeding thread failed")??;
+    drop(stdin);
+    let output = child.wait_with_output()?;
+    assert_eq!(output.status.code(), Some(0));
+    Ok((peak?, String::from_utf8(output.stderr)?, written))
+}
+
+/// C2: a request line is never read into a tree of values. The built relay is given one line
+/// of exactly the request limit, 16 MiB, that holds 8 million numbers, the shape that cost
+/// about 400 MiB while it was parsed. It forwards the line byte for byte, passes the answer
+/// on, and its peak memory stays within four times the line (64 MiB): the line itself, its
+/// buffer while it grows, and what the process holds anyway. Measured on the built executable
+/// as the operating system counts it (`peak_bytes`), Windows and Linux; not built elsewhere.
+#[cfg(any(target_os = "linux", windows))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_stdio_a_request_line_of_the_full_limit_costs_a_bounded_memory() -> TestResult {
+    const BOUND: u64 = 67_108_864;
+    let answer = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}";
+    let listener = Answering::routed(move |heard| {
+        if heard.line().starts_with("GET ") {
+            json_answer("200 OK", "{}")
+        } else {
+            json_answer("200 OK", answer)
+        }
+    })
+    .await?;
+    let opening = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"x\",\
+                \"arguments\":{\"n\":[0";
+    let tail = "]}}}";
+    let room = MAX_REQUEST_BODY_BYTES.saturating_sub(opening.len().saturating_add(tail.len()));
+    let numbers = room / 2;
+    let mut line = String::with_capacity(MAX_REQUEST_BODY_BYTES.saturating_add(1));
+    line.push_str(opening);
+    line.push_str(&",0".repeat(numbers));
+    line.push_str(&" ".repeat(room.saturating_sub(numbers.saturating_mul(2))));
+    line.push_str(tail);
+    assert_eq!(line.len(), MAX_REQUEST_BODY_BYTES);
+    assert!(numbers > 8_000_000);
+    let origin = listener.origin();
+    let sent = line.clone();
+    let measuring = tokio::task::spawn_blocking(move || {
+        relay_one_line(&origin, sent).map_err(|error| error.to_string())
+    });
+    let (peak, said, written) =
+        tokio::time::timeout(std::time::Duration::from_secs(300), measuring)
+            .await
+            .map_err(|_| "the relay did not answer one long line within five minutes")???;
+    // Seen with `--nocapture`: the figure the report quotes.
+    eprintln!("the relay's peak memory for one line of 16 MiB: {peak} bytes");
+    assert_eq!(
+        (written.as_str(), said.as_str()),
+        (format!("{answer}\n").as_str(), "")
+    );
+    let heard = listener.heard()?;
+    let post = some(heard.get(1), "the POST")?;
+    assert!(
+        post.body == line.as_bytes(),
+        "the line was not forwarded as it came"
+    );
+    assert!(
+        peak < BOUND,
+        "the relay's peak memory was {} MiB for one line of 16 MiB",
+        peak / 1_048_576
+    );
+    Ok(())
+}
+
 /// The answer bound of the relay as shipped is the stated one, all the way to its transport
 /// (the re-review's F4). Through the entry point: an answer of exactly 64 MiB is passed on
 /// whole, and one of a byte more is refused for its request in words that name the bound.

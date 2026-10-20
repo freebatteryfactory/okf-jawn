@@ -25,12 +25,15 @@
  * A session that ended. When the request for the stream is answered "not signed in"
  * (`unauthenticated`), nothing more is tried by itself: every try would be refused the same way,
  * for as long as the page is shown. The stream is asked for again when the person has acted and
- * the jobs were answered again (`wake`), or when the page is shown again after being hidden.
+ * the jobs were answered again (`wake`), a Reviews screen is opened, or the page is shown again
+ * after being hidden.
  *
  * A hidden page holds no stream: it is closed when the page is hidden and opened again, from the
  * last event seen, when the page is shown.
+ * Jobs, Reviews and Attention share one transport per QueryClient and workspace. Each keeps its
+ * own refresh callbacks; leaving one screen removes those without disconnecting the others.
  */
-import { useQueryClient } from '@tanstack/react-query';
+import { type QueryClient, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { streamEvents } from '../../api/generated/sdk.gen';
 import { zEvent } from '../../api/generated/zod.gen';
@@ -193,6 +196,108 @@ export function followEvents(
   };
 }
 
+interface WorkspaceFeed {
+  hooks: Set<FeedHooks>;
+  readonly feed: Feed;
+  stop: () => void;
+  wake: () => void;
+}
+
+/** A cache/session owns its transports; unrelated clients must never share one. */
+const workspaceFeeds = new WeakMap<QueryClient, Map<string, WorkspaceFeed>>();
+
+/** The transport owns visibility and resume identity, independently of any one subscriber. */
+function workspaceFeed(workspaceId: string): WorkspaceFeed {
+  const hooks = new Set<FeedHooks>();
+  let feed: Feed = { state: 'opening', error: null };
+  let stop: (() => string | undefined) | null = null;
+  let lastEventId: string | undefined;
+  let generation = 0;
+  const publish = (next: Feed) => {
+    feed = next;
+    for (const observer of hooks) observer.onState(next);
+  };
+  const open = () => {
+    const opened = ++generation;
+    publish({ state: 'opening', error: null });
+    stop = followEvents(workspaceId, lastEventId, {
+      onState: (next) => {
+        if (opened === generation) publish(next);
+      },
+      onEvent: (data) => {
+        if (opened !== generation) return;
+        for (const observer of hooks) observer.onEvent(data);
+      },
+    });
+  };
+  const close = () => {
+    generation += 1;
+    if (stop === null) return;
+    lastEventId = stop();
+    stop = null;
+  };
+  const visibility = () => {
+    if (document.visibilityState === 'hidden') {
+      close();
+      publish({ state: 'hidden', error: null });
+    } else if (stop === null) open();
+  };
+  document.addEventListener('visibilitychange', visibility);
+  visibility();
+  return {
+    hooks,
+    get feed() {
+      return feed;
+    },
+    stop: () => {
+      document.removeEventListener('visibilitychange', visibility);
+      close();
+    },
+    wake: () => {
+      // An explicit successful read or a new screen visit can retry a session refusal once.
+      if (
+        feed.state !== 'unavailable' ||
+        !sessionEnded(feed.error) ||
+        document.visibilityState === 'hidden'
+      )
+        return;
+      close();
+      open();
+    },
+  };
+}
+
+/**
+ * Subscribe to one workspace transport per QueryClient. A late observer receives its current
+ * state (including live, so it can subscribe-then-ask). Leaving one screen removes only its
+ * callbacks; the last observer releases the connection, visibility listener and cache entry.
+ */
+export function followWorkspaceEvents(client: QueryClient, workspaceId: string, hooks: FeedHooks) {
+  let feeds = workspaceFeeds.get(client);
+  if (feeds === undefined) {
+    feeds = new Map();
+    workspaceFeeds.set(client, feeds);
+  }
+  let following = feeds.get(workspaceId);
+  if (following === undefined) {
+    following = workspaceFeed(workspaceId);
+    feeds.set(workspaceId, following);
+  }
+  const entry = following;
+  const entries = feeds;
+  entry.hooks.add(hooks);
+  hooks.onState(entry.feed);
+  return {
+    wake: entry.wake,
+    stop: () => {
+      if (!entry.hooks.delete(hooks) || entry.hooks.size > 0) return;
+      entry.stop();
+      entries.delete(workspaceId);
+      if (entries.size === 0) workspaceFeeds.delete(client);
+    },
+  };
+}
+
 /** An event that says the workspace's jobs may have changed; one that cannot be read may too. */
 function concernsJobs(data: unknown): boolean {
   const event = zEvent.safeParse(data);
@@ -210,48 +315,20 @@ export function useJobsFeed(workspaceId: string): Feed & { live: boolean; wake: 
   const [feed, setFeed] = useState<Feed>({ state: 'opening', error: null });
   const reopen = useRef<() => void>(() => undefined);
   useEffect(() => {
-    let stop: (() => string | undefined) | null = null;
-    let lastEventId: string | undefined;
-    // The stream stopped because the service said the person is not signed in.
-    let signedOut = false;
-    const open = () => {
-      signedOut = false;
-      setFeed({ state: 'opening', error: null });
-      stop = followEvents(workspaceId, lastEventId, {
-        onState: (next) => {
-          setFeed(next);
-          signedOut = next.state === 'unavailable' && sessionEnded(next.error);
-          // Subscribe, then ask: what changed before the stream was open sent its event to
-          // nobody, the first time as after a time without it.
-          if (next.state === 'live') jobsChanged(client, workspaceId);
-        },
-        onEvent: (data) => {
-          if (concernsJobs(data)) jobsChanged(client, workspaceId);
-        },
-      });
-    };
-    const close = () => {
-      if (stop === null) return;
-      lastEventId = stop();
-      stop = null;
-    };
-    const visibility = () => {
-      if (document.visibilityState === 'hidden') {
-        close();
-        setFeed({ state: 'hidden', error: null });
-      } else if (stop === null) open();
-    };
-    reopen.current = () => {
-      if (!signedOut || document.visibilityState === 'hidden') return;
-      close();
-      open();
-    };
-    visibility();
-    document.addEventListener('visibilitychange', visibility);
+    const following = followWorkspaceEvents(client, workspaceId, {
+      onState: (next) => {
+        setFeed(next);
+        // A late subscriber asks too: earlier events were delivered to nobody on this screen.
+        if (next.state === 'live') jobsChanged(client, workspaceId);
+      },
+      onEvent: (data) => {
+        if (concernsJobs(data)) jobsChanged(client, workspaceId);
+      },
+    });
+    reopen.current = following.wake;
     return () => {
-      document.removeEventListener('visibilitychange', visibility);
       reopen.current = () => undefined;
-      close();
+      following.stop();
     };
   }, [client, workspaceId]);
   const wake = useCallback(() => reopen.current(), []);

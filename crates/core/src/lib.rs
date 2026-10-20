@@ -29,6 +29,8 @@ pub mod ports;
 
 /// Bounded conversion worker interface.
 pub mod conversion;
+/// Deterministic advisory instruction-like text detection, without external services.
+pub mod instruction_like;
 /// The server-owned application header of item files.
 pub mod items;
 /// Durable job specifications, leases, reviews, receipts and artifact records.

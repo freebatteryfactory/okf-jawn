@@ -3,7 +3,15 @@
 //! A credential comes from the environment or, for the relay, from the first line of a file
 //! (UTF-8 or ASCII, with or without a byte order mark; at most 8192 bytes, and a longer line
 //! is refused, not cut). From either place it is printable ASCII without spaces and at least
-//! 16 characters long; anything else is refused before the CLI does anything with it.
+//! 16 characters long; anything else is refused before the CLI does anything with it. The
+//! relay's connector credential is also refused unless it is spelled in the alphabet the
+//! service issues a connector secret in, lowercase letters, digits and the underscore
+//! ([`Credential::connector`]): so it never holds `[` or `]`, and the mark that replaces it in
+//! what the relay writes cannot complete it. An operation's bearer token is refused unless it
+//! is an RFC 6750 `b64token` ([`Credential::operation`]): letters, digits and `-` `.` `_` `~`
+//! `+` `/`, then any number of `=`. That alphabet holds a hosted service's WorkOS Connect
+//! access token (base64url and dots) and every connector secret, and no `[` or `]`, so the
+//! mark cannot complete a token in a refusal the CLI prints either.
 //! It is never an argument. The type has no `Display` and its `Debug` prints no secret.
 //!
 //! Two functions keep the secret out of what the CLI writes:
@@ -93,6 +101,27 @@ impl Credential {
         Ok(value)
     }
 
+    /// This credential as the relay's connector credential: refused unless it is spelled in the
+    /// alphabet the service issues a connector secret in (`in_connector_alphabet`). `source`
+    /// names where it came from, for the refusal.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` when a character is outside that alphabet; the credential itself
+    /// is never repeated.
+    pub fn connector(self, source: &str) -> Result<Self, ApiError> {
+        if self.0.bytes().all(in_connector_alphabet) {
+            return Ok(self);
+        }
+        Err(ApiError::new(
+            ErrorCode::InvalidInput,
+            format!(
+                "The connector credential in {source} is not usable: a connector credential the \
+                 okf-jawn service issues holds only lowercase letters, digits and the underscore. \
+                 Copy the whole credential as the service gave it"
+            ),
+        ))
+    }
+
     /// Read the credential the environment variable `name` holds, if it is set and not blank.
     ///
     /// # Errors
@@ -159,6 +188,24 @@ impl Credential {
             .map_err(|_| refused(format!("The first line of {file} is not text")))?;
         Self::parse(line, "--token-file")?
             .ok_or_else(|| refused(format!("The first line of {file} is empty")))
+    }
+
+    /// This credential as an operation's bearer token: refused unless it is an RFC 6750
+    /// `b64token` (`is_b64token`). `source` names where it came from, for the refusal.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` when it is not; the token itself is never repeated.
+    pub fn operation(self, source: &str) -> Result<Self, ApiError> {
+        if is_b64token(&self.0) {
+            return Ok(self);
+        }
+        Err(ApiError::new(
+            ErrorCode::InvalidInput,
+            format!(
+                "The bearer token in {source} is not usable: a bearer token holds only letters, \
+                 digits and - . _ ~ + /, and may end in =. Copy the whole token as it was issued"
+            ),
+        ))
     }
 
     /// Take a credential from raw text: surrounding whitespace is dropped, and blank is none.
@@ -342,6 +389,26 @@ fn escape(rest: Option<&[u8]>) -> (u8, usize) {
         }
         _ => (NO_MATCH, 2),
     }
+}
+
+/// Whether `byte` is in the alphabet a connector secret is spelled in. The service issues
+/// `okfj_` and 64 lowercase hexadecimal digits (32 random bytes); the alphabet is the
+/// lowercase letters, the digits and the underscore. The mark that replaces a credential,
+/// `[credential]`, begins and ends with a bracket, so it can never complete one.
+fn in_connector_alphabet(byte: u8) -> bool {
+    byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+}
+
+/// Whether `text` is a `b64token` of RFC 6750 section 2.1, the syntax of a bearer token:
+/// `1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" ) *"="`. A WorkOS Connect access
+/// token (base64url and dots) and a connector secret are; `[` and `]`, from which the mark
+/// `[credential]` could complete a token, are not.
+fn is_b64token(text: &str) -> bool {
+    let body = text.trim_end_matches('=');
+    !body.is_empty()
+        && body.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'+' | b'/')
+        })
 }
 
 /// For each prefix of `secret`, the length of its longest proper prefix that is also its

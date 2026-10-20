@@ -7,7 +7,9 @@ use serde_json::{Value, json};
 
 use super::{notification, request};
 use crate::check::{TestResult, some};
-use crate::support::doubles::{Body, FakeTransport, Setup, accepted, broken, relay, status};
+use crate::support::doubles::{
+    Body, FakeTransport, Setup, accepted, answered, broken, relay, status,
+};
 
 /// Read every frame of `input` at `limit`.
 async fn frames(input: &[u8], limit: usize) -> std::io::Result<Vec<Frame>> {
@@ -97,6 +99,144 @@ async fn a_very_long_line_is_dropped_and_the_next_line_is_read() -> TestResult {
     assert_eq!(
         frames(&input, 16).await?,
         [Frame::TooLong, line("next"), Frame::End]
+    );
+    Ok(())
+}
+
+/// C5: an input that ends inside a line already over the limit gives that line as too long,
+/// and then the end, not the end alone: whether the line passed the limit by the byte that is
+/// kept for a carriage return, by two bytes, or by far, and whether it arrived whole or in
+/// pieces of two bytes, the reader's own buffer being smaller than the line.
+#[tokio::test]
+async fn an_input_that_ends_inside_a_line_over_the_limit_gives_that_line_as_too_long() -> TestResult
+{
+    let far = vec![b'a'; 4096];
+    let cases: [&[u8]; 6] = [
+        b"123456789",
+        b"1234567890",
+        b"12345678901234567890",
+        &far,
+        b"ok\n1234567890",
+        b"1234567890\r",
+    ];
+    for input in cases {
+        let expected = if input.starts_with(b"ok\n") {
+            vec![line("ok"), Frame::TooLong, Frame::End]
+        } else {
+            vec![Frame::TooLong, Frame::End]
+        };
+        assert_eq!(frames(input, 8).await?, expected, "{} bytes", input.len());
+        let mut frames = Frames::new(tokio::io::BufReader::with_capacity(2, input), 8);
+        let mut pieces = Vec::new();
+        loop {
+            let frame = frames.next().await?;
+            let ended = frame == Frame::End;
+            pieces.push(frame);
+            if ended {
+                break;
+            }
+        }
+        assert_eq!(pieces, expected, "{} bytes in pieces of two", input.len());
+    }
+    // Through the relay: the client is told the line is too long, and nothing is forwarded.
+    let transport = FakeTransport::echoing();
+    let mut setup = Setup::new(&transport);
+    setup.limits = Limits {
+        line_bytes: 16,
+        ..Limits::default()
+    };
+    let ran = relay(setup, b"{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":1}").await?;
+    assert_eq!((ran.code, ran.stderr.as_str()), (0, ""));
+    let answers = ran.lines()?;
+    assert_eq!(answers.len(), 1, "{}", ran.stdout);
+    let refused = some(answers.first(), "the refusal")?;
+    assert_eq!(
+        (refused.get("id"), refused.pointer("/error/code")),
+        (None, Some(&json!(-32600)))
+    );
+    assert!(
+        ran.stdout
+            .contains("the line is longer than the request limit of 16 bytes"),
+        "{}",
+        ran.stdout
+    );
+    assert_eq!(transport.posts()?, Vec::new());
+    Ok(())
+}
+
+/// C2: a line is read for the members the relay acts on, and sent as it came. What it skips is
+/// checked by its grammar alone: a `params` nested a thousand deep and a number past the range
+/// of a 64-bit float are forwarded byte for byte (both were answered as not JSON while a line
+/// was read into a tree of values). When a member occurs twice the last one counts, as before.
+/// A line that is not UTF-8, or not JSON, is still answered `-32700`, and one whose id is an
+/// array nested deeper than the JSON library reads is an invalid request, not unreadable.
+#[tokio::test]
+async fn a_line_is_read_for_its_members_and_sent_as_it_came() -> TestResult {
+    let deep = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"x\":{}{}}}}}",
+        "[".repeat(1000),
+        "]".repeat(1000)
+    );
+    let huge = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"n\":1e400}}";
+    let twice = "{\"jsonrpc\":\"2.0\",\"id\":3,\"id\":4,\"method\":5,\"method\":\"ping\"}";
+    let method_last = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"ping\",\"method\":6}";
+    let deep_id = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":{}{},\"method\":\"ping\"}}",
+        "[".repeat(300),
+        "]".repeat(300)
+    );
+    let input = format!("{deep}\n{huge}\n{twice}\n{method_last}\n{deep_id}\n");
+    let mut lines = input.into_bytes();
+    lines.extend_from_slice(b"{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"p\xffing\"}\nnot json\n");
+    let transport = FakeTransport::new(|post, _events| {
+        Box::pin(async move {
+            let id = if post.body.starts_with(b"{\"jsonrpc\":\"2.0\",\"id\":1,") {
+                json!(1)
+            } else if post.body.starts_with(b"{\"jsonrpc\":\"2.0\",\"id\":2,") {
+                json!(2)
+            } else {
+                json!(4)
+            };
+            answered(&json!({"jsonrpc": "2.0", "id": id, "result": {}})).reply
+        })
+    });
+    let ran = relay(Setup::new(&transport), &lines).await?;
+    assert_eq!((ran.code, ran.stderr.as_str()), (0, ""));
+    let bodies: Vec<Vec<u8>> = transport
+        .posts()?
+        .into_iter()
+        .map(|post| post.body)
+        .collect();
+    assert_eq!(
+        bodies,
+        [
+            deep.into_bytes(),
+            huge.as_bytes().to_vec(),
+            twice.as_bytes().to_vec()
+        ],
+        "forwarded as they came, in order"
+    );
+    let answers = ran.lines()?;
+    let mut ids: Vec<String> = answers
+        .iter()
+        .map(|answer| {
+            format!(
+                "{}:{}",
+                answer.get("id").map_or_else(String::new, Value::to_string),
+                answer
+                    .pointer("/error/code")
+                    .map_or_else(|| "ok".to_owned(), Value::to_string)
+            )
+        })
+        .collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        [
+            "1:ok", "2:ok", "4:ok", "5:-32600", ":-32600", ":-32700", ":-32700"
+        ],
+        "{}",
+        ran.stdout
     );
     Ok(())
 }

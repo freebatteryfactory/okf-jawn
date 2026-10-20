@@ -1,5 +1,5 @@
 //! `ApplicationService` handlers over fakes of their ports: what each operation of the item,
-//! read, source, history, search, health, session, proposal, review, purge, naming-rules
+//! folder, read, source, history, search, health, session, proposal, review, purge, naming-rules
 //! (conventions), workspace, event, connector, upload and job-control modules asks of the
 //! ports, and what it answers; and the same of each byte transfer (`transfers`).
 //!
@@ -11,6 +11,7 @@
 //! handler), `job_control` dispatches to the service over the same fakes, with the fixture
 //! ledger (`support`).
 
+mod attention;
 #[path = "../support/candidates.rs"]
 mod candidates;
 #[path = "../support/confirmations.rs"]
@@ -21,7 +22,9 @@ mod drafts;
 mod events;
 #[path = "../support/application.rs"]
 mod fixture;
+mod folders;
 mod history;
+mod imports;
 mod items;
 mod job_control;
 mod navigation;

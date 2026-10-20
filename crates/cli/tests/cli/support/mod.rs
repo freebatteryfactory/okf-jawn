@@ -44,7 +44,7 @@ pub const EXECUTABLE: &str = env!("CARGO_BIN_EXE_okf-jawn");
 pub const STAND_IN_SAYS: &str = "stand-in-output";
 
 /// The token every test that needs one uses; no test expects to see it in any output.
-pub const TOKEN: &str = "tok-5f1c2a9e-7d3b-41c6";
+pub const TOKEN: &str = "tok_5f1c2a9e_7d3b_41c6";
 
 static FILES: AtomicUsize = AtomicUsize::new(0);
 

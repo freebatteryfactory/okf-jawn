@@ -26,7 +26,7 @@
 //! `InvalidInput`), so a rule about those is proven only against real storage. It applies no
 //! other edit (a delete, a status change, a folder), and only the items an applied edit wrote
 //! are readable at the new revision. A test may make the next `show` fail with a code it
-//! names (`fail_next_show`, `fail_show_number`), as a store fault would, and so may the next `log` and the next `list` (`fail_next_log`, `fail_next_list`). `item_at_path` answers from the scripted documents as its port documents it: `None` when no item is at the path at
+//! names (`fail_next_show`, `fail_show_number`), as a store fault would, and so may the next `log`, the next `list` and the next `diff` (`fail_next_log`, `fail_next_list`, `fail_next_diff`). `item_at_path` answers from the scripted documents as its port documents it: `None` when no item is at the path at
 //! a known revision, `NotFound` only for an unknown revision. `tree` answers the documents at a
 //! revision, one per item, in path order, each source card with its header's original name, and
 //! every folder above them; it holds no folder no document lies under. `rules` answers the file a test
@@ -187,6 +187,7 @@ pub struct FakeVersions {
     fail_show: Mutex<Option<(usize, ErrorCode)>>,
     fail_next_log: Mutex<Option<ErrorCode>>,
     fail_next_list: Mutex<Option<ErrorCode>>,
+    fail_next_diff: Mutex<Option<ErrorCode>>,
 }
 
 #[derive(Default)]
@@ -407,6 +408,7 @@ impl FakeVersions {
             fail_show: Mutex::new(None),
             fail_next_log: Mutex::new(None),
             fail_next_list: Mutex::new(None),
+            fail_next_diff: Mutex::new(None),
         })
     }
 
@@ -596,6 +598,16 @@ impl FakeVersions {
     /// Returns when the lock is poisoned.
     pub fn fail_next_list(&self, code: ErrorCode) -> Built<()> {
         *lock(&self.fail_next_list)? = Some(code);
+        Ok(())
+    }
+
+    /// Make the next `diff` fail with `code`, as a store fault, or a base the store no longer
+    /// holds (`NotFound`), would.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn fail_next_diff(&self, code: ErrorCode) -> Built<()> {
+        *lock(&self.fail_next_diff)? = Some(code);
         Ok(())
     }
 
@@ -993,8 +1005,11 @@ impl VersionState {
 
     fn require_known(&self, revision: &Revision) -> Result<(), ApiError> {
         let known = self.head.as_ref() == Some(revision)
-            || self.commits.iter().any(|(_, at)| at == revision)
-            || self.landed.iter().any(|(at, _)| at == revision)
+            || self.commits.iter().any(|(changes, at)| {
+                at == revision || &changes.expected_head == revision
+            })
+            // Moving the head does not erase the revision it moved from, including an empty tree.
+            || self.landed.iter().any(|(at, parent)| at == revision || parent == revision)
             || self.documents.iter().any(|(at, _)| at == revision)
             || self.listings.iter().any(|(at, _, _)| at == revision)
             || self.logs.iter().any(|(at, _, _)| at == revision)
@@ -1315,6 +1330,10 @@ impl VersionStore for FakeVersions {
             }
         })
     }
+    // "Every item and every folder of `revision` in one pass over its tree ... it includes the
+    // items under a folder whose name starts with `.`, and it is not paged. `NotFound` only
+    // when the revision itself is unknown." Archived items are among them
+    // (`WorkspaceTree::items`).
     fn tree<'a>(
         &'a self,
         _scope: &'a StorageScope,
@@ -1561,6 +1580,9 @@ impl VersionStore for FakeVersions {
             })
         })
     }
+    // "Compare two retained revisions." The comparison is the one a test scripted
+    // (`put_diff`); an unscripted one between two known revisions lists no change, which is
+    // kinder than a store that compares trees, so a rule that reads a comparison scripts it.
     fn diff<'a>(
         &'a self,
         _scope: &'a StorageScope,
@@ -1569,6 +1591,9 @@ impl VersionStore for FakeVersions {
         Box::pin(async move {
             let mut state = lock_api(&self.state)?;
             state.diff_queries.push(query.clone());
+            if let Some(code) = lock_api(&self.fail_next_diff)?.take() {
+                return Err(ApiError::new(code, "the store failed"));
+            }
             state.require_known(&query.from)?;
             state.require_known(&query.to)?;
             let changes = state
@@ -1745,6 +1770,9 @@ impl RecordStore for FakeRecords {
         unused()
     }
     fn get_job<'a>(&'a self, _scope: &'a JobScope, _job: JobId) -> PortFuture<'a, Job> {
+        unused()
+    }
+    fn job_mutation<'a>(&'a self, _scope: &'a JobScope, _job: JobId) -> PortFuture<'a, MutationId> {
         unused()
     }
     fn list_jobs<'a>(
@@ -2585,6 +2613,7 @@ pub fn config() -> ApplicationConfig {
         sandbox_origin: SANDBOX_ORIGIN.to_owned(),
         sandbox_ttl: Duration::from_secs(300),
         max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
+        conversion_defaults: ConversionSettings::default(),
     }
 }
 

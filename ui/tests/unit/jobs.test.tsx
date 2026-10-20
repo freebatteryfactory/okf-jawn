@@ -14,7 +14,7 @@ import type {
 import { sessionOptions } from '../../src/features/imports/limits';
 import { MAX_RECONNECT_MS, RECONNECT_MS } from '../../src/features/jobs/feed';
 import { JOB_ITEMS_STEP } from '../../src/features/jobs/JobRow';
-import { JOBS_POLL_MS, JOBS_SAFETY_POLL_MS } from '../../src/features/jobs/jobs';
+import { JOBS_POLL_MS, JOBS_SAFETY_POLL_MS, jobsQueryKey } from '../../src/features/jobs/jobs';
 import { fail, fromNewerService, type Handler, type Json, mockApi, ok } from './support/api';
 import {
   accepted,
@@ -492,7 +492,7 @@ describe('how the list stays current with the event stream', () => {
       explorerHandlers({ [OPEN]: () => ok(writableWorkspace), [JOBS]: () => listOf(jobs()) }),
     );
     const events = mockEvents();
-    await showJobs();
+    const view = await showJobs();
     await listed();
     await eventually(() => screen.getByText(FOLLOWING));
     // The listing asked for once the stream had opened has been answered and drawn: from here on
@@ -501,7 +501,7 @@ describe('how the list stays current with the event stream', () => {
     await eventually(() =>
       expect(screen.getByRole('button', { name: /^List/ }).textContent).toBe('List again'),
     );
-    return { api, events };
+    return { api, events, view };
   };
 
   it('asks once when the stream has opened, the first time too: a job that ended before then is not left running', async () => {
@@ -758,10 +758,20 @@ describe('how the list stays current with the event stream', () => {
     await later(() => expect(api.callsTo(JOBS).length).toBeGreaterThan(before));
   });
 
-  it('closes the stream when the page is left', async () => {
-    const { events } = await streaming(() => [jobOf('running')]);
+  it('stops following Jobs when its page is left, and closes the shared stream with the workspace', async () => {
+    const { api, events, view } = await streaming(() => [jobOf('running')]);
     fireEvent.click(screen.getByRole('link', { name: 'Documents' }));
-    await eventually(() => expect(events.streams.at(0)?.closed).toBe(true));
+    await eventually(() => expect(screen.queryByRole('heading', { name: 'Jobs' })).toBeNull());
+    // Attention still follows this workspace; only Jobs has left the transport.
+    expect(events.streams.at(0)?.closed).toBe(false);
+    const before = api.callsTo(JOBS).length;
+    expect(view.queryClient.getQueryState(jobsQueryKey(WS))?.isInvalidated).toBe(false);
+    act(() => events.streams.at(0)?.send('9', eventOf('job_updated', '9')));
+    await pass(50);
+    expect(api.callsTo(JOBS)).toHaveLength(before);
+    expect(view.queryClient.getQueryState(jobsQueryKey(WS))?.isInvalidated).toBe(false);
+    view.unmount();
+    expect(events.streams.at(0)?.closed).toBe(true);
   });
 });
 

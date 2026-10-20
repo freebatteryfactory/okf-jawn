@@ -3444,6 +3444,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3477,6 +3478,7 @@ dependencies = [
  "sha2 0.10.9",
  "time",
  "tokio",
+ "unicode-normalization",
  "uuid",
 ]
 
@@ -3524,6 +3526,7 @@ name = "okf-jawn-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "clap",
  "cookie",
  "directories",
  "futures-util",
@@ -3538,6 +3541,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "reqwest 0.12.28",
  "rmcp",
  "serde",
  "serde_json",
@@ -3566,6 +3570,7 @@ dependencies = [
  "okf-core",
  "okf-jawn-contract",
  "okf-jawn-core",
+ "okf-jawn-ingest",
  "rusqlite",
  "rusqlite_migration",
  "serde",

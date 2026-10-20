@@ -450,6 +450,17 @@ export const zImportedClaim = z.object({
 });
 
 /**
+ * Explainable rules in the local English instruction-warning detector.
+ */
+export const zInstructionRule = z.union([
+    z.literal('role_impersonation'),
+    z.literal('override_instructions'),
+    z.literal('reveal_secrets'),
+    z.literal('external_action'),
+    z.literal('hidden_text')
+]);
+
+/**
  * Stable item identity independent of its current relative path.
  */
 export const zItemId = z.uuid();
@@ -2470,32 +2481,11 @@ export const zItemSummary = z.object({
 });
 
 /**
- * An observation with a useful next action.
- */
-export const zAttentionItem = z.object({
-    action: zOperationName,
-    item: zItemSummary.nullish(),
-    item_id: zItemId.nullish(),
-    kind: zAttentionKind,
-    message: z.string(),
-    selection: zSelection.nullish()
-});
-
-/**
  * One draft and its item.
  */
 export const zDraftRow = z.object({
     draft: zDraft,
     item: zItemSummary.nullish()
-});
-
-/**
- * Bounded diagnostics; an empty list does not establish safety.
- */
-export const zGetAttentionResponse = z.object({
-    items: z.array(zAttentionItem),
-    next_cursor: z.string().nullish(),
-    revision: zRevision
 });
 
 /**
@@ -2797,6 +2787,47 @@ export const zGetSourcesResponse = z.object({
     declared: z.array(zDeclaredSource).optional(),
     revision: zRevision,
     sources: z.array(zSourceReference)
+});
+
+/**
+ * One advisory match, quoted from the original text and located like an ordinary citation.
+ */
+export const zInstructionFinding = z.object({
+    passage: z.string(),
+    rule_id: zInstructionRule,
+    rule_set_version: z.string(),
+    source: zSourceReference
+});
+
+/**
+ * Bounded current evidence for one item's instruction-like observation.
+ */
+export const zInstructionEvidence = z.object({
+    findings: z.array(zInstructionFinding).max(32),
+    language: z.string(),
+    omitted_findings: z.coerce.bigint().gte(BigInt(0)).max(BigInt('18446744073709551615'), { error: 'Invalid value: Expected uint64 to be <= 18446744073709551615' })
+});
+
+/**
+ * An observation with a useful next action.
+ */
+export const zAttentionItem = z.object({
+    action: zOperationName,
+    instruction_like: zInstructionEvidence.nullish(),
+    item: zItemSummary.nullish(),
+    item_id: zItemId.nullish(),
+    kind: zAttentionKind,
+    message: z.string(),
+    selection: zSelection.nullish()
+});
+
+/**
+ * Bounded diagnostics; an empty list does not establish safety.
+ */
+export const zGetAttentionResponse = z.object({
+    items: z.array(zAttentionItem),
+    next_cursor: z.string().nullish(),
+    revision: zRevision
 });
 
 /**

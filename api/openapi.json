@@ -293,6 +293,17 @@
             "$ref": "#/components/schemas/OperationName",
             "description": "Suggested existing operation, never executable code."
           },
+          "instruction_like": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InstructionEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Present only for instruction-like warnings; absence never certifies safety."
+          },
           "item": {
             "anyOf": [
               {
@@ -4182,6 +4193,95 @@
           }
         },
         "type": "object"
+      },
+      "InstructionEvidence": {
+        "additionalProperties": false,
+        "description": "Bounded current evidence for one item's instruction-like observation.",
+        "properties": {
+          "findings": {
+            "description": "First matches in source order, at most 32 for version one.",
+            "items": {
+              "$ref": "#/components/schemas/InstructionFinding"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "language": {
+            "description": "Language supported by this rule set; version one is English only (`en`).",
+            "type": "string"
+          },
+          "omitted_findings": {
+            "description": "Additional matches counted but not included in this bounded evidence list.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "language",
+          "findings",
+          "omitted_findings"
+        ],
+        "type": "object"
+      },
+      "InstructionFinding": {
+        "additionalProperties": false,
+        "description": "One advisory match, quoted from the original text and located like an ordinary citation.",
+        "properties": {
+          "passage": {
+            "description": "Original matching lines; normalization never rewrites the displayed evidence.",
+            "type": "string"
+          },
+          "rule_id": {
+            "$ref": "#/components/schemas/InstructionRule",
+            "description": "Rule that matched, not a verdict about intent or safety."
+          },
+          "rule_set_version": {
+            "description": "Exact version of the rules that produced this finding.",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/SourceReference",
+            "description": "The same revision, representation and locator used by application reads."
+          }
+        },
+        "required": [
+          "rule_id",
+          "rule_set_version",
+          "passage",
+          "source"
+        ],
+        "type": "object"
+      },
+      "InstructionRule": {
+        "description": "Explainable rules in the local English instruction-warning detector.",
+        "oneOf": [
+          {
+            "const": "role_impersonation",
+            "description": "Text impersonates a system, developer or administrator message.",
+            "type": "string"
+          },
+          {
+            "const": "override_instructions",
+            "description": "Text asks for earlier instructions to be ignored or overridden.",
+            "type": "string"
+          },
+          {
+            "const": "reveal_secrets",
+            "description": "Text asks for credentials, prompts or hidden instructions.",
+            "type": "string"
+          },
+          {
+            "const": "external_action",
+            "description": "Text asks an assistant to execute an action or send data elsewhere.",
+            "type": "string"
+          },
+          {
+            "const": "hidden_text",
+            "description": "Invisible or bidirectional controls occur within the text.",
+            "type": "string"
+          }
+        ]
       },
       "IssuedConnector": {
         "additionalProperties": false,
