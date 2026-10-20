@@ -12,13 +12,19 @@
 //! to queue such a job again for an archived workspace by the same check, in its own
 //! transaction. A job its running claim sealed (`seal`, the `sealed` column of records schema 4) refuses its cancellation, in
 //! the cancellation's own transaction, while it is queued or running.
+//!
+//! Tenant clean-up requests first replay their producing mutation, then advance one durable
+//! request generation and share the queued/running job. A pass snapshots the started generation;
+//! its live-claim completion adds removal totals, retains the latest kept count and queues the
+//! same job again when a newer generation still needs a pass. Clearing its sweep accounting
+//! and recording that completion are one transaction.
 
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::events::Receipt;
 use okf_jawn_contract::identity::{
     ArtifactId, Digest, ItemId, JobId, MutationId, PurgeId, ReceiptId, Revision, TenantId,
 };
-use okf_jawn_contract::import::{Job, JobState, ListJobsResponse};
+use okf_jawn_contract::import::{CleanUpReport, Job, JobKind, JobState, ListJobsResponse};
 use okf_jawn_contract::purge::{Purge, PurgeState, PurgeTarget};
 use okf_jawn_contract::review::Review;
 use okf_jawn_core::jobs::{
@@ -115,7 +121,11 @@ impl RecordStore for SqliteRecords {
                     job.spec.kind(),
                 )?;
             }
-            insert_job(transaction, &scope, &job)
+            if matches!(&job.spec, JobSpec::CleanUp) {
+                create_clean_up(transaction, &scope, &job)
+            } else {
+                insert_job(transaction, &scope, &job)
+            }
         }))
     }
 
@@ -689,6 +699,50 @@ impl RecordStore for SqliteRecords {
     }
 }
 
+/// Replay the producing mutation before incrementing the tenant's requested generation.
+/// A new request is served by the existing queued/running job or a newly inserted one.
+fn create_clean_up(
+    transaction: &Transaction<'_>,
+    scope: &JobScope,
+    request: &NewJob,
+) -> Result<Job, ApiError> {
+    if !request.spec.fits(scope) {
+        return Err(internal("a clean-up job requires tenant scope"));
+    }
+    let prior: Option<String> = transaction
+        .query_row(
+            "SELECT record FROM jobs WHERE mutation_id=?1",
+            [request.mutation_id.0.to_string()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| sql(&error))?;
+    if let Some(prior) = prior {
+        return decode_job(&prior);
+    }
+    let (tenant, _) = job_scope_key(scope);
+    transaction
+        .execute(
+            "INSERT INTO clean_up_requests (tenant_id,requested,started) VALUES (?1,1,0)
+         ON CONFLICT (tenant_id) DO UPDATE SET requested=requested+1",
+            [&tenant],
+        )
+        .map_err(|error| sql(&error))?;
+    let active: Option<String> = transaction
+        .query_row(
+            "SELECT record FROM jobs WHERE tenant_id=?1 AND workspace_id IS NULL
+         AND state IN ('queued','running') AND json_extract(spec,'$.kind')='clean_up'",
+            [&tenant],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| sql(&error))?;
+    match active {
+        Some(active) => decode_job(&active),
+        None => insert_job(transaction, scope, request),
+    }
+}
+
 /// Insert a queued job, or return the job already created under its mutation id.
 fn insert_job(
     transaction: &Transaction<'_>,
@@ -849,10 +903,21 @@ fn complete(transaction: &Transaction<'_>, completion: &JobCompletion) -> Result
     job.item_ids.clone_from(&completion.item_ids);
     job.restore.clone_from(&completion.restore);
     job.backup.clone_from(&completion.backup);
-    job.clean_up.clone_from(&completion.clean_up);
     job.warnings.clone_from(&completion.warnings);
     job.error = None;
-    write_job(transaction, &job, params![], "lease_expires_ms = NULL")?;
+    let lease_fields = if job.kind == JobKind::CleanUp {
+        complete_clean_up(
+            transaction,
+            &row.tenant_id,
+            &mut job,
+            completion.clean_up.as_ref(),
+        )?;
+        "lease_expires_ms = NULL, lease_expires_at = NULL, lease_token = NULL"
+    } else {
+        job.clean_up.clone_from(&completion.clean_up);
+        "lease_expires_ms = NULL"
+    };
+    write_job(transaction, &job, params![], lease_fields)?;
     for digest in &completion.outputs {
         transaction
             .execute(
@@ -868,6 +933,54 @@ fn complete(transaction: &Transaction<'_>, completion: &JobCompletion) -> Result
         puts::land(transaction, &row.tenant_id, workspace, &completion.outputs)?;
     }
     Ok(job)
+}
+
+/// Complete exactly one pass under the already-validated live claim, retaining prior pass
+/// totals and queuing again whenever a newer request was not covered by this pass's mark.
+fn complete_clean_up(
+    transaction: &Transaction<'_>,
+    tenant: &str,
+    job: &mut Job,
+    pass: Option<&CleanUpReport>,
+) -> Result<(), ApiError> {
+    let pass = pass.ok_or_else(|| internal("a clean-up completion has no pass report"))?;
+    let number = |text: &str| {
+        text.parse::<u64>()
+            .map_err(|_| internal("a clean-up report holds an invalid removal count"))
+    };
+    let prior = job.clean_up.as_ref();
+    let removed = number(&pass.objects_removed)?
+        .checked_add(prior.map_or(Ok(0), |report| number(&report.objects_removed))?)
+        .ok_or_else(|| internal("a clean-up removal count exceeds its report"))?;
+    let files = pass
+        .upload_files_removed
+        .checked_add(prior.map_or(0, |report| report.upload_files_removed))
+        .ok_or_else(|| internal("a clean-up file count exceeds its report"))?;
+    job.clean_up = Some(CleanUpReport {
+        objects_removed: removed.to_string(),
+        objects_kept: pass.objects_kept.clone(),
+        upload_files_removed: files,
+    });
+    let (requested, started): (i64, i64) = transaction
+        .query_row(
+            "SELECT requested,started FROM clean_up_requests WHERE tenant_id=?1",
+            [tenant],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| sql(&error))?;
+    if requested > started {
+        job.state = JobState::Queued;
+        job.started_at = None;
+        job.finished_at = None;
+        job.progress = 0;
+    }
+    transaction
+        .execute(
+            "DELETE FROM sweep_removals WHERE sweep=?1 AND tenant_id=?2",
+            params![format!("clean_up/{}", job.id.0), tenant],
+        )
+        .map_err(|error| sql(&error))?;
+    Ok(())
 }
 
 /// Cancel or retry a job once per mutation id.

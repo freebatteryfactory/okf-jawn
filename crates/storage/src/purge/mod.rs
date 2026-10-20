@@ -29,8 +29,8 @@
 //! Publication is pin-before-retain and durable-pending-before-retain. Workspace records land
 //! the objects they actually name; tenant archive records land only their producing mutation's
 //! pending puts. A dead write's pending puts and object-store crash staging files have no age
-//! reaper. Tenant clean-up uses this collector; its durable absorption/completion and discard
-//! consumers are the connected construction boundary. Item purge remains `NotImplemented`.
+//! reaper. Tenant clean-up uses this collector and durable coalescing job completion; connecting
+//! the discard port/handler remains construction work. Item purge remains `NotImplemented`.
 use std::collections::BTreeSet;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
