@@ -35,16 +35,15 @@ export const JOB = '77777777-7777-4777-8777-777777777777';
 const RECEIPT = '55555555-5555-4555-8555-555555555555';
 
 /**
- * The converter's text, with a misread year. It opens without a `#` heading: the reader draws a
- * text's `#` as a level-one heading, and the reader's "Original" (h3) then follows it, which axe
- * reports as `heading-order` (the reader's, ruling A1; said in the M4a report).
+ * The converter’s text, with a misread year and ordinary Markdown headings: axe checks the
+ * reader’s heading policy with the document’s own headings present.
  */
-export const CONVERTED = 'Annual report 2025\n\nRevenue grew by 21% in 2O25.';
+export const CONVERTED = '# Annual report 2025\n\nRevenue grew by 21% in 2O25.';
 /** The person's correction of it. */
-export const FIXED = 'Annual report 2025\n\nRevenue grew by 21% in 2025.';
+export const FIXED = '# Annual report 2025\n\nRevenue grew by 21% in 2025.';
 /** The converter's text of the pages converted again. */
 export const RECONVERTED_TEXT =
-  'Annual report 2025\n\nRevenue grew by 21% in 2025.\n\n## Outlook\n\nThe pages that were not converted are converted now.';
+  '# Annual report 2025\n\nRevenue grew by 21% in 2025.\n\n## Outlook\n\nThe pages that were not converted are converted now.';
 
 const SETTINGS = {
   ocr: 'auto',

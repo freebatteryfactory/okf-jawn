@@ -46,9 +46,9 @@ const showNew = (page: Page) =>
 const jobRow = (page: Page) =>
   reconvert(page).getByRole('list', { name: 'The reconversion started here' });
 
-async function openSource(page: Page, origin: string) {
+async function openSource(page: Page, origin: string, keyboard = false) {
   await page.goto(`${origin}/w/${WS}/i/${SOURCE}`);
-  await expect(await openOriginal(page)).toBeVisible();
+  await expect(await openOriginal(page, { keyboard })).toBeVisible();
   await expect(section(page)).toContainText(
     `As of revision ${short(HEAD)}, the version this workspace shows, the text shown is the converter’s text.`,
   );
@@ -121,7 +121,7 @@ test.describe('correct a source’s text through to the new revision', () => {
 
   test('from the keyboard alone', async ({ page }) => {
     const service = await playCorrections(page);
-    await openSource(page, server.origin());
+    await openSource(page, server.origin(), true);
 
     await tabTo(page, correctButton(page));
     await expectVisibleFocus(page);
@@ -221,7 +221,7 @@ test.describe('Reconvert’s job', () => {
 
   test('from the keyboard alone', async ({ page }) => {
     const service = await playCorrections(page);
-    await openSource(page, server.origin());
+    await openSource(page, server.origin(), true);
 
     await tabTo(page, onlyPages(page));
     await expectVisibleFocus(page);
