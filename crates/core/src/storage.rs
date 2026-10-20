@@ -1116,11 +1116,31 @@ pub struct WrittenArchive {
     pub rows_left_out: u32,
 }
 
+/// What a managed object of the tenant is (lifecycle design section 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedKind {
+    /// A workspace archive this store wrote, recorded as an artifact or not.
+    WorkspaceArchive,
+    /// An installation archive this store wrote.
+    InstallationArchive,
+    /// A written history (`VersionStore::write_history`).
+    WrittenHistory,
+}
+
 /// Independently recoverable backups (Stage 1b design section 8); storage implements them.
 ///
 /// The offline backup, the pre-migration backup and the replacement restore are storage
 /// functions the server command and startup call, not ports.
 pub trait Backups: Send + Sync {
+    /// Whether `digest` is one of the tenant's managed backups or written histories, of any
+    /// workspace; `None` for every other object, held or not. An import refuses such an object
+    /// before consuming any upload; a managed archive is restored instead.
+    fn managed_kind<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        digest: &'a Digest,
+    ) -> PortFuture<'a, Option<ManagedKind>>;
+
     /// Write a workspace archive into the blob store and answer it with the rows it left out;
     /// the backup handler records it as a `WorkspaceBackup` artifact and its job carries the
     /// count (`Job::backup`). Idempotent on the mutation id: a repeat answers the archive

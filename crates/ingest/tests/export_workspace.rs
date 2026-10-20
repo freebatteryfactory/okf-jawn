@@ -129,6 +129,7 @@ mod export_workspace {
                 },
                 writes: AtomicUsize::new(0),
                 restored: Mutex::new(Vec::new()),
+                managed: Mutex::new(Vec::new()),
                 versions: Arc::clone(&versions),
                 restore_hold: Mutex::new(None),
                 write_hold: Mutex::new(None),

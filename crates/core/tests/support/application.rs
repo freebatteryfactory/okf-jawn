@@ -2306,6 +2306,14 @@ impl AccessControl for Unused {
 }
 
 impl Backups for Unused {
+    fn managed_kind<'a>(
+        &'a self,
+        _tenant: &'a TenantId,
+        _digest: &'a Digest,
+    ) -> PortFuture<'a, Option<okf_jawn_core::storage::ManagedKind>> {
+        unused()
+    }
+
     fn write_workspace_archive<'a>(
         &'a self,
         _scope: &'a StorageScope,

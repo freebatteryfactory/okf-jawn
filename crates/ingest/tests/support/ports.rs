@@ -228,6 +228,8 @@ pub struct FakeSearch {
 pub struct FakeBackups {
     /// The archive every write returns.
     pub archive: ObjectInfo,
+    /// Managed digests stated by the test, scoped to their tenant.
+    pub managed: Mutex<Vec<(TenantId, Digest, okf_jawn_core::storage::ManagedKind)>>,
     /// Writes asked for.
     pub writes: AtomicUsize,
     /// The editors each restore was given.
@@ -1304,6 +1306,22 @@ impl SearchIndex for FakeSearch {
 }
 
 impl Backups for FakeBackups {
+    fn managed_kind<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        digest: &'a Digest,
+    ) -> PortFuture<'a, Option<okf_jawn_core::storage::ManagedKind>> {
+        Box::pin(async move {
+            Ok(self
+                .managed
+                .lock()
+                .map_err(|_| poisoned())?
+                .iter()
+                .find(|(owner, object, _)| owner == tenant && object == digest)
+                .map(|(_, _, kind)| *kind))
+        })
+    }
+
     fn write_workspace_archive<'a>(
         &'a self,
         _scope: &'a StorageScope,

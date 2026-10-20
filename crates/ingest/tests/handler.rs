@@ -43,7 +43,7 @@ mod job_handler {
         StorageScope, TreeEdit, VersionStore, derive_commit_mutation_id, derive_drain_mutation_id,
         derive_item_id,
     };
-    use okf_jawn_core::uploads::UploadRecord;
+    use okf_jawn_core::uploads::{UploadRecord, UploadStore};
     use okf_jawn_ingest::handler::{
         ARCHIVE_MEDIA_TYPE, CARD_NOT_WRITTEN, DRAIN_BOUND, HandlerLimits, HandlerPorts,
         IngestHandler, NAMING_RULES_ABSENT,
@@ -205,6 +205,7 @@ mod job_handler {
             },
             writes: AtomicUsize::new(0),
             restored: Mutex::new(Vec::new()),
+            managed: Mutex::new(Vec::new()),
             versions: Arc::clone(&versions),
             restore_hold: Mutex::new(None),
             write_hold: Mutex::new(None),
@@ -1892,6 +1893,163 @@ mod job_handler {
         Ok(())
     }
 
+    /// Lifecycle design V7: the fake's literal tenant/digest classification is not derived
+    /// from the import. No native converter or archive parser is claimed by these tests.
+    async fn mark_managed(
+        world: &World,
+        upload: UploadId,
+        owner: TenantId,
+        kind: okf_jawn_core::storage::ManagedKind,
+    ) -> TestResult {
+        let record = world.uploads.get(&storage_scope()?, upload).await?;
+        let object = some(record.object, "a complete managed upload")?;
+        world
+            .backups
+            .managed
+            .lock()
+            .map_err(|_| "poisoned")?
+            .push((owner, object.digest, kind));
+        Ok(())
+    }
+
+    /// V7.1/V7.2: every managed kind is refused on its upload before conversion or a commit.
+    #[tokio::test]
+    async fn managed_backup_import_refuses_each_kind_without_consumption() -> TestResult {
+        use okf_jawn_core::storage::ManagedKind;
+        for (kind, label) in [
+            (ManagedKind::WorkspaceArchive, "workspace archive"),
+            (ManagedKind::InstallationArchive, "installation archive"),
+            (ManagedKind::WrittenHistory, "written history"),
+        ] {
+            let world = world_with(None, Vec::new())?;
+            let managed = upload(&world, 700, "renamed.pdf", b"known managed bytes")?;
+            mark_managed(&world, managed, tenant()?, kind).await?;
+            let id = job(
+                &world,
+                700,
+                workspace_scope()?,
+                import_spec(vec![managed], false)?,
+            )?;
+            assert!(run(&world, id).await?);
+            let entry = world.records.entry(id)?;
+            assert_eq!(entry.job.state, JobState::Failed, "{kind:?}");
+            let error = some(entry.job.error.as_ref(), "the managed import refusal")?;
+            assert_eq!(error.code, ErrorCode::InvalidInput);
+            assert_eq!(error.field.as_deref(), Some("/upload_ids/0"));
+            assert_eq!(
+                error.message,
+                format!(
+                    "upload 0 is a {label} this installation wrote; restore it instead of importing it"
+                )
+            );
+            assert_eq!(entry.failures.len(), 1);
+            assert!(!some(entry.failures.first(), "the recorded refusal")?.1);
+            assert!(world.uploads.consumed()?.is_empty());
+            assert!(world.uploads.batches()?.is_empty());
+            assert!(world.versions.written()?.is_empty());
+            assert_eq!(world.converter.runs.load(Ordering::SeqCst), 0);
+        }
+        Ok(())
+    }
+
+    /// V7.3: a normal first upload remains available when the second is managed.
+    #[tokio::test]
+    async fn managed_backup_import_refuses_second_upload_without_taking_first() -> TestResult {
+        let world = world_with(None, Vec::new())?;
+        let first = upload(&world, 701, "ordinary.pdf", b"ordinary source")?;
+        let second = upload(&world, 702, "backup.zip", b"known backup bytes")?;
+        mark_managed(
+            &world,
+            second,
+            tenant()?,
+            okf_jawn_core::storage::ManagedKind::WorkspaceArchive,
+        )
+        .await?;
+        let id = job(
+            &world,
+            701,
+            workspace_scope()?,
+            import_spec(vec![first, second], false)?,
+        )?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        let error = some(entry.job.error.as_ref(), "the second-upload refusal")?;
+        assert_eq!(error.code, ErrorCode::InvalidInput);
+        assert_eq!(error.field.as_deref(), Some("/upload_ids/1"));
+        assert_eq!(
+            error.message,
+            "upload 1 is a workspace archive this installation wrote; restore it instead of importing it"
+        );
+        assert!(!some(entry.failures.first(), "the recorded refusal")?.1);
+        assert!(world.uploads.consumed()?.is_empty());
+        assert!(world.uploads.batches()?.is_empty());
+        assert!(world.versions.written()?.is_empty());
+        assert_eq!(world.converter.runs.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    /// V7.5 tenant boundary: identical bytes managed by another tenant are an ordinary source.
+    #[tokio::test]
+    async fn managed_backup_import_does_not_classify_another_tenants_digest() -> TestResult {
+        let world = world_with(None, Vec::new())?;
+        let input = upload(&world, 703, "ordinary.pdf", b"foreign tenant backup bytes")?;
+        mark_managed(
+            &world,
+            input,
+            TenantId::try_from("another-tenant".to_owned())?,
+            okf_jawn_core::storage::ManagedKind::WorkspaceArchive,
+        )
+        .await?;
+        let id = job(
+            &world,
+            703,
+            workspace_scope()?,
+            import_spec(vec![input], false)?,
+        )?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        assert_eq!(world.uploads.consumed()?, [(input, id)]);
+        assert_eq!(world.converter.runs.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    /// V7.4: restore takes the very same managed upload through its separate consume path.
+    #[tokio::test]
+    async fn managed_backup_import_does_not_block_restoring_the_upload() -> TestResult {
+        let world = world()?;
+        let input = upload(&world, 704, "backup.zip", b"known workspace archive")?;
+        mark_managed(
+            &world,
+            input,
+            tenant()?,
+            okf_jawn_core::storage::ManagedKind::WorkspaceArchive,
+        )
+        .await?;
+        let record = world.uploads.get(&storage_scope()?, input).await?;
+        let archive = some(record.object, "the archive bytes")?.digest;
+        let id = job(
+            &world,
+            704,
+            workspace_scope()?,
+            JobSpec::RestoreWorkspace {
+                upload_id: input,
+                archive,
+                editors: vec!["ana".to_owned()],
+            },
+        )?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        assert_eq!(world.uploads.consumed()?, [(input, id)]);
+        assert_eq!(
+            *world.backups.restored.lock().map_err(|_| "poisoned")?,
+            [vec!["ana".to_owned()]]
+        );
+        assert_eq!(world.converter.runs.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
     #[tokio::test]
     async fn an_import_refused_for_one_upload_consumes_none_of_its_batch() -> TestResult {
         let world = world_with(Some(3), Vec::new())?;

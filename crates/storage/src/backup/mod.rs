@@ -483,6 +483,17 @@ impl StorageBackups {
 }
 
 impl Backups for StorageBackups {
+    fn managed_kind<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        digest: &'a Digest,
+    ) -> PortFuture<'a, Option<okf_jawn_core::storage::ManagedKind>> {
+        let tenant = tenant.as_str().to_owned();
+        let digest = digest.clone();
+        Box::pin(self.storage.records.call(move |connection| {
+            Ok(managed::objects(connection, &tenant, Some(&digest))?.remove(&digest))
+        }))
+    }
     fn write_workspace_archive<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -852,6 +863,7 @@ fn event_key(
 
 pub(crate) mod archive;
 pub(crate) mod fence;
+mod managed;
 mod restore;
 pub(crate) mod snapshot;
 
