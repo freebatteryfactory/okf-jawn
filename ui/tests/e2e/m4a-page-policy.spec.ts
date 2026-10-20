@@ -11,7 +11,8 @@
  * the existing journeys are visited: the workspace list, the Explorer, a document, a note being
  * edited, the Jobs page, Settings, both Administration pages, a saved View, and an original of
  * every kind the reader shows (PDF, image, HTML in the sandbox, spreadsheet, Office, text and
- * code, other), as the viewers exist in this build.
+ * code, other), the original beside its digest in MergeView, and a correction being edited.
+ * Readiness waits for rendered content and the libraries' asynchronous work, not a viewer shell.
  *
  * On each screen the spec collects, from before the page's first script (`watchPolicy`):
  * - every Content-Security-Policy violation: each `securitypolicyviolation` event of the page, and
@@ -43,14 +44,22 @@ import {
   NOTE,
   ok,
   routeApi,
+  shot,
   useExplorerServer,
   WS,
   writableWorkspace,
 } from './support/explorer';
 import {
+  ELSEWHERE,
+  HTML_ITEM,
+  htmlSourceAnswers,
   ORIGINALS,
   type Original,
   originalsAnswers,
+  PLAIN_DIGEST,
+  PLAIN_ITEM,
+  PLAIN_ORIGINAL,
+  PLAIN_PATH,
   type PolicyFindings,
   pagePolicy,
   playSandbox,
@@ -60,6 +69,7 @@ import {
   underPagePolicy,
   watchPolicy,
 } from './support/m4a-sandbox';
+import { type PolicyConsoleLine, partitionPolicyConsole } from './support/m4a-sandbox-policy';
 import { openOriginal } from './support/reader';
 import { VIEW, viewAnswers } from './support/views';
 
@@ -87,9 +97,11 @@ interface KnownUrl {
   url: RegExp;
   where: RegExp;
   library: string;
+  /** Constrain an authored viewer's use to the screen that exercised it. */
+  screen?: RegExp;
 }
 
-/** No violation is known in this build. */
+/** Application violations have no exemptions. Intentional CSP controls are asserted separately. */
 const KNOWN_VIOLATIONS: KnownViolation[] = [];
 
 /** Installed-library styles allowed by the server's existing style-src 'unsafe-inline'. */
@@ -97,7 +109,8 @@ const KNOWN_STYLES: KnownStyle[] = [
   {
     text: /^\.\u037c[a-z0-9]+\.cm-focused \{outline:/,
     attributes: /^$/,
-    library: '@codemirror/view 6.41.0 through style-mod 4.1.4 (StyleSet.mount)',
+    library:
+      '@codemirror/view 6.41.0 through style-mod 4.1.4; @codemirror/merge 6.12.1 on comparison/correction screens',
   },
   {
     text: /^\.vega-embed \{/,
@@ -111,14 +124,30 @@ const KNOWN_STYLES: KnownStyle[] = [
   },
 ];
 
-/** CodeMirror draws its visible-tab marker with a data SVG; img-src already allows data:. */
+/** Source-backed uses under existing directives; the integrated browser run records observations. */
 const KNOWN_URLS: KnownUrl[] = [
   {
     url: /^data:image\/svg\+xml,/,
     where: /^stylesheet <style>: .*\.cm-highlightTab /,
     library: '@codemirror/view 6.41.0 baseTheme .cm-highlightTab; img-src data:',
   },
+  {
+    url: /^blob:/,
+    where: /^(URL\.createObjectURL \(image\/png\)|<img> src)$/,
+    screen: /^an original: image \(image\/png\)$/,
+    library:
+      'workspace ImageFrame/useObjectUrl (image/png original); img-src blob:; built observation pending integration',
+  },
 ];
+
+function knownUrl(use: { url: string; where: string }, screen: string): KnownUrl | undefined {
+  return KNOWN_URLS.find(
+    (entry) =>
+      entry.url.test(use.url) &&
+      entry.where.test(use.where) &&
+      (entry.screen === undefined || entry.screen.test(screen)),
+  );
+}
 
 /** Console lines in which a browser refuses something under a Content-Security-Policy. */
 const REFUSED = /Content Security Policy|Content-Security-Policy/i;
@@ -130,6 +159,9 @@ interface Screen {
   answers: Answers;
   /** The screen has drawn what the journey checks. */
   ready: (page: Page) => Promise<void>;
+  /** This readiness check verifies the hostile file actually loaded in its capability frame. */
+  hostileFrame?: boolean;
+  screenshot?: string;
 }
 
 const SCREENS: Screen[] = [
@@ -217,43 +249,179 @@ const SCREENS: Screen[] = [
       await expect(view.locator('.vega-embed canvas, .vega-embed svg').first()).toBeVisible();
     },
   },
+  {
+    name: 'the original beside its digest in MergeView',
+    path: `/w/${WS}/i/${PLAIN_ITEM}`,
+    answers: originalsAnswers(),
+    screenshot: 'm4a-page-policy-comparison',
+    ready: async (page) => {
+      const original = await openOriginal(page);
+      await original
+        .getByRole('button', { name: 'Compare the original with its converted text' })
+        .click();
+      const comparison = original.getByRole('region', {
+        name: 'The original beside its converted text',
+      });
+      const left = comparison.getByRole('textbox', { name: `Original: ${PLAIN_PATH}` });
+      const right = comparison.getByRole('textbox', {
+        name: 'Converted text: what the reader shows',
+      });
+      await expect(left).toHaveAttribute('aria-readonly', 'true');
+      await expect(right).toHaveAttribute('aria-readonly', 'true');
+      await expect(left).toHaveText(PLAIN_ORIGINAL);
+      await expect(right).toHaveText(PLAIN_DIGEST);
+      await expect(comparison.locator('.cm-mergeView')).toBeVisible();
+      await comparison.getByRole('button', { name: 'Next difference' }).click();
+      await expect(comparison).toContainText('Difference 1 of 2:');
+    },
+  },
+  {
+    name: 'the correction editor with changed text in MergeView',
+    path: `/w/${WS}/i/${PLAIN_ITEM}`,
+    answers: {
+      ...originalsAnswers(),
+      '/api/workspaces/open-workspace': () => ok(writableWorkspace),
+    },
+    screenshot: 'm4a-page-policy-correction',
+    ready: async (page) => {
+      await openOriginal(page);
+      const corrections = page.getByRole('region', { name: 'Corrections' });
+      await corrections.getByRole('button', { name: 'Correct text' }).click();
+      const shown = corrections.getByRole('textbox', { name: 'The text shown now' });
+      const yours = corrections.getByRole('textbox', { name: 'Your correction' });
+      await expect(shown).toHaveAttribute('aria-readonly', 'true');
+      await expect(shown).toHaveText(PLAIN_DIGEST);
+      await expect(yours).toHaveText(PLAIN_DIGEST);
+      await yours.fill('# Agenda\n\nBudget: 1.4 M\n\nDone.\n');
+      await expect(yours).toContainText('Budget: 1.4 M');
+      await expect(corrections).toContainText(
+        'Your text differs from the text shown in 1 place: line 3.',
+      );
+      await expect(corrections.locator('.cm-mergeView')).toBeVisible();
+      await expect(
+        corrections.getByRole('button', { name: 'Save the correction' }),
+      ).toHaveAttribute('aria-disabled', 'false');
+    },
+  },
   ...ORIGINALS.map(
     (original): Screen => ({
       name: `an original: ${original.kind} (${original.mediaType})`,
       path: `/w/${WS}/i/${original.id}`,
       answers: originalsAnswers(),
       ready: async (page) => originalShown(page, original),
+      hostileFrame: original.kind === 'html',
     }),
   ),
 ];
 
-/** The reader shows the original in its viewer, as far as this build's viewer goes. */
+/** Wait for the real library's loaded content, rather than an asynchronous viewer's container. */
 async function originalShown(page: Page, original: Original) {
   const region = await openOriginal(page);
-  await expect(region).toBeVisible();
-  if (original.kind === 'html') {
-    await expect(
-      page
-        .frameLocator('iframe[sandbox]')
-        .getByRole('heading', { name: 'Welcome to the workshop' }),
-    ).toBeVisible();
+  switch (original.kind) {
+    case 'pdf': {
+      const canvas = region.getByRole('img', {
+        name: /^Page 1 of 1 .*Its text is laid over the drawing/,
+      });
+      await expect(canvas).toBeVisible();
+      await expect(region.locator('.textLayer')).toContainText('Annual report 2025');
+      await expect
+        .poll(() =>
+          canvas.evaluate((element) => {
+            if (
+              !(element instanceof HTMLCanvasElement) ||
+              element.width === 0 ||
+              element.height === 0
+            )
+              return false;
+            const pixels = element
+              .getContext('2d')
+              ?.getImageData(0, 0, element.width, element.height).data;
+            if (pixels === undefined) return false;
+            for (let at = 0; at < pixels.length; at += 4) {
+              if ((pixels[at] ?? 255) < 200 && (pixels[at + 3] ?? 0) > 0) return true;
+            }
+            return false;
+          }),
+        )
+        .toBe(true);
+      return;
+    }
+    case 'image': {
+      const image = region.getByRole('img', {
+        name: `${original.filename}, the original image. It carries no caption of its own.`,
+      });
+      await expect(image).toBeVisible();
+      expect(
+        await image.evaluate(async (element) => {
+          if (!(element instanceof HTMLImageElement))
+            throw new Error('The original is not an image');
+          await element.decode();
+          return { width: element.naturalWidth, height: element.naturalHeight };
+        }),
+      ).toEqual({ width: 320, height: 180 });
+      return;
+    }
+    case 'html':
+      await expect(
+        page
+          .frameLocator('iframe[sandbox]')
+          .getByRole('heading', { name: 'Welcome to the workshop' }),
+      ).toBeVisible();
+      return;
+    case 'spreadsheet': {
+      const table = region.getByRole('table');
+      await expect(table).toHaveAccessibleName('Table 1 of 1: 2 columns, 4 rows');
+      await expect(table.getByRole('columnheader', { name: 'quarter', exact: true })).toBeVisible();
+      await expect(table.getByRole('cell', { name: '2.3', exact: true })).toBeVisible();
+      return;
+    }
+    case 'text': {
+      const text = region.getByRole('textbox', { name: `Original text of ${original.path}` });
+      await expect(text).toHaveAttribute('aria-readonly', 'true');
+      await expect(text).toHaveText(original.bytes.toString('utf8'));
+      if (original.mediaType === 'application/json')
+        await expect(text).toHaveAttribute('data-language', 'json');
+      return;
+    }
+    case 'office':
+      await expect(region).toContainText('This Rich Text document is shown as its conversion:');
+      await expect(
+        region.getByRole('link', { name: `Download the original, ${original.filename}` }),
+      ).toBeVisible();
+      return;
+    case 'other':
+      await expect(region).toContainText('There is no viewer here for files of this type');
+      await expect(
+        region.getByRole('link', { name: `Download the original, ${original.filename}` }),
+      ).toBeVisible();
   }
 }
 
 /** Every console line of the page's own documents in which the browser refuses under a policy. */
-function watchConsole(page: Page): string[] {
-  const lines: string[] = [];
+function watchConsole(page: Page): PolicyConsoleLine[] {
+  const lines: PolicyConsoleLine[] = [];
   page.on('console', (message) => {
     const from = message.location().url;
-    // The sandboxed frame's own refusals are the sandbox working, under its own policy.
-    if (from.startsWith(SANDBOX_ORIGIN)) return;
-    if (REFUSED.test(message.text())) lines.push(message.text());
+    if (REFUSED.test(message.text())) lines.push({ text: message.text(), source: from });
   });
   return lines;
 }
 
+function attributedConsole(
+  lines: readonly PolicyConsoleLine[],
+  found: PolicyFindings,
+  hostileFrameShown: boolean,
+) {
+  return partitionPolicyConsole(lines, {
+    sandboxOrigin: SANDBOX_ORIGIN,
+    pixelUrl: `${ELSEWHERE}/pixel.png`,
+    hostileFrameShown,
+    parentViolations: found.violations,
+  });
+}
+
 /** What is not on the known lists, in words the failure shows. */
-function unlisted(found: PolicyFindings, console: string[]): string[] {
+function unlisted(found: PolicyFindings, console: PolicyConsoleLine[], screen = ''): string[] {
   const left: string[] = [];
   for (const violation of found.violations) {
     const known = KNOWN_VIOLATIONS.some(
@@ -263,9 +431,9 @@ function unlisted(found: PolicyFindings, console: string[]): string[] {
   }
   for (const line of console) {
     const known = KNOWN_VIOLATIONS.some(
-      (entry) => entry.directive.test(line) && entry.blocked.test(line),
+      (entry) => entry.directive.test(line.text) && entry.blocked.test(line.text),
     );
-    if (!known) left.push(`console: ${line}`);
+    if (!known) left.push(`console: ${JSON.stringify(line)}`);
   }
   for (const style of found.styles) {
     if (
@@ -277,7 +445,7 @@ function unlisted(found: PolicyFindings, console: string[]): string[] {
     }
   }
   for (const use of found.urls) {
-    if (!KNOWN_URLS.some((entry) => entry.url.test(use.url) && entry.where.test(use.where))) {
+    if (knownUrl(use, screen) === undefined) {
       left.push(`${use.url} used: ${use.where}`);
     }
   }
@@ -338,10 +506,60 @@ test.describe('the built UI under the page policy', () => {
     });
   });
 
+  test('a parent image violation is retained even when the hostile frame uses the same pixel', async ({
+    page,
+    browserName,
+  }) => {
+    // Same target as the known WebKit sandbox refusal. A real parent securitypolicyviolation
+    // must keep it in the failing application inventory, even if its console source is absent.
+    await watchPolicy(page);
+    const lines = watchConsole(page);
+    await underPagePolicy(page, server.origin());
+    const { answers } = await playSandbox(page, server.origin());
+    await routeApi(page, { ...htmlSourceAnswers(), ...answers });
+    await page.goto(`${server.origin()}/w/${WS}/i/${HTML_ITEM}`);
+    await openOriginal(page);
+    await expect(
+      page
+        .frameLocator('iframe[sandbox]')
+        .getByRole('heading', { name: 'Welcome to the workshop' }),
+    ).toBeVisible();
+    await page.evaluate((url) => {
+      const image = document.createElement('img');
+      image.alt = 'Intentional parent policy control';
+      image.src = url;
+      document.body.append(image);
+    }, `${ELSEWHERE}/pixel.png`);
+    await expect
+      .poll(async () =>
+        (await policyFindings(page)).violations.some((violation) =>
+          violation.directive.startsWith('img-src'),
+        ),
+      )
+      .toBe(true);
+    const found = await policyFindings(page);
+    const attributed = attributedConsole(lines, found, true);
+    expect(
+      unlisted(found, attributed.application).some(
+        (entry) => entry.startsWith('violation:') && entry.includes('img-src'),
+      ),
+    ).toBe(true);
+    const unlocated = {
+      text: `Refused to load ${ELSEWHERE}/pixel.png because it does not appear in the img-src directive of the Content Security Policy.`,
+      source: '',
+    };
+    expect(attributedConsole([unlocated], found, true).application).toEqual([unlocated]);
+    await mkdir(findingsDir, { recursive: true });
+    await writeFile(
+      join(findingsDir, `intentional-parent-image-control-${browserName}.json`),
+      `${JSON.stringify({ intentionalControl: true, allConsole: lines, console: attributed.application, sandboxConsole: attributed.sandbox, ...found }, null, 2)}\n`,
+    );
+  });
+
   for (const screen of SCREENS) {
     test(`${screen.name}: nothing outside the policy`, async ({ page, browserName }) => {
       await watchPolicy(page);
-      const console = watchConsole(page);
+      const lines = watchConsole(page);
       await underPagePolicy(page, server.origin());
       const { answers } = await playSandbox(page, server.origin());
       await routeApi(page, { ...screen.answers, ...answers });
@@ -357,6 +575,8 @@ test.describe('the built UI under the page policy', () => {
           ),
       );
       const found = await policyFindings(page);
+      const console = attributedConsole(lines, found, screen.hostileFrame === true);
+      if (screen.screenshot !== undefined) await shot(page, screen.screenshot);
       await mkdir(findingsDir, { recursive: true });
       const file = `${screen.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-${browserName}.json`;
       await writeFile(
@@ -365,7 +585,9 @@ test.describe('the built UI under the page policy', () => {
           {
             screen: screen.name,
             browserName,
-            console,
+            allConsole: lines,
+            console: console.application,
+            sandboxConsole: console.sandbox,
             ...found,
             libraries: {
               styles: found.styles.map((style) => ({
@@ -378,9 +600,7 @@ test.describe('the built UI under the page policy', () => {
               })),
               urls: found.urls.map((use) => ({
                 ...use,
-                library:
-                  KNOWN_URLS.find((entry) => entry.url.test(use.url) && entry.where.test(use.where))
-                    ?.library ?? 'unlisted',
+                library: knownUrl(use, screen.name)?.library ?? 'unlisted',
               })),
             },
           },
@@ -388,7 +608,10 @@ test.describe('the built UI under the page policy', () => {
           2,
         )}\n`,
       );
-      expect(unlisted(found, console), `${screen.name} in ${browserName}`).toEqual([]);
+      expect(
+        unlisted(found, console.application, screen.name),
+        `${screen.name} in ${browserName}`,
+      ).toEqual([]);
     });
   }
 });

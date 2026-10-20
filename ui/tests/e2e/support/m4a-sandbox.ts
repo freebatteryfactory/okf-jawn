@@ -27,6 +27,7 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, type Page, type Route } from '@playwright/test';
 import { type Answers, HEAD, ok, summary, WS } from './explorer';
+import { png } from './m4a-reader';
 
 /** The configured sandbox origin: another origin than the page's. */
 export const SANDBOX_ORIGIN = 'http://sandbox.okf.test:7712';
@@ -316,11 +317,13 @@ export function onePagePdf(): Buffer {
   return Buffer.from(body, 'latin1');
 }
 
-/** A one-pixel PNG. */
-export const ONE_PIXEL_PNG = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
-  'base64',
-);
+/** Real PNG bytes from the reader journey's existing encoder, with valid chunks and checksums. */
+export const ONE_PIXEL_PNG = png(1, 1, 0);
+
+export const PLAIN_ITEM = 'a1a1a1a1-0000-4000-8000-000000000008';
+export const PLAIN_PATH = 'agenda.txt.md';
+export const PLAIN_ORIGINAL = 'Agenda\nBudget: 1.2 M\nDone.\n';
+export const PLAIN_DIGEST = '# Agenda\n\nBudget: 1.2 M\n\nDone.\n';
 
 /** One original the reader shows, of one kind (`original-kind.ts`). */
 export interface Original {
@@ -361,7 +364,7 @@ export const ORIGINALS: Original[] = [
     filename: 'whiteboard.png',
     mediaType: 'image/png',
     object: '2'.repeat(64),
-    bytes: ONE_PIXEL_PNG,
+    bytes: png(320, 180, 1),
     sentAs: 'image/png',
     text: 'A photo of the whiteboard.',
   },
@@ -387,17 +390,17 @@ export const ORIGINALS: Original[] = [
     object: '4'.repeat(64),
     bytes: Buffer.from('quarter,revenue\nQ1,1.2\nQ2,1.4\nQ3,1.9\nQ4,2.3\n'),
     sentAs: 'application/octet-stream',
-    text: '| quarter | revenue |\n| --- | --- |\n| Q1 | 1.2 |\n| Q2 | 1.4 |',
+    text: '| quarter | revenue |\n| --- | --- |\n| Q1 | 1.2 |\n| Q2 | 1.4 |\n| Q3 | 1.9 |\n| Q4 | 2.3 |',
   },
   {
     kind: 'office',
     id: 'a1a1a1a1-0000-4000-8000-000000000005',
-    path: 'minutes.docx.md',
+    path: 'minutes.rtf.md',
     title: 'Minutes',
-    filename: 'minutes.docx',
-    mediaType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    filename: 'minutes.rtf',
+    mediaType: 'application/rtf',
     object: '5'.repeat(64),
-    bytes: Buffer.from('PK\u0003\u0004 minutes'),
+    bytes: Buffer.from('{\\rtf1\\ansi Minutes of the October workshop.}'),
     sentAs: 'application/octet-stream',
     text: 'Minutes of the October workshop.',
   },
@@ -421,9 +424,34 @@ export const ORIGINALS: Original[] = [
     filename: 'photos.zip',
     mediaType: 'application/zip',
     object: '7'.repeat(64),
-    bytes: Buffer.from('PK\u0005\u0006'),
+    // A complete empty ZIP end-of-central-directory record, not a truncated magic prefix.
+    bytes: Buffer.from([0x50, 0x4b, 0x05, 0x06, ...Array<number>(18).fill(0)]),
     sentAs: 'application/octet-stream',
     text: '',
+  },
+  {
+    kind: 'text',
+    id: PLAIN_ITEM,
+    path: PLAIN_PATH,
+    title: 'Agenda',
+    filename: 'agenda.txt',
+    mediaType: 'text/plain',
+    object: '8'.repeat(64),
+    bytes: Buffer.from(PLAIN_ORIGINAL),
+    sentAs: 'application/octet-stream',
+    text: PLAIN_DIGEST,
+  },
+  {
+    kind: 'text',
+    id: 'a1a1a1a1-0000-4000-8000-000000000009',
+    path: 'revenue.json.md',
+    title: 'Revenue data',
+    filename: 'revenue.json',
+    mediaType: 'application/json',
+    object: 'a'.repeat(64),
+    bytes: Buffer.from('{"revenue":[1.2,1.4,1.9,2.3]}\n'),
+    sentAs: 'application/octet-stream',
+    text: 'Revenue data: 1.2, 1.4, 1.9, 2.3.\n',
   },
 ];
 
@@ -478,7 +506,7 @@ export function originalsAnswers(): Answers {
       if (original === undefined) return { status: 404, body: { code: 'not_found', message: '' } };
       return ok({
         summary: originalSummary(original),
-        body: `# ${original.title}\n\n${original.text}`,
+        body: original.text,
         content_digest: 'c'.repeat(64),
         properties: { type: 'source-file', okf_jawn: { id: original.id } },
         source: originalAppearance(original),
@@ -494,6 +522,7 @@ export function originalsAnswers(): Answers {
         item_id: original.id,
         path: original.path,
         revision: HEAD,
+        digest: 'f'.repeat(64),
         selection: body.selection,
         locations: [],
       };
