@@ -134,6 +134,7 @@ mod export_workspace {
                 write_hold: Mutex::new(None),
             }),
             purger: Arc::new(FakePurger {
+                clean_up_calls: Mutex::new(Vec::new()),
                 report: serde_json::from_value(json!({
                     "objects_removed": "0", "objects_kept_shared": "0", "backups_removed": 0,
                     "backups_rewritten": 0, "exports_removed": 0, "proposals_removed": 0,

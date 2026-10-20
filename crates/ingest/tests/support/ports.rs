@@ -246,6 +246,8 @@ pub type Hold = Arc<dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = ()> + Send
 
 /// A `Purger` that returns one report and counts the calls.
 pub struct FakePurger {
+    /// Tenant/job identities of clean-up calls, distinct from purge calls.
+    pub clean_up_calls: Mutex<Vec<(TenantId, JobId)>>,
     /// The report every call returns.
     pub report: PurgeReport,
     /// Calls made.
@@ -1387,10 +1389,23 @@ impl FakePurger {
 impl Purger for FakePurger {
     fn clean_up<'a>(
         &'a self,
-        _tenant: &'a TenantId,
-        _job: JobId,
+        tenant: &'a TenantId,
+        job: JobId,
     ) -> PortFuture<'a, okf_jawn_contract::import::CleanUpReport> {
-        unused("clean_up: execution awaits R3 and the lifecycle storage implementation")
+        let hold = hold_of(&self.hold);
+        Box::pin(async move {
+            self.clean_up_calls
+                .lock()
+                .map_err(|_| poisoned())?
+                .push((tenant.clone(), job));
+            held(hold).await?;
+            self.failed()?;
+            Ok(okf_jawn_contract::import::CleanUpReport {
+                objects_removed: "18446744073709551616".to_owned(),
+                objects_kept: "7".to_owned(),
+                upload_files_removed: 2,
+            })
+        })
     }
 
     fn purge_workspace<'a>(

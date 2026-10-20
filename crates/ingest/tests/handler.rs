@@ -210,6 +210,7 @@ mod job_handler {
             write_hold: Mutex::new(None),
         });
         let purger = Arc::new(FakePurger {
+            clean_up_calls: Mutex::new(Vec::new()),
             report: report()?,
             calls: AtomicUsize::new(0),
             hold: Mutex::new(None),
@@ -939,23 +940,159 @@ mod job_handler {
         Ok(())
     }
 
-    /// R2 declares the spec but leaves valid tenant execution to R3; bad scope stays a fault.
+    /// R3 builds tenant execution; the invalid workspace adapter input remains an Internal fault.
     #[tokio::test]
-    async fn clean_up_dispatch_is_unimplemented_at_tenant_and_internal_at_workspace() -> TestResult
-    {
-        for (scope, expected) in [
-            (JobScope::Tenant(tenant()?), ErrorCode::NotImplemented),
-            (workspace_scope()?, ErrorCode::Internal),
-        ] {
-            let world = world()?;
-            let spec = JobSpec::from_stored(json!({ "kind": "clean_up" }))?;
-            let id = job(&world, 790, scope, spec)?;
-            let claimed = some(world.records.claim_job(id).await?, "the test claim")?;
-            let refusal = err_of(world.handler.handle(&claimed).await)?;
-            assert_eq!(refusal.code, expected);
-            assert!(world.records.entry(id)?.completions.is_empty());
-            assert!(world.versions.written()?.is_empty());
-        }
+    async fn clean_up_dispatch_refuses_workspace_scope() -> TestResult {
+        let world = world()?;
+        let spec = JobSpec::from_stored(json!({ "kind": "clean_up" }))?;
+        let id = job(&world, 790, workspace_scope()?, spec)?;
+        let claimed = some(world.records.claim_job(id).await?, "the test claim")?;
+        let refusal = err_of(world.handler.handle(&claimed).await)?;
+        assert_eq!(refusal.code, ErrorCode::Internal);
+        assert!(world.records.entry(id)?.completions.is_empty());
+        assert!(world.versions.written()?.is_empty());
+        Ok(())
+    }
+
+    /// Lifecycle design3.2/R3: one tenant pass forwards its literal count-only report,
+    /// called with the actual tenant/job identities, with no workspace effect.
+    #[tokio::test]
+    async fn clean_up_forwards_the_tenant_job_and_literal_report() -> TestResult {
+        let world = world()?;
+        let tenant_b = TenantId::try_from("tenant-b".to_owned())?;
+        let id = job(
+            &world,
+            791,
+            JobScope::Tenant(tenant_b.clone()),
+            JobSpec::CleanUp,
+        )?;
+        assert!(run(&world, id).await?);
+        assert_completed_under(&world, id, 1)?;
+        let entry = world.records.entry(id)?;
+        let expected = okf_jawn_contract::import::CleanUpReport {
+            objects_removed: "18446744073709551616".to_owned(),
+            objects_kept: "7".to_owned(),
+            upload_files_removed: 2,
+        };
+        assert_eq!(
+            some(entry.completions.first(), "the completion")?.clean_up,
+            Some(expected.clone())
+        );
+        assert_eq!(entry.job.clean_up, Some(expected));
+        assert_eq!(
+            *world.purger.clean_up_calls.lock().map_err(|_| "poisoned")?,
+            [(tenant_b.clone(), id)]
+        );
+        assert!(world.versions.written()?.is_empty());
+        assert_eq!(
+            world.records.artifacts()?,
+            [] as [okf_jawn_core::jobs::ArtifactRecord; 0]
+        );
+        assert_eq!(
+            world.purger.calls.load(Ordering::SeqCst),
+            0,
+            "no purge invoked"
+        );
+        let updates = events_of(&world, &EventKind::JobUpdated)?;
+        assert_eq!(updates.len(), 1);
+        assert_eq!(
+            some(updates.first(), "the tenant update")?.0,
+            EventScope::Tenant(tenant_b)
+        );
+        Ok(())
+    }
+
+    /// A damaged survivor is the runtime's Internal failure, not a successful empty sweep
+    /// and not the purge handler's separate resumable-record path (design3.2).
+    #[tokio::test]
+    async fn clean_up_failure_is_recorded_by_the_runtime_without_completion() -> TestResult {
+        let world = world()?;
+        let id = job(&world, 792, JobScope::Tenant(tenant()?), JobSpec::CleanUp)?;
+        world.purger.fail_next(ApiError::new(
+            ErrorCode::Internal,
+            "survivor workspace 00000000-0000-0000-0000-0000000000aa is unreadable",
+        ))?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        assert_eq!(
+            some(entry.job.error.as_ref(), "the runtime's error")?.code,
+            ErrorCode::Internal
+        );
+        assert_eq!(
+            entry.failures,
+            [(
+                "survivor workspace 00000000-0000-0000-0000-0000000000aa is unreadable".to_owned(),
+                true
+            )]
+        );
+        assert!(entry.completions.is_empty());
+        assert_eq!(entry.job.clean_up, None);
+        assert_eq!(
+            *world.purger.clean_up_calls.lock().map_err(|_| "poisoned")?,
+            [(tenant()?, id)]
+        );
+        assert!(world.versions.written()?.is_empty());
+        Ok(())
+    }
+
+    /// Reuse the same six50ms lease windows as existing rebuild/backup/purge controls.
+    /// This proves only that this new storage arm uses renewing, not storage lease fencing.
+    #[tokio::test]
+    async fn clean_up_outlasting_lease_intervals_renews_the_first_claim() -> TestResult {
+        let world = heartbeat_world()?;
+        *world.purger.hold.lock().map_err(|_| "poisoned")? = Some(lapsing(&world.records));
+        let id = job(&world, 793, JobScope::Tenant(tenant()?), JobSpec::CleanUp)?;
+        assert!(run(&world, id).await?);
+        assert_completed_under(&world, id, 1)?;
+        assert!(
+            world.records.renewals() >= 6,
+            "{} renewals",
+            world.records.renewals()
+        );
+        assert_eq!(events_of(&world, &EventKind::JobUpdated)?.len(), 1);
+        assert_eq!(
+            *world.purger.clean_up_calls.lock().map_err(|_| "poisoned")?,
+            [(tenant()?, id)]
+        );
+        Ok(())
+    }
+
+    /// Tenant jobs have no public cancel route. This adversarial fake-ledger cancellation
+    /// verifies renewing's shared rule: finish the in-flight storage call, then no completion.
+    #[tokio::test]
+    async fn clean_up_observes_cancellation_after_the_storage_call_returns() -> TestResult {
+        let world = heartbeat_world()?;
+        let id = job(&world, 794, JobScope::Tenant(tenant()?), JobSpec::CleanUp)?;
+        let records = Arc::clone(&world.records);
+        let finished = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&finished);
+        *world.purger.hold.lock().map_err(|_| "poisoned")? = Some(Arc::new(move || {
+            let records = Arc::clone(&records);
+            let seen = Arc::clone(&seen);
+            Box::pin(async move {
+                let _cancelled = records.cancel(id);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let _previous = seen.fetch_add(1, Ordering::SeqCst);
+            })
+        }));
+        assert!(run(&world, id).await?);
+        assert_eq!(
+            finished.load(Ordering::SeqCst),
+            1,
+            "storage work returned, not dropped"
+        );
+        assert_eq!(world.records.entry(id)?.job.state, JobState::Cancelled);
+        assert!(world.records.entry(id)?.completions.is_empty());
+        assert_eq!(
+            world.records.entry(id)?.failures,
+            [] as [(std::string::String, bool); 0]
+        );
+        assert_eq!(
+            *world.purger.clean_up_calls.lock().map_err(|_| "poisoned")?,
+            [(tenant()?, id)]
+        );
+        assert!(world.versions.written()?.is_empty());
         Ok(())
     }
 
