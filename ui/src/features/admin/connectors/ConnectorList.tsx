@@ -179,7 +179,7 @@ export function ConnectorList({
             <dd>
               <code>{opened.connectorId}</code>
             </dd>
-            <dt>It may</dt>
+            <dt>Rights</dt>
             <dd>{opened.rights}</dd>
             <dt>Workspaces</dt>
             <dd>

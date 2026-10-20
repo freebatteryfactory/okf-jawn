@@ -214,7 +214,7 @@ function EventRow({ event, workspaceId }: { event: Event; workspaceId: string | 
       <p id={titleId} className="job-title">
         {kindWords(event.kind)}
       </p>
-      <dl className="m-0 grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5 [&_dd]:m-0">
+      <dl className="m-0 grid grid-cols-[10rem_1fr] gap-x-3 gap-y-0.5 [&_dd]:m-0">
         <dt>When</dt>
         <dd>
           <Instant value={event.at} />

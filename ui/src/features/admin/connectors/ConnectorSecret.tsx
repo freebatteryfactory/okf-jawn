@@ -54,7 +54,7 @@ export function ConnectorSecret({ issued, boxRef, onHide }: ConnectorSecretProps
         onFocus={(event) => event.currentTarget.select()}
       />
       <p className="m-0">Put it in your MCP client now:</p>
-      <ul className="m-0 pl-6">
+      <ul className="m-0 list-disc pl-6">
         <li>
           a client that starts a program runs <code>okf-jawn mcp --stdio</code> with the environment
           variable <code>OKF_JAWN_TOKEN</code> set to this secret (or with the secret as the first
