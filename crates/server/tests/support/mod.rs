@@ -16,8 +16,10 @@ use okf_jawn_core::credentials::{
 };
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_server::BoundApplication;
+use okf_jawn_server::allowance::SecurityEvents;
 use okf_jawn_server::app::{ServiceParts, service};
 use okf_jawn_server::cookies::CrateCookies;
+use okf_jawn_server::grants::SystemClock;
 use okf_jawn_server::identity::{
     BearerAuth, ConnectIdentity, ConnectVerifier, Identity, IdentityPorts, Verifying,
 };
@@ -53,6 +55,8 @@ pub struct LocalApp {
     pub credentials: Arc<FakeCredentials>,
     /// Dispatch's fixture ports.
     pub ports: FixturePorts,
+    /// The security-event allowance over the fixture log, where refused sign-ins are recorded.
+    pub refusals: Arc<SecurityEvents>,
 }
 
 /// The installation owner's subject.
@@ -66,6 +70,9 @@ pub const HOST: &str = "127.0.0.1:7711";
 
 /// The test service's own origin.
 pub const ORIGIN: &str = "http://127.0.0.1:7711";
+
+/// The sandbox origin the test service's pages may frame.
+pub const SANDBOX_ORIGIN: &str = "http://127.0.0.1:8788";
 
 /// The workspace the owner and the connector may read.
 pub const WORKSPACE: &str = "11111111-1111-4111-8111-111111111111";
@@ -268,10 +275,16 @@ impl LocalApp {
             vec![Permission::Read],
             false,
         )?;
+        let ports = FixturePorts::new(table);
+        let refusals = Arc::new(SecurityEvents::new(
+            ports.events.clone(),
+            Arc::new(SystemClock),
+        ));
         Ok(Self {
             counting: Arc::new(CountingApplication::new()),
             credentials,
-            ports: FixturePorts::new(table),
+            ports,
+            refusals,
         })
     }
 
@@ -295,6 +308,7 @@ impl LocalApp {
                 credentials: self.credentials.clone(),
                 events: self.ports.events.clone(),
                 cookies: Arc::new(CrateCookies),
+                refusals: self.refusals.clone(),
             },
             vec![ORIGIN.to_owned()],
         )
@@ -326,14 +340,29 @@ impl LocalApp {
         ui_dir: Option<PathBuf>,
     ) -> Result<Router, ApiError> {
         service(ServiceParts {
-            bound: self.bound(),
             identity,
+            ..self.parts(extra, cors_origins, ui_dir)
+        })
+    }
+
+    /// The parts of the local service: `extra` routes, the given CORS origins and UI
+    /// directory, its pages framing the sandbox origin `SANDBOX_ORIGIN`.
+    pub fn parts(
+        &self,
+        extra: Router,
+        cors_origins: Vec<String>,
+        ui_dir: Option<PathBuf>,
+    ) -> ServiceParts {
+        ServiceParts {
+            bound: self.bound(),
+            identity: self.identity(),
             hosts: vec![HOST.to_owned()],
             hosted: None,
             cors_origins,
             ui_dir,
+            sandbox_origin: Some(SANDBOX_ORIGIN.to_owned()),
             extra,
-        })
+        }
     }
 }
 

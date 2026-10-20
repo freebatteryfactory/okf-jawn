@@ -96,6 +96,10 @@ impl Harness {
             credentials: self.credentials.clone(),
             events: self.ports.events.clone(),
             cookies: Arc::new(CrateCookies),
+            refusals: Arc::new(okf_jawn_server::allowance::SecurityEvents::new(
+                self.ports.events.clone(),
+                Arc::new(okf_jawn_server::grants::SystemClock),
+            )),
         }
     }
 
@@ -164,6 +168,7 @@ impl Harness {
 
             cors_origins: Vec::new(),
             ui_dir: None,
+            sandbox_origin: None,
             extra,
         })?)
     }

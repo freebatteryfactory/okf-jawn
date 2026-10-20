@@ -1,8 +1,15 @@
 //! The WorkOS AuthKit sign-in adapter of hosted mode, through the `workos` crate.
 //!
-//! Errors from WorkOS are reported in fixed words: a WorkOS error can quote the request, and the
-//! request carries an authorization code and the API key's client secret, which never leave the
-//! server. A sign-in without an organization is refused: the organization is the tenant.
+//! The authorize URL names the AuthKit provider (`provider=authkit`): WorkOS's reference for
+//! `GET /user_management/authorize` says "If you are using AuthKit, set the provider parameter to
+//! "authkit""; without it the request is the SSO path, which needs a connection selector. The
+//! crate adds only the parameters it is given (`helpers/authkit.rs`).
+//!
+//! The login runs over the deployment's one WorkOS client (`outbound::workos_client`), whose
+//! transport follows no redirect and has its own time limits. Errors from WorkOS are reported in
+//! fixed words: a WorkOS error can quote the request, and the request carries an authorization
+//! code and the API key's client secret, which never leave the server. A sign-in without an
+//! organization is refused: the organization is the tenant.
 
 use std::sync::Arc;
 
@@ -19,27 +26,18 @@ pub struct WorkosLogin {
     redirect_uri: String,
 }
 
+/// The provider an AuthKit authorize URL names.
+pub const AUTHKIT_PROVIDER: &str = "authkit";
+
 impl WorkosLogin {
-    /// A login over a WorkOS client built from `config`.
-    ///
-    /// # Errors
-    /// Returns `InvalidInput` naming `WORKOS_API_KEY` when the key cannot be sent as a header.
-    pub fn new(config: &HostedConfig) -> Result<Self, ApiError> {
-        let client = Client::builder()
-            .api_key(config.api_key.clone())
-            .client_id(config.client_id.clone())
-            .try_build()
-            .map_err(|_| {
-                ApiError::new(
-                    ErrorCode::InvalidInput,
-                    "WORKOS_API_KEY cannot be sent as an HTTP header",
-                )
-                .with_field("WORKOS_API_KEY")
-            })?;
-        Ok(Self {
-            client: Arc::new(client),
+    /// A login over the deployment's one WorkOS `client` (`outbound::workos_client`), returning
+    /// the browser to `config`'s redirect URI.
+    #[must_use]
+    pub fn new(client: Arc<Client>, config: &HostedConfig) -> Self {
+        Self {
+            client,
             redirect_uri: config.redirect_uri.clone(),
-        })
+        }
     }
 }
 
@@ -50,6 +48,7 @@ impl HostedLogin for WorkosLogin {
             .authkit()
             .pkce_authorization_url(AuthKitAuthorizationUrlParams {
                 redirect_uri: self.redirect_uri.clone(),
+                provider: Some(AUTHKIT_PROVIDER.to_owned()),
                 ..AuthKitAuthorizationUrlParams::default()
             })
             .map_err(|_| {

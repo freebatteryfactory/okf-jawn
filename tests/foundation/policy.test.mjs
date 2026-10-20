@@ -15,6 +15,16 @@ const exposed=operations.filter(o=>o.alias);
 const approvedModelTools=['ls','grep','show','log','diff','blame','sources','links','propose','catalog','present','workspaces','rules'];
 const humanOnly=['approve','review','admin'];
 
+test('the CLI handle exception retains every other workspace lint and requires documented single-operation unsafe blocks',async()=>{
+ const workspace=Bun.TOML.parse(await readFile(join(root,'Cargo.toml'),'utf8')).workspace.lints;
+ const cli=Bun.TOML.parse(await readFile(join(root,'crates/cli/Cargo.toml'),'utf8')).lints;
+ assert.deepEqual(cli,{
+  rust:{...workspace.rust,unsafe_code:'allow'},
+  clippy:{...workspace.clippy,undocumented_unsafe_blocks:'deny',multiple_unsafe_ops_per_block:'deny'},
+ });
+ assert.equal(workspace.rust.unsafe_code,'forbid');
+});
+
 test('complete operation surface has unique canonical identifiers and paths',()=>{
  assert.ok(operations.length>0,'api/operations.json is empty');
  assert.equal(new Set(operations.map(o=>o.id)).size,operations.length);
@@ -108,7 +118,13 @@ test('canceled product runtimes are not imported as application dependencies',as
 });
 test('CLI, UI, browser tests and examples agree on the local service endpoint',async()=>{
  for(const file of ['crates/cli/src/lib.rs','ui/vite.config.ts','ui/playwright.config.ts','deploy/.env.example']){
-  const source=await readFile(join(root,file),'utf8');
+  let source=await readFile(join(root,file),'utf8');
+  if(file==='deploy/.env.example'){
+   // The sandbox is a separate origin/listener (SPEC 11), not another application endpoint.
+   assert.match(source,/^OKF_SANDBOX_BIND=127\.0\.0\.1:7712\r?$/m);
+   assert.match(source,/^OKF_SANDBOX_ORIGIN=http:\/\/127\.0\.0\.1:7712\r?$/m);
+   source=source.split(/\r?\n/).filter(line=>!/^OKF_SANDBOX_(?:BIND|ORIGIN)=/.test(line)).join('\n');
+  }
   assert.match(source,/127\.0\.0\.1:7711/,file);
   assert.doesNotMatch(source,/127\.0\.0\.1:(?!7711\b)\d+/,file);
  }

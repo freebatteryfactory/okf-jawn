@@ -124,6 +124,7 @@ impl Hosted {
                 credentials: base.credentials.clone(),
                 events: base.ports.events.clone(),
                 cookies: Arc::new(CrateCookies),
+                refusals: base.refusals.clone(),
             },
             vec![HTTPS_ORIGIN.to_owned()],
         );
@@ -131,6 +132,7 @@ impl Hosted {
             credentials: base.credentials.clone(),
             events: base.ports.events.clone(),
             secrets: Arc::new(Fixed),
+            refusals: base.refusals.clone(),
             policy: identity.cookie_policy(Duration::from_secs(3600)),
             entry: SessionEntry::Hosted {
                 login: provider.clone(),
@@ -358,6 +360,33 @@ async fn the_browser_that_began_a_sign_in_completes_it_and_its_cookie_is_cleared
         .filter(|(_, event)| event.kind == EventKind::SignedIn)
         .count();
     assert_eq!(signed_in, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_hosted_refusal_before_any_tenant_is_known_writes_no_log() -> TestResult {
+    let hosted = Hosted::new()?;
+    // A callback this browser never began, and a bearer that does not authenticate.
+    let response = hosted.callback("not-a-state-of-ours", "code", None).await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let bearer = Request::post("/api/items/list-drafts")
+        .header("host", HOST)
+        .header("authorization", "Bearer not-the-token")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))?;
+    assert_eq!(
+        hosted.app.clone().oneshot(bearer).await?.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let refused = hosted
+        .base
+        .ports
+        .events
+        .appended()?
+        .into_iter()
+        .filter(|(_, event)| event.kind == EventKind::SignInRefused)
+        .count();
+    assert_eq!(refused, 0);
     Ok(())
 }
 

@@ -155,11 +155,15 @@ async fn respond(
 okf_jawn_contract::for_each_operation!(bind_routes);
 
 #[cfg(feature = "runtime")]
+pub mod allowance;
+#[cfg(feature = "runtime")]
 pub mod app;
 #[cfg(feature = "runtime")]
 pub mod assets;
 #[cfg(feature = "runtime")]
 pub mod authkit;
+#[cfg(feature = "runtime")]
+pub mod commands;
 pub mod config;
 #[cfg(feature = "runtime")]
 pub mod connect;
@@ -172,13 +176,29 @@ pub mod grants;
 pub mod hosted;
 pub mod hosts;
 pub mod identity;
+#[cfg(feature = "runtime")]
+pub mod ingress;
+#[cfg(feature = "runtime")]
+pub mod launch;
 pub mod local;
 #[cfg(feature = "runtime")]
 pub mod mcp;
+#[cfg(feature = "runtime")]
+pub mod offline;
+#[cfg(feature = "runtime")]
+pub mod outbound;
 pub mod public;
+#[cfg(feature = "runtime")]
+pub mod run;
 pub mod sandbox;
 pub mod schemas;
 #[cfg(feature = "runtime")]
 pub mod sessions;
 #[cfg(feature = "runtime")]
+pub mod settings;
+#[cfg(feature = "runtime")]
+pub mod startup;
+#[cfg(feature = "runtime")]
 pub mod transfers;
+#[cfg(feature = "runtime")]
+pub mod workos_access;

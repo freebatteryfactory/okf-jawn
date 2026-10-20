@@ -5,7 +5,10 @@
 //! and a `signed_in` event naming the subject and route is appended to the tenant's log before the
 //! cookies are sent, by core's one rule for it (`okf_jawn_core::events::record_sign_in`, which
 //! `ApplicationService::record_sign_in` applies too); a sign-in that cannot be recorded is undone
-//! and refused. Locally the session's
+//! and refused. A refused launch link is recorded as a refused sign-in (`SignInRefusals`) in the
+//! local tenant's log, from the deployment's one source; a refused hosted callback names no tenant
+//! and is only counted. A completed local sign-in tells the launch link to publish the next token
+//! (`LaunchTokens::sign_in_completed`). Locally the session's
 //! principal is the persistent installation identity with route `LocalOwner`; hosted it is the
 //! AuthKit user in their organization with route `BrowserSession`. No other route ever gets a
 //! session. A hosted sign-in in progress lives in its browser's cookie, never on the server
@@ -38,7 +41,9 @@ use crate::cookies::{
 };
 use crate::errors::{error_response, wrong_method};
 use crate::hosted::{HostedLogin, LOGIN_COOKIE, MAX_CALLBACK_PARAMETER_CHARS, PendingLogin};
-use crate::identity::{CookieReader as _, hex, session_id_of};
+use crate::identity::{
+    CookieReader as _, HOSTED_SOURCE, LOCAL_SOURCE, SignInRefusals, hex, session_id_of,
+};
 use crate::local::{LaunchTokens, SecretSource};
 
 /// Secrets from the operating system's random source: 32 bytes, lowercase hex.
@@ -57,6 +62,8 @@ pub struct SessionParts {
     pub credentials: Arc<dyn CredentialStore>,
     /// Where sign-ins are recorded.
     pub events: Arc<dyn EventLog>,
+    /// Where a refused launch link is recorded as a refused sign-in.
+    pub refusals: Arc<dyn SignInRefusals>,
     /// Where cookie secrets come from.
     pub secrets: Arc<dyn SecretSource>,
     /// How the cookies are written: `Identity::cookie_policy` of the identity middleware the
@@ -181,15 +188,22 @@ async fn begin_local(
     }
     let presented = query.get("token").map(String::as_str).unwrap_or_default();
     let taken = match tokens.redeem(presented) {
-        Ok(taken) => taken,
+        Ok(Some(taken)) => taken,
+        Ok(None) => {
+            // One source for the local deployment (contract `EventKind::SignInRefused`).
+            let _recorded = sessions
+                .inner
+                .parts
+                .refusals
+                .refused(Some(&TenantId::local()), LOCAL_SOURCE)
+                .await;
+            return private(error_response(ApiError::new(
+                ErrorCode::Unauthenticated,
+                "The launch link is not valid or was already used",
+            )));
+        }
         Err(error) => return private(error_response(error)),
     };
-    if !taken {
-        return private(error_response(ApiError::new(
-            ErrorCode::Unauthenticated,
-            "The launch link is not valid or was already used",
-        )));
-    }
     let outcome = async {
         let owner = sessions
             .inner
@@ -209,10 +223,14 @@ async fn begin_local(
     }
     .await;
     match outcome {
-        Ok(response) => private(response),
+        Ok(response) => {
+            // The launch link publishes the next token.
+            tokens.sign_in_completed();
+            private(response)
+        }
         Err(error) => {
             // The first error is the answer; a failed give-back leaves the token spent.
-            let _given_back = tokens.give_back(presented);
+            let _given_back = tokens.give_back(taken);
             private(error_response(error))
         }
     }
@@ -270,6 +288,13 @@ async fn complete_login(
             bounded("state").is_some_and(|state| secret_hash(&pending.state) == secret_hash(state))
         });
     let Some(pending) = pending else {
+        // No tenant is known before the provider names one: counted, written to no log.
+        let _recorded = sessions
+            .inner
+            .parts
+            .refusals
+            .refused(None, HOSTED_SOURCE)
+            .await;
         return private(error_response(refused()));
     };
     let cleared = match cleared_login_cookie() {
@@ -291,6 +316,19 @@ async fn complete_login(
             .await
     }
     .await;
+    if let Err(error) = &outcome
+        && matches!(
+            error.code,
+            ErrorCode::Unauthenticated | ErrorCode::Forbidden
+        )
+    {
+        let _recorded = sessions
+            .inner
+            .parts
+            .refusals
+            .refused(None, HOSTED_SOURCE)
+            .await;
+    }
     let mut response = private(outcome.unwrap_or_else(error_response));
     response.headers_mut().append(SET_COOKIE, cleared);
     response

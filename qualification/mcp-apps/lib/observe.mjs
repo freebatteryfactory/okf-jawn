@@ -2,7 +2,7 @@
  * How one view render in the reference host is watched.
  *
  * The browser is reached only through a driver (open, hostText, frames, readFrame, toolLog,
- * wait, screenshot, axe, now), so the order of the watch, which tool calls count as this
+ * wait, viewport, screenshot, axe, now), so the order of the watch, which tool calls count as this
  * view's and when waiting stops are decided here and tested with a driver double. run.mjs
  * supplies the Playwright driver and nothing else.
  *
@@ -97,7 +97,9 @@ export function viewSettled(view, expected, observation) {
  * Open `view` in the reference host and watch until it has settled or `timeoutMs` has passed.
  * Returns what was seen last: `frame` (readAppDom of the App document, or null), `tool_calls`
  * (only those the harness reported after this view was opened), the screenshot and, for a
- * settled view, the axe results. A host that cannot reach the harness, or any driver call
+ * settled view, the axe results. Content must fit the reference-host frames, without active
+ * animations, with unchanged viewport geometry for 500ms inside the same watch deadline.
+ * A host that cannot reach the harness, or any driver call
  * that fails, throws: that is the environment, not the view.
  */
 export async function observeView(driver, view, expected, { timeoutMs = 30_000, pollMs = 500 } = {}) {
@@ -108,6 +110,8 @@ export async function observeView(driver, view, expected, { timeoutMs = 30_000, 
   await driver.open(url);
   const deadline = driver.now() + timeoutMs;
   let observation;
+  let stableViewport = null;
+  let stableSince = null;
   for (;;) {
     const hostText = await driver.hostText();
     if (HOST_UNREACHABLE.test(hostText)) {
@@ -120,11 +124,22 @@ export async function observeView(driver, view, expected, { timeoutMs = 30_000, 
       frame: located ? await driver.readFrame(located.frame) : null,
       tool_calls: toolCallsFrom(driver.toolLog().slice(logStart)),
     };
-    observation.settled = viewSettled(view, expected, observation);
+    const contentSettled = viewSettled(view, expected, observation);
+    observation.viewport = contentSettled && located ? await driver.viewport(located.frame) : null;
+    const viewport = observation.viewport;
+    const signature = viewport ? JSON.stringify(viewport) : null;
+    const visible = viewport && viewport.viewport_height > 0
+      && viewport.content_height <= viewport.viewport_height + 2 && viewport.active_animations === 0;
+    if (!visible || signature !== stableViewport) stableSince = visible ? driver.now() : null;
+    stableViewport = signature;
+    observation.settled = contentSettled && stableSince !== null && driver.now() - stableSince >= 500;
     if (observation.settled || driver.now() >= deadline) break;
-    await driver.wait(pollMs);
+    await driver.wait(Math.min(pollMs, Math.max(0, deadline - driver.now())));
   }
   observation.screenshot = await driver.screenshot(view.tool);
+  if (viewSettled(view, expected, observation) && !observation.settled) {
+    throw new HarnessError(`basic-host viewport did not settle unclipped within ${timeoutMs}ms: ${JSON.stringify(observation.viewport)}`);
+  }
   // axe runs on the whole page, and only once the view is drawn.
   observation.axe = observation.settled ? await driver.axe() : null;
   return observation;

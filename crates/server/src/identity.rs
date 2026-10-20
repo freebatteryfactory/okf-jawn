@@ -13,6 +13,9 @@
 //!   cookie. A hosted token the verifier cannot judge yet (`Unverified::retry_after`) is 503
 //!   `Unavailable` with `Retry-After`, never a 401 that would send a good client back to sign
 //!   in. The CLI, a connector and every other non-browser client arrive this way.
+//!   A bearer that does not authenticate is a refused sign-in (`SignInRefusals`): locally recorded
+//!   in the local tenant's log, within the allowance of the deployment's one source; hosted
+//!   counted with no tenant, since a token that did not verify names none to believe.
 //! - **Browser session cookie** (`__Host-okf-session` when the public origin is `https`,
 //!   `okf-session` on plain `http`; only the name of the service's own scheme is read): resolved through `CredentialStore::get_session`
 //!   by the SHA-256 of its secret. Only this path may carry `BrowserSession` or `LocalOwner`
@@ -21,7 +24,9 @@
 //!   request that comes from another origin or site (`Origin`, `Sec-Fetch-Site`) is not
 //!   authenticated by its cookie; one that would change state is refused, as is a mutation whose
 //!   `x-okf-csrf` header is not the session's anti-CSRF token, and the refusal is recorded as
-//!   `permission_denied`.
+//!   `permission_denied` by core's one rule for a binding's own refusal (`dispatch::record_refusal`),
+//!   or, on a byte transport's path, as a refused transport (`NewEvent::transport_denied`); both
+//!   in the tenant's log, since the middleware reads no body.
 //! - **None**: no `Principal`; every route that needs one answers 401.
 //!
 //! `Identity::still_authenticates` fails closed: when the store cannot be read, the answer is
@@ -47,8 +52,12 @@ use okf_jawn_contract::access::{
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::TenantId;
 use okf_jawn_contract::metadata::{OperationName, operations};
+use okf_jawn_contract::transport::{TRANSPORTS, TransportName};
 use okf_jawn_core::credentials::{CredentialStore, secret_hash};
+use okf_jawn_core::dispatch;
 use okf_jawn_core::events::{EventLog, EventScope, NewEvent};
+use okf_jawn_core::ports::PortFuture;
+use serde_json::Value;
 
 use crate::SessionId;
 use crate::cookies::{CookiePolicy, CookieScheme};
@@ -87,6 +96,14 @@ pub struct Unverified {
 pub trait CookieReader: Send + Sync {
     /// The value of the cookie `name`, when the request carries exactly that cookie.
     fn read(&self, headers: &HeaderMap, name: &str) -> Option<String>;
+}
+
+/// Where a refused sign-in is recorded: bounded per source (`allowance::SecurityEvents` in
+/// production).
+pub trait SignInRefusals: Send + Sync {
+    /// Record one refused sign-in from `source` in `tenant`'s log; with no tenant known it is
+    /// written to no log. Never fails the refusal it records: the answer is ignored.
+    fn refused<'a>(&'a self, tenant: Option<&'a TenantId>, source: &'a str) -> PortFuture<'a, ()>;
 }
 
 /// Where the middleware reads the wall-clock time a session's expiry is compared with.
@@ -166,6 +183,8 @@ pub struct IdentityPorts {
     pub events: Arc<dyn EventLog>,
     /// How the session cookie is read.
     pub cookies: Arc<dyn CookieReader>,
+    /// Where a bearer that does not authenticate is recorded as a refused sign-in.
+    pub refusals: Arc<dyn SignInRefusals>,
 }
 
 struct Inner {
@@ -181,6 +200,15 @@ struct Inner {
 
 /// The MCP endpoint path (`api/transports.json` `mcp_request`).
 pub const MCP_PATH: &str = "/mcp";
+
+/// The one source of a local deployment's refused sign-ins (contract `EventKind::SignInRefused`).
+pub const LOCAL_SOURCE: &str = "local";
+
+/// The source a hosted refusal that names no tenant is counted under.
+pub const HOSTED_SOURCE: &str = "hosted";
+
+/// The words of a cookie write refused for its origin or its anti-CSRF token.
+const CSRF_REFUSAL: &str = "A browser write needs its same-origin anti-CSRF token";
 
 impl From<ApiError> for Unverified {
     fn from(error: ApiError) -> Self {
@@ -404,22 +432,42 @@ impl Identity {
         response
     }
 
-    /// Record the refusal of a cookie-authenticated request in the tenant's log.
+    /// Record the refusal of a cookie-authenticated request. An operation path is recorded by
+    /// core's one rule for a binding's own refusal (`dispatch::record_refusal`), with no body
+    /// read, so in the tenant's log; a byte transport's path as a refused transport
+    /// (`NewEvent::transport_denied`), in the tenant's log too. Any other path records nothing.
+    /// A failed append does not change the answer.
     async fn record_refusal(&self, principal: &Principal, path: &str) {
-        let Some(operation) = operation_at(path) else {
-            return;
+        let events = self.inner.ports.events.as_ref();
+        if let Some(operation) = operation_at(path) {
+            let refused = ApiError::new(ErrorCode::Forbidden, CSRF_REFUSAL);
+            let _recorded =
+                dispatch::record_refusal(events, principal, operation, &Value::Null, refused).await;
+        } else if let Some(transport) = transport_at(path) {
+            let scope = EventScope::Tenant(principal.tenant_id.clone());
+            let _recorded = events
+                .append(
+                    &scope,
+                    None,
+                    NewEvent::transport_denied(principal, transport),
+                )
+                .await;
+        }
+    }
+
+    /// Record a bearer that does not authenticate as a refused sign-in: locally in the local
+    /// tenant's log, from the deployment's one source; hosted, counted with no tenant, since a
+    /// token that did not verify names none this service may believe.
+    async fn record_refused_bearer(&self) {
+        let refusals = self.inner.ports.refusals.as_ref();
+        let _recorded = match self.inner.bearer {
+            BearerAuth::Local => {
+                refusals
+                    .refused(Some(&TenantId::local()), LOCAL_SOURCE)
+                    .await
+            }
+            BearerAuth::Hosted { .. } => refusals.refused(None, HOSTED_SOURCE).await,
         };
-        let scope = EventScope::Tenant(principal.tenant_id.clone());
-        let _recorded = self
-            .inner
-            .ports
-            .events
-            .append(
-                &scope,
-                None,
-                NewEvent::permission_denied(principal, operation),
-            )
-            .await;
     }
 }
 
@@ -438,6 +486,7 @@ pub async fn identify(
 
     if let Some(authorization) = headers.get(AUTHORIZATION) {
         let Some(token) = bearer_token(authorization) else {
+            identity.record_refused_bearer().await;
             return identity.challenge(ApiError::new(
                 ErrorCode::Unauthenticated,
                 "The Authorization header must be a Bearer token",
@@ -450,6 +499,7 @@ pub async fn identify(
                 next.run(request).await
             }
             Err(refusal) if refusal.error.code == ErrorCode::Unauthenticated => {
+                identity.record_refused_bearer().await;
                 identity.challenge(refusal.error)
             }
             // A token that cannot be judged yet: try again, not sign in again.
@@ -494,10 +544,7 @@ pub async fn identify(
         identity
             .record_refusal(&principal, request.uri().path())
             .await;
-        return error_response(ApiError::new(
-            ErrorCode::Forbidden,
-            "A browser write needs its same-origin anti-CSRF token",
-        ));
+        return error_response(ApiError::new(ErrorCode::Forbidden, CSRF_REFUSAL));
     }
     request.extensions_mut().insert(principal);
     request.extensions_mut().insert(Credential::Session {
@@ -537,6 +584,28 @@ fn bearer_token(value: &HeaderValue) -> Option<String> {
     let token = token.trim();
     (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty() && !token.contains(' '))
         .then(|| token.to_owned())
+}
+
+/// The byte transport whose route `path` is: each `{...}` segment of its declared path stands for
+/// one segment, not empty.
+fn transport_at(path: &str) -> Option<TransportName> {
+    let segments: Vec<&str> = path.split('/').collect();
+    TransportName::ALL.into_iter().find(|name| {
+        TRANSPORTS
+            .iter()
+            .find(|declared| declared.id == name.as_str())
+            .is_some_and(|declared| {
+                let template: Vec<&str> = declared.path.split('/').collect();
+                template.len() == segments.len()
+                    && template.iter().zip(&segments).all(|(expected, given)| {
+                        if expected.starts_with('{') && expected.ends_with('}') {
+                            !given.is_empty()
+                        } else {
+                            expected == given
+                        }
+                    })
+            })
+    })
 }
 
 /// The canonical operation whose JSON route is `path`.

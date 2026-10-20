@@ -77,6 +77,40 @@ impl Debug for HostedConfig {
     }
 }
 
+impl AuthKind {
+    /// The entry path `OKF_AUTH_MODE` selects, by the mode rule alone, reading no WorkOS
+    /// setting's value: the offline commands need no WorkOS credential, and they must still
+    /// refuse what the service refuses about the mode.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` naming `OKF_AUTH_MODE` for an unknown mode, and for an unset one
+    /// beside any `WORKOS_*` setting. Never answers `Local` for a hosted mode or beside a hosted
+    /// setting.
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ApiError> {
+        // The mode is read exactly as set: a value with surrounding whitespace is no mode.
+        match lookup("OKF_AUTH_MODE").as_deref() {
+            None => {
+                // Hosted settings are never ignored: with any of them present and no mode, the
+                // deployment was meant to be hosted, and starting it local would hand the
+                // installation to whoever reads the launch link.
+                let hosted_setting = HOSTED_SETTINGS
+                    .iter()
+                    .any(|name| lookup(name).is_some_and(|value| !value.trim().is_empty()));
+                if hosted_setting {
+                    return Err(invalid(
+                        "OKF_AUTH_MODE",
+                        "must be set to `workos` when a WORKOS_* setting is present",
+                    ));
+                }
+                Ok(Self::Local)
+            }
+            Some("local") => Ok(Self::Local),
+            Some("workos") => Ok(Self::Hosted),
+            Some(_) => Err(invalid("OKF_AUTH_MODE", "must be `local` or `workos`")),
+        }
+    }
+}
+
 impl AuthConfig {
     /// The entry path these settings select.
     #[must_use]
@@ -94,26 +128,9 @@ impl AuthConfig {
     /// one beside any `WORKOS_*` setting, and for `workos` with any WorkOS setting missing or
     /// invalid. Never answers `Local` for a hosted mode or beside a hosted setting.
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ApiError> {
-        // The mode is read exactly as set: a value with surrounding whitespace is no mode.
-        let mode = lookup("OKF_AUTH_MODE");
-        match mode.as_deref() {
-            None => {
-                // Hosted settings are never ignored: with any of them present and no mode, the
-                // deployment was meant to be hosted, and starting it local would hand the
-                // installation to whoever reads the launch link.
-                let hosted_setting = HOSTED_SETTINGS
-                    .iter()
-                    .any(|name| lookup(name).is_some_and(|value| !value.trim().is_empty()));
-                if hosted_setting {
-                    return Err(invalid(
-                        "OKF_AUTH_MODE",
-                        "must be set to `workos` when a WORKOS_* setting is present",
-                    ));
-                }
-                Ok(Self::Local)
-            }
-            Some("local") => Ok(Self::Local),
-            Some("workos") => {
+        match AuthKind::from_lookup(&lookup)? {
+            AuthKind::Local => Ok(Self::Local),
+            AuthKind::Hosted => {
                 let required = |name: &str| {
                     lookup(name)
                         .map(|value| value.trim().to_owned())
@@ -130,7 +147,6 @@ impl AuthConfig {
                 hosted.check()?;
                 Ok(Self::Hosted(hosted))
             }
-            Some(_) => Err(invalid("OKF_AUTH_MODE", "must be `local` or `workos`")),
         }
     }
 }
@@ -188,6 +204,7 @@ fn https_url(text: &str) -> Option<Uri> {
     Some(uri)
 }
 
-fn invalid(setting: &str, rule: &str) -> ApiError {
+/// The refusal of a setting: `InvalidInput` naming it, in the message and as its field.
+pub(crate) fn invalid(setting: &str, rule: &str) -> ApiError {
     ApiError::new(ErrorCode::InvalidInput, format!("{setting} {rule}")).with_field(setting)
 }

@@ -14,7 +14,7 @@ use crate::support::doubles::{
     Body, FakeTransport, Script, Setup, accepted, answered, broken, relay, status,
 };
 use crate::support::http::{Answering, json as json_answer};
-use crate::support::{TOKEN, Untouched, cli, cli_reading, file};
+use crate::support::{Outcome, Ran, TOKEN, Untouched, cli, cli_reading, file};
 
 /// A liveness answer, then one accepted message.
 fn service() -> Vec<String> {
@@ -74,7 +74,7 @@ async fn the_credential_comes_from_the_environment() -> TestResult {
 #[tokio::test]
 async fn the_credential_comes_from_the_first_line_of_the_token_file() -> TestResult {
     let listener = Answering::with(service()).await?;
-    let path = file("token", b"  file-token-81c4-9a2e\r\nnot-the-credential\n")?;
+    let path = file("token", b"  file_token_81c4_9a2e\r\nnot-the-credential\n")?;
     let ran = cli(
         &[
             "mcp",
@@ -96,7 +96,7 @@ async fn the_credential_comes_from_the_first_line_of_the_token_file() -> TestRes
     let sent = some(heard.get(1), "the POST")?;
     assert_eq!(
         sent.header("authorization").as_deref(),
-        Some("Bearer file-token-81c4-9a2e")
+        Some("Bearer file_token_81c4_9a2e")
     );
     std::fs::remove_file(path)?;
     Ok(())
@@ -541,6 +541,93 @@ async fn mcp_stdio_credential_shorter_than_sixteen_characters_is_refused() -> Te
         operated.stderr
     );
     assert!(listener.heard()?.is_empty());
+    Ok(())
+}
+
+/// Run the shipped relay with `credential` from the environment, or from a token file when
+/// `filed`, against `listener`; returns what it wrote and whether it read its input.
+async fn relayed_with(
+    credential: &str,
+    filed: bool,
+    listener: &Answering,
+    input: Option<&[u8]>,
+) -> Outcome<(Ran, bool)> {
+    let touched = Arc::new(AtomicBool::new(false));
+    let path = file("alphabet-token", format!("{credential}\n").as_bytes())?;
+    let (origin, shown) = (listener.origin(), path.display().to_string());
+    let mut arguments = vec!["mcp", "--stdio", "--server", origin.as_str()];
+    let mut token = Some(credential);
+    if filed {
+        arguments.extend(["--token-file", shown.as_str()]);
+        token = None;
+    }
+    let ran = match input {
+        Some(input) => cli(&arguments, token, input).await?,
+        None => cli_reading(&arguments, token, Untouched(touched.clone())).await?,
+    };
+    std::fs::remove_file(path)?;
+    Ok((ran, touched.load(Ordering::SeqCst)))
+}
+
+/// C7: the relay's connector credential is refused unless it is spelled in the alphabet the
+/// service issues a connector secret in (`okfj_` and lowercase hex: lowercase letters, digits
+/// and the underscore), so it never holds `[` or `]` and the mark that replaces it can never
+/// complete it. From the environment and from the token file alike, before the relay reads a
+/// line or asks the service anything, in words that do not repeat it. From both sides: every
+/// letter of the alphabet is taken, and the character just outside each of its ranges is
+/// refused, as are the brackets, a quote, a backslash and a dash.
+#[tokio::test]
+async fn mcp_stdio_a_connector_credential_outside_its_alphabet_is_refused() -> TestResult {
+    let listener = Answering::with(Vec::new()).await?;
+    let stem = "okfj_5f1c2a9e7d3b41c6";
+    for outside in [
+        '[', ']', '`', '{', '/', ':', '^', '@', 'A', 'Z', '"', '\\', '-', '.', '~',
+    ] {
+        let credential = format!("{stem}{outside}0");
+        for filed in [false, true] {
+            let (ran, touched) = relayed_with(&credential, filed, &listener, None).await?;
+            let source = if filed {
+                "--token-file"
+            } else {
+                "OKF_JAWN_TOKEN"
+            };
+            assert_eq!((ran.code, ran.stdout.as_str()), (1, ""), "{credential}");
+            assert!(
+                ran.stderr.starts_with(&format!(
+                    "okf-jawn: invalid_input: The connector credential in {source} is not usable"
+                )) && ran
+                    .stderr
+                    .contains("lowercase letters, digits and the underscore"),
+                "{credential}: {}",
+                ran.stderr
+            );
+            assert!(!ran.stderr.contains(stem), "{}", ran.stderr);
+            assert!(!touched, "standard input was read for {credential}");
+        }
+    }
+    assert!(listener.heard()?.is_empty(), "the service was asked");
+    // Every character of the alphabet, and a credential of the shape the service issues.
+    let alphabet: String = ('a'..='z').chain('0'..='9').chain(['_']).collect();
+    let issued = format!("okfj_{}", "0123456789abcdef".repeat(4));
+    let input = notification("notifications/initialized");
+    for credential in [alphabet.as_str(), issued.as_str()] {
+        for filed in [false, true] {
+            let listener = Answering::with(service()).await?;
+            let (ran, _) =
+                relayed_with(credential, filed, &listener, Some(input.as_bytes())).await?;
+            assert_eq!(
+                (ran.code, ran.stdout.as_str(), ran.stderr.as_str()),
+                (0, "", ""),
+                "{credential}"
+            );
+            let heard = listener.heard()?;
+            let sent = some(heard.get(1), "the POST")?;
+            assert_eq!(
+                sent.header("authorization"),
+                Some(format!("Bearer {credential}"))
+            );
+        }
+    }
     Ok(())
 }
 
