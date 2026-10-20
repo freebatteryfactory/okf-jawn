@@ -1,10 +1,15 @@
 /** A1: exact read identity, inclusive selections and budgets, from SPEC section 7 and the wire. */
 import { QueryClient } from '@tanstack/react-query';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Selection } from '../../src/api/generated/types.gen';
 import { zReadItemRequest } from '../../src/api/generated/zod.gen';
+import { createQueryClient } from '../../src/app/query-client';
 import { readKey, readOptions, readRequest } from '../../src/features/reader/request';
 import { objectBytesKey } from '../../src/features/viewers/image/bytes';
+import { mockApi, ok } from './support/api';
+import { sourceRead } from './support/m4a-reader';
+
+afterEach(() => vi.unstubAllGlobals());
 
 const base = {
   workspaceId: '11111111-1111-4111-8111-111111111111',
@@ -26,11 +31,12 @@ describe('read cache identity (A1, SPEC section 7)', () => {
     const first = readRequest(base);
     const other = readRequest({ ...base, ...change });
     // A cached answer of the first request must never answer the other identity dimension.
-    client.setQueryData(readKey(first), 'the first reading only');
+    const cached = { pages: [], pageParams: [] };
+    client.setQueryData(readKey(first), cached);
     expect(other.max_bytes).toBe(65_536);
     expect(other.max_images).toBe(0);
     expect(client.getQueryData(readKey(other))).toBeUndefined();
-    expect(client.getQueryData(readKey(readRequest({ ...base })))).toBe('the first reading only');
+    expect(client.getQueryData(readKey(readRequest({ ...base })))).toEqual(cached);
     client.clear();
   });
 
@@ -98,4 +104,34 @@ describe('bounded selected reading (A1)', () => {
     );
     expect(options.getNextPageParam({ next_cursor: null })).toBeUndefined();
   });
+
+  it.each(['text', 'outline', 'multimodal', 'pages', 'original'] as const)(
+    'continues %s through the generated transport at the same revision and inclusive selection',
+    async (view) => {
+      const api = mockApi({
+        '/api/reads/read-item': (body) =>
+          ok(
+            sourceRead(body, {
+              truncated: body.cursor === null,
+              next_cursor: body.cursor === null ? 'opaque-next-part' : null,
+            }),
+          ),
+      });
+      const client = createQueryClient();
+      const request = readRequest({
+        ...base,
+        itemId: '44444444-4444-4444-8444-444444444444',
+        view,
+        selection: { kind: 'pages', range: { start: 2, end: 4 } },
+      });
+      const result = await client.fetchInfiniteQuery({ ...readOptions(request), pages: 2 });
+      expect(result.pages).toHaveLength(2);
+      expect(api.callsTo('/api/reads/read-item')).toEqual([
+        request,
+        { ...request, cursor: 'opaque-next-part' },
+      ]);
+      expect(api.violations).toEqual([]);
+      client.clear();
+    },
+  );
 });

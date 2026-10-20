@@ -33,6 +33,16 @@ export function mediaAlt(media: MediaReference): string {
   const caption = media.caption?.trim();
   if (caption) return caption;
   const page = mediaPage(media);
+  const places = (media.source.locations ?? []).filter((place) => pageOf(place) === page);
+  const inferred =
+    page !== null &&
+    places.some((place) => place.provenance === 'inferred') &&
+    !places.some((place) => place.provenance === 'direct');
+  if (inferred) {
+    return media.role === 'page_image'
+      ? `A page render inferred to be of page ${page}, not certain; the document gives it no caption.`
+      : `A picture inferred to be on page ${page}, not certain; the document gives it no caption.`;
+  }
   if (media.role === 'page_image') {
     return page === null
       ? 'A page as the converter rendered it; the document gives it no caption.'

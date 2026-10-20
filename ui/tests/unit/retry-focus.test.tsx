@@ -6,10 +6,11 @@
  */
 
 import { focusManager } from '@tanstack/react-query';
-import { act, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SearchHit } from '../../src/api/generated/types.gen';
+import { pageHeading } from '../../src/lib/focus';
 import { fail, type Handler, type Json, mockApi, ok, type Reply } from './support/api';
 import {
   explorerHandlers,
@@ -32,6 +33,21 @@ import {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+it('finds the application focus heading when unrelated content has an earlier h1', () => {
+  render(
+    <>
+      <h1>Unrelated document heading</h1>
+      <h1 tabIndex={-1}>Application heading</h1>
+    </>,
+  );
+  expect(pageHeading()).toBe(
+    screen.getByRole('heading', { level: 1, name: 'Application heading' }),
+  );
+  expect(pageHeading()).not.toBe(
+    screen.getByRole('heading', { level: 1, name: 'Unrelated document heading' }),
+  );
 });
 
 const WORKSPACES = '/api/workspaces/list-workspaces';
@@ -524,15 +540,12 @@ describe('a keyboard retry that loads nothing new', () => {
       reach: () => press('Show more results'),
       context: 'Loading more results',
     });
-    // The document's own `# Meeting notes` is rendered as a level-one heading too.
-    await screen.findByRole('heading', { level: 1, name: 'Meeting notes' });
+    // The document's own `# Meeting notes` is nested below the item's level-two title.
+    await screen.findByRole('heading', { level: 3, name: 'Meeting notes' });
     operation.end('answers');
     await waitFor(() => expect(notice.isConnected).toBe(false));
     const headings = screen.getAllByRole('heading', { level: 1 });
-    expect(headings.map((heading) => heading.textContent)).toEqual([
-      'Workshop notes',
-      'Meeting notes',
-    ]);
+    expect(headings.map((heading) => heading.textContent)).toEqual(['Workshop notes']);
     await waitFor(() => expectFocusOn(headings[0]));
   });
 });

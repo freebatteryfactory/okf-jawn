@@ -20,7 +20,7 @@ it('releases every object URL when bytes change and when the image closes', asyn
     initialProps: { blob: first },
   });
   await waitFor(() => expect(hook.result.current).toBe('blob:first'));
-  expect(create.mock.calls[0]?.[0].type).toBe('image/png');
+  expect(create.mock.calls[0]?.[0]).toMatchObject({ type: 'image/png' });
   hook.rerender({ blob: second });
   await waitFor(() => expect(hook.result.current).toBe('blob:second'));
   expect(revoke.mock.calls).toEqual([['blob:first']]);
@@ -41,7 +41,7 @@ it('shows a selected region in either recorded coordinate origin', () => {
 it('uses a retained caption and names an uncaptioned picture/page explicitly', () => {
   expect(mediaAlt(picture)).toBe('Revenue by quarter, 2025');
   expect(mediaAlt({ ...picture, caption: null })).toBe(
-    'A picture on page 1 that the document gives no caption.',
+    'A picture inferred to be on page 1, not certain; the document gives it no caption.',
   );
   expect(mediaAlt(pageImage(1, PAGE_ONE))).toBe(
     'Page 1 as the converter rendered it; the document gives it no caption.',

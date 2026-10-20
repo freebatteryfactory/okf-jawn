@@ -143,7 +143,7 @@ export const appearance: SourceAppearance = {
   media_type: 'application/pdf',
   size: '20480',
   metadata: {},
-  names: [{ filename: 'report.pdf', folder: null, observed_at: NOW, supplied_by: 'ada' }],
+  names: [{ filename: 'report.pdf', folder: 'sources', observed_at: NOW, supplied_by: 'ada' }],
   extraction: {
     outcome: { status: 'completed' },
     text_origin: 'converter',

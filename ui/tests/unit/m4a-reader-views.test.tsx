@@ -1,12 +1,13 @@
 /** A1: available representations and truthful source locations, from SPEC sections 5 and 7. */
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import { Locations } from '../../src/features/reader/Locations';
 import { pageWindows } from '../../src/features/reader/ReaderViews';
 import { viewsOf } from '../../src/features/reader/views';
-import { mockApi } from './support/api';
-import { appearance, converter } from './support/m4a-reader';
-import { explorerHandlers, NOTE, renderAt, WS } from './support/workspace';
+import { mockApi, ok } from './support/api';
+import { appearance, converter, sourceDocument, sourceRead } from './support/m4a-reader';
+import { explorerHandlers, NOTE, renderAt, SOURCE, WS } from './support/workspace';
 
 describe('the reader representations an item has', () => {
   it('offers all five for a converted paginated source with page renders', () => {
@@ -58,6 +59,50 @@ describe('the reader representations an item has', () => {
     await within(article).findByText('Text of Meeting notes');
     expect(within(article).getByRole('heading', { name: 'Meeting notes', level: 2 })).toBeTruthy();
     expect(within(article).getByRole('heading', { name: 'Meeting notes', level: 3 })).toBeTruthy();
+    expect(api.violations).toEqual([]);
+  });
+
+  it('waits for the outline entry selection before moving focus past a cached whole-item text read', async () => {
+    // The old Text answer is cached before Outline is selected. Its first part is not the
+    // selected section, so it cannot consume the pending focus request (A1 keyboard journey).
+    const api = mockApi(
+      explorerHandlers({
+        '/api/items/get-item': () => ok(sourceDocument()),
+        '/api/reads/read-item': (body) =>
+          ok(
+            sourceRead(body, {
+              markdown:
+                body.view === 'text'
+                  ? body.selection &&
+                    typeof body.selection === 'object' &&
+                    'heading' in body.selection
+                    ? 'Selected Budget section'
+                    : 'Whole report before choosing its outline'
+                  : '',
+              outline: [
+                {
+                  kind: 'heading',
+                  level: 1,
+                  label: 'Budget',
+                  selection: { kind: 'section', heading: 'Budget' },
+                },
+              ],
+            }),
+          ),
+      }),
+    );
+    renderAt(`/w/${WS}/i/${SOURCE}`);
+    const article = await screen.findByRole('article', { name: 'Annual report' });
+    await within(article).findByText('Whole report before choosing its outline');
+    await userEvent.click(within(article).getByRole('radio', { name: 'Outline', exact: true }));
+    const outline = await within(article).findByRole('navigation', {
+      name: 'Outline of this item',
+    });
+    const budget = within(outline).getByRole('button', { name: 'Budget' });
+    budget.focus();
+    await userEvent.keyboard('{Enter}');
+    await within(article).findByText('Selected Budget section');
+    await waitFor(() => expect(document.activeElement).toBe(article.querySelector('[data-part]')));
     expect(api.violations).toEqual([]);
   });
 });

@@ -9,6 +9,7 @@
  * corrections stay beside whatever view is shown.
  */
 import { expect, type Locator, type Page } from '@playwright/test';
+import { tabTo } from './views';
 
 export type ReaderViewName = 'Text' | 'Outline' | 'Text and pictures' | 'Pages' | 'Original';
 
@@ -37,7 +38,7 @@ export async function chooseView(page: Page, name: ReaderViewName, options: Choo
     return;
   }
   const count = await group.getByRole('radio').count();
-  await group.locator('input:checked').focus();
+  await tabTo(page, group.locator('input:checked'));
   for (let presses = 0; presses < count && !(await choice.isChecked()); presses += 1) {
     await page.keyboard.press('ArrowRight');
   }

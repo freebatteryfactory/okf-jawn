@@ -6,7 +6,7 @@
  */
 import { deflateSync } from 'node:zlib';
 import type { Page, Route } from '@playwright/test';
-import { type Answers, HEAD, NOW, ok, summary, WS } from './explorer';
+import { type Answers, answers, HEAD, NOW, ok, summary, WS } from './explorer';
 
 export const REPORT = '66666666-6666-4666-8666-666666666666';
 export const PHOTO = '77777777-7777-4777-8777-777777777777';
@@ -46,13 +46,14 @@ function appearance(
   filename: string,
   pages: number,
   size: number,
+  folder: string,
 ) {
   return {
     object,
     media_type: mediaType,
     size: String(size),
     metadata: {},
-    names: [{ filename, folder: null, observed_at: NOW, supplied_by: 'ada' }],
+    names: [{ filename, folder, observed_at: NOW, supplied_by: 'ada' }],
     extraction: {
       outcome: { status: 'completed' },
       text_origin: 'converter',
@@ -326,6 +327,8 @@ function readPhoto(body: Body) {
 
 /** `get_item` and `read_item` of the report and the photo; other items as `explorer.ts` answers. */
 export function readerAnswers(reads: Reads, others: Answers['/api/items/get-item']): Answers {
+  const otherRead = answers()['/api/reads/read-item'];
+  if (otherRead === undefined) throw new Error('the explorer answers no read_item');
   return {
     '/api/items/list-items': (body) =>
       body.folder === 'reports'
@@ -346,6 +349,7 @@ export function readerAnswers(reads: Reads, others: Answers['/api/items/get-item
             'annual-report.pdf',
             REPORT_PAGES,
             812_034,
+            'reports',
           ),
         });
       }
@@ -355,14 +359,18 @@ export function readerAnswers(reads: Reads, others: Answers['/api/items/get-item
           body: 'A harbour at dawn, boats moored.',
           content_digest: 'c'.repeat(64),
           properties: { type: photo.type_name, okf_jawn: { id: PHOTO } },
-          source: appearance(PHOTO_BYTES, 'image/png', 'harbour.png', 1, 52_100),
+          source: appearance(PHOTO_BYTES, 'image/png', 'harbour.png', 1, 52_100, 'photos'),
         });
       }
       return others(body);
     },
     '/api/reads/read-item': (body) => {
       reads.bodies.push(body);
-      return body.item_id === PHOTO ? readPhoto(body) : readReport(body);
+      return body.item_id === PHOTO
+        ? readPhoto(body)
+        : body.item_id === REPORT
+          ? readReport(body)
+          : otherRead(body);
     },
   };
 }

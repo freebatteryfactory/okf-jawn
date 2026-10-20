@@ -82,6 +82,7 @@ function Choice({
     <label ref={ref} className="reader-view inline-flex items-center gap-1">
       <input
         type="radio"
+        className="focus:outline-[3px] focus:outline-solid focus:outline-[Highlight] focus:outline-offset-[3px]"
         name={name}
         value={view}
         checked={checked}

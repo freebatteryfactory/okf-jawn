@@ -23,6 +23,7 @@
  * while the pages are read; when it leaves (the last pages are shown) focus goes to the other one,
  * or to the first page shown.
  */
+import { hashKey } from '@tanstack/react-query';
 import { type RefCallback, useId, useLayoutEffect, useRef } from 'react';
 import type {
   ItemDocument,
@@ -163,7 +164,7 @@ export function ReaderViews({
   // An outline entry chosen: its view leaves, and the text of the entry comes.
   const outlineHeld = useRef<HTMLElement | null>(null);
   const [, outlineRef] = useWatchedPart<HTMLElement>(outlineHeld);
-  const awaitingText = useRef(false);
+  const awaitingText = useRef<{ selection: string; revision: Revision } | null>(null);
   // "Show pages …": the button pressed stays while the pages are read; one that leaves is followed.
   const pagerHeld = useRef<HTMLElement | null>(null);
   const [, beforeRef] = useWatchedPart<HTMLButtonElement>(pagerHeld);
@@ -172,10 +173,15 @@ export function ReaderViews({
   const body = continuation.bodyRef;
   useLayoutEffect(() => {
     if (takeHeld(outlineHeld)) checkedChoice()?.focus();
-    if (awaitingText.current) {
-      if (view !== 'text') awaitingText.current = false;
-      else if (!read.isPending && pages.length > 0) {
-        awaitingText.current = false;
+    const wantedText = awaitingText.current;
+    if (wantedText !== null) {
+      if (view !== 'text' || wantedText.revision !== revision) awaitingText.current = null;
+      else if (
+        wantedText.selection === hashKey([request.selection]) &&
+        !read.isPending &&
+        pages.length > 0
+      ) {
+        awaitingText.current = null;
         if (document.activeElement === checkedChoice() || focusOnBody()) {
           partOf(body.current, 'first')?.focus();
         }
@@ -192,9 +198,11 @@ export function ReaderViews({
   });
 
   const showInText = (selection: Selection) => {
-    awaitingText.current = true;
-    onSelect(selection);
+    awaitingText.current = { selection: hashKey([selection]), revision };
+    // Queue the Text choice before navigation can commit the new URL. The leaving outline's
+    // focus bridge must already be the Text radio, even when the router commits synchronously.
     onView('text');
+    onSelect(selection);
   };
 
   const shownText = view === 'text' || view === 'multimodal' || view === 'outline';
