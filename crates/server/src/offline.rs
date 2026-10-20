@@ -92,6 +92,14 @@ pub async fn backup(
         ));
     }
     let storage = open_storage(data_dir).await?;
+    // Opening can create the data directory. Resolve it again so the filesystem's actual
+    // spelling, including non-ASCII case aliases, is used before any output is created.
+    if inside(&output, data_dir)? {
+        return Err(invalid(
+            "--output",
+            "must not lie inside the data directory: a backup must outlive it",
+        ));
+    }
     std::fs::create_dir_all(&output).map_err(|error| {
         ApiError::new(
             ErrorCode::Unavailable,
@@ -140,7 +148,8 @@ fn is_empty_directory(path: &Path) -> bool {
 }
 
 /// Whether `path` is `directory` or lies under it, compared by components after resolving the
-/// part of each that exists (links and, on Windows, letter case resolved).
+/// part of each that exists. Canonicalization resolves links and the filesystem's spelling;
+/// missing components need another check after the directory is created.
 fn inside(path: &Path, directory: &Path) -> Result<bool, ApiError> {
     let path = resolved(path)?;
     let directory = resolved(directory)?;
@@ -193,8 +202,9 @@ fn resolved(path: &Path) -> Result<PathBuf, ApiError> {
     }
 }
 
-/// Whether two path components name the same entry: exactly on Unix, ignoring ASCII case on
-/// Windows, whose file systems compare names that way.
+/// Compare resolved components exactly on Unix, with an ASCII case fallback on Windows.
+/// Existing components use the filesystem's canonical spelling; this fallback does not
+/// resolve non-ASCII case aliases in missing components.
 fn same(left: &OsStr, right: &OsStr) -> bool {
     if cfg!(windows) {
         left.to_string_lossy()

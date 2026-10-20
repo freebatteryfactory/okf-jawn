@@ -264,6 +264,42 @@ async fn a_backup_refuses_an_inside_output_reached_through_a_missing_sibling() -
     Ok(())
 }
 
+/// SPEC12: a backup must outlive its data directory. A missing Windows data path is not
+/// outside merely because an alternate Unicode case spelling precedes the output directory.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_backup_refuses_an_inside_unicode_case_output_for_a_missing_data_directory() -> TestResult
+{
+    let scratch = Scratch::new("unicode-case")?;
+    let probe = scratch.join("probe-DÁTÁ");
+    std::fs::create_dir(&probe)?;
+    std::fs::write(probe.join("marker"), b"same directory")?;
+    let alias = scratch.join("probe-dátá");
+    if !alias.join("marker").is_file() {
+        eprintln!("NOT EXERCISED: filesystem does not resolve this Unicode case alias");
+        return Ok(());
+    }
+    assert_eq!(probe.canonicalize()?, alias.canonicalize()?);
+    assert_eq!(std::fs::read(alias.join("marker"))?, b"same directory");
+    eprintln!("VERIFIED: Unicode case alias resolves to the same directory");
+    let data = scratch.join("DÁTÁ");
+    let output = scratch.join("dátá").join("backup");
+    assert!(
+        !data.exists(),
+        "the regression requires a missing data directory"
+    );
+    assert!(!output.exists());
+
+    let refused = err_of(backup(AuthKind::Local, &data, &backup_args(&output, None)).await)?;
+    assert_eq!(refused.code, ErrorCode::InvalidInput);
+    assert_eq!(refused.field.as_deref(), Some("--output"));
+    assert!(
+        !output.exists() && !data.join("backup").exists(),
+        "a refused backup must not create its output inside the actual data directory"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_tenant_is_named_only_in_a_hosted_backup() -> TestResult {
     let scratch = Scratch::new("tenant")?;
