@@ -76,9 +76,9 @@ for (const original of [
           mediaType: original.mediaType,
           bytes: original.bytes,
           filename: original.filename,
-          ...(original.converted
+          extraction: original.converted
             ? {}
-            : { extraction: { outcome: { status: 'unsupported' }, text_origin: 'none' } }),
+            : { outcome: { status: 'unsupported' }, text_origin: 'none' },
           extra: {
             // Reads, including the original, remain available in an archived workspace.
             '/api/workspaces/open-workspace': () =>
@@ -92,7 +92,7 @@ for (const original of [
           ).toBeVisible();
           await expectNoAxeViolations(page, 'the Office conversion in the reader');
         }
-        const region = await openOriginal(page);
+        const region = await openOriginal(page, { keyboard });
         await expect(region).toContainText(original.words);
         const link = region.getByRole('link', {
           name: `Download the original, ${original.filename}`,

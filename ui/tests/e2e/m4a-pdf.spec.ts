@@ -40,7 +40,19 @@ import { tabTo } from './support/views';
 const PDF = 'application/pdf';
 
 /** Open the reader on the PDF; returns the original's region and what the page did. */
-async function openReport(page: Page, origin: string, selection?: unknown, bytes = REPORT) {
+async function openReport(
+  page: Page,
+  origin: string,
+  {
+    selection,
+    bytes = REPORT,
+    keyboard = false,
+  }: {
+    selection?: unknown;
+    bytes?: Buffer;
+    keyboard?: boolean;
+  } = {},
+) {
   const policy = await watchPolicy(page);
   const workers = watchWorkers(page);
   const reads = await routeSource(page, {
@@ -49,7 +61,7 @@ async function openReport(page: Page, origin: string, selection?: unknown, bytes
     filename: 'annual-report.pdf',
   });
   await page.goto(sourceAddress(origin, selection));
-  const original = await openOriginal(page);
+  const original = await openOriginal(page, { keyboard });
   return { original, policy, workers, reads };
 }
 
@@ -59,6 +71,34 @@ function pdfjsFetched(asked: string[]): string[] {
 }
 
 const pages = (original: Locator) => original.getByRole('group', { name: 'Pages of the PDF' });
+
+/** The reader scrolls inside its pane: show the PDF controls and drawing in the taste evidence. */
+async function shotPages(page: Page, original: Locator, name: string, keyboard = false) {
+  if (keyboard) {
+    // Small keyboard scrolls keep the focused control in view while exposing the drawing below.
+    // A full PageDown can put the focus ring above this pane's clipped viewport.
+    for (let presses = 0; presses < 6; presses += 1) {
+      const visible = await original.locator('canvas').evaluate(
+        (canvas) =>
+          new Promise<boolean>((resolve) => {
+            const observer = new IntersectionObserver(([entry]) => {
+              observer.disconnect();
+              resolve((entry?.intersectionRatio ?? 0) >= 0.2);
+            });
+            observer.observe(canvas);
+          }),
+      );
+      if (visible) break;
+      await page.keyboard.press('ArrowDown');
+    }
+    await expect(pages(original).locator(':focus')).toBeInViewport();
+    await expect(original.locator('canvas')).toBeInViewport({ ratio: 0.2 });
+    await expectVisibleFocus(page);
+  } else {
+    await pages(original).scrollIntoViewIfNeeded();
+  }
+  await shot(page, name);
+}
 
 test.describe('open a PDF and page through it', () => {
   const server = useOriginalServer();
@@ -78,7 +118,7 @@ test.describe('open a PDF and page through it', () => {
       true,
     );
     await expectNoAxeViolations(page, 'a PDF open at its first page');
-    await shot(page, 'm4a-pdf-01-first-page');
+    await shotPages(page, original, 'm4a-pdf-01-first-page');
 
     await pages(original).getByRole('button', { name: 'Next page' }).click();
     await expectDrawn(original, 2);
@@ -92,7 +132,7 @@ test.describe('open a PDF and page through it', () => {
     const next = pages(original).getByRole('button', { name: 'Next page' });
     await expect(next).toHaveAttribute('aria-disabled', 'true');
     await expectNoAxeViolations(page, 'a PDF at its last page');
-    await shot(page, 'm4a-pdf-02-last-page');
+    await shotPages(page, original, 'm4a-pdf-02-last-page');
 
     const field = pages(original).getByRole('spinbutton', { name: 'Page number' });
     await field.fill('9');
@@ -102,7 +142,7 @@ test.describe('open a PDF and page through it', () => {
     );
     await expect(field).toHaveAttribute('aria-invalid', 'true');
     await expectNoAxeViolations(page, 'a page the PDF does not have');
-    await shot(page, 'm4a-pdf-03-no-such-page');
+    await shotPages(page, original, 'm4a-pdf-03-no-such-page');
     await field.fill('1');
     await pages(original).getByRole('button', { name: 'Go to page' }).click();
     await expectDrawn(original, 1);
@@ -129,7 +169,9 @@ test.describe('open a PDF and page through it', () => {
   });
 
   test('from the keyboard alone: Tab, Enter and the number field', async ({ page }) => {
-    const { original, policy, workers } = await openReport(page, server.origin());
+    const { original, policy, workers } = await openReport(page, server.origin(), {
+      keyboard: true,
+    });
     await expectDrawn(original, 1);
 
     const next = pages(original).getByRole('button', { name: 'Next page' });
@@ -143,10 +185,10 @@ test.describe('open a PDF and page through it', () => {
     // At its end the button stays, with focus, and does nothing.
     await page.keyboard.press('Enter');
     await expect(next).toBeFocused();
-    await expect(original.getByRole('status')).toHaveText('Page 3 of 3');
+    await expect(pages(original).getByRole('status')).toHaveText('Page 3 of 3');
     await expectVisibleFocus(page);
     await expectNoAxeViolations(page, 'the last page, from the keyboard');
-    await shot(page, 'm4a-pdf-04-keyboard-last-page');
+    await shotPages(page, original, 'm4a-pdf-04-keyboard-last-page', true);
 
     await page.keyboard.press('Shift+Tab');
     const previous = pages(original).getByRole('button', { name: 'Previous page' });
@@ -166,7 +208,7 @@ test.describe('open a PDF and page through it', () => {
     await expect(pages(original).getByRole('button', { name: 'Go to page' })).toBeFocused();
     await expectVisibleFocus(page);
     await expectNoAxeViolations(page, 'the number field, from the keyboard');
-    await shot(page, 'm4a-pdf-05-keyboard-go-to-page');
+    await shotPages(page, original, 'm4a-pdf-05-keyboard-go-to-page', true);
 
     // Closing the tab from the keyboard lets the document go.
     const close = page.getByRole('button', { name: 'Close tab' });
@@ -180,15 +222,14 @@ test.describe('open a PDF and page through it', () => {
 
   test('a pages selection opens at its first page and says the range', async ({ page }) => {
     const { original, policy } = await openReport(page, server.origin(), {
-      kind: 'pages',
-      range: { start: 2, end: 3 },
+      selection: { kind: 'pages', range: { start: 2, end: 3 } },
     });
     await expectDrawn(original, 2);
     await expect(
       original.getByText('The reader shows pages 2–3: the PDF opened at page 2.'),
     ).toBeVisible();
     await expectNoAxeViolations(page, 'a PDF opened at a selection of pages');
-    await shot(page, 'm4a-pdf-06-selection');
+    await shotPages(page, original, 'm4a-pdf-06-selection');
     expect(await policy.refusals()).toEqual([]);
   });
 
@@ -204,7 +245,7 @@ test.describe('open a PDF and page through it', () => {
       ],
       6 * 1024 * 1024,
     );
-    const { original, policy, reads } = await openReport(page, server.origin(), undefined, large);
+    const { original, policy, reads } = await openReport(page, server.origin(), { bytes: large });
     await expectDrawn(original, 1);
     await expect(original.getByText(/This PDF is large \(.*\): it is read in parts/)).toBeVisible();
     await pages(original).getByRole('button', { name: 'Next page' }).click();
@@ -214,7 +255,7 @@ test.describe('open a PDF and page through it', () => {
     const read = reads.reduce((total, part) => total + part.length, 0);
     expect(read).toBeLessThan(large.length / 4);
     await expectNoAxeViolations(page, 'a large PDF read in parts');
-    await shot(page, 'm4a-pdf-07-large');
+    await shotPages(page, original, 'm4a-pdf-07-large');
     expect(await policy.refusals()).toEqual([]);
     expect(OBJECT_PATH).toContain('/objects/');
   });

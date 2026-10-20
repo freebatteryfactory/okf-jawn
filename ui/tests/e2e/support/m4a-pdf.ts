@@ -485,6 +485,8 @@ export function pageImage(region: Locator, pageNumber: number, of = 3, name = 'a
 export async function expectDrawn(region: Locator, pageNumber: number, of = 3) {
   const image = pageImage(region, pageNumber, of);
   await expect(image).toBeVisible();
-  await expect(region.getByRole('status')).toHaveText(`Page ${pageNumber} of ${of}`);
+  await expect(
+    region.getByRole('group', { name: 'Pages of the PDF' }).getByRole('status'),
+  ).toHaveText(`Page ${pageNumber} of ${of}`);
   await expect.poll(() => inked(image)).toBe(true);
 }

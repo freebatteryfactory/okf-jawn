@@ -11,6 +11,7 @@
  */
 import { QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, configure, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ConversionOutcome, SourceAppearance } from '../../src/api/generated/types.gen';
 import { createQueryClient } from '../../src/app/query-client';
@@ -222,6 +223,7 @@ describe('reading an original', () => {
       }),
     );
     renderAt(`/w/${WS}/i/${SOURCE}`);
+    await userEvent.click(await screen.findByRole('radio', { name: /^Original$/ }));
     const link = await screen.findByRole('link', { name: 'Download the original, quarterly.docx' });
     expect(link.getAttribute('href')).toBe(
       `/api/workspaces/${WS}/items/${SOURCE}/revisions/${sourceSummary.revision}/objects/${'d'.repeat(64)}`,
