@@ -77,8 +77,11 @@ async function shotPages(page: Page, original: Locator, name: string, keyboard =
   if (keyboard) {
     // Small keyboard scrolls keep the focused control in view while exposing the drawing below.
     // A full PageDown can put the focus ring above this pane's clipped viewport.
-    for (let presses = 0; presses < 6; presses += 1) {
-      const visible = await original.locator('canvas').evaluate(
+    // At the default page scale the drawing also clips horizontally: six 40px steps exposed
+    // only 14.6% of it. Twelve steps bound this traversal while leaving the controls in view.
+    const canvas = original.locator('canvas');
+    for (let presses = 0; presses < 12; presses += 1) {
+      const visible = await canvas.evaluate(
         (canvas) =>
           new Promise<boolean>((resolve) => {
             const observer = new IntersectionObserver(([entry]) => {
@@ -110,7 +113,7 @@ test.describe('open a PDF and page through it', () => {
     await expectDrawn(original, 1);
     await expect(original.getByText('Page one: the year in figures.')).toBeAttached();
     // One whole read through download_object, never get_object.
-    expect(reads).toEqual<ByteRead[]>([{ range: null, length: REPORT.length }]);
+    expect(reads).toEqual([{ range: null, length: REPORT.length }] satisfies ByteRead[]);
     // The worker: this build's own file, on the page's origin.
     expect(workers.started()).toEqual([`${server.origin()}${PDFJS_FILES}pdf.worker.min.js`]);
     // The standard font for Helvetica, from the page's origin.
