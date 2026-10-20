@@ -17,6 +17,7 @@ const RECORDS_STEPS: &[M<'static>] = &[
     M::up(RECORDS_V2).foreign_key_check(),
     M::up(RECORDS_V3).foreign_key_check(),
     M::up(RECORDS_V4).foreign_key_check(),
+    M::up(RECORDS_V5).foreign_key_check(),
 ];
 
 const INDEX_STEPS: &[M<'static>] = &[M::up(INDEX_V1)];
@@ -421,6 +422,109 @@ CREATE TABLE commit_warnings (
 /// step gets it, as 0, when its records copy is brought to this build's schema on import.
 const RECORDS_V4: &str = r"
 ALTER TABLE jobs ADD COLUMN sealed INTEGER NOT NULL DEFAULT 0 CHECK (sealed IN (0, 1));
+";
+
+/// Records schema, version 5, lifecycle design section 9.
+///
+/// (a) Terminally purged mutations retain retry identities and clocks, without request digests
+/// or responses. Existing completed/released rows of recorded workspace purges are converted;
+/// purge operations, live leases and other scopes remain unchanged.
+///
+/// (b) Pending puts may belong to a tenant mutation without a workspace; existing workspace
+/// puts keep their identity, object and creation time.
+///
+/// (c) Discarded uploads retain their upload, discard and original creation identities.
+///
+/// (d) Clean-up generation counters and one queued/running clean-up job per tenant persist.
+///
+/// (e) Sweep progress records each selected object and whether its removal finished.
+const RECORDS_V5: &str = r"
+CREATE TABLE mutations_v5 (
+    tenant_id TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    client_key TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    mutation_id TEXT NOT NULL UNIQUE,
+    digest TEXT CHECK ((digest IS NULL) = (state = 'purged')),
+    state TEXT NOT NULL CHECK (state IN ('leased', 'completed', 'released', 'purged')),
+    token INTEGER NOT NULL,
+    lease_expires_ms INTEGER NOT NULL,
+    response TEXT CHECK (state <> 'purged' OR response IS NULL),
+    finished_ms INTEGER,
+    workspace_id TEXT,
+    purge_id TEXT CHECK ((purge_id IS NOT NULL) = (state = 'purged')),
+    PRIMARY KEY (tenant_id, subject, client_key, operation, idempotency_key)
+) STRICT;
+INSERT INTO mutations_v5 (tenant_id, subject, client_key, operation, idempotency_key,
+    mutation_id, digest, state, token, lease_expires_ms, response, finished_ms, workspace_id,
+    purge_id)
+SELECT tenant_id, subject, client_key, operation, idempotency_key, mutation_id, digest, state,
+    token, lease_expires_ms, response, finished_ms, workspace_id, NULL FROM mutations;
+UPDATE mutations_v5 SET state = 'purged', digest = NULL, response = NULL,
+    purge_id = (SELECT purge_id FROM purges
+        WHERE purges.tenant_id = mutations_v5.tenant_id
+          AND purges.target_key = 'workspace/' || mutations_v5.workspace_id
+        ORDER BY purges.rowid LIMIT 1)
+WHERE state IN ('completed', 'released')
+  AND operation NOT IN ('purge_workspace', 'purge_item')
+  AND EXISTS (SELECT 1 FROM purges
+      WHERE purges.tenant_id = mutations_v5.tenant_id
+        AND purges.target_key = 'workspace/' || mutations_v5.workspace_id);
+DROP TABLE mutations;
+ALTER TABLE mutations_v5 RENAME TO mutations;
+CREATE INDEX mutations_by_workspace ON mutations (tenant_id, workspace_id);
+
+CREATE TABLE pending_puts_v5 (
+    put_id INTEGER PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT,
+    digest TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    mutation_id TEXT,
+    CHECK (workspace_id IS NOT NULL OR mutation_id IS NOT NULL)
+) STRICT;
+INSERT INTO pending_puts_v5 (put_id, tenant_id, workspace_id, digest, created_at, mutation_id)
+SELECT put_id, tenant_id, workspace_id, digest, created_at, NULL FROM pending_puts;
+DROP TABLE pending_puts;
+ALTER TABLE pending_puts_v5 RENAME TO pending_puts;
+CREATE INDEX pending_puts_by_object ON pending_puts (tenant_id, workspace_id, digest);
+CREATE INDEX pending_puts_by_mutation ON pending_puts (tenant_id, mutation_id)
+    WHERE mutation_id IS NOT NULL;
+
+CREATE TABLE discarded_uploads (
+    upload_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    mutation_id TEXT NOT NULL UNIQUE,
+    created_by TEXT NOT NULL UNIQUE,
+    discarded_at TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    expected_size INTEGER NOT NULL,
+    expected_sha256 TEXT,
+    supplied_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    received_bytes INTEGER NOT NULL,
+    object_digest TEXT,
+    object_size INTEGER
+) STRICT;
+
+CREATE TABLE clean_up_requests (
+    tenant_id TEXT PRIMARY KEY,
+    requested INTEGER NOT NULL CHECK (requested >= 0),
+    started INTEGER NOT NULL CHECK (started >= 0 AND started <= requested)
+) STRICT;
+CREATE UNIQUE INDEX jobs_one_clean_up ON jobs (tenant_id)
+    WHERE state IN ('queued', 'running') AND json_extract(spec, '$.kind') = 'clean_up';
+
+CREATE TABLE sweep_removals (
+    sweep TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    removed INTEGER NOT NULL DEFAULT 0 CHECK (removed IN (0, 1)),
+    PRIMARY KEY (sweep, digest)
+) STRICT;
 ";
 
 /// Index schema, version 1: one copy of each indexed revision's searchable projection.

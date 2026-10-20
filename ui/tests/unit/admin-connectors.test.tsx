@@ -332,24 +332,22 @@ describe('connectors of this workspace (C5)', { timeout: 30_000 }, () => {
     expect(view.api.violations).toEqual([]);
   });
 
-  it('in an archived workspace, keeps issuing and listing offered, and says why revoking cannot run', async () => {
+  it('in an archived workspace, keeps issuing, listing and revoking offered', async () => {
     const view = openConnectors({ ...adminWorkspace, archived_at: ARCHIVED_AT });
     const region = await section();
     await waitFor(() => expect(rows(region)).toHaveLength(2));
     const issueButton = within(region).getByRole('button', { name: 'Issue a connector' });
     expect(issueButton.getAttribute('aria-disabled')).not.toBe('true');
     const revoke = within(region).getByRole('button', { name: 'Revoke “Desktop app”…' });
-    expect(revoke.getAttribute('aria-disabled')).toBe('true');
-    const why = revoke.getAttribute('aria-describedby') ?? '';
-    expect(document.getElementById(why)?.textContent).toContain(
-      'nothing in it can be changed until it is unarchived',
-    );
+    expect(revoke.getAttribute('aria-disabled')).not.toBe('true');
     fireEvent.click(revoke);
-    expect(screen.queryByRole('alertdialog')).toBeNull();
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Revoke it' }));
+    await waitFor(() => expect(view.service.revocations).toHaveLength(1));
     // Issuing runs while archived.
     await issue(region, 'Research agent');
     expect(await within(region).findByRole('textbox', { name: 'Secret' })).toBeTruthy();
-    expect(view.service.revocations).toEqual([]);
+    expect(view.service.revocations).toHaveLength(1);
     expect(view.api.violations).toEqual([]);
   });
 

@@ -430,6 +430,7 @@ fn ledger_rows(data: &Path, workspace: WorkspaceId, state: &str) -> Fallible<Vec
     let mut statement = records.prepare(
         "SELECT operation FROM mutations
          WHERE workspace_id = ?1 AND state = ?2 AND (state = 'completed') = (response IS NOT NULL)
+             AND (state <> 'purged' OR (digest IS NULL AND purge_id IS NOT NULL))
          ORDER BY operation",
     )?;
     let rows = statement
@@ -622,15 +623,13 @@ async fn purge_ledger_a_retried_mutation_of_the_purged_workspace_is_refused_and_
         "the refusal names the purge: {}",
         refused.message
     );
-    // It ran again under the same mutation, so no store could take it for a new write.
+    // Section5.4: begin refuses the terminal row before the original handler runs again.
     let runs = purged.harness.runs_of("save_draft")?;
-    let (original, retry) = (
-        some(runs.first(), "the draft")?,
-        some(runs.get(1), "the retry")?,
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        some(runs.first(), "the original draft")?.attempt,
+        Attempt::First
     );
-    assert_eq!(runs.len(), 2);
-    assert_eq!(retry.mutation, original.mutation);
-    assert_eq!(retry.attempt, Attempt::Resumed);
     let scope = StorageScope {
         tenant_id: tenant()?,
         workspace_id: purged.target,
@@ -666,14 +665,20 @@ async fn purge_ledger_a_retried_create_of_the_purged_workspace_is_refused_and_cr
     let (request, _) = purged.create_target.clone();
     let refused = err_of(call(&purged.harness, "create_workspace", request).await)?;
     assert_eq!(refused.code, ErrorCode::Conflict, "{}", refused.message);
+    assert!(
+        refused.message.contains(&purged.purge.0.to_string()),
+        "{}",
+        refused.message
+    );
     let runs = purged.harness.runs_of("create_workspace")?;
-    let (original, retry) = (
-        some(runs.first(), "the create")?,
-        some(runs.get(2), "the retry")?,
+    assert_eq!(
+        runs.len(),
+        2,
+        "both original creates ran once; begin refused the retry"
     );
     assert_eq!(
-        retry.mutation, original.mutation,
-        "the retry re-runs under the purged workspace's own mutation"
+        some(runs.first(), "the target create")?.attempt,
+        Attempt::First
     );
     let listed = purged
         .harness
@@ -706,7 +711,7 @@ async fn purge_ledger_no_file_keeps_a_response_of_the_purged_workspace() -> Test
         ["purge_workspace"]
     );
     assert_eq!(
-        ledger_rows(directory.path(), purged.target, "released")?,
+        ledger_rows(directory.path(), purged.target, "purged")?,
         ["add_comment", "create_workspace", "save_draft"]
     );
     assert_eq!(
@@ -731,14 +736,13 @@ async fn purge_ledger_a_comment_citing_another_workspace_goes_with_the_one_it_wa
         "the refusal names the purge: {}",
         refused.message
     );
-    // The target's comment ran first, the survivor's second; the retry is the third run.
+    // Section5.4: the target and survivor comments ran once each; begin refuses the retry.
     let runs = purged.harness.runs_of("add_comment")?;
-    let (original, retry) = (
-        some(runs.first(), "the comment")?,
-        some(runs.get(2), "the retry")?,
+    assert_eq!(runs.len(), 2);
+    assert_eq!(
+        some(runs.first(), "the original comment")?.attempt,
+        Attempt::First
     );
-    assert_eq!(retry.mutation, original.mutation);
-    assert_eq!(retry.attempt, Attempt::Resumed);
     assert_eq!(
         marked_files(directory.path())?,
         Vec::<String>::new(),
@@ -797,9 +801,21 @@ async fn purge_ledger_an_emptied_row_expires_on_the_clock_of_the_completed_one()
         Ok(times)
     };
     assert_eq!(
-        finished("released")?,
+        finished("purged")?,
         vec![Some(six_days_ago); 3],
         "the create, the draft and the comment, emptied, keep the time they completed"
+    );
+    let refused = err_of(call(&purged.harness, "save_draft", purged.draft.0.clone()).await)?;
+    assert_eq!(refused.code, ErrorCode::Conflict);
+    assert!(
+        refused.message.contains(&purged.purge.0.to_string()),
+        "{}",
+        refused.message
+    );
+    assert_eq!(
+        finished("purged")?,
+        vec![Some(six_days_ago); 3],
+        "section5.2: a refused retry never moves the original retention clocks"
     );
     call(
         &purged.harness,
@@ -808,7 +824,7 @@ async fn purge_ledger_an_emptied_row_expires_on_the_clock_of_the_completed_one()
     )
     .await?;
     assert_eq!(
-        ledger_rows(directory.path(), purged.target, "released")?.len(),
+        ledger_rows(directory.path(), purged.target, "purged")?.len(),
         3,
         "six days after they completed, a begin leaves the emptied rows where they are"
     );
@@ -823,7 +839,7 @@ async fn purge_ledger_an_emptied_row_expires_on_the_clock_of_the_completed_one()
     )
     .await?;
     assert_eq!(
-        ledger_rows(directory.path(), purged.target, "released")?,
+        ledger_rows(directory.path(), purged.target, "purged")?,
         Vec::<String>::new(),
         "eight days after they completed, the next begin dropped the emptied rows"
     );

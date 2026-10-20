@@ -56,8 +56,9 @@ const { registry } = defineRegistry(catalog, {
       const bindings = useBindings();
       const source = bindings.sources.get(props.binding);
       const why = bindings.sourceErrors?.get(props.binding);
+      // Under the Stack's h2 and the View's: the source's own `#` is drawn as an h3.
       return source ? (
-        <SourceExcerpt result={source} />
+        <SourceExcerpt result={source} headingLevel={3} />
       ) : (
         <p role="alert">
           Source binding unavailable: {props.binding}

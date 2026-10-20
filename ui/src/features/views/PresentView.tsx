@@ -9,6 +9,7 @@ import {
   type zReadItemResponse,
   type zViewBinding,
 } from '../../api/generated/zod.gen';
+import { SafeMarkdown } from '../documents/SafeMarkdown';
 import type { ResolvedPresentation } from './Bindings';
 import { BindingsContext, linked, type SourceLink } from './Bindings';
 import { Chart, parseVegaLiteSpec } from './Chart';
@@ -301,11 +302,12 @@ export function PresentView({ response, data, sourceLink }: PresentViewProps) {
   const bindings = { ...current.bindings, sourceLink };
   const view = response.view;
   // Either grammar: the View's own title and description, its drawing, then what it was read from.
+  // The description is Markdown, drawn safely; a heading in it sits below the View's h2.
   return (
     <BindingsContext.Provider value={bindings}>
       <section>
         <h2>{view.title}</h2>
-        <p>{view.description}</p>
+        <SafeMarkdown markdown={view.description} headingLevel={3} />
         {view.grammar === 'json_render' ? (
           <Layout spec={view.spec} />
         ) : (

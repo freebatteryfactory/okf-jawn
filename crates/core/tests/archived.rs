@@ -65,9 +65,9 @@ const PROPOSAL: &str = "99999999-9999-4999-8999-999999999999";
 const CONFIRMATION: &str = "88888888-8888-4888-8888-888888888888";
 const DIGEST: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
-/// The mutations an archived workspace allows that name it in their targets or body, each sent
-/// to the archived workspace.
-const ALLOWED_MUTATIONS: [&str; 10] = [
+/// The mutations an archived workspace allows, exercised with the archived workspace or a
+/// connector that can read it. Revocation is authorized at the tenant, not the workspace.
+const ALLOWED_MUTATIONS: [&str; 11] = [
     "archive_workspace",
     "unarchive_workspace",
     "purge_workspace",
@@ -78,6 +78,7 @@ const ALLOWED_MUTATIONS: [&str; 10] = [
     "rebuild_index",
     "export_view",
     "create_connector",
+    "revoke_connector",
 ];
 
 /// Mutations of a workspace an archived workspace refuses whose table permission is not
@@ -91,7 +92,7 @@ const REFUSED_NOT_WRITE: [&str; 6] = [
     "create_review",
 ];
 
-/// The refused mutations authorized at the tenant: their table target names no workspace.
+/// Mutations authorized at the tenant: their table target names no workspace.
 const AT_THE_TENANT: [&str; 3] = [
     "create_workspace",
     "backup_installation",
@@ -440,6 +441,46 @@ async fn a_connector_listing_an_archived_workspace_is_issued() -> TestResult {
     let _ran = call(&app, &ports, &owner, "create_connector", request).await;
     assert_eq!(app.handlers.call_count("create_connector")?, 1);
     assert!(app.asked()?.is_empty(), "no archive question asked");
+    Ok(())
+}
+
+/// The owner's administration ruling: a connector can still read an archived workspace, so
+/// the authorized local owner can revoke it without unarchiving. The handler is scripted here;
+/// application/connectors and storage's credential tests exercise the actual revocation store.
+#[tokio::test]
+async fn the_local_owner_can_revoke_a_connector_to_an_archived_workspace() -> TestResult {
+    let (app, ports) = world()?;
+    let owner = principal("alice", AccessRoute::LocalOwner)?;
+    let revoked = json!({
+        "connector_id": CONNECTOR, "label": "Archived workspace reader",
+        "workspace_ids": [ARCHIVED], "permissions": ["read"],
+        "created_at": "2026-10-09T08:00:00.000Z",
+        "revoked_at": "2026-10-11T08:00:00.000Z"
+    });
+    app.handlers
+        .set_response("revoke_connector", revoked.clone())?;
+    let answer = call(
+        &app,
+        &ports,
+        &owner,
+        "revoke_connector",
+        body("revoke_connector", ARCHIVED)?,
+    )
+    .await?;
+    assert_eq!(answer, revoked);
+    assert_eq!(app.handlers.call_count("revoke_connector")?, 1);
+    assert!(
+        app.asked()?.is_empty(),
+        "revocation asks no archive question"
+    );
+    let contexts = app.handlers.contexts("revoke_connector")?;
+    let context = some(contexts.first(), "the authorized revocation")?;
+    assert_eq!(context.operation, OperationName::RevokeConnector);
+    let grant = some(context.tenant.as_ref(), "the tenant grant")?;
+    assert_eq!(grant.tenant_id, tenant("tenant-local")?);
+    assert!(grant.permissions.contains(&Permission::Admin));
+    let mutation = some(context.mutation, "the revocation mutation")?;
+    assert_eq!(ports.mutations.stored_body(mutation)?, Some(revoked));
     Ok(())
 }
 
