@@ -1,6 +1,6 @@
 /**
  * Proposals and reviews kept current from the workspace's event stream (`stream_events`), the
- * stream the jobs page follows (`jobs/feed.ts`, `followEvents`).
+ * stream the jobs page follows (`jobs/feed.ts`, `followWorkspaceEvents`).
  *
  * An event is a notification, not content: `proposal_updated` says a proposal changed (opened,
  * accepted, declined, put in conflict), `reviewed` that an item's review was recorded. The
@@ -13,8 +13,8 @@
  * A read asked again replaces nothing on screen when it fails: TanStack Query keeps the last
  * answer, and the screens show the failure beside it.
  *
- * The stream is held while the page is shown, closed when it is hidden, and opened again from the
- * last event seen when it is shown again. When it cannot be opened for a reason a repeat cannot
+ * This screen subscribes to the shared workspace stream while mounted. The transport closes
+ * when hidden and resumes from the last event seen when shown again. When it cannot be opened for a reason a repeat cannot
  * cure (`not_implemented`, no permission), nothing more is tried and the screens show what they
  * last read; a refresh of the workspace, or the person's own action, asks again.
  */
@@ -22,7 +22,7 @@ import { type QueryClient, useQueryClient } from '@tanstack/react-query';
 import { useEffect } from 'react';
 import { z } from 'zod';
 import { zEvent } from '../../api/generated/zod.gen';
-import { followEvents } from '../jobs/feed';
+import { followWorkspaceEvents } from '../jobs/feed';
 import { askAgain } from '../jobs/jobs';
 
 /** The parts of a generated query key these screens read. */
@@ -104,32 +104,16 @@ function concerned(client: QueryClient, workspaceId: string, data: unknown) {
 export function useReviewFeed(workspaceId: string) {
   const client = useQueryClient();
   useEffect(() => {
-    let stop: (() => string | undefined) | null = null;
-    let lastEventId: string | undefined;
-    const open = () => {
-      stop = followEvents(workspaceId, lastEventId, {
-        onState: (next) => {
-          if (next.state !== 'live') return;
-          proposalsChanged(client, workspaceId, null);
-          reviewsChanged(client, workspaceId, null);
-        },
-        onEvent: (data) => concerned(client, workspaceId, data),
-      });
-    };
-    const close = () => {
-      if (stop === null) return;
-      lastEventId = stop();
-      stop = null;
-    };
-    const visibility = () => {
-      if (document.visibilityState === 'hidden') close();
-      else if (stop === null) open();
-    };
-    visibility();
-    document.addEventListener('visibilitychange', visibility);
-    return () => {
-      document.removeEventListener('visibilitychange', visibility);
-      close();
-    };
+    const following = followWorkspaceEvents(client, workspaceId, {
+      onState: (next) => {
+        if (next.state !== 'live') return;
+        proposalsChanged(client, workspaceId, null);
+        reviewsChanged(client, workspaceId, null);
+      },
+      onEvent: (data) => concerned(client, workspaceId, data),
+    });
+    // Opening this screen is an explicit visit: retry a prior session refusal once.
+    following.wake();
+    return following.stop;
   }, [client, workspaceId]);
 }

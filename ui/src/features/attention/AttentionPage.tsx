@@ -72,7 +72,7 @@ export function AttentionPage({ workspaceId, head }: AttentionPageProps) {
 
   const nothingListed = attention.data === undefined;
   const previous =
-    !nothingListed && (attention.isFetching || attention.isError || attention.isStale);
+    !nothingListed && (attention.isRefetching || attention.isRefetchError || attention.isStale);
   const listFailure = useRetry({
     request: `${workspaceId} ${head}`,
     failed: attention.isError && nothingListed,

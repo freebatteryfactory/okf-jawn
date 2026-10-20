@@ -570,8 +570,10 @@ fn stage_and_commit(
         // passes (`Staged::refuse_collisions`), so the rule holds on what is committed.
         staged.refuse_collisions()?;
         maintain(&staged_root, &write.message)?;
-        // The check is told the files the edits made the store rewrite on its own.
-        let warnings = check.check(&staged_root, &staged.rewritten()?)?;
+        // The check is told the files the edits made the store rewrite on its own; what the
+        // edits report about themselves follows its findings (`Committed::warnings`).
+        let mut warnings = check.check(&staged_root, &staged.rewritten()?)?;
+        warnings.extend(staged.notes().iter().cloned());
         Ok((staged_tree(repository, &staged_root)?, warnings))
     };
     let (tree, warnings) = candidate().map_err(|error| without_staging(error, &staging.path))?;

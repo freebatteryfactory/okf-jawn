@@ -37,7 +37,7 @@ use okf_jawn_core::application::ApplicationService;
 use okf_jawn_core::jobs::{JobScope, JobSpec};
 use okf_jawn_core::portable::item_content_digest;
 use okf_jawn_core::ports::Application;
-use okf_jawn_core::storage::ObjectInfo;
+use okf_jawn_core::storage::{ObjectInfo, VersionStore};
 use okf_jawn_core::uploads::UploadRecord;
 use serde_json::json;
 use uuid::Uuid;
@@ -84,13 +84,22 @@ fn scan_world() -> Built<Scan> {
         &head,
         None,
         LogResponse {
-            commits: vec![Commit {
-                revision: head.clone(),
-                parents: Vec::new(),
-                message: "m".to_owned(),
-                author: "alice".to_owned(),
-                committed_at: instant()?,
-            }],
+            commits: vec![
+                Commit {
+                    revision: head.clone(),
+                    parents: vec![revision('0')?],
+                    message: "m".to_owned(),
+                    author: "alice".to_owned(),
+                    committed_at: instant()?,
+                },
+                Commit {
+                    revision: revision('0')?,
+                    parents: Vec::new(),
+                    message: "Base before accepted promotion a".to_owned(),
+                    author: "alice".to_owned(),
+                    committed_at: instant()?,
+                },
+            ],
             next_cursor: None,
         },
     )?;
@@ -244,12 +253,24 @@ fn accepted(
     number: u128,
     route: &str,
     candidate: char,
-    changes: serde_json::Value,
+    changes: &serde_json::Value,
+) -> Built<()> {
+    accepted_from(scan, number, route, '0', candidate, changes)
+}
+
+/// An immutable accepted row whose real promotion is the accepted successor of `base`.
+fn accepted_from(
+    scan: &Scan,
+    number: u128,
+    route: &str,
+    base: char,
+    candidate: char,
+    changes: &serde_json::Value,
 ) -> Built<()> {
     let held = serde_json::from_value(json!({
         "id": ProposalId(Uuid::from_u128(number)),
         "workspace_id": scope()?.workspace_id,
-        "base_revision": revision('a')?,
+        "base_revision": revision(base)?,
         "proposal_revision": revision(candidate)?,
         "content_digest": digest('d')?,
         "title": "t",
@@ -512,7 +533,7 @@ async fn attention_unreviewed_content_an_agents_accepted_proposal_wrote() -> Tes
         800,
         "mcp_delegation",
         'e',
-        json!([
+        &json!([
             { "kind": "edit", "item_id": edited.summary.id, "body": "text", "properties": {} },
             { "kind": "create", "path": "p/created.md", "type_name": "Note", "body": "text",
               "properties": {} },
@@ -526,7 +547,7 @@ async fn attention_unreviewed_content_an_agents_accepted_proposal_wrote() -> Tes
         801,
         "local_owner",
         'e',
-        json!([{ "kind": "edit", "item_id": by_person.summary.id, "body": "text",
+        &json!([{ "kind": "edit", "item_id": by_person.summary.id, "body": "text",
                  "properties": {} }]),
     )?;
     // A candidate the store no longer holds (revision `f` is unknown to it).
@@ -535,7 +556,7 @@ async fn attention_unreviewed_content_an_agents_accepted_proposal_wrote() -> Tes
         802,
         "mcp_delegation",
         'f',
-        json!([
+        &json!([
             { "kind": "edit", "item_id": by_person.summary.id, "body": "text",
               "properties": {} },
             { "kind": "create", "path": "p/by-person.md", "type_name": "Note", "body": "text",
@@ -556,6 +577,167 @@ async fn attention_unreviewed_content_an_agents_accepted_proposal_wrote() -> Tes
     Ok(())
 }
 
+/// SPEC sections 3 and 8, and R4: a later accepted agent proposal cannot claim a historical
+/// person's identical body. Its exact base still predates acceptance; its successor includes it.
+#[tokio::test]
+async fn attention_agent_proposal_never_claims_matching_historical_human_text() -> TestResult {
+    let scan = scan_world()?;
+    let versions = &scan.world.versions;
+    let mut original = described(86, "p/historical.md", json!({}))?;
+    "Human original X.".clone_into(&mut original.body);
+    put(&scan, &original)?;
+    for (at, body) in [
+        ('b', "Human replacement Y."),
+        ('c', "Human original X."),
+        ('e', "Human original X."),
+        ('f', "Human original X."),
+    ] {
+        let mut document = original.clone();
+        document.summary.revision = revision(at)?;
+        body.clone_into(&mut document.body);
+        versions.put_document(&revision(at)?, document)?;
+        scan.world.search.mark_indexed(&revision(at)?)?;
+    }
+    versions.set_head(revision('b')?)?;
+    versions.set_head(revision('c')?)?;
+    versions.page_log(1)?;
+    for (tip, chain) in [
+        ('b', vec!['b', 'a', '0']),
+        ('c', vec!['c', 'b', 'a', '0']),
+        ('f', vec!['f', 'b', 'a', '0']),
+    ] {
+        let mut commits = Vec::new();
+        for (index, at) in chain.iter().enumerate() {
+            commits.push(Commit {
+                revision: revision(*at)?,
+                parents: chain
+                    .get(index.saturating_add(1))
+                    .map(|parent| revision(*parent))
+                    .transpose()?
+                    .into_iter()
+                    .collect(),
+                message: "Literal historical fixture".to_owned(),
+                author: "alice".to_owned(),
+                committed_at: instant()?,
+            });
+        }
+        versions.put_log(
+            &revision(tip)?,
+            None,
+            LogResponse {
+                commits,
+                next_cursor: None,
+            },
+        )?;
+    }
+    scan.proposals.put(
+        &scope()?,
+        mutation(860),
+        serde_json::from_value(json!({
+            "id": ProposalId(Uuid::from_u128(860)), "workspace_id": scope()?.workspace_id,
+            "base_revision": revision('b')?, "proposal_revision": revision('e')?,
+            "content_digest": digest('d')?, "title": "Restore X", "description": "Agent proposal",
+            "changes": [{ "kind": "edit", "item_id": original.summary.id,
+                "body": "Human original X.", "properties": {} }],
+            "kind": "content", "status": "accepted", "created_by": "later-agent",
+            "created_via": "mcp_delegation", "created_at": "2026-10-09T12:00:00.000Z"
+        }))?,
+    )?;
+    for (at, expected) in [
+        ('a', Vec::new()),
+        ('b', Vec::new()),
+        ('f', Vec::new()),
+        ('c', vec![Some(item(86))]),
+    ] {
+        let response = attention_at(
+            &scan,
+            At::Revision {
+                revision: revision(at)?,
+            },
+            200,
+            None,
+        )
+        .await?;
+        assert_eq!(response.revision, revision(at)?);
+        assert_eq!(
+            named(&response.items, &AttentionKind::Unreviewed),
+            expected,
+            "revision {at}"
+        );
+    }
+    Ok(())
+}
+
+/// R4 applies accepted content after promotion, never at its exact base, even when the
+/// proposed edit repeats the person's bytes. The explicit negative is independent of digests.
+#[tokio::test]
+async fn attention_agent_proposal_excludes_matching_content_at_its_exact_base() -> TestResult {
+    let scan = scan_world()?;
+    let original = described(87, "p/base.md", json!({}))?;
+    put(&scan, &original)?;
+    for at in ['b', 'e'] {
+        let mut document = original.clone();
+        document.summary.revision = revision(at)?;
+        scan.world.versions.put_document(&revision(at)?, document)?;
+    }
+    scan.world.versions.set_head(revision('b')?)?;
+    scan.world.versions.put_log(
+        &revision('b')?,
+        None,
+        LogResponse {
+            commits: vec![
+                Commit {
+                    revision: revision('b')?,
+                    parents: vec![revision('a')?],
+                    message: "Accepted promotion".to_owned(),
+                    author: "alice".to_owned(),
+                    committed_at: instant()?,
+                },
+                Commit {
+                    revision: revision('a')?,
+                    parents: vec![revision('0')?],
+                    message: "Human base".to_owned(),
+                    author: "alice".to_owned(),
+                    committed_at: instant()?,
+                },
+                Commit {
+                    revision: revision('0')?,
+                    parents: Vec::new(),
+                    message: "Root".to_owned(),
+                    author: "alice".to_owned(),
+                    committed_at: instant()?,
+                },
+            ],
+            next_cursor: None,
+        },
+    )?;
+    accepted_from(
+        &scan,
+        870,
+        "mcp_delegation",
+        'a',
+        'e',
+        &json!([{ "kind": "edit", "item_id": item(87),
+        "body": "text", "properties": {} }]),
+    )?;
+    let response = attention_at(
+        &scan,
+        At::Revision {
+            revision: revision('a')?,
+        },
+        200,
+        None,
+    )
+    .await?;
+    assert_eq!(response.revision, revision('a')?);
+    assert_eq!(
+        named(&response.items, &AttentionKind::Unreviewed),
+        Vec::new(),
+        "proposal base precedes acceptance"
+    );
+    Ok(())
+}
+
 /// Every page of the accepted proposals is read: the agent's, the oldest, comes after a full
 /// page of a person's.
 #[tokio::test]
@@ -568,9 +750,9 @@ async fn attention_every_page_of_the_accepted_proposals_is_read() -> TestResult 
         .put_document(&revision('e')?, document.clone())?;
     let edit = json!([{ "kind": "edit", "item_id": document.summary.id, "body": "text",
                         "properties": {} }]);
-    accepted(&scan, 820, "mcp_delegation", 'e', edit.clone())?;
+    accepted(&scan, 820, "mcp_delegation", 'e', &edit)?;
     for number in 821..=1020 {
-        accepted(&scan, number, "local_owner", 'e', edit.clone())?;
+        accepted(&scan, number, "local_owner", 'e', &edit)?;
     }
     let row = only(&every_row(&scan).await?, &AttentionKind::Unreviewed)?;
     assert!(row.message.contains("agent-820"), "{}", row.message);
@@ -592,7 +774,7 @@ async fn attention_a_candidate_that_cannot_be_read_fails_the_request() -> TestRe
         810,
         "mcp_delegation",
         'e',
-        json!([{ "kind": "edit", "item_id": document.summary.id, "body": "text",
+        &json!([{ "kind": "edit", "item_id": document.summary.id, "body": "text",
                  "properties": {} }]),
     )?;
     // The scan shows the one item of the head, then the candidate.
@@ -659,12 +841,8 @@ fn partial(not_converted: Vec<PageRange>) -> ConversionOutcome {
     }
 }
 
-/// `Unprocessed` for a partial, failed or unsupported source, supplied text or not; its pages
-/// as the selection when they are one range. `ExtractionWarnings` for a completed source with
-/// warnings only.
-#[tokio::test]
-async fn attention_unprocessed_and_extraction_warnings_follow_the_converters_verdict() -> TestResult
-{
+/// The same ten literal conversion outcomes, scanned together for the verdict assertions.
+async fn conversion_verdict_rows() -> Built<Vec<AttentionItem>> {
     let scan = scan_world()?;
     let warned = vec![ExtractionWarning::UnlocatedItems { items: 2 }];
     let mut supplied_failed = extraction(
@@ -748,7 +926,16 @@ async fn attention_unprocessed_and_extraction_warnings_follow_the_converters_ver
         object = if object == 'a' { 'b' } else { 'a' };
         put(&scan, &card(number, location, extraction, object)?)?;
     }
-    let rows = every_row(&scan).await?;
+    every_row(&scan).await
+}
+
+/// `Unprocessed` for a partial, failed or unsupported source, supplied text or not; its pages
+/// as the selection when they are one range. `ExtractionWarnings` for a completed source with
+/// warnings only.
+#[tokio::test]
+async fn attention_unprocessed_and_extraction_warnings_follow_the_converters_verdict() -> TestResult
+{
+    let rows = conversion_verdict_rows().await?;
     assert_eq!(
         named(&rows, &AttentionKind::Unprocessed),
         [110, 111, 112, 113, 117, 118, 119]
@@ -1037,5 +1224,118 @@ async fn attention_rebuild_index_queues_a_rebuild_job_and_wakes_the_worker() -> 
             (JobScope::Workspace(scope()?), job.id)
         ]
     );
+    Ok(())
+}
+
+/// A stored pinned/live View citing one historical note twice; distinct binding names
+/// must still produce just one Attention row for the View's pagination key.
+fn newer_source_view(mode: &str) -> Built<ItemDocument> {
+    let mut view = described(202, "views/pinned.md", json!({ "title": "Pinned" }))?;
+    view.summary.kind = okf_jawn_contract::item::ItemKind::View;
+    let source = json!({ "item_id": item(201), "path": "notes/source.md",
+        "revision": revision('c')?, "selection": { "kind": "all" } });
+    let block = json!({ "schema_version": 1, "mode": mode, "grammar": "json_render",
+        "bindings": [
+            { "name": "left", "source": source, "units": {}, "transforms": [] },
+            { "name": "right", "source": source, "units": {}, "transforms": [] }
+        ],
+        "spec": { "root": "root", "elements": {
+            "root": { "type": "SourceList", "props": { "bindings": ["left", "right"] },
+                "children": [] }
+        } }, "charts": {} });
+    view.body = format!("Pinned explanation.\n\n```json okf-jawn-view\n{block}\n```\n");
+    Ok(view)
+}
+
+fn newer_source_scan(mode: &str, current_body: &str, archived: bool) -> Built<Scan> {
+    let scan = scan_world()?;
+    let mut cited = note(
+        201,
+        &revision('c')?,
+        "notes/source.md",
+        "Old source.",
+        json!({}),
+    )?;
+    DESCRIBED.clone_into(&mut cited.summary.description);
+    scan.world
+        .versions
+        .put_document(&revision('c')?, cited.clone())?;
+    cited.summary.revision = revision('a')?;
+    current_body.clone_into(&mut cited.body);
+    put(&scan, &cited)?;
+    let mut view = newer_source_view(mode)?;
+    view.summary.archived = archived;
+    put(&scan, &view)?;
+    Ok(scan)
+}
+
+/// SPEC section10/R4: newer data is an observation about a pinned View, never a refresh.
+/// The literal expected item is the View202, not its note201; duplicate bindings aggregate.
+#[tokio::test]
+async fn attention_newer_source_names_the_pinned_view_without_refreshing_or_materializing()
+-> TestResult {
+    let scan = newer_source_scan("pinned", "New source.", false)?;
+    let rows = every_row(&scan).await?;
+    assert_eq!(
+        named(&rows, &AttentionKind::NewerSource),
+        vec![Some(item(202))]
+    );
+    let warning = only(&rows, &AttentionKind::NewerSource)?;
+    assert_eq!(warning.action, OperationName::GetView);
+    assert_eq!(warning.selection, None);
+    assert_eq!(
+        some(warning.item.as_ref(), "the pinned View")?
+            .path
+            .as_str(),
+        "views/pinned.md"
+    );
+    assert!(warning.message.contains("left"));
+    assert!(warning.message.contains("right"));
+    let opened = scan
+        .service
+        .get_view(
+            &alice(OperationName::GetView, None)?,
+            okf_jawn_contract::views::GetViewRequest {
+                workspace_id: scope()?.workspace_id,
+                item_id: item(202),
+                at: At::Latest,
+            },
+        )
+        .await?;
+    let expected_cited_revision = revision('c')?;
+    assert!(
+        opened
+            .bindings
+            .iter()
+            .all(|binding| binding.source.revision == expected_cited_revision)
+    );
+    assert_eq!(
+        scan.world
+            .versions
+            .show(&scope()?, &revision('c')?, item(201))
+            .await?
+            .body,
+        "Old source."
+    );
+    assert_eq!(scan.world.records.derived()?.len(), 0);
+    assert_eq!(scan.world.records.receipts()?.len(), 0);
+    Ok(())
+}
+
+/// Literal exclusions from `AttentionKind::NewerSource` and R4: unchanged, live and archived
+/// Views are not pinned Views with newer visible inputs. Worlds share no mutable state.
+#[tokio::test]
+async fn attention_newer_source_leaves_unchanged_live_and_archived_views_out() -> TestResult {
+    for (mode, body, archived) in [
+        ("pinned", "Old source.", false),
+        ("live", "New source.", false),
+        ("pinned", "New source.", true),
+    ] {
+        let scan = newer_source_scan(mode, body, archived)?;
+        assert_eq!(
+            named(&every_row(&scan).await?, &AttentionKind::NewerSource),
+            Vec::new()
+        );
+    }
     Ok(())
 }

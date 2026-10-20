@@ -1,4 +1,4 @@
-//! Literal positive and near-miss corpus from the owner's InstructionLike v1 decision.
+//! Literal positive and near-miss corpus from the owner's `InstructionLike` v1 decision.
 //! These detector checks supplement, and never replace, real Attention/citation journeys.
 
 use okf_jawn_contract::attention::InstructionRule;

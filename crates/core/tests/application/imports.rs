@@ -178,8 +178,8 @@ fn assert_nothing_queued(tenancy: &Tenancy) -> TestResult {
     Ok(())
 }
 
-fn assert_refused(error: &ApiError, code: ErrorCode, field: &str) {
-    assert_eq!(error.code, code, "{}", error.message);
+fn assert_refused(error: &ApiError, code: &ErrorCode, field: &str) {
+    assert_eq!(&error.code, code, "{}", error.message);
     assert_eq!(error.field.as_deref(), Some(field), "{}", error.message);
 }
 
@@ -240,7 +240,7 @@ fn imports_deployment_conversion_defaults_are_checked_before_acceptance() -> Tes
     let refused = err_of(bad.check())?;
     assert_refused(
         &refused,
-        ErrorCode::InvalidInput,
+        &ErrorCode::InvalidInput,
         "/settings/page_image_dpi",
     );
     Ok(())
@@ -287,7 +287,7 @@ async fn imports_absent_settings_are_the_deployments_defaults_resolved_into_the_
     let refused = err_of(start(&imports, 12, out_of_bounds).await)?;
     assert_refused(
         &refused,
-        ErrorCode::InvalidInput,
+        &ErrorCode::InvalidInput,
         "/settings/page_image_dpi",
     );
     assert_eq!(imports.tenancy.jobs.created()?.len(), 2, "no third job");
@@ -307,7 +307,7 @@ async fn imports_the_destination_is_a_workspace_path_that_need_not_exist() -> Te
         (25, "reports."),
     ] {
         let refused = err_of(start(&imports, number, import(vec![upload], written)?).await)?;
-        assert_refused(&refused, ErrorCode::InvalidInput, "/destination");
+        assert_refused(&refused, &ErrorCode::InvalidInput, "/destination");
     }
     assert_nothing_queued(&imports.tenancy)?;
     start(&imports, 26, import(vec![upload], "reports/2026")?).await?;
@@ -346,7 +346,7 @@ async fn imports_a_destination_spelled_otherwise_than_a_folder_of_the_base_is_re
         (34, "Zeta", "zeta"),
     ] {
         let refused = err_of(start(&imports, number, import(vec![upload], written)?).await)?;
-        assert_refused(&refused, ErrorCode::InvalidInput, "/destination");
+        assert_refused(&refused, &ErrorCode::InvalidInput, "/destination");
         assert!(
             refused.message.contains(held_spelling),
             "{written}: {}",
@@ -386,7 +386,7 @@ async fn imports_a_destination_or_ancestor_that_is_an_item_is_refused_before_job
         (133, "notes/REPORT.md/new/deep", "notes/report.md"),
     ] {
         let refused = err_of(start(&imports, number, import(vec![upload], written)?).await)?;
-        assert_refused(&refused, ErrorCode::InvalidInput, "/destination");
+        assert_refused(&refused, &ErrorCode::InvalidInput, "/destination");
         assert!(
             refused.message.contains(occupied),
             "{written}: {}",
@@ -402,7 +402,7 @@ async fn imports_a_destination_or_ancestor_that_is_an_item_is_refused_before_job
 }
 
 /// M1.5b's destination ruling applies inside hidden folders too. Real storage's root `list`
-/// omits a leading-dot folder; `tree` still contains its items (VersionStore::tree's contract).
+/// omits a leading-dot folder; `tree` still contains its items (`VersionStore::tree`'s contract).
 /// Literal expected refusals come from R1's collision rule and the item-ancestor scope extension.
 #[tokio::test]
 async fn imports_a_hidden_destination_uses_the_complete_tree_before_job_creation() -> TestResult {
@@ -437,7 +437,7 @@ async fn imports_a_hidden_destination_uses_the_complete_tree_before_job_creation
         (151, ".HIDDEN/new", ".hidden"),
     ] {
         let refused = err_of(start(&imports, number, import(vec![upload], destination)?).await)?;
-        assert_refused(&refused, ErrorCode::InvalidInput, "/destination");
+        assert_refused(&refused, &ErrorCode::InvalidInput, "/destination");
         assert!(refused.message.contains(occupied), "{}", refused.message);
         assert_nothing_queued(&imports.tenancy)?;
     }
@@ -503,24 +503,24 @@ async fn imports_every_upload_must_be_held_complete_and_not_taken() -> TestResul
     let tenancy = &imports.tenancy;
     let fine = held(tenancy, 1, true, None)?;
     let incomplete = held(tenancy, 2, false, None)?;
-    let taker = JobId(Uuid::from_u128(77));
-    let taken = held(tenancy, 3, true, Some(taker))?;
+    let consuming_job = JobId(Uuid::from_u128(77));
+    let taken = held(tenancy, 3, true, Some(consuming_job))?;
     let refused = err_of(start(&imports, 60, import(vec![fine, upload_id(99)], "")?).await)?;
-    assert_refused(&refused, ErrorCode::NotFound, "/upload_ids/1");
+    assert_refused(&refused, &ErrorCode::NotFound, "/upload_ids/1");
     let refused = err_of(start(&imports, 61, import(vec![fine, incomplete], "")?).await)?;
-    assert_refused(&refused, ErrorCode::InvalidInput, "/upload_ids/1");
+    assert_refused(&refused, &ErrorCode::InvalidInput, "/upload_ids/1");
     let refused = err_of(start(&imports, 62, import(vec![fine, taken], "")?).await)?;
-    assert_refused(&refused, ErrorCode::Conflict, "/upload_ids/1");
+    assert_refused(&refused, &ErrorCode::Conflict, "/upload_ids/1");
     assert!(
-        refused.message.contains(&taker.0.to_string()),
+        refused.message.contains(&consuming_job.0.to_string()),
         "{}",
         refused.message
     );
     // The first upload that fails, in the request's order.
     let refused = err_of(start(&imports, 63, import(vec![taken, incomplete], "")?).await)?;
-    assert_refused(&refused, ErrorCode::Conflict, "/upload_ids/0");
+    assert_refused(&refused, &ErrorCode::Conflict, "/upload_ids/0");
     let refused = err_of(start(&imports, 64, import(vec![incomplete, taken], "")?).await)?;
-    assert_refused(&refused, ErrorCode::InvalidInput, "/upload_ids/0");
+    assert_refused(&refused, &ErrorCode::InvalidInput, "/upload_ids/0");
     assert_nothing_queued(tenancy)?;
     Ok(())
 }
@@ -531,9 +531,9 @@ async fn imports_the_list_of_uploads_is_checked_by_the_handler_too() -> TestResu
     let imports = imports()?;
     let upload = held(&imports.tenancy, 1, true, None)?;
     let refused = err_of(start(&imports, 70, import(Vec::new(), "")?).await)?;
-    assert_refused(&refused, ErrorCode::InvalidInput, "/upload_ids");
+    assert_refused(&refused, &ErrorCode::InvalidInput, "/upload_ids");
     let refused = err_of(start(&imports, 71, import(vec![upload, upload], "")?).await)?;
-    assert_refused(&refused, ErrorCode::InvalidInput, "/upload_ids/1");
+    assert_refused(&refused, &ErrorCode::InvalidInput, "/upload_ids/1");
     assert_nothing_queued(&imports.tenancy)?;
     Ok(())
 }
@@ -624,7 +624,7 @@ async fn imports_a_resumed_attempt_whose_own_job_took_the_uploads_is_answered_th
     assert_eq!(tenancy.jobs.created()?.len(), 1, "no second job");
     // Another request's first attempt is refused, whatever this one's job wrote.
     let refused = err_of(start(&imports, 101, import(vec![second], "")?).await)?;
-    assert_refused(&refused, ErrorCode::Conflict, "/upload_ids/0");
+    assert_refused(&refused, &ErrorCode::Conflict, "/upload_ids/0");
     // And so is another resumed request, whose own commit never landed.
     let refused = err_of(
         imports
@@ -635,7 +635,7 @@ async fn imports_a_resumed_attempt_whose_own_job_took_the_uploads_is_answered_th
             )
             .await,
     )?;
-    assert_refused(&refused, ErrorCode::Conflict, "/upload_ids/0");
+    assert_refused(&refused, &ErrorCode::Conflict, "/upload_ids/0");
     assert_eq!(
         tenancy.jobs.created()?.len(),
         1,
@@ -664,7 +664,7 @@ async fn imports_a_resumed_own_consumption_does_not_skip_later_upload_checks() -
             )
             .await,
     )?;
-    assert_refused(&refused, ErrorCode::InvalidInput, "/upload_ids/1");
+    assert_refused(&refused, &ErrorCode::InvalidInput, "/upload_ids/1");
     assert_eq!(tenancy.jobs.created()?.len(), 1);
     assert_eq!(
         tenancy.queue.woken()?.len(),
@@ -805,12 +805,12 @@ async fn imports_a_redigest_of_the_unconverted_pages_needs_some_and_the_records_
     let mut other = redigest(true)?;
     other.settings.table_structure = false;
     let refused = err_of(convert_again(&imports, 220, other).await)?;
-    assert_refused(&refused, ErrorCode::InvalidInput, "/settings");
+    assert_refused(&refused, &ErrorCode::InvalidInput, "/settings");
     // A completed conversion has no page that was not converted.
     let complete = imports_with(config())?;
     put_card(&complete, ConversionOutcome::Completed)?;
     let refused = err_of(convert_again(&complete, 221, redigest(true)?).await)?;
-    assert_refused(&refused, ErrorCode::InvalidInput, "/unconverted_only");
+    assert_refused(&refused, &ErrorCode::InvalidInput, "/unconverted_only");
     convert_again(&complete, 222, redigest(false)?).await?;
     // A failed card names no record.
     let failed = imports_with(config())?;
@@ -830,7 +830,7 @@ async fn imports_a_redigest_of_the_unconverted_pages_needs_some_and_the_records_
         source_card(CARD, &base, "files/report-pdf.md", "", extraction)?,
     )?;
     let refused = err_of(convert_again(&failed, 223, redigest(true)?).await)?;
-    assert_refused(&refused, ErrorCode::InvalidInput, "/unconverted_only");
+    assert_refused(&refused, &ErrorCode::InvalidInput, "/unconverted_only");
     assert_nothing_queued(&imports.tenancy)?;
     assert_nothing_queued(&failed.tenancy)?;
     Ok(())
@@ -848,7 +848,7 @@ async fn imports_a_redigest_needs_a_source_at_a_revision_of_the_workspace() -> T
     let mut of_a_note = redigest(false)?;
     of_a_note.item_id = ItemId(Uuid::from_u128(31));
     let refused = err_of(convert_again(&imports, 230, of_a_note).await)?;
-    assert_refused(&refused, ErrorCode::InvalidInput, "/item_id");
+    assert_refused(&refused, &ErrorCode::InvalidInput, "/item_id");
     let refused = err_of(convert_again(&imports, 231, redigest(false)?).await)?;
     assert_eq!(refused.code, ErrorCode::NotFound, "no card at the base");
     partial_card(&imports)?;
@@ -861,7 +861,7 @@ async fn imports_a_redigest_needs_a_source_at_a_revision_of_the_workspace() -> T
     let refused = err_of(convert_again(&imports, 233, out_of_bounds).await)?;
     assert_refused(
         &refused,
-        ErrorCode::InvalidInput,
+        &ErrorCode::InvalidInput,
         "/settings/page_image_dpi",
     );
     assert_nothing_queued(&imports.tenancy)?;
@@ -974,7 +974,7 @@ async fn imports_a_correction_names_the_items_digest_at_the_base() -> TestResult
     let mut other = correction("text", None)?;
     other.digest = digest('d')?;
     let refused = err_of(correct(&imports, 310, other).await)?;
-    assert_refused(&refused, ErrorCode::InvalidInput, "/digest");
+    assert_refused(&refused, &ErrorCode::InvalidInput, "/digest");
     let base = revision('a')?;
     imports
         .tenancy
@@ -984,11 +984,11 @@ async fn imports_a_correction_names_the_items_digest_at_the_base() -> TestResult
     let mut of_a_note = correction("text", None)?;
     of_a_note.item_id = ItemId(Uuid::from_u128(31));
     let refused = err_of(correct(&imports, 311, of_a_note).await)?;
-    assert_refused(&refused, ErrorCode::InvalidInput, "/digest");
+    assert_refused(&refused, &ErrorCode::InvalidInput, "/digest");
     let mut too_long = correction("", None)?;
     too_long.corrected_markdown = "x".repeat(MAX_ITEM_TEXT_BYTES.saturating_add(1));
     let refused = err_of(correct(&imports, 312, too_long).await)?;
-    assert_refused(&refused, ErrorCode::TooLarge, "/corrected_markdown");
+    assert_refused(&refused, &ErrorCode::TooLarge, "/corrected_markdown");
     assert_eq!(imports.tenancy.world.versions.commits()?.len(), 0);
     Ok(())
 }
@@ -999,7 +999,7 @@ async fn imports_a_correction_on_a_moved_head_is_a_conflict_on_the_base() -> Tes
     partial_card(&imports)?;
     imports.tenancy.world.versions.set_head(revision('b')?)?;
     let refused = err_of(correct(&imports, 320, correction("text", None)?).await)?;
-    assert_refused(&refused, ErrorCode::Conflict, "/base_revision");
+    assert_refused(&refused, &ErrorCode::Conflict, "/base_revision");
     assert!(
         matches!(
             refused.detail.as_deref(),
@@ -1017,7 +1017,7 @@ fn proposal(
     number: u128,
     status: &str,
     kind: &str,
-    changes: serde_json::Value,
+    changes: &serde_json::Value,
 ) -> Built<ProposalId> {
     let id = ProposalId(Uuid::from_u128(number));
     let held = serde_json::from_value(json!({
@@ -1057,28 +1057,28 @@ async fn imports_keeping_supplied_text_needs_an_accepted_supply_of_this_item_wit
         400,
         "accepted",
         "supply_extraction",
-        supplied(card_id(), text),
+        &supplied(card_id(), text),
     )?;
     let open = proposal(
         &imports,
         401,
         "open",
         "supply_extraction",
-        supplied(card_id(), text),
+        &supplied(card_id(), text),
     )?;
     let elsewhere = proposal(
         &imports,
         402,
         "accepted",
         "supply_extraction",
-        supplied(ItemId(Uuid::from_u128(31)), text),
+        &supplied(ItemId(Uuid::from_u128(31)), text),
     )?;
     let content = proposal(
         &imports,
         403,
         "accepted",
         "content",
-        json!([{ "kind": "edit", "item_id": card_id(), "body": text, "properties": {} }]),
+        &json!([{ "kind": "edit", "item_id": card_id(), "body": text, "properties": {} }]),
     )?;
     for (number, adopted, written) in [
         (410, open, text),
@@ -1087,11 +1087,11 @@ async fn imports_keeping_supplied_text_needs_an_accepted_supply_of_this_item_wit
         (413, kept, "# Another text\n"),
     ] {
         let refused = err_of(correct(&imports, number, correction(written, Some(adopted))?).await)?;
-        assert_refused(&refused, ErrorCode::Conflict, "/adopts");
+        assert_refused(&refused, &ErrorCode::Conflict, "/adopts");
     }
     let unknown = ProposalId(Uuid::from_u128(499));
     let refused = err_of(correct(&imports, 414, correction(text, Some(unknown))?).await)?;
-    assert_refused(&refused, ErrorCode::NotFound, "/adopts");
+    assert_refused(&refused, &ErrorCode::NotFound, "/adopts");
     assert_eq!(imports.tenancy.world.versions.commits()?.len(), 0);
     imports
         .tenancy

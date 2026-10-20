@@ -30,8 +30,11 @@
 //!   accepted supplied text (`TextOrigin::SuppliedByAgent`), or when its content digest
 //!   (`portable::item_content_digest`) is the one an accepted content proposal opened by an
 //!   agent's delegated route (`AccessRoute::McpDelegation`) gave it, read at that proposal's
-//!   candidate. Every accepted proposal of the workspace is listed for that, and each of its
-//!   creations and edits read at its candidate once; a candidate the store no longer holds (its
+//!   candidate, only if that proposal's accepted promotion is an ancestor of the inspected
+//!   revision. Its promotion is the sole-parent successor of its base on the accepted head's
+//!   first-parent line; a retained sibling candidate does not include that promotion. Every
+//!   accepted proposal of the workspace is listed for that, and each eligible creation or edit
+//!   read at its candidate once; a candidate the store no longer holds (its
 //!   `NotFound`, after a purge) gives nothing, and every other error fails the request. A
 //!   person's edit after an agent's leaves content no agent wrote alone, and is not counted.
 //!   Action `create_review`.
@@ -43,6 +46,10 @@
 //!   pages not converted when they are one range. Action `redigest_item`.
 //! - `ExtractionWarnings`: a completed source whose conversion recorded warnings. Action
 //!   `read_item`.
+//! - `NewerSource`: a pinned View whose cited inputs differ at this scan's resolved revision,
+//!   using the ordinary View citation/freshness reads. One row names its affected bindings;
+//!   the saved inputs stay pinned. This never reads a later head or materializes datasets.
+//!   Action `get_view`.
 //! - `InstructionLike`: the current local English rule set scans the shown body, including
 //!   digest, corrected and supplied text. One row holds at most 32 original passages with the
 //!   same citation locations as `read_item`, plus the count omitted. Action `read_item`.
@@ -50,7 +57,7 @@
 //!   (`UploadStore::list` in `waiting`, every page), with their count and total retained bytes.
 //!   Action `list_uploads`.
 //!
-//! Remaining producers, said rather than hidden: `NewerSource`, `Invalidated` and
+//! Remaining producers, said rather than hidden: `Invalidated` and
 //! `UnparseableHeader` remain separate producer-backed work; this handler does not emit them.
 //!
 //! Order and pages: the rows are ordered by kind in the order `AttentionKind` declares them,
@@ -65,9 +72,12 @@
 //! What it costs: every page scans the whole workspace again, so a page costs one `show` and one
 //! link query per item at the revision, a listing per folder, a `read_file` per link to a file
 //! that is not Markdown and has no item, a `list_reviews` per item an agent wrote, a read per
-//! creation or edit of every accepted agent proposal, and every page of the waiting uploads: it
-//! is O(items + accepted proposal changes + waiting uploads) per page, not O(items x
-//! revisions). Nothing is cached between pages.
+//! eligible creation or edit of accepted agent proposals, and every page of the waiting
+//! uploads. Relevant accepted proposals also require all pages of the accepted head's history
+//! and the inspected revision's history (one history when those tips match); no such proposals
+//! means no attribution history reads. It is O(items + proposals + eligible proposal changes +
+//! history commits + waiting uploads) per page, plus each pinned View's citation and source
+//! reads (at most 50 bindings per View). Nothing is cached between pages.
 //!
 //! An empty answer says only that these checks found nothing: SPEC section 11, "no clean scan
 //! becomes a safe-for-AI certificate". The answer is a listing of summaries, as `list_items` is,
@@ -78,7 +88,7 @@
 //! reviews or receipts. Dispatch lets it run while the workspace is archived (contract ruling
 //! 25), and its table permission is `admin`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use okf_core::{Actor, ActorKind, ConceptId, LinkKind};
 use okf_jawn_contract::access::AccessRoute;
@@ -93,12 +103,13 @@ use okf_jawn_contract::extraction::{
 };
 use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath};
 use okf_jawn_contract::import::{Job, UploadListState};
-use okf_jawn_contract::item::ItemDocument;
+use okf_jawn_contract::item::{ItemDocument, ItemKind};
 use okf_jawn_contract::metadata::OperationName;
-use okf_jawn_contract::proposal::{Change, ProposalKind, ProposalStatus};
+use okf_jawn_contract::proposal::{Change, Proposal, ProposalKind, ProposalStatus};
 use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::review::ReviewCoverage;
 use okf_jawn_contract::search::{Link, LinkDirection};
+use okf_jawn_contract::views::{MAX_VIEW_BINDINGS, ViewMode};
 use serde::{Deserialize, Serialize};
 
 use super::ApplicationService;
@@ -106,6 +117,7 @@ use super::navigation::indexed;
 use super::reviews::reviews_at;
 use super::shared::{invalid, next_page, resolve_page, workspace_scope};
 use super::sources::{citation, record_of};
+use super::views::{stored_fault, view_ports};
 use super::workspaces::start_job;
 use crate::conformance::names_markdown;
 use crate::context::OperationContext;
@@ -116,10 +128,15 @@ use crate::proposals::ProposalFilter;
 use crate::search::LinkQuery;
 use crate::storage::{LogQuery, Page, StorageScope};
 use crate::uploads::UploadQuery;
+use crate::views::layout::view_of;
+use crate::views::resolve::newer_sources;
 
 /// The accepted agent proposals' content: for each item, the content digests an agent's
 /// proposal gave it, each with the proposer.
 type AgentContent = BTreeMap<ItemId, Vec<(Digest, String)>>;
+
+/// All reachable commits at a tip, without an item filter.
+type Parents = BTreeMap<Revision, Vec<Revision>>;
 
 /// Where a row stands in the scan's order; a page's cursor carries the last row's, as JSON.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,6 +174,7 @@ const PAGE_CURSOR: &str = "/page/cursor";
 /// Returns `InvalidInput` on `/page/cursor` for a cursor this operation did not issue or that
 /// continues another revision than `at` names; the typed `NotFound` of an invalidated revision;
 /// the index's `Unavailable` for a revision outside the window an index is built for on demand;
+/// `Unsupported` for a stored View this build cannot read or whose bindings exceed the bound;
 /// or any port error.
 pub(super) async fn get_attention(
     service: &ApplicationService,
@@ -232,7 +250,7 @@ async fn scan(
     revision: &Revision,
 ) -> Result<Vec<Row>, ApiError> {
     let documents = documents_at(service, scope, revision).await?;
-    let agents = agent_content(service, scope).await?;
+    let agents = agent_content(service, scope, revision).await?;
     let detector = Detector::new()?;
     let mut day = None;
     let mut rows = Vec::new();
@@ -245,6 +263,7 @@ async fn scan(
         if let Some(message) = stale(service, scope, revision, document, &mut day).await? {
             rows.push(message);
         }
+        rows.extend(newer_source(service, scope, revision, document).await?);
         if let Some(writer) = writer_of(document, &agents)? {
             let shown = item_content_digest(document)?;
             let covered = reviews_at(service, scope, document.summary.id, &shown)
@@ -288,6 +307,44 @@ async fn scan(
     }
     rows.extend(uploads_waiting(service, scope).await?);
     Ok(rows)
+}
+
+/// One observation for a pinned View, so its (kind, path, item) cursor key stays unique.
+async fn newer_source(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    revision: &Revision,
+    document: &ItemDocument,
+) -> Result<Option<Row>, ApiError> {
+    if document.summary.kind != ItemKind::View {
+        return Ok(None);
+    }
+    let view = view_of(document, scope.workspace_id).map_err(stored_fault)?;
+    if view.mode != ViewMode::Pinned {
+        return Ok(None);
+    }
+    if view.bindings.len() > MAX_VIEW_BINDINGS {
+        return Err(stored_fault(invalid(
+            "the View has more than 50 bindings",
+            "/bindings",
+        )));
+    }
+    let names = newer_sources(view_ports(service), scope, &view, revision).await?;
+    if names.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(row(
+        AttentionKind::NewerSource,
+        document,
+        None,
+        format!(
+            "Pinned View has newer source content for bindings {} at revision {}; its cited \
+             inputs remain unchanged",
+            names.join(", "),
+            revision.as_str()
+        ),
+        OperationName::GetView,
+    )))
 }
 
 /// Current advisory evidence over the unchanged shown body, located by the ordinary read path.
@@ -523,13 +580,12 @@ async fn stale(
     let Some(after) = okf_core::DateTime::parse(written) else {
         return Ok(None);
     };
-    let today = match day {
-        Some(today) => *today,
-        None => {
-            let found = revision_day(service, scope, revision).await?;
-            *day = Some(found);
-            found
-        }
+    let today = if let Some(today) = day {
+        *today
+    } else {
+        let found = revision_day(service, scope, revision).await?;
+        *day = Some(found);
+        found
     };
     if !okf_core::trust::is_stale_on(Some(after), today) {
         return Ok(None);
@@ -617,19 +673,74 @@ fn writer_of(document: &ItemDocument, agents: &AgentContent) -> Result<Option<St
 }
 
 /// The content digest each accepted content proposal of an agent's delegated route gave each
-/// item it created or edited, read at the proposal's candidate.
+/// item it created or edited, read at the proposal's candidate, only after its accepted
+/// promotion in the inspected revision's ancestry.
 ///
 /// # Errors
 /// Returns any port error but the `NotFound` of a candidate the store no longer holds.
 async fn agent_content(
     service: &ApplicationService,
     scope: &StorageScope,
+    revision: &Revision,
 ) -> Result<AgentContent, ApiError> {
     let ports = service.ports();
     let mut written: AgentContent = BTreeMap::new();
+    let proposals = agent_proposals(service, scope).await?;
+    if proposals.is_empty() {
+        return Ok(written);
+    }
+    // Read the head after the accepted rows: their promotions must already have landed.
+    let head = ports.versions.head(scope).await?;
+    let accepted = history_at(service, scope, &head).await?;
+    let successors = accepted_successors(&accepted, &head)?;
+    let inspected = if &head == revision {
+        accepted
+    } else {
+        history_at(service, scope, revision).await?
+    };
+    for proposal in proposals {
+        if !successors
+            .get(&proposal.base_revision)
+            .is_some_and(|promoted| inspected.contains_key(promoted))
+        {
+            continue;
+        }
+        let candidate = &proposal.proposal_revision;
+        for change in &proposal.changes {
+            let item = match change {
+                Change::Create { path, .. } => {
+                    match gone(ports.versions.item_at_path(scope, candidate, path).await)? {
+                        Some(Some(found)) => found.id,
+                        Some(None) | None => continue,
+                    }
+                }
+                Change::Edit { item_id, .. } => *item_id,
+                Change::Move { .. } | Change::Archive { .. } | Change::SupplyExtraction { .. } => {
+                    continue;
+                }
+            };
+            let Some(document) = gone(ports.versions.show(scope, candidate, item).await)? else {
+                continue;
+            };
+            written
+                .entry(item)
+                .or_default()
+                .push((item_content_digest(&document)?, proposal.created_by.clone()));
+        }
+    }
+    Ok(written)
+}
+
+/// Every accepted agent content proposal with content to attribute, across all pages.
+async fn agent_proposals(
+    service: &ApplicationService,
+    scope: &StorageScope,
+) -> Result<Vec<Proposal>, ApiError> {
+    let mut proposals = Vec::new();
     let mut cursor = None;
     loop {
-        let page = ports
+        let page = service
+            .ports()
             .proposals
             .list(
                 scope,
@@ -642,39 +753,84 @@ async fn agent_content(
                 },
             )
             .await?;
-        for proposal in page.items.iter().filter(|proposal| {
+        proposals.extend(page.items.into_iter().filter(|proposal| {
             proposal.created_via == AccessRoute::McpDelegation
                 && proposal.kind == ProposalKind::Content
-        }) {
-            let candidate = &proposal.proposal_revision;
-            for change in &proposal.changes {
-                let item = match change {
-                    Change::Create { path, .. } => {
-                        match gone(ports.versions.item_at_path(scope, candidate, path).await)? {
-                            Some(Some(found)) => found.id,
-                            Some(None) | None => continue,
-                        }
-                    }
-                    Change::Edit { item_id, .. } => *item_id,
-                    Change::Move { .. }
-                    | Change::Archive { .. }
-                    | Change::SupplyExtraction { .. } => continue,
-                };
-                let Some(document) = gone(ports.versions.show(scope, candidate, item).await)?
-                else {
-                    continue;
-                };
-                written
-                    .entry(item)
-                    .or_default()
-                    .push((item_content_digest(&document)?, proposal.created_by.clone()));
-            }
-        }
+                && proposal
+                    .changes
+                    .iter()
+                    .any(|change| matches!(change, Change::Create { .. } | Change::Edit { .. }))
+        }));
         match page.next_cursor {
             Some(next) => cursor = Some(next),
-            None => return Ok(written),
+            None => return Ok(proposals),
         }
     }
+}
+
+/// Complete unfiltered ancestry, including retained candidates when they are the tip.
+async fn history_at(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    tip: &Revision,
+) -> Result<Parents, ApiError> {
+    let mut history = Parents::new();
+    let mut cursor = None;
+    loop {
+        let page = service
+            .ports()
+            .versions
+            .log(
+                scope,
+                LogQuery {
+                    tip: tip.clone(),
+                    item_id: None,
+                    page: Page {
+                        cursor: cursor.take(),
+                        limit: SCAN_PAGE,
+                    },
+                },
+            )
+            .await?;
+        history.extend(
+            page.commits
+                .into_iter()
+                .map(|commit| (commit.revision, commit.parents)),
+        );
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => return Ok(history),
+        }
+    }
+}
+
+/// A CAS promotion has exactly its base as parent. Follow only the accepted first-parent
+/// line: a candidate branching from that base is not the accepted successor.
+fn accepted_successors(
+    history: &Parents,
+    head: &Revision,
+) -> Result<BTreeMap<Revision, Revision>, ApiError> {
+    let mut successors = BTreeMap::new();
+    let mut visited = BTreeSet::new();
+    let mut at = head.clone();
+    while visited.insert(at.clone()) {
+        let parents = history.get(&at).ok_or_else(history_error)?;
+        let Some(parent) = parents.first() else {
+            return Ok(successors);
+        };
+        if parents.len() == 1 {
+            successors.insert(parent.clone(), at);
+        }
+        at = parent.clone();
+    }
+    Err(history_error())
+}
+
+fn history_error() -> ApiError {
+    ApiError::new(
+        ErrorCode::Internal,
+        "the store's history does not describe a complete acyclic accepted line",
+    )
 }
 
 /// A read of a proposal's candidate: `None` for the store's `NotFound` (the candidate is gone),

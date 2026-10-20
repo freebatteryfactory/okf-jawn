@@ -3,7 +3,7 @@ import { type QueryClient, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import type { Revision } from '../../api/generated/types.gen';
 import { zEvent } from '../../api/generated/zod.gen';
-import { type FeedState, followEvents } from '../jobs/feed';
+import { type FeedState, followWorkspaceEvents } from '../jobs/feed';
 import { attentionOptions } from './attention';
 
 /** The jobs askAgain cancellation rule, with lifecycle checks on both sides of its await. */
@@ -40,8 +40,6 @@ export function useAttentionLifecycle(workspaceId: string, head: Revision) {
   const [state, setState] = useState<FeedState>('opening');
   useEffect(() => {
     const queryKey = attentionOptions(workspaceId, head).queryKey;
-    let stop: (() => string | undefined) | null = null;
-    let lastEventId: string | undefined;
     let feed: FeedState = 'opening';
     let wasLive = false;
     let active = true;
@@ -68,56 +66,35 @@ export function useAttentionLifecycle(workspaceId: string, head: Revision) {
         ),
       );
     };
-    const open = () => {
-      generation += 1;
-      feed = 'opening';
-      setState(feed);
-      stop = followEvents(workspaceId, lastEventId, {
-        onState: (next) => {
-          feed = next.state;
-          setState(feed);
-          if (feed === 'live') {
-            wasLive = true;
-            check();
-          } else if (wasLive) previous();
-        },
-        onEvent: (data) => {
-          const event = zEvent.safeParse(data);
-          // Progress notifications do not justify scanning the entire workspace on each tick.
-          if (
-            !event.success ||
-            ['changed', 'imported', 'reviewed', 'proposal_updated'].includes(event.data.kind)
-          )
-            check();
-        },
-      });
-    };
-    const close = () => {
-      if (stop === null) return;
-      lastEventId = stop();
-      stop = null;
-    };
-    const visibility = () => {
-      if (document.visibilityState === 'hidden') {
-        close();
-        feed = 'hidden';
+    const following = followWorkspaceEvents(client, workspaceId, {
+      onState: (next) => {
+        feed = next.state;
         setState(feed);
-        previous();
-      } else if (stop === null) open();
-    };
+        if (feed === 'live') {
+          wasLive = true;
+          check();
+        } else if (wasLive || feed === 'hidden') previous();
+      },
+      onEvent: (data) => {
+        const event = zEvent.safeParse(data);
+        // Progress notifications do not justify scanning the entire workspace on each tick.
+        if (
+          !event.success ||
+          ['changed', 'imported', 'reviewed', 'proposal_updated'].includes(event.data.kind)
+        )
+          check();
+      },
+    });
     const focus = () => {
       // A returning hidden page is about to subscribe then ask; do not duplicate that read.
       if (document.visibilityState !== 'hidden' && feed !== 'hidden' && feed !== 'opening') check();
     };
-    visibility();
-    document.addEventListener('visibilitychange', visibility);
     window.addEventListener('focus', focus);
     return () => {
       active = false;
       generation += 1;
-      document.removeEventListener('visibilitychange', visibility);
       window.removeEventListener('focus', focus);
-      close();
+      following.stop();
     };
   }, [client, workspaceId, head]);
   return state;

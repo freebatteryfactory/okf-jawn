@@ -34,7 +34,8 @@ export function ItemAttention({ workspaceId, itemId, head }: ItemAttentionProps)
   const warnings = warningsOf(attention.data?.pages);
   const mine = warningsFor(warnings, itemId);
   const retained = attention.data !== undefined;
-  const previous = retained && (attention.isFetching || attention.isError || attention.isStale);
+  const previous =
+    retained && (attention.isRefetching || attention.isRefetchError || attention.isStale);
   const notice = useRef<HTMLDivElement | null>(null);
   const failure = useRetry({
     request: `${workspaceId} ${head} ${itemId}`,
