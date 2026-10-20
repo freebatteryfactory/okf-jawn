@@ -301,13 +301,7 @@ impl StoragePurger {
                 {
                     return Ok(*plan);
                 }
-                let named_revisions: i64 = transaction
-                    .query_row(
-                        "SELECT count(*) FROM revision_map WHERE tenant_id=?1 AND workspace_id=?2",
-                        params![tenant, workspace],
-                        |row| row.get(0),
-                    )
-                    .map_err(|error| sql(&error))?;
+                let named_revisions = revisions::named(transaction, &tenant, &workspace)?;
                 let plan = WorkspacePlan {
                     workspace_id,
                     report: report_at_plan(
@@ -316,8 +310,7 @@ impl StoragePurger {
                         &workspace,
                         &copy_plan,
                         0,
-                        usize::try_from(named_revisions)
-                            .map_err(|_| internal("a purge revision count is negative"))?,
+                        named_revisions,
                     )?,
                     archives: BTreeSet::new(),
                     uploads: Vec::new(),
@@ -625,6 +618,18 @@ impl StoragePurger {
                     )
                     .map_err(|error| sql(&error))?;
                 if step == OBJECTS {
+                    // Target writers have drained and the sweep completed. Clear its dead
+                    // publication roots atomically with the durable objects report, never
+                    // another workspace's or a tenant-level archive mutation's pending puts.
+                    transaction
+                        .execute(
+                            "DELETE FROM pending_puts WHERE tenant_id=(
+                                SELECT tenant_id FROM purge_progress WHERE purge_id=?1)
+                             AND workspace_id=(SELECT json_extract(plan, '$.workspace_id')
+                                FROM purge_progress WHERE purge_id=?1)",
+                            [purge.0.to_string()],
+                        )
+                        .map_err(|error| sql(&error))?;
                     transaction
                         .execute(
                             "DELETE FROM sweep_removals WHERE sweep=?1 AND tenant_id=(
@@ -920,6 +925,7 @@ where
 mod copies;
 pub(crate) mod guard;
 pub(crate) mod references;
+mod revisions;
 mod rows;
 #[cfg(test)]
 mod tests;
