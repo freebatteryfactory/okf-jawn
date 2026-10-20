@@ -793,6 +793,9 @@ async fn a_creator_without_a_membership_is_refused() -> TestResult {
 
 #[tokio::test]
 async fn editors_are_active_write_holders_and_every_organization_admin() -> TestResult {
+    // Defensive unexpected-provider response: inactive admins are not validated restore owners.
+    let mut inactive_admin = membership("om_inactive", "user_inactive", ORG, &["admin"]);
+    *some(inactive_admin.get_mut("status"), "membership status")? = json!("inactive");
     let script = Scripted::new(vec![
         Reply::Json(
             200,
@@ -811,6 +814,7 @@ async fn editors_are_active_write_holders_and_every_organization_admin() -> Test
                     membership("om_u2", "user_u2", ORG, &["admin"]),
                     membership("om_u3", "user_u3", ORG, &["member", "admin"]),
                     membership("om_u4", "user_u4", ORG, &["member"]),
+                    inactive_admin,
                 ],
                 None,
             ),

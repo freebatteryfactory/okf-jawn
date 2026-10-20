@@ -480,9 +480,10 @@ impl WorkosAccess {
                             .data
                             .into_iter()
                             .filter(|member| {
-                                std::iter::once(&member.role)
-                                    .chain(member.roles.iter())
-                                    .any(|role| role.slug == ORGANIZATION_ADMIN)
+                                member.status == UserOrganizationMembershipStatus::Active
+                                    && std::iter::once(&member.role)
+                                        .chain(member.roles.iter())
+                                        .any(|role| role.slug == ORGANIZATION_ADMIN)
                             })
                             .map(|member| member.user_id);
                         (users.collect(), page.list_metadata.after)
