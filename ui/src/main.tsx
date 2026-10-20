@@ -1,5 +1,6 @@
 /** Mount the human workspace; the user's chosen agent owns chat. */
 
+import './app/schema-runtime';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createQueryClient } from './app/query-client';
