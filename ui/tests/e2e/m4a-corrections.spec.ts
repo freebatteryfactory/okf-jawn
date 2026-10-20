@@ -114,6 +114,7 @@ test.describe('correct a source’s text through to the new revision', () => {
     ).toHaveAttribute('aria-readonly', 'true');
     await fixTheYear(page, box);
     await expectNoAxeViolations(page, 'a correction beside the text shown');
+    await section(page).getByRole('group', { name: 'Correct the text' }).scrollIntoViewIfNeeded();
     await shot(page, 'm4a-corrections-02-editing');
 
     await saveButton(page).click();
