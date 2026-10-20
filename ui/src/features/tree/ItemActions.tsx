@@ -17,6 +17,7 @@
  */
 import { useId, useLayoutEffect, useRef, useState } from 'react';
 import type { ItemSummary } from '../../api/generated/types.gen';
+import { PurgeItem } from '../admin/purges/PurgeItem';
 import type { DraftMark } from '../drafts/marks';
 import { ChangeFailure, DeleteQuestion, MoveForm, useChange, useSaid } from './ChangeForms';
 import {
@@ -138,6 +139,8 @@ export function ItemActions({ item, mark, busy }: ItemActionsProps) {
           {item.archived ? 'Unarchive' : 'Archive'}
         </button>
       </p>
+      {/* The item's purge, offered only to an administrator here (`admin/purges/PurgeItem.tsx`). */}
+      <PurgeItem item={item} busy={busy} />
       {/* Present from the start, so what a change did is announced. */}
       <p role="status" className="meta">
         {life.pending ? 'Changing…' : said}
