@@ -387,40 +387,22 @@ describe('the HTML sandbox viewer (A3)', () => {
     expect(api.violations).toEqual([]);
   });
 
-  it('says when the frame has left the file, and a reload frames the file again', async () => {
+  it('mints nothing when the frame loads again by itself: only the person’s reload does', async () => {
     const api = mockApi({ [CREATE_SANDBOX_CAPABILITY]: minting() });
-    // Each frame's loads, by its address: the environment loads a frame once by itself, as a
-    // browser does when the file has loaded.
-    const loads = new Map<string, number>();
-    const count = (event: Event) => {
-      if (!(event.target instanceof HTMLIFrameElement)) return;
-      const src = event.target.getAttribute('src') ?? '';
-      loads.set(src, (loads.get(src) ?? 0) + 1);
-    };
-    document.addEventListener('load', count, true);
-    try {
-      await renderViewer(<HtmlSandbox {...htmlProps()} />);
-      const frame = await frameShown();
-      await waitFor(() => expect(loads.get(capability(1).url)).toBe(1));
-      // The file loaded: nothing to say.
-      expect(screen.queryByText(/no longer shows the file/)).toBeNull();
-      // A link in the file was followed inside the frame: the frame loaded something else.
-      fireEvent.load(frame);
-      const said = await screen.findByText(/no longer shows the file/);
-      expect(said.closest('[role="status"]')).not.toBeNull();
-      expect(said.textContent).toContain('Reload the page to show it again');
-      // Nothing is minted until the person reloads.
-      expect(api.callsTo(CREATE_SANDBOX_CAPABILITY)).toHaveLength(1);
-      await userEvent.click(screen.getByRole('button', { name: 'Reload the page' }));
-      await waitFor(async () =>
-        expect((await frameShown()).getAttribute('src')).toBe(capability(2).url),
-      );
-      await waitFor(() => expect(loads.get(capability(2).url)).toBe(1));
-      expect(screen.queryByText(/no longer shows the file/)).toBeNull();
-      expect(screen.getByText(/good until/)).toBeTruthy();
-    } finally {
-      document.removeEventListener('load', count, true);
-    }
+    await renderViewer(<HtmlSandbox {...htmlProps()} />);
+    const frame = await frameShown();
+    // A file that reloads itself, or a link followed inside the frame, loads the frame again.
+    for (let times = 0; times < 5; times += 1) fireEvent.load(frame);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(api.callsTo(CREATE_SANDBOX_CAPABILITY)).toHaveLength(1);
+    expect((await frameShown()).getAttribute('src')).toBe(capability(1).url);
+    await userEvent.click(screen.getByRole('button', { name: 'Reload the page' }));
+    await waitFor(async () =>
+      expect((await frameShown()).getAttribute('src')).toBe(capability(2).url),
+    );
+    expect(api.callsTo(CREATE_SANDBOX_CAPABILITY)).toHaveLength(2);
     expect(api.violations).toEqual([]);
   });
 });
