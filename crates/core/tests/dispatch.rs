@@ -1972,6 +1972,7 @@ async fn retrying_or_cancelling_a_backup_or_restore_job_needs_a_human_admin() ->
         JobKind::BackupInstallation,
         JobKind::PurgeWorkspace,
         JobKind::PurgeItem,
+        JobKind::CleanUp,
     ] {
         let hidden = err_of(authorize_job_kind(access, &admin, a, kind).await)?;
         assert_eq!(hidden.code, ErrorCode::NotFound, "{kind:?}");

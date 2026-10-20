@@ -1,6 +1,6 @@
 //! Resumable import identities, conversion jobs, and durable progress.
 //!
-//! A job runs in a workspace or, for an installation backup and a purge, at the tenant: a
+//! A job runs in a workspace or, for an installation backup, purge or clean-up, at the tenant: a
 //! tenant job's wire `Job` has no `workspace_id` and is followed through `get_tenant_job`.
 
 use schemars::JsonSchema;
@@ -48,6 +48,9 @@ pub enum JobKind {
     PurgeWorkspace,
     /// Remove one item permanently (tenant-level).
     PurgeItem,
+    /// Reclaim the tenant's stored objects nothing references any more (tenant-level): queued
+    /// by a discarded upload, never more than one queued or running at a time.
+    CleanUp,
 }
 
 /// Durable work status; acknowledgement is not a claim of completion.
@@ -92,6 +95,9 @@ pub struct Job {
     /// What a completed workspace backup left out of its archive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<crate::workspace::BackupReport>,
+    /// What a completed clean-up removed and kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_up: Option<CleanUpReport>,
     /// When the job was accepted; absent on a job accepted before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<crate::identity::Timestamp>,
@@ -107,6 +113,19 @@ pub struct Job {
     /// existed has none; `retry_job` still decides for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
+}
+
+/// What a clean-up did; counts only.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CleanUpReport {
+    /// Stored objects removed, over every pass of the job, as a decimal string.
+    pub objects_removed: String,
+    /// Stored objects its last pass kept because something still references, pends or pins
+    /// them, as a decimal string.
+    pub objects_kept: String,
+    /// Received bytes of discarded upload slots removed (files a stopped discard left).
+    pub upload_files_removed: u32,
 }
 
 /// Register immutable upload intent before streaming bytes.
@@ -424,6 +443,7 @@ impl JobKind {
         Self::BackupInstallation,
         Self::PurgeWorkspace,
         Self::PurgeItem,
+        Self::CleanUp,
     ];
 
     /// Whether a job of this kind runs at the tenant level; its `Job` has no `workspace_id`,
@@ -432,7 +452,7 @@ impl JobKind {
     pub const fn is_tenant(self) -> bool {
         matches!(
             self,
-            Self::BackupInstallation | Self::PurgeWorkspace | Self::PurgeItem
+            Self::BackupInstallation | Self::PurgeWorkspace | Self::PurgeItem | Self::CleanUp
         )
     }
 
@@ -451,6 +471,7 @@ impl JobKind {
             Self::BackupInstallation => OperationName::BackupInstallation,
             Self::PurgeWorkspace => OperationName::PurgeWorkspace,
             Self::PurgeItem => OperationName::PurgeItem,
+            Self::CleanUp => OperationName::DiscardUpload,
         }
     }
 }

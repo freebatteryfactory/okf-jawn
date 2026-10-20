@@ -142,6 +142,15 @@ export const zChartResult = z.object({
 });
 
 /**
+ * What a clean-up did; counts only.
+ */
+export const zCleanUpReport = z.object({
+    objects_kept: z.string(),
+    objects_removed: z.string(),
+    upload_files_removed: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
+});
+
+/**
  * How proposed naming collisions are handled.
  */
 export const zCollisionPolicy = z.union([
@@ -513,7 +522,8 @@ export const zJobKind = z.union([
     z.literal('export_view'),
     z.literal('backup_installation'),
     z.literal('purge_workspace'),
-    z.literal('purge_item')
+    z.literal('purge_item'),
+    z.literal('clean_up')
 ]);
 
 /**
@@ -1929,6 +1939,7 @@ export const zJob = z.object({
     artifact: zDownloadArtifact.nullish(),
     attempt: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
     backup: zBackupReport.nullish(),
+    clean_up: zCleanUpReport.nullish(),
     created_at: zTimestamp.nullish(),
     error: zApiError.nullish(),
     finished_at: zTimestamp.nullish(),

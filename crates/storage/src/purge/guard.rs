@@ -28,8 +28,8 @@
 //! before they take the workspace's lock and again under it, and record themselves before they
 //! release it, so the purge's plan either refuses them or reads their record. An import puts
 //! its objects through `put_pinned`, so each is checked again in its pending-put transaction,
-//! and its Git writes are refused under the lock, but it copies its rows without the check;
-//! that is job work, which core drains before it calls the purger.
+//! and its Git writes are refused under the lock; copied rows check the guard and the
+//! captured job lease in their transaction, so a stale restore cannot overlap the purge.
 //!
 //! Events are not refused. An event carries identities only (its kind, revision, item, job,
 //! connector, actor and operation), and one appended after the rows step is tenant-level data

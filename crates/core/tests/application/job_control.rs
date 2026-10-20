@@ -108,6 +108,7 @@ fn job(number: u128, kind: JobKind, state: JobState, workspace: Option<Workspace
         artifact: None,
         restore: None,
         backup: None,
+        clean_up: None,
         created_at: Some(instant()?),
         started_at: None,
         finished_at: failed.then(instant).transpose()?,

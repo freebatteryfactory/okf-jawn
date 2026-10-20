@@ -97,6 +97,7 @@ export const ALLOWED_WHILE_ARCHIVED: ReadonlySet<OperationName> = new Set<Operat
   'get_session',
   'create_connector',
   'list_connectors',
+  'revoke_connector',
   'get_health',
   'get_readiness',
 ]);

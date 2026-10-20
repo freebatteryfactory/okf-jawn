@@ -134,10 +134,11 @@ const ALLOWED_MUTATIONS_WHILE_ARCHIVED: &[&str] = &[
     "rebuild_index",
     "export_view",
     "create_connector",
+    "revoke_connector",
 ];
 
 /// The mutations an archived workspace refuses, in table order. The tenant-level ones
-/// (`create_workspace`, `backup_installation`, `revoke_connector`) never
+/// (`create_workspace`, `backup_installation`) never
 /// name an archived workspace as their table target; they are listed so that every mutation
 /// has a decision.
 const REFUSED_MUTATIONS_WHILE_ARCHIVED: &[&str] = &[
@@ -172,7 +173,6 @@ const REFUSED_MUTATIONS_WHILE_ARCHIVED: &[&str] = &[
     "correct_digest",
     "set_rules",
     "apply_names",
-    "revoke_connector",
 ];
 
 fn scoped<T: RequestScope>(id: &'static str, permission: Permission, request: &T) -> Scoped {
