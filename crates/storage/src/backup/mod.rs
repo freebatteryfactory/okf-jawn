@@ -851,6 +851,7 @@ fn event_key(
 }
 
 pub(crate) mod archive;
+pub(crate) mod fence;
 mod restore;
 pub(crate) mod snapshot;
 

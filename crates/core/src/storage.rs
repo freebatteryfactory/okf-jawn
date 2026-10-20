@@ -1151,6 +1151,8 @@ pub trait Backups: Send + Sync {
         offset: u64,
         length: u64,
     ) -> PortFuture<'a, ObjectRead>;
+    /// A job-backed import captures its claim once and refuses publication after lease expiry
+    /// or takeover. Imports with no job under the mutation are intentionally not job-fenced.
     /// Import a workspace archive into `scope`. `editors` are the subjects with `write` on
     /// the target, computed by core from `AccessControl`: a draft whose editor is not among them
     /// stays in the archive and is counted as unassigned. Idempotent on the mutation id.

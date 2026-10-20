@@ -60,6 +60,7 @@ struct ChunkReader {
 #[derive(Clone, Copy)]
 enum PutOwner<'a> {
     Workspace(&'a StorageScope),
+    Restore(&'a StorageScope, &'a Option<crate::backup::fence::Fence>),
     Tenant(MutationId),
     #[cfg(test)]
     Untracked,
@@ -141,6 +142,29 @@ impl LocalBlobs {
         Ok((object, pinned))
     }
 
+    /// Restore publication checks the captured claim in the pending-put transaction.
+    pub(crate) async fn put_restore(
+        &self,
+        scope: &StorageScope,
+        body: ByteReader,
+        limit: u64,
+        expected: Option<Digest>,
+        fence: Option<crate::backup::fence::Fence>,
+    ) -> Result<(ObjectInfo, Pinned), ApiError> {
+        let (object, pinned) = self
+            .store_staged(
+                &scope.tenant_id,
+                body,
+                limit,
+                expected,
+                PutOwner::Restore(scope, &fence),
+            )
+            .await?;
+        Ok((
+            object,
+            pinned.ok_or_else(|| internal("a restore put took no pin"))?,
+        ))
+    }
     /// Private fixtures may model retained bytes with no surviving publisher record.
     #[cfg(test)]
     pub(crate) async fn put_for(
@@ -214,7 +238,11 @@ impl LocalBlobs {
         // Pinned before it is retained, and before the object is looked for: a purge's delete
         // either ran before (and this stores the object again) or sees the pin.
         let pinned = match owner {
-            PutOwner::Workspace(scope) => Some(self.pin_unless_purged(scope, &digest).await?),
+            PutOwner::Workspace(scope) => Some(self.pin_unless_purged(scope, &digest, None).await?),
+            PutOwner::Restore(scope, fence) => Some(
+                self.pin_unless_purged(scope, &digest, fence.clone())
+                    .await?,
+            ),
             PutOwner::Tenant(mutation) => Some(self.pin_tenant(tenant, mutation, &digest).await?),
             #[cfg(test)]
             PutOwner::Untracked => None,
@@ -257,6 +285,7 @@ impl LocalBlobs {
         &self,
         scope: &StorageScope,
         digest: &Digest,
+        fence: Option<crate::backup::fence::Fence>,
     ) -> Result<Pinned, ApiError> {
         let (tenant, workspace) = scope_key(scope);
         let pinned = self.pins.pin(&tenant, &workspace, digest)?;
@@ -265,6 +294,9 @@ impl LocalBlobs {
             let recorded = records
                 .transaction(move |transaction| {
                     guard::refuse(transaction, &tenant, &workspace)?;
+                    if let Some(fence) = &fence {
+                        fence.check(transaction)?;
+                    }
                     puts::record(transaction, &tenant, &workspace, &digest)
                 })
                 .await;
