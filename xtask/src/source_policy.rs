@@ -557,6 +557,26 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn unsafe_policy_refuses_aliases_and_bindings_for_the_handle_call() -> TestResult {
+        // AGENTS confines the exception to the named Windows function, not any renamed callee.
+        for binding in [
+            "use other::function as SetHandleInformation;",
+            "use other::flag as HANDLE_FLAG_INHERIT;",
+            "let SetHandleInformation = other;",
+            "let HANDLE_FLAG_INHERIT = other;",
+        ] {
+            let source = format!(
+                "#[cfg(windows)] fn keep_back_standard_handles() {{ {binding} unsafe {{ SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) }}; }}"
+            );
+            assert!(
+                refused_unsafe("crates/cli/src/relay/launch.rs", &source)?,
+                "{binding}"
+            );
+        }
+        Ok(())
+    }
+
     /// The zip rule's findings for `source` at `relative`.
     fn zip(relative: &str, source: &str) -> Result<Vec<String>, Box<dyn Error>> {
         Ok(zip_violations(relative, &syn::parse_file(source)?))

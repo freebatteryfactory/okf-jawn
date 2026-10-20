@@ -15,6 +15,22 @@ struct UnsafeUse {
 }
 
 impl<'ast> Visit<'ast> for UnsafeUse {
+    fn visit_use_rename(&mut self, rename: &'ast syn::UseRename) {
+        if handle_name(&rename.rename) {
+            self.findings
+                .insert("a rename to the C1 handle-call names is forbidden");
+        }
+        syn::visit::visit_use_rename(self, rename);
+    }
+
+    fn visit_pat_ident(&mut self, pattern: &'ast syn::PatIdent) {
+        if handle_name(&pattern.ident) {
+            self.findings
+                .insert("a binding that shadows the C1 handle-call names is forbidden");
+        }
+        syn::visit::visit_pat_ident(self, pattern);
+    }
+
     fn visit_item(&mut self, item: &'ast syn::Item) {
         // A nested declaration cannot borrow its containing function's exception.
         let outer = self.allowed_function;
@@ -85,6 +101,10 @@ impl<'ast> Visit<'ast> for UnsafeUse {
         }
         syn::visit::visit_macro(self, mac);
     }
+}
+
+fn handle_name(identifier: &syn::Ident) -> bool {
+    identifier == "SetHandleInformation" || identifier == "HANDLE_FLAG_INHERIT"
 }
 
 pub(super) fn violations(relative: &str, file: &syn::File) -> Vec<String> {
