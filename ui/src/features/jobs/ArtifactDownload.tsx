@@ -4,14 +4,31 @@
  * its own rule offers it to this person in this session (`download.ts`); otherwise the words that
  * say why, where the link would be.
  *
- * It is shown only for a job the service answered as succeeded (`JobRow`'s outcome): nothing here
- * infers that an export finished. The link is not a request of the page's: the browser follows it
- * and saves the file, and the service decides again whether to serve it.
+ * It is shown only for a job the service answered as succeeded (`JobRow`'s outcome, and the row of
+ * a job of the installation, `admin/installation/TenantJobRow.tsx`): nothing here infers that an
+ * export or a backup finished. The link is not a request of the page's: a plain
+ * `<a href={download_path} download>` is the one exception to the transport rule (ruling C6; an
+ * archive can be larger than memory, see `download.ts`). The browser follows it and saves the
+ * file, and the service decides again whether to serve it.
+ *
+ * Whose permissions decide. A workspace's artifact is offered by the person's permissions in that
+ * workspace, as `open_workspace` answered them (`ArtifactDownload`). An artifact of the
+ * installation (its backup) belongs to no workspace, and the contract names no tenant grant a
+ * client can read: it is listed by `list_tenant_jobs`, which the service answers only to an
+ * administrator of the installation, so a row it answered is shown with `admin` held there
+ * (`TenantArtifactDownload`). The session's route is the one `get_session` answered either way.
  */
-import type { AccessRoute, ArtifactKind, DownloadArtifact } from '../../api/generated/types.gen';
+import { useQuery } from '@tanstack/react-query';
+import type {
+  AccessRoute,
+  ArtifactKind,
+  DownloadArtifact,
+  Permission,
+} from '../../api/generated/types.gen';
 import { wordsFor } from '../../lib/words';
 import { Missing } from '../explorer/rights';
 import { describeSize } from '../imports/files';
+import { sessionOptions } from '../imports/limits';
 import { ROUTE_WORDS } from '../tree/Committed';
 import { type Download, downloadOf } from './download';
 import { useControlRights } from './job-control';
@@ -71,9 +88,42 @@ export interface ArtifactDownloadProps {
   artifact: DownloadArtifact;
 }
 
+/** An artifact of a workspace, offered by the person's permissions there. */
 export function ArtifactDownload({ workspaceId, artifact }: ArtifactDownloadProps) {
   const rights = useControlRights(workspaceId);
-  const offer = downloadOf(artifact, rights.permissions, rights.route);
+  return (
+    <ArtifactOffer artifact={artifact} permissions={rights.permissions} route={rights.route} />
+  );
+}
+
+/**
+ * What the person holds on the installation, as far as a page can know it: the service answered
+ * `list_tenant_jobs`, whose permission is `admin` (see the header).
+ */
+const LISTED_TENANT_JOBS: readonly Permission[] = ['admin'];
+
+/** An artifact of the installation, from a row `list_tenant_jobs` answered. */
+export function TenantArtifactDownload({ artifact }: { artifact: DownloadArtifact }) {
+  const session = useQuery({ ...sessionOptions(), enabled: false });
+  return (
+    <ArtifactOffer
+      artifact={artifact}
+      permissions={LISTED_TENANT_JOBS}
+      route={session.data?.principal.route ?? null}
+    />
+  );
+}
+
+interface ArtifactOfferProps {
+  artifact: DownloadArtifact;
+  /** What the person holds where the artifact lives. */
+  permissions: readonly Permission[];
+  /** Their session's route; null while it is not read. */
+  route: AccessRoute | null;
+}
+
+function ArtifactOffer({ artifact, permissions, route }: ArtifactOfferProps) {
+  const offer = downloadOf(artifact, permissions, route);
   const what =
     wordsFor(ARTIFACT, artifact.kind) ??
     `something of a kind this page does not know (“${artifact.kind}”)`;
