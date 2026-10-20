@@ -18,7 +18,8 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 use rusqlite::{Connection, OpenFlags};
 use rusqlite_migration::Migrations;
 
-use crate::data::{DataDir, io_error};
+use crate::data::{DataDir, RECORDS_FILE, io_error};
+use crate::schema;
 use crate::seam;
 
 /// An opened database at the latest schema version.
@@ -51,6 +52,9 @@ pub struct Migrated<'data> {
     pub backup: Option<PathBuf>,
 }
 
+/// A records-specific preparation of the verified copy before its source is migrated.
+type PrepareBackup = fn(&Path, usize) -> Result<(), ApiError>;
+
 impl Migrated<'_> {
     /// The connection, borrowed: it lives no longer than the locked directory.
     #[must_use]
@@ -80,6 +84,27 @@ pub fn migrate_database<'data>(
     file: &str,
     migrations: &Migrations<'_>,
 ) -> Result<Migrated<'data>, ApiError> {
+    migrate_with_backup(data, file, migrations, None)
+}
+
+/// Migrate records after sanitizing the one pre-schema5 copy (lifecycle ruling9).
+/// Generic/index migrations keep their original copy behavior.
+pub(crate) fn migrate_records(data: &DataDir) -> Result<Migrated<'_>, ApiError> {
+    migrate_with_backup(
+        data,
+        RECORDS_FILE,
+        &schema::RECORDS,
+        Some(sanitize_before_v5),
+    )
+}
+
+/// The shared migration transaction, with an optional preparation only of its new copy.
+fn migrate_with_backup<'data>(
+    data: &'data DataDir,
+    file: &str,
+    migrations: &Migrations<'_>,
+    prepare_backup: Option<PrepareBackup>,
+) -> Result<Migrated<'data>, ApiError> {
     let path = data.root().join(file);
     let path = path.as_path();
     let backups = data.pre_migration_path();
@@ -99,7 +124,11 @@ pub fn migrate_database<'data>(
         .pending_migrations(&connection)
         .map_err(|error| migration_error(path, &error))?;
     let backup = if pending > 0 && from > 0 {
-        Some(back_up(&connection, path, from, backups)?)
+        let copy = back_up(&connection, path, from, backups)?;
+        if let Some(prepare) = prepare_backup {
+            prepare(&copy, from)?;
+        }
+        Some(copy)
     } else {
         None
     };
@@ -195,21 +224,53 @@ fn back_up(
     connection
         .execute("VACUUM INTO ?1", [target_text])
         .map_err(|error| backup_error(&target, &error.to_string()))?;
-    let copy = Connection::open_with_flags(&target, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| backup_error(&target, &error.to_string()))?;
+    verify_copy(&target, from)?;
+    Ok(target)
+}
+
+/// Check the copy both before and after records-only sanitation; its released schema stays.
+fn verify_copy(target: &Path, from: usize) -> Result<(), ApiError> {
+    let copy = Connection::open_with_flags(target, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| backup_error(target, &error.to_string()))?;
     let integrity: String = copy
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-        .map_err(|error| backup_error(&target, &error.to_string()))?;
+        .map_err(|error| backup_error(target, &error.to_string()))?;
     let version: i64 = copy
         .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(|error| backup_error(&target, &error.to_string()))?;
+        .map_err(|error| backup_error(target, &error.to_string()))?;
     if integrity != "ok" || usize::try_from(version).ok() != Some(from) {
         return Err(backup_error(
-            &target,
+            target,
             &format!("the copy did not verify (integrity {integrity}, version {version})"),
         ));
     }
-    Ok(target)
+    Ok(())
+}
+
+/// Empty recorded purged-workspace request digests in this newly written pre-V5 copy only.
+/// No installation predates schema2 (ruling9); older released fixtures and later copies are
+/// unchanged. Secure deletion plus VACUUM removes old cell/free-page bytes as well as SQL values.
+fn sanitize_before_v5(target: &Path, from: usize) -> Result<(), ApiError> {
+    if !(2..=4).contains(&from) {
+        return Ok(());
+    }
+    let copy = Connection::open_with_flags(target, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|error| backup_error(target, &error.to_string()))?;
+    copy.execute_batch(
+        "PRAGMA secure_delete = ON;
+         BEGIN IMMEDIATE;
+         UPDATE mutations SET state = 'released', response = NULL, digest = ''
+         WHERE state IN ('completed', 'released')
+           AND operation NOT IN ('purge_workspace', 'purge_item')
+           AND EXISTS (SELECT 1 FROM purges
+               WHERE purges.tenant_id = mutations.tenant_id
+                 AND purges.target_key = 'workspace/' || mutations.workspace_id);
+         COMMIT;
+         VACUUM;",
+    )
+    .map_err(|error| backup_error(target, &error.to_string()))?;
+    drop(copy);
+    verify_copy(target, from)
 }
 
 /// Check the migrated database: nothing pending, intact, no dangling reference.

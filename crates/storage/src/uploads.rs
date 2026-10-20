@@ -13,6 +13,12 @@
 //! a resume (`get`, `put_content`, `complete`), always under the upload's claim, so a crash
 //! between the append and the record update never makes a resent chunk duplicate bytes. A `get`
 //! while a transfer holds the claim reads the record as it is and writes nothing.
+//!
+//! Discard replaces an unconsumed, unreserved slot with its scoped replay tombstone in one
+//! immediate transaction, then removes its two private files. The blocking worker owns the
+//! writer claim through both stages, including when the awaiting caller is dropped. Failure
+//! to unlink is an error after the durable tombstone; the same mutation retries that unlink.
+//! Completed object bytes remain for tenant cleanup, never deleted by discard itself.
 
 use std::collections::HashSet;
 use std::io::{Read as _, Write as _};
@@ -171,6 +177,32 @@ impl SqliteUploads {
         self.db
             .call(move |connection| {
                 read(connection, &tenant, &workspace, upload)?.ok_or_else(|| not_found("upload"))
+            })
+            .await
+    }
+
+    async fn discard_slot(
+        &self,
+        scope: &StorageScope,
+        upload: UploadId,
+        mutation: MutationId,
+    ) -> Result<UploadRecord, ApiError> {
+        guard::refuse_scope(&self.db, scope).await?;
+        let writing = self.writers.claim(upload)?;
+        let (tenant, workspace) = scope_key(scope);
+        let directory = self.directory.clone();
+        self.db
+            .call(move |connection| {
+                // This worker, not its awaiting async caller, keeps the claim until both the
+                // commit and unlink have finished. An aborted request cannot free it early.
+                let _writing = writing;
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(|error| sql(&error))?;
+                let prior = discard_record(&transaction, &tenant, &workspace, upload, mutation)?;
+                transaction.commit().map_err(|error| sql(&error))?;
+                remove_discarded_parts(&directory, upload)?;
+                Ok(prior)
             })
             .await
     }
@@ -354,6 +386,15 @@ impl SqliteUploads {
 }
 
 impl UploadStore for SqliteUploads {
+    fn discard<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        upload: UploadId,
+        mutation_id: MutationId,
+    ) -> PortFuture<'a, UploadRecord> {
+        Box::pin(self.discard_slot(scope, upload, mutation_id))
+    }
+
     fn create<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -363,6 +404,16 @@ impl UploadStore for SqliteUploads {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
             guard::refuse(transaction, &tenant, &workspace)?;
+            let discarded: bool = transaction
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM discarded_uploads WHERE created_by = ?1)",
+                    [mutation_id.0.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(|error| sql(&error))?;
+            if discarded {
+                return Err(conflict("the slot this request opened was discarded"));
+            }
             let id: UploadId = new_id!()?;
             transaction
                 .execute(
@@ -571,38 +622,122 @@ impl UploadStore for SqliteUploads {
     }
 }
 
+/// Replace a slot with its replay occurrence atomically with purge/job-reservation checks.
+fn discard_record(
+    connection: &Connection,
+    tenant: &str,
+    workspace: &str,
+    upload: UploadId,
+    mutation: MutationId,
+) -> Result<UploadRecord, ApiError> {
+    guard::refuse(connection, tenant, workspace)?;
+    let prior = read_record(
+        connection,
+        "SELECT upload_id, filename, relative_path, expected_size, expected_sha256,
+             supplied_by, created_at, received_bytes, object_digest, object_size, NULL
+         FROM discarded_uploads WHERE mutation_id = ?1 AND tenant_id = ?2 AND workspace_id = ?3",
+        params![mutation.0.to_string(), tenant, workspace],
+    )?;
+    if let Some(prior) = prior {
+        return if prior.id == upload {
+            Ok(prior)
+        } else {
+            Err(conflict("this mutation discarded another upload"))
+        };
+    }
+    let record = read(connection, tenant, workspace, upload)?.ok_or_else(|| not_found("upload"))?;
+    if let Some(job) = record.consumed_by {
+        return Err(conflict(format!(
+            "a job took this upload (job {}); it cannot be discarded",
+            job.0
+        )));
+    }
+    let reservation: Option<String> = connection
+        .query_row(
+            "SELECT job_id FROM jobs WHERE tenant_id = ?1 AND workspace_id = ?2
+             AND state IN ('queued', 'running')
+             AND (json_extract(spec, '$.upload_id') = ?3
+                  OR EXISTS (SELECT 1 FROM json_each(spec, '$.upload_ids') WHERE value = ?3))
+             ORDER BY rowid LIMIT 1",
+            params![tenant, workspace, upload.0.to_string()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| sql(&error))?;
+    if let Some(job) = reservation {
+        return Err(conflict(format!(
+            "a queued or running job reserves this upload (job {job}); it cannot be discarded"
+        )));
+    }
+    connection
+        .execute(
+            "INSERT INTO discarded_uploads (
+                 upload_id, tenant_id, workspace_id, mutation_id, created_by, discarded_at,
+                 filename, relative_path, expected_size, expected_sha256, supplied_by, created_at,
+                 received_bytes, object_digest, object_size)
+             SELECT upload_id, tenant_id, workspace_id, ?2, mutation_id, ?3,
+                 filename, relative_path, expected_size, expected_sha256, supplied_by, created_at,
+                 received_bytes, object_digest, object_size
+             FROM uploads WHERE upload_id = ?1 AND tenant_id = ?4 AND workspace_id = ?5",
+            params![
+                upload.0.to_string(),
+                mutation.0.to_string(),
+                seam::now()?.as_str(),
+                tenant,
+                workspace
+            ],
+        )
+        .map_err(|error| sql(&error))?;
+    connection
+        .execute(
+            "DELETE FROM uploads WHERE upload_id = ?1 AND tenant_id = ?2 AND workspace_id = ?3",
+            params![upload.0.to_string(), tenant, workspace],
+        )
+        .map_err(|error| sql(&error))?;
+    Ok(record)
+}
+
 fn read(
     connection: &Connection,
     tenant: &str,
     workspace: &str,
     upload: UploadId,
 ) -> Result<Option<UploadRecord>, ApiError> {
-    let found = connection
-        .query_row(
-            "SELECT upload_id, filename, relative_path, expected_size, expected_sha256,
+    read_record(
+        connection,
+        "SELECT upload_id, filename, relative_path, expected_size, expected_sha256,
                  supplied_by, created_at, received_bytes, object_digest, object_size, consumed_by
-             FROM uploads WHERE upload_id = ?1 AND tenant_id = ?2 AND workspace_id = ?3",
-            params![upload.0.to_string(), tenant, workspace],
-            |row| {
-                Ok((
-                    (
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, String>(5)?,
-                    ),
-                    (
-                        row.get::<_, String>(6)?,
-                        row.get::<_, i64>(7)?,
-                        row.get::<_, Option<String>>(8)?,
-                        row.get::<_, Option<i64>>(9)?,
-                        row.get::<_, Option<String>>(10)?,
-                    ),
-                ))
-            },
-        )
+         FROM uploads WHERE upload_id = ?1 AND tenant_id = ?2 AND workspace_id = ?3",
+        params![upload.0.to_string(), tenant, workspace],
+    )
+}
+
+/// Decode the same preserved occurrence from either the live row or its discard tombstone.
+fn read_record(
+    connection: &Connection,
+    query: &str,
+    parameters: impl rusqlite::Params,
+) -> Result<Option<UploadRecord>, ApiError> {
+    let found = connection
+        .query_row(query, parameters, |row| {
+            Ok((
+                (
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                ),
+                (
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                ),
+            ))
+        })
         .optional()
         .map_err(|error| sql(&error))?;
     let Some((
@@ -635,6 +770,19 @@ fn read(
             .map(|job| from_text!(job.as_str()))
             .transpose()?,
     }))
+}
+
+/// Missing files are already cleaned; every other unlink failure must remain retryable.
+fn remove_discarded_parts(directory: &std::path::Path, upload: UploadId) -> Result<(), ApiError> {
+    for extension in ["part", "incoming"] {
+        let path = directory.join(format!("{}.{extension}", upload.0));
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error("remove", &path, &error)),
+        }
+    }
+    Ok(())
 }
 
 /// Append the whole of `from` to `to`, creating `to` when absent, and sync it.

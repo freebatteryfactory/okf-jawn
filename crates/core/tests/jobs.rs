@@ -79,6 +79,7 @@ fn every_spec() -> Result<Vec<JobSpec>, Box<dyn std::error::Error>> {
             workspace_id: WorkspaceId(Uuid::from_u128(1)),
             item_id: ItemId(Uuid::from_u128(10)),
         },
+        JobSpec::CleanUp,
     ])
 }
 
@@ -87,11 +88,14 @@ fn a_tenant_kind_fits_only_the_tenant_scope() -> TestResult {
     let tenant_scope = JobScope::Tenant(tenant()?);
     let workspace = workspace_scope()?;
     let specs = every_spec()?;
-    assert_eq!(specs.len(), 10);
+    assert_eq!(specs.len(), 11);
     for spec in &specs {
         let tenant_kind = matches!(
             spec.kind(),
-            JobKind::BackupInstallation | JobKind::PurgeWorkspace | JobKind::PurgeItem
+            JobKind::BackupInstallation
+                | JobKind::PurgeWorkspace
+                | JobKind::PurgeItem
+                | JobKind::CleanUp
         );
         assert_eq!(spec.fits(&tenant_scope), tenant_kind, "{spec:?}");
         assert_eq!(spec.fits(&workspace), !tenant_kind, "{spec:?}");
@@ -309,6 +313,48 @@ fn an_artifact_download_path_follows_its_scope() -> TestResult {
     assert_eq!(tenant_scope.workspace(), None);
     assert_eq!(tenant_scope.tenant(), &tenant()?);
     Ok(())
+}
+
+/// Lifecycle ruling7/R2: cleanup's stored unit specification belongs only to the tenant.
+#[test]
+fn clean_up_spec_is_a_strict_tenant_unit_and_round_trips() -> TestResult {
+    let wire = serde_json::json!({ "kind": "clean_up" });
+    let spec = JobSpec::from_stored(wire.clone())?;
+    assert_eq!(spec.kind(), JobKind::CleanUp);
+    assert!(spec.fits(&JobScope::Tenant(tenant()?)));
+    assert!(!spec.fits(&workspace_scope()?));
+    assert_eq!(spec.to_stored()?, wire);
+    for extra in [
+        serde_json::json!({ "kind": "clean_up", "job_id": Uuid::from_u128(7) }),
+        serde_json::json!({ "kind": "clean_up", "workspace_id": Uuid::from_u128(1) }),
+    ] {
+        assert_eq!(
+            err_of(JobSpec::from_stored(extra))?.code,
+            ErrorCode::Internal
+        );
+    }
+    Ok(())
+}
+
+/// R2's domain-separated SHA-256 identity: literal vector from the ruled `clean_up` label,
+/// derived-identity prefix and UUID42 bytes, with no ordinal or job input.
+#[test]
+fn clean_up_mutation_is_stable_per_discard_and_separate_from_other_effects() {
+    use okf_jawn_core::storage::derive_clean_up_mutation_id;
+    let discard = MutationId(Uuid::from_u128(42));
+    let actual = derive_clean_up_mutation_id(discard);
+    assert_eq!(actual.0.to_string(), "5fc4dfc8-971a-8001-8493-310899fcd284");
+    assert_eq!(actual, derive_clean_up_mutation_id(discard));
+    assert_ne!(
+        actual,
+        derive_clean_up_mutation_id(MutationId(Uuid::from_u128(43)))
+    );
+    assert_ne!(actual, discard);
+    assert_ne!(actual, derive_commit_mutation_id(discard, 0));
+    assert_ne!(
+        actual,
+        derive_drain_mutation_id(discard, JobId(Uuid::from_u128(7)))
+    );
 }
 
 #[path = "../../../tests/support/check.rs"]

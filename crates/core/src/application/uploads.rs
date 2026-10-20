@@ -20,20 +20,22 @@
 //! `invalid_input` on `/page/cursor` for a cursor the store did not write). `list_uploads` hands
 //! the store the request's state and page as they are.
 //!
-//! The bytes themselves arrive through the `upload_content` transport, not an operation;
-//! `discard_upload` is not built here and answers `NotImplemented` (`application::pending`):
-//! the store has no discard yet (its storage side is the storage lifecycle work item's).
+//! The bytes themselves arrive through the `upload_content` transport, not an operation.
+//! A discard first removes its slot, then requests tenant cleanup under a mutation derived
+//! from the discard's mutation and wakes that durable job. A failed wake fails the request;
+//! its resumed attempt answers the same tombstone and wakes the same job.
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::import::{
-    CompleteUploadRequest, CreateUploadRequest, GetUploadRequest, ListUploadsRequest,
-    ListUploadsResponse, Upload,
+    CompleteUploadRequest, CreateUploadRequest, DiscardUploadRequest, GetUploadRequest,
+    ListUploadsRequest, ListUploadsResponse, Upload,
 };
 
 use super::ApplicationService;
 use super::shared::{invalid, mutation_id, workspace_scope};
 use crate::context::OperationContext;
-use crate::storage::{Page, Provenance};
+use crate::jobs::{JobScope, JobSpec, NewJob};
+use crate::storage::{Page, Provenance, derive_clean_up_mutation_id};
 use crate::uploads::{NewUpload, UploadQuery};
 
 /// The request field an upload's announced size is refused on.
@@ -90,6 +92,39 @@ pub(super) async fn complete_upload(
         .uploads
         .complete(&scope, request.upload_id, request.sha256)
         .await?;
+    Ok(record.to_wire(scope.workspace_id))
+}
+
+/// Discard one occurrence before requesting and waking its tenant's durable cleanup.
+///
+/// # Errors
+/// Returns the upload store's refusal or any job creation or queue error; an unsuccessful
+/// wake is never reported as a successful discard response.
+pub(super) async fn discard_upload(
+    service: &ApplicationService,
+    context: &OperationContext,
+    request: DiscardUploadRequest,
+) -> Result<Upload, ApiError> {
+    let scope = workspace_scope(context)?;
+    let mutation = mutation_id(context)?;
+    let ports = service.ports();
+    let record = ports
+        .uploads
+        .discard(&scope, request.upload_id, mutation)
+        .await?;
+    let jobs = JobScope::Tenant(scope.tenant_id);
+    let job = ports
+        .records
+        .create_job(
+            &jobs,
+            NewJob {
+                mutation_id: derive_clean_up_mutation_id(mutation),
+                initiator: Provenance::from_principal(&context.principal),
+                spec: JobSpec::CleanUp,
+            },
+        )
+        .await?;
+    ports.queue.enqueue(jobs, job.id).await?;
     Ok(record.to_wire(scope.workspace_id))
 }
 

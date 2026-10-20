@@ -494,7 +494,8 @@ const fn declared_after(kind: JobKind) -> Option<JobKind> {
         JobKind::ExportView => Some(JobKind::BackupInstallation),
         JobKind::BackupInstallation => Some(JobKind::PurgeWorkspace),
         JobKind::PurgeWorkspace => Some(JobKind::PurgeItem),
-        JobKind::PurgeItem => None,
+        JobKind::PurgeItem => Some(JobKind::CleanUp),
+        JobKind::CleanUp => None,
     }
 }
 

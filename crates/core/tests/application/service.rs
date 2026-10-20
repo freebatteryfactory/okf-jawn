@@ -1,15 +1,12 @@
-//! The service's construction checks and the answer of an operation whose part has not landed.
+//! The service's configuration checks.
 
 use std::time::Duration;
 
 use okf_jawn_contract::error::ErrorCode;
-use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_core::application::ApplicationConfig;
-use okf_jawn_core::ports::Application;
-use serde_json::json;
 
 use crate::check::{TestResult, err_of};
-use crate::fixture::{World, alice, config, scope};
+use crate::fixture::config;
 
 #[test]
 fn the_configuration_needs_a_bare_http_origin_and_a_lifetime() -> TestResult {
@@ -112,35 +109,6 @@ fn an_ipv6_sandbox_host_must_be_an_ipv6_address() -> TestResult {
         let refused = err_of(check(origin))?;
         assert_eq!(refused.code, ErrorCode::InvalidInput, "{origin}");
         assert_eq!(refused.field.as_deref(), Some("sandbox_origin"), "{origin}");
-    }
-    Ok(())
-}
-
-/// The rows contract batch 2 added and no part has built yet answer `NotImplemented`, naming
-/// themselves, through the production service: core's `route!` sends an operation it does not
-/// name to `pending`. Proposals, upload slots, folders, rules and the View catalog have their
-/// own implemented behavior tests; `discard_upload` retains the pending-route guard.
-#[tokio::test]
-async fn the_rows_of_contract_batch_2_answer_not_implemented() -> TestResult {
-    let world = World::new()?;
-    let workspace = scope()?.workspace_id;
-    let upload = json!("77777777-7777-4777-8777-777777777777");
-    let key = json!("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
-    let refused = [err_of(
-        world
-            .service
-            .discard_upload(
-                &alice(OperationName::DiscardUpload, None)?,
-                serde_json::from_value(json!({
-                    "workspace_id": workspace, "upload_id": upload, "idempotency_key": key
-                }))?,
-            )
-            .await,
-    )?];
-    let names = ["discard_upload"];
-    for (error, name) in refused.iter().zip(names) {
-        assert_eq!(error.code, ErrorCode::NotImplemented, "{name}");
-        assert!(error.message.contains(name), "{name}: {}", error.message);
     }
     Ok(())
 }

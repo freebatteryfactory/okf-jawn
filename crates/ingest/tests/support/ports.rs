@@ -228,6 +228,8 @@ pub struct FakeSearch {
 pub struct FakeBackups {
     /// The archive every write returns.
     pub archive: ObjectInfo,
+    /// Managed digests stated by the test, scoped to their tenant.
+    pub managed: Mutex<Vec<(TenantId, Digest, okf_jawn_core::storage::ManagedKind)>>,
     /// Writes asked for.
     pub writes: AtomicUsize,
     /// The editors each restore was given.
@@ -246,6 +248,8 @@ pub type Hold = Arc<dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = ()> + Send
 
 /// A `Purger` that returns one report and counts the calls.
 pub struct FakePurger {
+    /// Tenant/job identities of clean-up calls, distinct from purge calls.
+    pub clean_up_calls: Mutex<Vec<(TenantId, JobId)>>,
     /// The report every call returns.
     pub report: PurgeReport,
     /// Calls made.
@@ -1302,6 +1306,22 @@ impl SearchIndex for FakeSearch {
 }
 
 impl Backups for FakeBackups {
+    fn managed_kind<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        digest: &'a Digest,
+    ) -> PortFuture<'a, Option<okf_jawn_core::storage::ManagedKind>> {
+        Box::pin(async move {
+            Ok(self
+                .managed
+                .lock()
+                .map_err(|_| poisoned())?
+                .iter()
+                .find(|(owner, object, _)| owner == tenant && object == digest)
+                .map(|(_, _, kind)| *kind))
+        })
+    }
+
     fn write_workspace_archive<'a>(
         &'a self,
         _scope: &'a StorageScope,
@@ -1385,6 +1405,27 @@ impl FakePurger {
 }
 
 impl Purger for FakePurger {
+    fn clean_up<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        job: JobId,
+    ) -> PortFuture<'a, okf_jawn_contract::import::CleanUpReport> {
+        let hold = hold_of(&self.hold);
+        Box::pin(async move {
+            self.clean_up_calls
+                .lock()
+                .map_err(|_| poisoned())?
+                .push((tenant.clone(), job));
+            held(hold).await?;
+            self.failed()?;
+            Ok(okf_jawn_contract::import::CleanUpReport {
+                objects_removed: "18446744073709551616".to_owned(),
+                objects_kept: "7".to_owned(),
+                upload_files_removed: 2,
+            })
+        })
+    }
+
     fn purge_workspace<'a>(
         &'a self,
         _tenant: &'a TenantId,
@@ -1420,6 +1461,16 @@ impl Purger for FakePurger {
 }
 
 impl UploadStore for FakeUploads {
+    /// Remove a slot under its mutation; this handler fixture does not use discards.
+    fn discard<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _upload: UploadId,
+        _mutation_id: MutationId,
+    ) -> PortFuture<'a, UploadRecord> {
+        unused("discard")
+    }
+
     fn list<'a>(
         &'a self,
         _scope: &'a StorageScope,

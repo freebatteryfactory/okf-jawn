@@ -2983,10 +2983,7 @@ async fn a_replay_of_a_commit_without_kept_warnings_answers_the_one_unavailable_
         .await?;
     let records = storage.data().records_path();
     drop(storage);
-    rusqlite::Connection::open(&records)?.execute_batch(
-        "DROP TABLE commit_warnings; ALTER TABLE jobs DROP COLUMN sealed;
-             PRAGMA user_version = 2;",
-    )?;
+    legacy_schema::rebuild(&records, 2)?;
     let storage = Storage::open(directory.path())?;
     let versions = storage.versions();
     assert_eq!(
@@ -3346,6 +3343,9 @@ async fn two_attempts_of_one_mutation_at_once_answer_one_commit_and_its_warnings
     }
     Ok(())
 }
+
+#[path = "support/legacy_schema.rs"]
+mod legacy_schema;
 
 #[path = "../../../tests/support/check.rs"]
 mod check;

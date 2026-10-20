@@ -912,7 +912,7 @@
     "operator_alias": "",
     "path": "/api/imports/discard-upload",
     "permission": "write",
-    "starts_job": null,
+    "starts_job": "clean_up",
     "success_status": 200,
     "ui": "",
     "visibility": ""

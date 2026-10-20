@@ -50,6 +50,7 @@ export const STARTED_BY: Record<JobKind, StartedBy> = {
   },
   purge_workspace: { operation: 'purge_workspace', permission: 'admin', humanSessionOnly: true },
   purge_item: { operation: 'purge_item', permission: 'admin', humanSessionOnly: true },
+  clean_up: { operation: 'discard_upload', permission: 'write', humanSessionOnly: false },
 };
 
 /** The routes of a human session. */

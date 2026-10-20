@@ -28,8 +28,8 @@ mod job_handler {
         ConversionOutcome, ConversionSettings, FailureReason, TextOrigin,
     };
     use okf_jawn_contract::identity::{
-        Digest, ItemId, MutationId, PurgeId, Revision, TenantId, Timestamp, UploadId, WorkspaceId,
-        WorkspacePath,
+        Digest, ItemId, JobId, MutationId, PurgeId, Revision, TenantId, Timestamp, UploadId,
+        WorkspaceId, WorkspacePath,
     };
     use okf_jawn_contract::import::JobState;
     use okf_jawn_contract::purge::{Purge, PurgeReport, PurgeState};
@@ -43,7 +43,7 @@ mod job_handler {
         StorageScope, TreeEdit, VersionStore, derive_commit_mutation_id, derive_drain_mutation_id,
         derive_item_id,
     };
-    use okf_jawn_core::uploads::UploadRecord;
+    use okf_jawn_core::uploads::{UploadRecord, UploadStore};
     use okf_jawn_ingest::handler::{
         ARCHIVE_MEDIA_TYPE, CARD_NOT_WRITTEN, DRAIN_BOUND, HandlerLimits, HandlerPorts,
         IngestHandler, NAMING_RULES_ABSENT,
@@ -205,11 +205,13 @@ mod job_handler {
             },
             writes: AtomicUsize::new(0),
             restored: Mutex::new(Vec::new()),
+            managed: Mutex::new(Vec::new()),
             versions: Arc::clone(&versions),
             restore_hold: Mutex::new(None),
             write_hold: Mutex::new(None),
         });
         let purger = Arc::new(FakePurger {
+            clean_up_calls: Mutex::new(Vec::new()),
             report: report()?,
             calls: AtomicUsize::new(0),
             hold: Mutex::new(None),
@@ -935,6 +937,162 @@ mod job_handler {
             assert!(message.contains("does not run"), "{kind:?}: {message}");
             assert!(!retryable, "{kind:?}");
         }
+        assert!(world.versions.written()?.is_empty());
+        Ok(())
+    }
+
+    /// R3 builds tenant execution; the invalid workspace adapter input remains an Internal fault.
+    #[tokio::test]
+    async fn clean_up_dispatch_refuses_workspace_scope() -> TestResult {
+        let world = world()?;
+        let spec = JobSpec::from_stored(json!({ "kind": "clean_up" }))?;
+        let id = job(&world, 790, workspace_scope()?, spec)?;
+        let claimed = some(world.records.claim_job(id).await?, "the test claim")?;
+        let refusal = err_of(world.handler.handle(&claimed).await)?;
+        assert_eq!(refusal.code, ErrorCode::Internal);
+        assert!(world.records.entry(id)?.completions.is_empty());
+        assert!(world.versions.written()?.is_empty());
+        Ok(())
+    }
+
+    /// Lifecycle design3.2/R3: one tenant pass forwards its literal count-only report,
+    /// called with the actual tenant/job identities, with no workspace effect.
+    #[tokio::test]
+    async fn clean_up_forwards_the_tenant_job_and_literal_report() -> TestResult {
+        let world = world()?;
+        let tenant_b = TenantId::try_from("tenant-b".to_owned())?;
+        let id = job(
+            &world,
+            791,
+            JobScope::Tenant(tenant_b.clone()),
+            JobSpec::CleanUp,
+        )?;
+        assert!(run(&world, id).await?);
+        assert_completed_under(&world, id, 1)?;
+        let entry = world.records.entry(id)?;
+        let expected = okf_jawn_contract::import::CleanUpReport {
+            objects_removed: "18446744073709551616".to_owned(),
+            objects_kept: "7".to_owned(),
+            upload_files_removed: 2,
+        };
+        assert_eq!(
+            some(entry.completions.first(), "the completion")?.clean_up,
+            Some(expected.clone())
+        );
+        assert_eq!(entry.job.clean_up, Some(expected));
+        assert_eq!(
+            *world.purger.clean_up_calls.lock().map_err(|_| "poisoned")?,
+            [(tenant_b.clone(), id)]
+        );
+        assert!(world.versions.written()?.is_empty());
+        assert_eq!(
+            world.records.artifacts()?,
+            [] as [okf_jawn_core::jobs::ArtifactRecord; 0]
+        );
+        assert_eq!(
+            world.purger.calls.load(Ordering::SeqCst),
+            0,
+            "no purge invoked"
+        );
+        let updates = events_of(&world, &EventKind::JobUpdated)?;
+        assert_eq!(updates.len(), 1);
+        assert_eq!(
+            some(updates.first(), "the tenant update")?.0,
+            EventScope::Tenant(tenant_b)
+        );
+        Ok(())
+    }
+
+    /// A damaged survivor is the runtime's Internal failure, not a successful empty sweep
+    /// and not the purge handler's separate resumable-record path (design3.2).
+    #[tokio::test]
+    async fn clean_up_failure_is_recorded_by_the_runtime_without_completion() -> TestResult {
+        let world = world()?;
+        let id = job(&world, 792, JobScope::Tenant(tenant()?), JobSpec::CleanUp)?;
+        world.purger.fail_next(ApiError::new(
+            ErrorCode::Internal,
+            "survivor workspace 00000000-0000-0000-0000-0000000000aa is unreadable",
+        ))?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        assert_eq!(
+            some(entry.job.error.as_ref(), "the runtime's error")?.code,
+            ErrorCode::Internal
+        );
+        assert_eq!(
+            entry.failures,
+            [(
+                "survivor workspace 00000000-0000-0000-0000-0000000000aa is unreadable".to_owned(),
+                true
+            )]
+        );
+        assert!(entry.completions.is_empty());
+        assert_eq!(entry.job.clean_up, None);
+        assert_eq!(
+            *world.purger.clean_up_calls.lock().map_err(|_| "poisoned")?,
+            [(tenant()?, id)]
+        );
+        assert!(world.versions.written()?.is_empty());
+        Ok(())
+    }
+
+    /// Reuse the same six50ms lease windows as existing rebuild/backup/purge controls.
+    /// This proves only that this new storage arm uses renewing, not storage lease fencing.
+    #[tokio::test]
+    async fn clean_up_outlasting_lease_intervals_renews_the_first_claim() -> TestResult {
+        let world = heartbeat_world()?;
+        *world.purger.hold.lock().map_err(|_| "poisoned")? = Some(lapsing(&world.records));
+        let id = job(&world, 793, JobScope::Tenant(tenant()?), JobSpec::CleanUp)?;
+        assert!(run(&world, id).await?);
+        assert_completed_under(&world, id, 1)?;
+        assert!(
+            world.records.renewals() >= 6,
+            "{} renewals",
+            world.records.renewals()
+        );
+        assert_eq!(events_of(&world, &EventKind::JobUpdated)?.len(), 1);
+        assert_eq!(
+            *world.purger.clean_up_calls.lock().map_err(|_| "poisoned")?,
+            [(tenant()?, id)]
+        );
+        Ok(())
+    }
+
+    /// Tenant jobs have no public cancel route. This adversarial fake-ledger cancellation
+    /// verifies renewing's shared rule: finish the in-flight storage call, then no completion.
+    #[tokio::test]
+    async fn clean_up_observes_cancellation_after_the_storage_call_returns() -> TestResult {
+        let world = heartbeat_world()?;
+        let id = job(&world, 794, JobScope::Tenant(tenant()?), JobSpec::CleanUp)?;
+        let records = Arc::clone(&world.records);
+        let finished = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&finished);
+        *world.purger.hold.lock().map_err(|_| "poisoned")? = Some(Arc::new(move || {
+            let records = Arc::clone(&records);
+            let seen = Arc::clone(&seen);
+            Box::pin(async move {
+                let _cancelled = records.cancel(id);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let _previous = seen.fetch_add(1, Ordering::SeqCst);
+            })
+        }));
+        assert!(run(&world, id).await?);
+        assert_eq!(
+            finished.load(Ordering::SeqCst),
+            1,
+            "storage work returned, not dropped"
+        );
+        assert_eq!(world.records.entry(id)?.job.state, JobState::Cancelled);
+        assert!(world.records.entry(id)?.completions.is_empty());
+        assert_eq!(
+            world.records.entry(id)?.failures,
+            [] as [(std::string::String, bool); 0]
+        );
+        assert_eq!(
+            *world.purger.clean_up_calls.lock().map_err(|_| "poisoned")?,
+            [(tenant()?, id)]
+        );
         assert!(world.versions.written()?.is_empty());
         Ok(())
     }
@@ -1735,6 +1893,169 @@ mod job_handler {
         Ok(())
     }
 
+    /// Lifecycle design V7: the fake's literal tenant/digest classification is not derived
+    /// from the import. No native converter or archive parser is claimed by these tests.
+    async fn mark_managed(
+        world: &World,
+        upload: UploadId,
+        owner: TenantId,
+        kind: okf_jawn_core::storage::ManagedKind,
+    ) -> TestResult {
+        let record = world.uploads.get(&storage_scope()?, upload).await?;
+        let object = some(record.object, "a complete managed upload")?;
+        world
+            .backups
+            .managed
+            .lock()
+            .map_err(|_| "poisoned")?
+            .push((owner, object.digest, kind));
+        Ok(())
+    }
+
+    /// V7.1/V7.2: every managed kind is refused on its upload before conversion or a commit.
+    #[tokio::test]
+    async fn managed_backup_import_refuses_each_kind_without_consumption() -> TestResult {
+        use okf_jawn_core::storage::ManagedKind;
+        for (kind, label) in [
+            (ManagedKind::WorkspaceArchive, "workspace archive"),
+            (ManagedKind::InstallationArchive, "installation archive"),
+            (ManagedKind::WrittenHistory, "written history"),
+        ] {
+            let world = world_with(None, Vec::new())?;
+            let managed = upload(&world, 700, "renamed.pdf", b"known managed bytes")?;
+            mark_managed(&world, managed, tenant()?, kind).await?;
+            let id = job(
+                &world,
+                700,
+                workspace_scope()?,
+                import_spec(vec![managed], false)?,
+            )?;
+            assert!(run(&world, id).await?);
+            let entry = world.records.entry(id)?;
+            assert_eq!(entry.job.state, JobState::Failed, "{kind:?}");
+            let error = some(entry.job.error.as_ref(), "the managed import refusal")?;
+            assert_eq!(error.code, ErrorCode::InvalidInput);
+            assert_eq!(error.field.as_deref(), Some("/upload_ids/0"));
+            assert_eq!(
+                error.message,
+                format!(
+                    "upload 0 is a {label} this installation wrote; restore it instead of importing it"
+                )
+            );
+            assert_eq!(entry.failures.len(), 1);
+            assert!(!some(entry.failures.first(), "the recorded refusal")?.1);
+            assert_eq!(world.uploads.consumed()?, Vec::<(UploadId, JobId)>::new());
+            assert_eq!(
+                world.uploads.batches()?,
+                Vec::<(Vec<UploadId>, JobId)>::new()
+            );
+            assert!(world.versions.written()?.is_empty());
+            assert_eq!(world.converter.runs.load(Ordering::SeqCst), 0);
+        }
+        Ok(())
+    }
+
+    /// V7.3: a normal first upload remains available when the second is managed.
+    #[tokio::test]
+    async fn managed_backup_import_refuses_second_upload_without_taking_first() -> TestResult {
+        let world = world_with(None, Vec::new())?;
+        let first = upload(&world, 701, "ordinary.pdf", b"ordinary source")?;
+        let second = upload(&world, 702, "backup.zip", b"known backup bytes")?;
+        mark_managed(
+            &world,
+            second,
+            tenant()?,
+            okf_jawn_core::storage::ManagedKind::WorkspaceArchive,
+        )
+        .await?;
+        let id = job(
+            &world,
+            701,
+            workspace_scope()?,
+            import_spec(vec![first, second], false)?,
+        )?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        let error = some(entry.job.error.as_ref(), "the second-upload refusal")?;
+        assert_eq!(error.code, ErrorCode::InvalidInput);
+        assert_eq!(error.field.as_deref(), Some("/upload_ids/1"));
+        assert_eq!(
+            error.message,
+            "upload 1 is a workspace archive this installation wrote; restore it instead of importing it"
+        );
+        assert!(!some(entry.failures.first(), "the recorded refusal")?.1);
+        assert_eq!(world.uploads.consumed()?, Vec::<(UploadId, JobId)>::new());
+        assert_eq!(
+            world.uploads.batches()?,
+            Vec::<(Vec<UploadId>, JobId)>::new()
+        );
+        assert!(world.versions.written()?.is_empty());
+        assert_eq!(world.converter.runs.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    /// V7.5 tenant boundary: identical bytes managed by another tenant are an ordinary source.
+    #[tokio::test]
+    async fn managed_backup_import_does_not_classify_another_tenants_digest() -> TestResult {
+        let world = world_with(None, Vec::new())?;
+        let input = upload(&world, 703, "ordinary.pdf", b"foreign tenant backup bytes")?;
+        mark_managed(
+            &world,
+            input,
+            TenantId::try_from("another-tenant".to_owned())?,
+            okf_jawn_core::storage::ManagedKind::WorkspaceArchive,
+        )
+        .await?;
+        let id = job(
+            &world,
+            703,
+            workspace_scope()?,
+            import_spec(vec![input], false)?,
+        )?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        assert_eq!(world.uploads.consumed()?, [(input, id)]);
+        assert_eq!(world.converter.runs.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    /// V7.4: restore takes the very same managed upload through its separate consume path.
+    #[tokio::test]
+    async fn managed_backup_import_does_not_block_restoring_the_upload() -> TestResult {
+        let world = world()?;
+        let input = upload(&world, 704, "backup.zip", b"known workspace archive")?;
+        mark_managed(
+            &world,
+            input,
+            tenant()?,
+            okf_jawn_core::storage::ManagedKind::WorkspaceArchive,
+        )
+        .await?;
+        let record = world.uploads.get(&storage_scope()?, input).await?;
+        let archive = some(record.object, "the archive bytes")?.digest;
+        let id = job(
+            &world,
+            704,
+            workspace_scope()?,
+            JobSpec::RestoreWorkspace {
+                upload_id: input,
+                archive,
+                editors: vec!["ana".to_owned()],
+            },
+        )?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        assert_eq!(world.uploads.consumed()?, [(input, id)]);
+        assert_eq!(
+            *world.backups.restored.lock().map_err(|_| "poisoned")?,
+            [vec!["ana".to_owned()]]
+        );
+        assert_eq!(world.converter.runs.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
     #[tokio::test]
     async fn an_import_refused_for_one_upload_consumes_none_of_its_batch() -> TestResult {
         let world = world_with(Some(3), Vec::new())?;
