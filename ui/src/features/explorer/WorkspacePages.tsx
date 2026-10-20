@@ -3,8 +3,10 @@
  * (`/jobs`), its Attention warnings (`/attention`), its Timeline (`/timeline`: its versions,
  * their Changes and Rewind), its proposals (`/proposals`, and one proposal at `/proposals/<id>`),
  * its graph (`/graph`), a comparison of two versions (`/compare`, which the page tool
- * `open_comparison` opens and the bar does not list), and the settings of this browser (`/settings`), which are not the
- * workspace's but are reached from its bar. Each has a URL, which the router owns.
+ * `open_comparison` opens and the bar does not list), the settings of this browser
+ * (`/settings`), which are not the workspace's but are reached from its bar, and its
+ * Administration (`/admin`), which the bar lists only for a person whose grant here includes
+ * `admin`. Each has a URL, which the router owns.
  *
  * A page is shown in place of the documents, between the same navigation and source columns. The
  * open tabs are kept in the Explorer store and are there again under "Documents", which goes back
@@ -19,6 +21,7 @@
 import { Link, useMatches } from '@tanstack/react-router';
 import type { MouseEvent } from 'react';
 import type { Revision } from '../../api/generated/types.gen';
+import { WorkspaceAdminPage } from '../admin/WorkspaceAdminPage';
 import { AttentionLink } from '../attention/AttentionLink';
 import { AttentionPage } from '../attention/AttentionPage';
 import { GraphPage } from '../graph/GraphPage';
@@ -40,6 +43,7 @@ export type WorkspacePage =
   | 'proposals'
   | 'graph'
   | 'settings'
+  | 'admin'
   | { proposal: string }
   | { comparison: Comparison | null };
 
@@ -80,6 +84,7 @@ export function useWorkspacePage(): WorkspacePage | null {
   if (route === '/w/$workspaceId/proposals') return 'proposals';
   if (route === '/w/$workspaceId/graph') return 'graph';
   if (route === '/w/$workspaceId/settings') return 'settings';
+  if (route === '/w/$workspaceId/admin') return 'admin';
   if (route === '/w/$workspaceId/proposals/$proposalId' && proposalId !== undefined) {
     return { proposal: proposalId };
   }
@@ -103,6 +108,7 @@ export function DocumentsOrPage({
       {page === 'proposals' && <ProposalsPage workspaceId={workspaceId} />}
       {page === 'graph' && <GraphPage workspaceId={workspaceId} head={head} />}
       {page === 'settings' && <SettingsPage />}
+      {page === 'admin' && <WorkspaceAdminPage workspaceId={workspaceId} />}
       {typeof page === 'object' && 'proposal' in page && (
         <ProposalPage key={page.proposal} workspaceId={workspaceId} proposalId={page.proposal} />
       )}
@@ -132,13 +138,22 @@ export interface WorkspaceNavProps {
   documents: Pane | null;
   /** A link of the bar was pressed; the router acts on the press after this. */
   onFollow?: ((event: MouseEvent<HTMLAnchorElement>) => void) | undefined;
+  /** The person's grant here includes `admin`: the bar lists the workspace's Administration. */
+  admin?: boolean;
 }
 
 /**
  * The links to the workspace's places. The link of the place on screen says so: the router sets
  * `aria-current="page"` on a link to the current URL.
  */
-export function WorkspaceNav({ workspaceId, head, query, documents, onFollow }: WorkspaceNavProps) {
+export function WorkspaceNav({
+  workspaceId,
+  head,
+  query,
+  documents,
+  onFollow,
+  admin = false,
+}: WorkspaceNavProps) {
   const kept = query === undefined ? {} : { q: query };
   const params = { workspaceId };
   const shown = documents?.active ?? null;
@@ -189,6 +204,11 @@ export function WorkspaceNav({ workspaceId, head, query, documents, onFollow }: 
       <Link to="/w/$workspaceId/settings" params={params} search={kept} onClick={onFollow}>
         Settings
       </Link>
+      {admin && (
+        <Link to="/w/$workspaceId/admin" params={params} search={kept} onClick={onFollow}>
+          Administration
+        </Link>
+      )}
     </nav>
   );
 }

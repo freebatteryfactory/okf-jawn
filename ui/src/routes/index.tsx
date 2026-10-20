@@ -13,6 +13,8 @@ import { createFileRoute, Link } from '@tanstack/react-router';
 import { useEffect, useRef } from 'react';
 import { listWorkspacesQueryKey } from '../api/generated/@tanstack/react-query.gen';
 import { listWorkspaces } from '../api/generated/sdk.gen';
+import { InstallationAdminLink } from '../features/admin/InstallationAdminLink';
+import { NewWorkspaceLink } from '../features/admin/installation/NewWorkspaceLink';
 import { FailureNotice } from '../features/errors/FailureNotice';
 import { useRetry } from '../features/errors/retry';
 import { Instant } from '../lib/instant';
@@ -100,6 +102,8 @@ function Home() {
       <h1 id="workspaces-heading" ref={headingRef} tabIndex={-1}>
         Your workspaces
       </h1>
+      <InstallationAdminLink workspaces={workspaces} />
+      <NewWorkspaceLink workspaces={workspaces} />
       {result.isPending && !listFailure.retrying && (
         <p role="status">Contacting the workspace service…</p>
       )}

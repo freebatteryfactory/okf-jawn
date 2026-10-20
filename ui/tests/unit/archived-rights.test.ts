@@ -10,6 +10,10 @@ import {
   ALLOWED_WHILE_ARCHIVED,
   allowed,
   allowedOperation,
+  HUMAN_SESSION_ONLY,
+  humanSessionWords,
+  LOCAL_OWNER_ONLY,
+  LOCAL_OWNER_WORDS,
   type Rights,
 } from '../../src/features/explorer/rights';
 
@@ -70,5 +74,39 @@ describe('whether an operation can run here', () => {
     expect(allowed(archivedWriter, 'write')).toBe('archived');
     expect(allowed(archivedReader, 'write')).toBe('no-permission');
     expect(allowed(writer, 'write')).toBe('yes');
+  });
+});
+
+interface Guarded {
+  id: string;
+  human_session_only: boolean;
+  local_owner_only: boolean;
+}
+
+const guarded = all as unknown as Guarded[];
+
+/** The ids the generated metadata marks with `flag`, sorted. */
+function marked(flag: 'human_session_only' | 'local_owner_only'): string[] {
+  return guarded
+    .filter((operation) => operation[flag])
+    .map((operation) => operation.id)
+    .sort();
+}
+
+describe('the operations only a person in their own browser session, or the local owner, may ask (C2)', () => {
+  it('are the generated metadata’s, both ways', () => {
+    expect(marked('human_session_only').length).toBeGreaterThan(0);
+    expect([...HUMAN_SESSION_ONLY].sort()).toEqual(marked('human_session_only'));
+    expect(marked('local_owner_only').length).toBeGreaterThan(0);
+    expect([...LOCAL_OWNER_ONLY].sort()).toEqual(marked('local_owner_only'));
+  });
+
+  it('are said in plain words, with what is allowed instead', () => {
+    expect(humanSessionWords('Purging this workspace')).toBe(
+      'Purging this workspace is done only by an administrator in their own browser session: an agent, a connector or a service cannot ask for it.',
+    );
+    expect(LOCAL_OWNER_WORDS).toBe(
+      'Connectors are issued only on a local installation. Hosted agents connect through WorkOS Connect.',
+    );
   });
 });
