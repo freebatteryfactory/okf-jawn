@@ -1406,19 +1406,19 @@ async fn delete_folder_refuses_what_the_tree_does_not_allow_and_writes_nothing()
     Ok(())
 }
 
-/// A folder move includes raw files too: the literal new PDF path is 4335 UTF-8 bytes,
+/// A folder move includes raw files too: the literal new PDF path is 4166 UTF-8 bytes,
 /// beyond `WorkspacePath`'s 4096-byte bound, so the service must refuse before any commit.
 #[tokio::test]
 async fn move_folder_refuses_an_overlong_non_item_path_without_changing_the_tree() -> TestResult {
     let service = Service::new().await?;
     let space = &service.workspace;
-    let tail = format!("{}file.pdf", format!("{}/", "x".repeat(180)).repeat(20));
+    let tail = format!("{}.pdf", "x".repeat(180));
     let source = format!("n/{tail}");
-    let destination = vec!["d".repeat(100); 7].join("/");
+    let destination = vec!["d".repeat(180); 22].join("/");
     let target = format!("{destination}/{tail}");
-    assert_eq!(source.len(), 3630);
-    assert_eq!(destination.len(), 706);
-    assert_eq!(target.len(), 4335);
+    assert_eq!(source.len(), 186);
+    assert_eq!(destination.len(), 3981);
+    assert_eq!(target.len(), 4166);
     let _source_path = WorkspacePath::try_from(source.clone())?;
     let _destination_path = WorkspacePath::try_from(destination.clone())?;
     let payload = b"literal non-item PDF bytes";
