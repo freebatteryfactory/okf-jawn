@@ -68,8 +68,10 @@ export function WorkspaceBackups({ workspaceId }: { workspaceId: string }) {
         ? ''
         : `${acceptedWords('The backup', start.started)} Its row below shows how it stands now; once finished, it offers the download.`;
   return (
-    <section aria-labelledby={headingId}>
-      <h3 id={headingId}>Backups</h3>
+    <section aria-labelledby={headingId} className="grid gap-2">
+      <h3 id={headingId} className="text-lg font-bold">
+        Backups
+      </h3>
       <p id={aboutId}>
         A backup is one self-contained archive of this workspace: its versions, the files it keeps
         and its records, drafts included. It can be restored without this installation’s stores, and

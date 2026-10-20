@@ -102,8 +102,8 @@ export function InstallationJobs() {
   });
 
   return (
-    <section aria-labelledby={headingId}>
-      <h2 id={headingId} ref={headingRef} tabIndex={-1}>
+    <section aria-labelledby={headingId} className="mt-8 grid gap-2">
+      <h2 id={headingId} ref={headingRef} tabIndex={-1} className="page-heading">
         Installation jobs
       </h2>
       <p>
@@ -147,19 +147,21 @@ export function InstallationJobs() {
         </ul>
       )}
       {jobs.hasNextPage && (
-        // aria-disabled rather than disabled: the button keeps focus while the page is asked.
-        <button
-          type="button"
-          ref={moreRef}
-          aria-disabled={loadingMore}
-          onClick={() => {
-            if (loadingMore) return;
-            focusFrom.current = { shown: shownCount, pages: pageCount };
-            void jobs.fetchNextPage();
-          }}
-        >
-          {loadingMore ? 'Loading more installation jobs…' : 'Show more installation jobs'}
-        </button>
+        <p>
+          {/* aria-disabled rather than disabled: the button keeps focus while the page is asked. */}
+          <button
+            type="button"
+            ref={moreRef}
+            aria-disabled={loadingMore}
+            onClick={() => {
+              if (loadingMore) return;
+              focusFrom.current = { shown: shownCount, pages: pageCount };
+              void jobs.fetchNextPage();
+            }}
+          >
+            {loadingMore ? 'Loading more installation jobs…' : 'Show more installation jobs'}
+          </button>
+        </p>
       )}
       {laterFailure.shown && (
         <FailureNotice

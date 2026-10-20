@@ -52,8 +52,10 @@ export function InstallationBackups() {
         ? ''
         : `${acceptedWords('The backup of the installation', start.started)} Its row under “Installation jobs” shows how it stands now, and offers the download once it has finished.`;
   return (
-    <section aria-labelledby={headingId}>
-      <h2 id={headingId}>Backup of the installation</h2>
+    <section aria-labelledby={headingId} className="mt-8 grid gap-2">
+      <h2 id={headingId} className="page-heading">
+        Backup of the installation
+      </h2>
       <p id={aboutId}>
         A backup of the installation holds its identities, tenant grants, connector records without
         their secrets, purge records and security events: no workspace content. Each workspace is

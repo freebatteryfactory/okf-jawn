@@ -176,8 +176,10 @@ export function RestoreWorkspace({ workspaceId }: { workspaceId: string }) {
     setChoice((n) => n + 1);
   };
   return (
-    <section aria-labelledby={headingId}>
-      <h4 id={headingId}>Restore from a backup</h4>
+    <section aria-labelledby={headingId} className="mt-4 grid gap-2">
+      <h4 id={headingId} className="font-bold">
+        Restore from a backup
+      </h4>
       <p>
         A restore fills this workspace from a workspace’s backup archive, keeping its items’
         identities. Each draft goes back to its editor when that editor is known here; the others

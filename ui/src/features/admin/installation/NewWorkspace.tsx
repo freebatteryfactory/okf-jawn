@@ -117,8 +117,10 @@ export function NewWorkspace() {
   };
 
   return (
-    <section id={NEW_WORKSPACE_HASH} aria-labelledby={headingId}>
-      <h2 id={headingId}>New workspace</h2>
+    <section id={NEW_WORKSPACE_HASH} aria-labelledby={headingId} className="mt-8 grid gap-2">
+      <h2 id={headingId} className="page-heading">
+        New workspace
+      </h2>
       <p id={aboutId}>
         A new workspace is created blank, with no example content, and you hold administrator rights
         in it. It opens once it is created.
