@@ -4,8 +4,9 @@
  *
  * Each page of the application has a level-one heading that takes focus from script
  * (`tabindex="-1"`): the workspace list's, the Explorer's (the workspace's name) and the one of
- * the page shown before the Explorer. The reader renders a document's own `#` heading as a
- * level-one heading too; that one is the document's, carries no tabindex, and is not the page's.
+ * the page shown before the Explorer. The reader nests a document's headings beneath its item
+ * title. Unrelated content can still contain level-one headings; only the application's heading
+ * carries this focus target's tabindex.
  *
  * Seeing a part leave: React clears an element's ref before it removes the element, so a ref
  * callback is called while focus is still where it was (react-dom 19: `safelyDetachRef`, then
