@@ -274,6 +274,8 @@ test.describe('purge an item', () => {
     await expect(dialog).toContainText(
       'A purge never erases exports, clones or backups outside the application’s control',
     );
+    // Focus has moved into the dialog, onto Cancel, before the keyboard goes on from there.
+    await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused();
     await page.keyboard.press('Shift+Tab');
     await expect(dialog.getByRole('button', { name: 'Purge the item' })).toBeFocused();
     await page.keyboard.press('Enter');
