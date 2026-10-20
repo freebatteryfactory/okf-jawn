@@ -132,6 +132,7 @@ export function useOriginalText({ workspaceId, itemId, revision, appearance }: O
   });
   const parts = read.data?.pages ?? [];
   const shown = parts.reduce((total, part) => total + part.bytes.length, 0);
-  const complete = parts.length > 0 && !read.hasNextPage;
+  // A valid zero-byte original is complete without issuing an invalid bytes=0--1 read.
+  const complete = size === 0 || (parts.length > 0 && !read.hasNextPage);
   return { read, size, shown, complete, parts };
 }

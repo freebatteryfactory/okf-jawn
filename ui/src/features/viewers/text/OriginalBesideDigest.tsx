@@ -329,7 +329,7 @@ function Comparison({
     loaded: pane,
   });
 
-  const ready = original.parts.length > 0 && pages.length > 0;
+  const ready = (original.size === 0 || original.parts.length > 0) && pages.length > 0;
   const bothComplete = original.complete && convertedComplete;
   const partsWord = (parts: number) =>
     parts === 1 ? 'The first part' : `The first ${grouped(parts)} parts`;

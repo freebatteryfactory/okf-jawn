@@ -76,6 +76,20 @@ const readOf = (markdown: string, extra: Partial<ReadItemResponse> = {}) =>
   ok(sourceRead(PATH, markdown, extra));
 
 describe('the original beside its converted text (A2)', () => {
+  it('compares an empty retained original with its digest without requesting an invalid byte range', async () => {
+    // SPEC section 7 permits original/digest comparison; zero bytes is a valid original.
+    // The expected panes are authored here: empty original and the supplied digest text.
+    const api = mockApi({ [READ_ITEM]: () => readOf('An empty original.\n') });
+    const object = answerBytes(new Uint8Array());
+    renderText(new Uint8Array());
+    await userEvent.click(await screen.findByRole('button', { name: COMPARE }));
+    expect((await pane(ORIGINAL_PANE)).state.doc.toString()).toBe('');
+    expect((await pane(CONVERTED_PANE)).state.doc.toString()).toBe('An empty original.\n');
+    expect(object.reads).toEqual([]);
+    expect(screen.getByText('All 0 bytes of the original are compared.')).toBeTruthy();
+    expect(api.violations).toEqual([]);
+  });
+
   it('stands the two side by side, read-only, each pane named, with the places that differ counted', async () => {
     const api = mockApi({ [READ_ITEM]: () => readOf(converted) });
     answerBytes(utf8(original));

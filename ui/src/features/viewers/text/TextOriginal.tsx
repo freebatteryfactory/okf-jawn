@@ -120,13 +120,15 @@ export function TextOriginal({
       </p>
     );
   }
-  if (size === 0) return <p>The original is empty: 0 bytes.</p>;
 
   const lines = linesSaid(selection, decoded.text, complete);
   return (
     <div className="text-original">
+      {size === 0 && <p>The original is empty: 0 bytes.</p>}
       <p>The original of {path}, as text (UTF-8), read-only.</p>
-      {read.isPending && !readFailure.retrying && <p role="status">Reading the original…</p>}
+      {size > 0 && read.isPending && !readFailure.retrying && (
+        <p role="status">Reading the original…</p>
+      )}
       {readFailure.shown && (
         <FailureNotice
           context="Reading the original"
