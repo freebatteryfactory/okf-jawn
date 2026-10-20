@@ -27,7 +27,9 @@ export function readAs(page: Page, options: ChooseView = {}): Locator {
 
 /**
  * Show the reader's view `name`. With the keyboard, focus goes to the chosen radio (where Tab
- * puts it: a radio group is one Tab stop) and the arrow keys move the choice.
+ * puts it: a radio group is one Tab stop) and the arrow keys move the choice. Native WebKit stops
+ * at the group's ends, so travel toward the target in DOM order rather than assuming wrapping.
+ * Each intermediate choice must be checked and focused before another key is sent.
  */
 export async function chooseView(page: Page, name: ReaderViewName, options: ChooseView = {}) {
   const group = readAs(page, options);
@@ -39,8 +41,23 @@ export async function chooseView(page: Page, name: ReaderViewName, options: Choo
   }
   const count = await group.getByRole('radio').count();
   await tabTo(page, group.locator('input:checked'));
-  for (let presses = 0; presses < count && !(await choice.isChecked()); presses += 1) {
-    await page.keyboard.press('ArrowRight');
+  for (let presses = 0; presses < count; presses += 1) {
+    const positions = await group.getByRole('radio').evaluateAll(
+      (elements, wanted) => ({
+        current: elements.findIndex((element) => (element as HTMLInputElement).checked),
+        target: elements.findIndex((element) => (element as HTMLInputElement).value === wanted),
+      }),
+      await choice.inputValue(),
+    );
+    expect(positions.current).toBeGreaterThanOrEqual(0);
+    expect(positions.target).toBeGreaterThanOrEqual(0);
+    if (positions.current === positions.target) break;
+    const step = positions.target < positions.current ? -1 : 1;
+    const next = group.getByRole('radio').nth(positions.current + step);
+    const key = step < 0 ? 'ArrowLeft' : 'ArrowRight';
+    await page.keyboard.press(key);
+    await expect(next).toBeChecked();
+    await expect(next).toBeFocused();
   }
   await expect(choice).toBeChecked();
   await expect(choice).toBeFocused();
