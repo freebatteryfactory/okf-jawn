@@ -84,6 +84,7 @@ import { pageHeading, takeHeld, useWatchedPart } from '../../lib/focus';
 import { Instant } from '../../lib/instant';
 import { keyed } from '../../lib/keys';
 import { ItemAttention } from '../attention/ItemAttention';
+import { Corrections } from '../corrections/Corrections';
 import { ConflictNotice } from '../drafts/ConflictNotice';
 import { DraftEditor } from '../drafts/DraftEditor';
 import { KeptText } from '../drafts/KeptText';
@@ -99,6 +100,7 @@ import { BringBack } from '../history/BringBack';
 import { ItemHistory } from '../history/ItemHistory';
 import { ProposeChange } from '../proposals/ProposeChange';
 import { ItemActions } from '../tree/ItemActions';
+import { OriginalViewer } from '../viewers/OriginalViewer';
 import { ConversionState } from './ConversionState';
 import { describeSelection, short, textLabels } from './describe';
 import { LeftDraft } from './LeftDraft';
@@ -622,6 +624,7 @@ export function DocumentView({
   });
   // A View's text is one step away: open from the start, and opened, when the address names a part.
   const textId = useId();
+  const originalId = useId();
   const named = JSON.stringify(selection ?? null);
   const [textOpen, setTextOpen] = useState(selection !== undefined);
   const [textNamed, setTextNamed] = useState(named);
@@ -989,6 +992,30 @@ export function DocumentView({
             )}
           </ItemText>
         </>
+      )}
+      {/* A Source's original in the viewer its media type goes to, and its corrections (M4a: the
+          reader's views take them in, ruling A1). */}
+      {document?.source && (
+        <section aria-labelledby={originalId} className="original">
+          <h3 id={originalId}>Original</h3>
+          <OriginalViewer
+            workspaceId={workspaceId}
+            itemId={itemId}
+            revision={revision}
+            path={document.summary.path}
+            appearance={document.source}
+            selection={selection ?? { kind: 'all' }}
+          />
+        </section>
+      )}
+      {document?.source && (
+        <Corrections
+          workspaceId={workspaceId}
+          itemId={itemId}
+          revision={revision}
+          head={head}
+          document={document}
+        />
       )}
     </article>
   );
