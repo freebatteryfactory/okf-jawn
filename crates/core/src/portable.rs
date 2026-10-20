@@ -257,6 +257,62 @@ pub fn exported_verified(
     Some(Value::Array(entries))
 }
 
+/// The bytes an export writes for one committed item, or `None` to keep its exact stored
+/// bytes. Only `verified` changes: the existing claim and current whole-item reviews are
+/// combined by `exported_verified`, then the pinned OKF writer restores preferred key order.
+/// All other frontmatter values and the parsed body are preserved.
+///
+/// # Errors
+/// Returns `Internal` when the stored item is not UTF-8 or is not a parseable OKF document.
+/// The caller supplies committed bytes and the content fingerprint of that same revision.
+pub fn export_item_file(
+    stored: &[u8],
+    reviews: &[Review],
+    content: &Digest,
+) -> Result<Option<Vec<u8>>, ApiError> {
+    let text = std::str::from_utf8(stored)
+        .map_err(|_| ApiError::new(ErrorCode::Internal, "a committed item file is not UTF-8"))?;
+    let mut document = okf_core::Document::parse(text).map_err(|error| {
+        ApiError::new(
+            ErrorCode::Internal,
+            format!("a committed item file does not parse: {error}"),
+        )
+    })?;
+    let existing = document.frontmatter.get(VERIFIED_KEY).map(json_of);
+    let Some(value) = exported_verified(existing.as_ref(), reviews, content) else {
+        return Ok(None);
+    };
+    if existing.as_ref() == Some(&value) {
+        return Ok(None);
+    }
+    document.frontmatter.set(VERIFIED_KEY, yaml_value(&value));
+    document.frontmatter.reorder_preferred();
+    Ok(Some(document.serialize().into_bytes()))
+}
+
+/// An OKF YAML property as storage reads it into JSON: non-finite floats become null;
+/// mapping keys use their display strings, with nondisplayable keys omitted. Export compares
+/// existing verification through this same conversion; import can reuse it for properties.
+#[must_use]
+pub fn json_of(value: &YamlValue) -> Value {
+    match value {
+        YamlValue::Null => Value::Null,
+        YamlValue::Bool(flag) => Value::Bool(*flag),
+        YamlValue::Int(integer) => Value::from(*integer),
+        YamlValue::Float(float) => {
+            serde_json::Number::from_f64(*float).map_or(Value::Null, Value::Number)
+        }
+        YamlValue::String(text) => Value::String(text.clone()),
+        YamlValue::Sequence(items) => Value::Array(items.iter().map(json_of).collect()),
+        YamlValue::Mapping(mapping) => Value::Object(
+            mapping
+                .iter()
+                .filter_map(|(key, child)| key.as_display_string().map(|key| (key, json_of(child))))
+                .collect(),
+        ),
+    }
+}
+
 /// The verification events an imported file claims in its frontmatter `properties`, read with
 /// okf-core's own `verified` rules: a list of `{ by, at }` mappings, or a bare mapping read as
 /// a one-element list; any other shape claims nothing.

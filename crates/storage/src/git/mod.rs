@@ -12,7 +12,8 @@
 //! replay answers them (`warnings`).
 //!
 //! `write_history` writes the accepted line up to a revision as a Git bundle into the blob
-//! store (`export`).
+//! store (`export`); `committed_files` reads every file of a revision a page at a time, for a
+//! portable export (`read`).
 
 use std::sync::Arc;
 
@@ -26,9 +27,9 @@ use okf_jawn_contract::identity::{
 use okf_jawn_contract::item::{ItemDocument, ItemSummary, TypeDefinition};
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
-    BlameQuery, CandidateChanges, CandidateCheck, CommitChanges, Committed, DiffQuery,
-    FolderListing, LogQuery, ObjectInfo, Page, Promotion, Provenance, RulesFile, StorageScope,
-    TreeEdit, VersionStore, WorkspaceTree,
+    BlameQuery, CandidateChanges, CandidateCheck, CommitChanges, Committed, CommittedFiles,
+    DiffQuery, FilePage, FolderListing, LogQuery, ObjectInfo, Page, Promotion, Provenance,
+    RulesFile, StorageScope, TreeEdit, VersionStore, WorkspaceTree,
 };
 
 use crate::blobs::{LocalBlobs, file_reader};
@@ -508,6 +509,18 @@ impl VersionStore for GitVersions {
         mutation_id: MutationId,
     ) -> PortFuture<'a, ObjectInfo> {
         Box::pin(self.history(scope, revision, mutation_id))
+    }
+
+    fn committed_files<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+        page: FilePage,
+    ) -> PortFuture<'a, CommittedFiles> {
+        let revision = revision.clone();
+        Box::pin(self.blocking(scope, move |repositories, scope| {
+            read::committed_files(&repositories.open(scope)?, &revision, &page)
+        }))
     }
 }
 

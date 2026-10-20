@@ -122,7 +122,7 @@ pub(crate) fn write_bundle(
 }
 
 /// Refuse a revision that the accepted head does not contain.
-fn refuse_off_the_line(repository: &Repository, tip: Oid) -> Result<(), ApiError> {
+pub(crate) fn refuse_off_the_line(repository: &Repository, tip: Oid) -> Result<(), ApiError> {
     let accepted = head(repository)?;
     let on_line = accepted == tip
         || repository

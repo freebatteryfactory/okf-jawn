@@ -8,6 +8,8 @@
 //!   item is (`ingest-locates-unlocated-items`) and which text a font could not decode
 //!   (`ingest-flags-undecodable-text`).
 //! - `outline` and `record` assemble the whole-document `ConversionRecord` from its windows.
+//! - `portable_export` streams the pinned workspace tree and its references as an OKF ZIP;
+//!   `export` above still means the Docling JSON reader, not this job.
 //! - `cap` is the per-platform memory cap of the conversion child
 //!   (`converter-worker-memory-ceiling`).
 //! - `protocol`, `child` and `converter` are the docling adapter: the request and reply between
@@ -32,6 +34,8 @@ mod import;
 pub mod locate;
 #[cfg(feature = "runtime")]
 pub mod outline;
+#[cfg(feature = "runtime")]
+mod portable_export;
 #[cfg(feature = "runtime")]
 pub mod protocol;
 #[cfg(feature = "runtime")]

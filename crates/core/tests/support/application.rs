@@ -125,10 +125,10 @@ use okf_jawn_core::sandbox::{SandboxCapabilityStore, SandboxMint, SandboxResolve
 use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
     Backups, BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges,
-    Committed, DiffQuery, FolderListing, LocalSource, LogQuery, NewWorkspace, ObjectInfo,
-    ObjectRead, Page, Promotion, Provenance, RulesFile, StorageScope, TreeEdit, TreeItem,
-    VersionStore, WorkspaceArchive, WorkspaceCatalog, WorkspaceTree, WorkspaceUpdate,
-    WrittenArchive, replay_warnings_unavailable,
+    Committed, CommittedFiles, DiffQuery, FilePage, FolderListing, LocalSource, LogQuery,
+    NewWorkspace, ObjectInfo, ObjectRead, Page, Promotion, Provenance, RulesFile, StorageScope,
+    TreeEdit, TreeItem, VersionStore, WorkspaceArchive, WorkspaceCatalog, WorkspaceTree,
+    WorkspaceUpdate, WrittenArchive, replay_warnings_unavailable,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadPage, UploadQuery, UploadRecord, UploadStore};
 use serde_json::Value;
@@ -1677,6 +1677,14 @@ impl VersionStore for FakeVersions {
         _revision: &'a Revision,
         _mutation_id: MutationId,
     ) -> PortFuture<'a, ObjectInfo> {
+        unused()
+    }
+    fn committed_files<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _revision: &'a Revision,
+        _page: FilePage,
+    ) -> PortFuture<'a, CommittedFiles> {
         unused()
     }
 }
