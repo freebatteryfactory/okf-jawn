@@ -2,10 +2,51 @@
  * Where a journey finds a Source's original and its corrections in the reader (UI M4a). The
  * reader's builder (ruling A1) owns this file: when the reader's views change how the original is
  * reached, these helpers change with it, and every viewer's journey keeps calling them.
+ *
+ * The reader shows one view of an item at a time, chosen in its "Read as" radio group (Text,
+ * Outline, Text and pictures, Pages, Original: only the views the item has). The original is the
+ * Original view: a region named "Original" holding the viewer its media type goes to. A Source's
+ * corrections stay beside whatever view is shown.
  */
-import type { Locator, Page } from '@playwright/test';
+import { expect, type Locator, type Page } from '@playwright/test';
 
-/** The original of the item the reader shows, in its viewer. */
-export async function openOriginal(page: Page): Promise<Locator> {
-  return page.getByRole('region', { name: 'Original' });
+export type ReaderViewName = 'Text' | 'Outline' | 'Text and pictures' | 'Pages' | 'Original';
+
+export interface ChooseView {
+  /** Choose with the keyboard alone: focus moves into the group, and the arrow keys choose. */
+  keyboard?: boolean;
+  /** The reader to choose in, when the page shows more than one (two panes). */
+  within?: Locator;
+}
+
+/** The "Read as" choice of the reader. */
+export function readAs(page: Page, options: ChooseView = {}): Locator {
+  return (options.within ?? page).getByRole('radiogroup', { name: 'Read as' });
+}
+
+/**
+ * Show the reader's view `name`. With the keyboard, focus goes to the chosen radio (where Tab
+ * puts it: a radio group is one Tab stop) and the arrow keys move the choice.
+ */
+export async function chooseView(page: Page, name: ReaderViewName, options: ChooseView = {}) {
+  const group = readAs(page, options);
+  const choice = group.getByRole('radio', { name, exact: true });
+  await expect(choice).toBeVisible();
+  if (!options.keyboard) {
+    await choice.check();
+    return;
+  }
+  const count = await group.getByRole('radio').count();
+  await group.locator('input:checked').focus();
+  for (let presses = 0; presses < count && !(await choice.isChecked()); presses += 1) {
+    await page.keyboard.press('ArrowRight');
+  }
+  await expect(choice).toBeChecked();
+  await expect(choice).toBeFocused();
+}
+
+/** The original of the item the reader shows, in its viewer: its Original view, chosen. */
+export async function openOriginal(page: Page, options: ChooseView = {}): Promise<Locator> {
+  await chooseView(page, 'Original', options);
+  return (options.within ?? page).getByRole('region', { name: 'Original' });
 }

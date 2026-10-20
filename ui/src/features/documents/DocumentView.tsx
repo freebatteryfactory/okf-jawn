@@ -70,13 +70,13 @@ import { type ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } f
 import {
   getItemOptions,
   openWorkspaceQueryKey,
-  readItemInfiniteOptions,
 } from '../../api/generated/@tanstack/react-query.gen';
 import { openWorkspace, readItem } from '../../api/generated/sdk.gen';
 import type {
   ItemSummary,
   ReadItemRequest,
   ReadItemResponse,
+  ReadView,
   Revision,
   Workspace,
 } from '../../api/generated/types.gen';
@@ -99,18 +99,17 @@ import { useDeletedItem, useExplorerStore } from '../explorer/store';
 import { BringBack } from '../history/BringBack';
 import { ItemHistory } from '../history/ItemHistory';
 import { ProposeChange } from '../proposals/ProposeChange';
+import { partOf, useContinuation } from '../reader/continuation';
+import { ReaderViews } from '../reader/ReaderViews';
+import { readKey, readOptions, readRequest } from '../reader/request';
+import { type ItemShape, shapeOf, viewsOf } from '../reader/views';
 import { ItemActions } from '../tree/ItemActions';
-import { OriginalViewer } from '../viewers/OriginalViewer';
 import { ConversionState } from './ConversionState';
-import { describeSelection, short, textLabels } from './describe';
+import { describeSelection, short } from './describe';
 import { LeftDraft } from './LeftDraft';
 import { Properties } from './Properties';
 import { PropertiesViews } from './PropertiesYaml';
-import { SafeMarkdown } from './SafeMarkdown';
 import { ViewTab } from './ViewTab';
-
-/** Text budget per read; a longer item is read in parts through the continuation. */
-export const READ_BUDGET_BYTES = 65_536;
 
 export interface DocumentViewProps {
   workspaceId: string;
@@ -148,27 +147,6 @@ const DRAFT_STANDS = {
 } as const;
 
 const ROLE = { note: 'Note', source: 'Source', view: 'View' } as const;
-
-/**
- * The words of the reading's live region: what the last continuation did. While the failure
- * notice is trying the continuation again, the notice says so and this line stays as it was.
- */
-function readingStatus(
-  read: { isFetchingNextPage: boolean; isFetchNextPageError: boolean; hasNextPage: boolean },
-  parts: number,
-  retrying: boolean,
-): string {
-  if (read.isFetchingNextPage && !retrying) return 'Reading more…';
-  if (read.isFetchNextPageError) return 'The rest of this reading could not be read.';
-  if (parts > 1) return `Part ${parts} read${read.hasNextPage ? '; more can be read' : ''}.`;
-  return '';
-}
-
-/** A part of the reading on screen, as an element keyboard focus can go to. */
-function partOf(body: HTMLDivElement | null, which: 'first' | 'last'): HTMLElement | null {
-  const part = which === 'first' ? body?.firstElementChild : body?.lastElementChild;
-  return part instanceof HTMLElement ? part : null;
-}
 
 export function itemOptions(workspaceId: string, itemId: string, revision: Revision) {
   return getItemOptions({
@@ -235,7 +213,7 @@ function PinnedRevision({
     onSuccess: (response) => {
       const resolved = response.source.revision;
       const pinned: ReadItemRequest = { ...request, at: { kind: 'revision', revision: resolved } };
-      client.setQueryData(readItemInfiniteOptions({ body: pinned }).queryKey, {
+      client.setQueryData(readKey(pinned), {
         pages: [response],
         pageParams: [{ body: pinned }],
       });
@@ -446,59 +424,49 @@ export function DocumentView({
   // committed text is neither read nor shown, so it never stands where the draft will.
   const undecided =
     atShown && chosen === null && session === undefined && document === undefined && !item.isError;
-  const request: ReadItemRequest = {
-    workspace_id: workspaceId,
-    item_id: itemId,
-    at: { kind: 'revision', revision },
-    view: 'text',
+  // The views this item has (`reader/views.ts`), by what the last `get_item` that answered said of
+  // it: while the item is read again the views stay, so the choice does not leave under focus.
+  const shapeNow = document === undefined ? null : shapeOf(document);
+  const [shape, setShape] = useState<ItemShape | null>(shapeNow);
+  if (shapeNow !== null && JSON.stringify(shapeNow) !== JSON.stringify(shape)) setShape(shapeNow);
+  const views = viewsOf(shape);
+  const [chosenView, setChosenView] = useState<ReadView>('text');
+  // A view a newer answer no longer offers is not chosen any more: the Text view is shown.
+  if (shape !== null && !views.offered.includes(chosenView)) setChosenView('text');
+  const view = views.offered.includes(chosenView) ? chosenView : 'text';
+  const request: ReadItemRequest = readRequest({
+    workspaceId,
+    itemId,
+    revision,
+    view,
     selection: selection ?? { kind: 'all' },
-    cursor: null,
-    max_bytes: READ_BUDGET_BYTES,
-    max_images: 0,
-  };
+  });
   const read = useInfiniteQuery({
-    ...readItemInfiniteOptions({ body: request }),
-    initialPageParam: { body: request },
-    getNextPageParam: (last) => last.next_cursor ?? undefined,
+    ...readOptions(request),
     // The editor shows the draft's own text; the committed text is read when it is shown.
     enabled: !(wantsEdit && !elsewhere) && !undecided && !gone,
   });
 
   const pages = read.data?.pages ?? [];
   const first = pages[0];
-  const last = pages.at(-1);
   const summary = document?.summary;
   const path = summary?.path ?? first?.source.path;
   const title = summary?.title || path || deletedTitle || 'Item';
-  const warnings = pages.flatMap((page) => page.warnings);
   const extraction = first?.extraction;
+  const reading = JSON.stringify(request);
 
-  // "Continue reading" moves keyboard focus to the part it loaded. If none arrived, focus stays
-  // on the button, which is still there, and the status says what happened.
-  const bodyRef = useRef<HTMLDivElement | null>(null);
-  const continueRef = useRef<HTMLButtonElement | null>(null);
-  const focusPart = useRef<number | null>(null);
-  const continuing = read.isFetchingNextPage;
-  const continuationFailed = read.isFetchNextPageError;
-  const partCount = pages.length;
-  useEffect(() => {
-    const part = focusPart.current;
-    if (part === null) return;
-    // Settled once the asked-for part is here, or the continuation failed.
-    if (partCount > part) {
-      focusPart.current = null;
-      const loaded = bodyRef.current?.children.item(part);
-      if (loaded instanceof HTMLElement) loaded.focus();
-    } else if (continuationFailed && !continuing) {
-      focusPart.current = null;
-      continueRef.current?.focus();
-    }
-  }, [partCount, continuing, continuationFailed]);
-  const continueReading = () => {
-    if (continuing) return;
-    focusPart.current = pages.length;
-    void read.fetchNextPage();
-  };
+  // "Continue reading" (`reader/continuation.ts`): focus goes to the part it loaded, or stays on
+  // the button when none arrived, and only from where the continuation left it.
+  const continuation = useContinuation(
+    {
+      parts: pages.length,
+      continuing: read.isFetchingNextPage,
+      failed: read.isFetchNextPageError,
+      fetchNextPage: () => read.fetchNextPage(),
+    },
+    reading,
+  );
+  const bodyRef = continuation.bodyRef;
 
   // Each operation's failure keeps its notice through a retry, which ends with keyboard focus on
   // what it loaded: the properties' disclosure, the first part of the text, or the part continued.
@@ -632,7 +600,6 @@ export function DocumentView({
     setTextNamed(named);
     if (selection !== undefined) setTextOpen(true);
   }
-  const reading = JSON.stringify(request);
   const itemFailure = useRetry({
     request: reading,
     failed: item.isError,
@@ -874,7 +841,7 @@ export function DocumentView({
           ) : itemFailure.shown ? null : (
             <p role="status">Loading properties…</p>
           )}
-          {first && first.outline.length > 0 && (
+          {first && first.outline.length > 0 && (view === 'text' || view === 'multimodal') && (
             <details className="outline">
               <summary>Outline ({first.outline.length})</summary>
               <nav aria-label="Outline">
@@ -912,102 +879,33 @@ export function DocumentView({
           )}
 
           <ItemText asView={kind === 'view'} id={textId} open={textOpen} onToggle={setTextOpen}>
-            {textLabels(extraction).map((label) => (
-              <p key={label} role="note" className="notice">
-                {label}
-              </p>
-            ))}
-
-            {read.isPending && !readFailure.retrying && <p role="status">Reading…</p>}
-            {readFailure.shown && (
-              <FailureNotice
-                context="Reading this item"
-                error={readFailure.error}
-                retry={readFailure}
-                workspaceId={workspaceId}
-              />
-            )}
-            {pages.length > 0 && (
-              <div className="document-body" ref={bodyRef}>
-                {keyed(pages, (page) => page.receipt_id).map(({ key, value: page }, index) => (
-                  <div
-                    key={key}
-                    data-part
-                    tabIndex={-1}
-                    {...(pages.length > 1
-                      ? { role: 'group', 'aria-label': `Part ${index + 1} of this reading` }
-                      : {})}
-                  >
-                    <SafeMarkdown markdown={page.markdown} />
-                  </div>
-                ))}
-              </div>
-            )}
-            <p role="status" className="sr-only">
-              {readingStatus(read, pages.length, moreFailure.retrying)}
-            </p>
-            {keyed(warnings, (warning) => JSON.stringify(warning)).map(
-              ({ key, value: warning }) => (
-                <p key={key} role="note" className="notice">
-                  {warning.message}
-                  {warning.location ? ` (${warning.location})` : ''}
-                </p>
-              ),
-            )}
-            {last?.truncated && (
-              <div role="note" className="notice">
-                <p>
-                  Partial reading: this is not all of {describeSelection(request.selection)}.
-                  {last.next_cursor ? '' : ' The rest cannot be continued from here.'}
-                </p>
-                {read.hasNextPage && (
-                  // aria-disabled rather than disabled while reading: the button stays focusable and
-                  // announced. A disabled one would lose focus: Chromium and WebKit move focus to the
-                  // body within a frame of a focused button becoming disabled (HTML's focus fixup).
-                  <button
-                    type="button"
-                    ref={continueRef}
-                    aria-disabled={continuing}
-                    onClick={continueReading}
-                  >
-                    {continuing ? 'Reading more…' : 'Continue reading'}
-                  </button>
-                )}
-              </div>
-            )}
-            {moreFailure.shown && (
-              <FailureNotice
-                context="Continuing this reading"
-                error={moreFailure.error}
-                retry={moreFailure}
-                workspaceId={workspaceId}
-              />
-            )}
-            {first && (
-              <p className="citation">
-                Read from {first.source.path} at{' '}
-                <code title={first.source.revision}>{short(first.source.revision)}</code>,{' '}
-                {describeSelection(first.source.selection)}.
-              </p>
-            )}
+            <ReaderViews
+              workspaceId={workspaceId}
+              itemId={itemId}
+              revision={revision}
+              document={document}
+              views={views}
+              viewsUnknown={shape === null && item.isError}
+              view={view}
+              onView={setChosenView}
+              request={request}
+              read={{
+                pages,
+                isPending: read.isPending,
+                isFetchingNextPage: read.isFetchingNextPage,
+                isFetchNextPageError: read.isFetchNextPageError,
+                hasNextPage: read.hasNextPage,
+              }}
+              readFailure={readFailure}
+              moreFailure={moreFailure}
+              continuation={continuation}
+              onSelect={onSelect}
+              originalId={originalId}
+            />
           </ItemText>
         </>
       )}
-      {/* A Source's original in the viewer its media type goes to, and its corrections (M4a: the
-          reader's views take them in, ruling A1). */}
-      {document?.source && (
-        <section aria-labelledby={originalId} className="original">
-          <h3 id={originalId}>Original</h3>
-          <OriginalViewer
-            workspaceId={workspaceId}
-            itemId={itemId}
-            revision={revision}
-            path={document.summary.path}
-            appearance={document.source}
-            selection={selection ?? { kind: 'all' }}
-          />
-        </section>
-      )}
+      {/* A Source's corrections stay beside whatever view of it is shown. */}
       {document?.source && (
         <Corrections
           workspaceId={workspaceId}
