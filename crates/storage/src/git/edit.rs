@@ -36,6 +36,29 @@
 //! taking the destination (`Staged::occupied`); a move onto any other item's or file's key is
 //! refused as taken.
 //!
+//! A folder move (`TreeEdit::MoveFolder`, `move_folder`) moves everything under the folder in
+//! one edit (`hop`). First every concept okf-core reads under it (every item, and every other
+//! Markdown file it parses), one at a time in path order, as `MoveItem` moves one (`relink`):
+//! each link and `sources` entry that points at it follows it, and its own links are rebased,
+//! so a link between two of them ends pointing at the other's new path. Then every other file
+//! under it moves as it is (an image, a `X.MD`, a folder `index.md`, which the indexes then
+//! regenerate), and every reference of the tree that resolves to one of those (a link, or a
+//! frontmatter path okf-core rebases when it moves a concept) is rewritten to its new path
+//! (`follow`). The emptied folder is removed. The files those moves rewrote are told to the
+//! check, a file under the folder at its new path. A rename of the folder that changes only
+//! letter case goes in two such hops by a free private folder beside it (`park_folder`), for
+//! the reason an item's does; no hop rewrites the bytes of an earlier one, so nothing of the
+//! private name is committed. When files that are not items moved (the folder indexes not
+//! counted), the edit adds one `FOLDER_OTHER_FILES` warning (`Staged::notes`). Each concept's
+//! move reads the staged tree again, so moving a folder of `k` concepts in a tree of `n` files
+//! reads about `k × n` files: a known cost, kept so that every move is the one `MoveItem` makes.
+//!
+//! A folder delete (`TreeEdit::DeleteFolder`, `delete_folder`) removes every item under the
+//! folder as `DeleteItem` removes one, with its companion files (`delete_item`), then every
+//! other file and the folder; the links that pointed into it are left as written, as a
+//! `DeleteItem` leaves them. Its refusals of the folder are a move's (`existing_folder`), and so
+//! is its warning about the files that are not items (`folder_files_deleted`).
+//!
 //! A move with `keep_alias` first records the item's path in its frontmatter `aliases`
 //! (`record_alias`), after the move's refusals and before its first hop, so a rename by letter
 //! case records the item's own path, never the private one, and a move to the path the item holds
@@ -83,6 +106,7 @@ use okf_core::{
     Bundle, ConceptId, Document, Link, LinkKind, LinkRewriteAction, MoveOptions, RefactorError,
     compute_relative_path, rebase_relative_path, rewrite_markdown_links,
 };
+use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::TextOrigin;
 use okf_jawn_contract::identity::{
@@ -91,7 +115,9 @@ use okf_jawn_contract::identity::{
 use okf_jawn_contract::item::{ItemStatus, TypeDefinition};
 use okf_jawn_core::items::{ApplicationHeader, refuse_header_change, refuse_header_in_type};
 use okf_jawn_core::portable::ALIASES_KEY;
-use okf_jawn_core::storage::{SourceCard, TreeEdit};
+use okf_jawn_core::storage::{
+    SourceCard, TreeEdit, folder_files_deleted, folder_other_files, item_companion_owner,
+};
 
 use super::item::{
     CORRECTIONS_DIR, Holder, INDEX_FILE, ItemFile, LOG_FILE, RULES_FILE, SOURCES_DIR, SUPPLIED_DIR,
@@ -108,7 +134,13 @@ pub(crate) struct Staged {
     /// Every file a move rewrote besides the moved item's own old and new file, as a
     /// `/`-separated path relative to the root: the referrers whose links followed the item.
     rewritten: BTreeSet<String>,
+    /// What the edits report about themselves, in order (`Committed::warnings`).
+    notes: Vec<Warning>,
 }
+
+/// The name of the private folder a rename of a folder by letter case parks it under
+/// (`park_folder`), then `-1`, `-2` and so on.
+const RECASE_FOLDER: &str = "okf-jawn-recase-folder";
 
 impl Staged {
     /// Index the items of a staging directory.
@@ -117,9 +149,17 @@ impl Staged {
             root: root.to_path_buf(),
             items: BTreeMap::new(),
             rewritten: BTreeSet::new(),
+            notes: Vec::new(),
         };
         staged.rescan()?;
         Ok(staged)
+    }
+
+    /// What the edits report about themselves, in the order they were applied, for the
+    /// commit's warnings after the check's (`Committed::warnings`): one `FOLDER_OTHER_FILES`
+    /// warning for each folder move or delete that moved or removed files that are not items.
+    pub(crate) fn notes(&self) -> &[Warning] {
+        &self.notes
     }
 
     fn rescan(&mut self) -> Result<(), ApiError> {
@@ -351,15 +391,13 @@ fn apply_one(repository: &Repository, staged: &mut Staged, edit: TreeEdit) -> Re
             status,
             archived,
         } => set_status(staged, item_id, status, archived),
-        TreeEdit::DeleteItem { item_id } => {
-            let path = staged.path_of(item_id)?;
-            remove(&staged.root.join(&path))?;
-            staged.items.remove(&item_id);
-            remove(&appearance_path(&staged.root, item_id))?;
-            remove(&supplied_path(&staged.root, item_id))?;
-            remove_folder(&staged.root.join(corrections_folder(item_id)))
-        }
+        TreeEdit::DeleteItem { item_id } => delete_item(staged, item_id),
         TreeEdit::CreateFolder { folder } => create_folder(staged, &folder),
+        TreeEdit::MoveFolder {
+            folder,
+            destination,
+        } => move_folder(staged, &folder, &destination),
+        TreeEdit::DeleteFolder { folder } => delete_folder(staged, &folder),
         TreeEdit::SetType { definition } => set_type(&staged.root, definition),
         TreeEdit::SetRules { rules } => {
             let text = yaml_serde::to_string(&rules)
@@ -453,6 +491,369 @@ fn create_folder(staged: &Staged, folder: &WorkspacePath) -> Result<(), ApiError
         &target.join(INDEX_FILE),
         &okf_core::index::build_index_text(&[]),
     )
+}
+
+/// Move a folder with everything under it (`TreeEdit::MoveFolder`; the module header), after
+/// the refusals the edit documents, each before anything is written: the folder's
+/// (`existing_folder`); a reserved destination, the folder itself or a path inside it,
+/// `InvalidInput` on `/destination`; a folder of the destination the tree spells another way
+/// (`Staged::refuse_respelled_folder`); and a destination taken (`Staged::occupied`, or, for a
+/// rename by letter case, any entry but the folder itself with the destination's key),
+/// `Conflict` on `/destination`; and every file's final path as a `WorkspacePath`,
+/// `InvalidInput` on `/destination`, before either hop writes anything.
+fn move_folder(
+    staged: &mut Staged,
+    folder: &WorkspacePath,
+    destination: &WorkspacePath,
+) -> Result<(), ApiError> {
+    existing_folder(staged, folder)?;
+    if is_reserved(destination.as_str()) {
+        return Err(ApiError::new(
+            ErrorCode::InvalidInput,
+            format!(
+                "{} is reserved: .okf, index.md and log.md (in any letter case, as any path \
+                 segment) are kept by the server and cannot hold a folder",
+                destination.as_str()
+            ),
+        )
+        .with_field("/destination"));
+    }
+    if destination == folder {
+        return Err(ApiError::new(
+            ErrorCode::InvalidInput,
+            format!("{} is the folder itself", destination.as_str()),
+        )
+        .with_field("/destination"));
+    }
+    let (key, to) = (folder.collision_key(), destination.collision_key());
+    if to
+        .strip_prefix(&key)
+        .is_some_and(|rest| rest.starts_with('/'))
+    {
+        return Err(ApiError::new(
+            ErrorCode::InvalidInput,
+            format!(
+                "{} is inside {}, which cannot move into itself",
+                destination.as_str(),
+                folder.as_str()
+            ),
+        )
+        .with_field("/destination"));
+    }
+    staged.refuse_respelled_folder(destination, false, "/destination")?;
+    let recase = key == to;
+    let taken = if recase {
+        entries_under(&staged.root)?
+            .iter()
+            .any(|(path, _)| path != folder.as_str() && collision_key_of(path) == to)
+    } else {
+        staged.occupied(destination, None)?
+    };
+    if taken {
+        return Err(
+            conflict(format!("{} is already taken", destination.as_str()))
+                .with_field("/destination"),
+        );
+    }
+    let prefix = format!("{}/", folder.as_str());
+    for source in files_under(&staged.root, folder.as_str())? {
+        let suffix = source
+            .strip_prefix(&prefix)
+            .ok_or_else(|| internal(format!("{source} is not under {}", folder.as_str())))?;
+        let target = format!("{}/{suffix}", destination.as_str());
+        WorkspacePath::try_from(target.clone()).map_err(|error| {
+            ApiError::new(
+                ErrorCode::InvalidInput,
+                format!("Cannot move {source} to {target}: {error}"),
+            )
+            .with_field("/destination")
+        })?;
+    }
+    let others = other_files(staged, folder)?;
+    if recase {
+        let private = park_folder(staged, folder)?;
+        hop(staged, private.as_str(), destination.as_str())?;
+    } else {
+        hop(staged, folder.as_str(), destination.as_str())?;
+    }
+    if others > 0 {
+        staged.notes.push(folder_other_files(destination, others));
+    }
+    Ok(())
+}
+
+/// Refuse the folder a folder edit names unless the staged tree holds it, spelled as named: a
+/// reserved folder (`is_reserved`: `.okf/` and everything below it among them) is
+/// `InvalidInput` on `/folder`, and so is a folder the tree spells another way, naming the
+/// tree's spelling (`Staged::refuse_respelled_folder`); a path that is no folder of the tree is
+/// `NotFound` on `/folder`.
+fn existing_folder(staged: &Staged, folder: &WorkspacePath) -> Result<(), ApiError> {
+    if is_reserved(folder.as_str()) {
+        return Err(ApiError::new(
+            ErrorCode::InvalidInput,
+            format!(
+                "{} is reserved: .okf, index.md and log.md (in any letter case, as any path \
+                 segment) are kept by the server, and cannot be moved or deleted",
+                folder.as_str()
+            ),
+        )
+        .with_field("/folder"));
+    }
+    staged.refuse_respelled_folder(folder, true, "/folder")?;
+    if staged.root.join(folder.as_str()).is_dir() {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            ErrorCode::NotFound,
+            format!("No folder {} in this tree", folder.as_str()),
+        )
+        .with_field("/folder"))
+    }
+}
+
+/// Remove an item and every companion file it owns (`TreeEdit::DeleteItem`): its source
+/// appearance, its supplied text and its corrections folder.
+fn delete_item(staged: &mut Staged, item: ItemId) -> Result<(), ApiError> {
+    let path = staged.path_of(item)?;
+    remove(&staged.root.join(&path))?;
+    staged.items.remove(&item);
+    remove(&appearance_path(&staged.root, item))?;
+    remove(&supplied_path(&staged.root, item))?;
+    remove_folder(&staged.root.join(corrections_folder(item)))
+}
+
+/// Remove a folder with everything under it (`TreeEdit::DeleteFolder`), after the folder's
+/// refusals (`existing_folder`): every item under it as `DeleteItem` removes one, with its
+/// companions (`delete_item`), then every other file under it and the folder. History and
+/// retained objects stay, because nothing here touches Git or the object store.
+fn delete_folder(staged: &mut Staged, folder: &WorkspacePath) -> Result<(), ApiError> {
+    existing_folder(staged, folder)?;
+    let others = other_files(staged, folder)?;
+    let prefix = format!("{}/", folder.as_str());
+    let items: Vec<ItemId> = staged
+        .items
+        .iter()
+        .filter(|(_, path)| path.starts_with(&prefix))
+        .map(|(item, _)| *item)
+        .collect();
+    for item in items {
+        delete_item(staged, item)?;
+    }
+    remove_folder(&staged.root.join(folder.as_str()))?;
+    if others > 0 {
+        staged.notes.push(folder_files_deleted(folder, others));
+    }
+    Ok(())
+}
+
+/// How many files under `folder` are not items, the folder indexes the store regenerates (each
+/// `index.md`) left out.
+fn other_files(staged: &Staged, folder: &WorkspacePath) -> Result<usize, ApiError> {
+    let items: BTreeSet<&str> = staged.items.values().map(String::as_str).collect();
+    Ok(files_under(&staged.root, folder.as_str())?
+        .iter()
+        .filter(|path| {
+            !items.contains(path.as_str()) && path.rsplit('/').next() != Some(INDEX_FILE)
+        })
+        .count())
+}
+
+/// Move the folder `folder` with everything under it to a private folder beside it (`hop`),
+/// and answer that folder; the caller moves it on within the same commit, so the private folder
+/// reaches no commit's tree. It is the first free one of `okf-jawn-recase-folder`, then
+/// `okf-jawn-recase-folder-1`, `-2` and so on, in `folder`'s parent. Free means that no file,
+/// folder or item holds its collision key or one below it (`Staged::occupied`), and that no
+/// reference of the staged tree resolves to it or below it (`linked`): the next hop rewrites
+/// every reference that resolves below the private folder, so it must find only the ones this
+/// hop wrote. Each entry of the parent takes at most one of these names, and so does each
+/// linked concept, so one of the first `entries + linked + 1` is free.
+fn park_folder(staged: &mut Staged, folder: &WorkspacePath) -> Result<WorkspacePath, ApiError> {
+    let linked: Vec<String> = linked(&load(&staged.root)?)
+        .iter()
+        .map(|id| collision_key_of(&id.to_string()))
+        .collect();
+    let parent = folder.as_str().rsplit_once('/').map(|(parent, _)| parent);
+    let directory = parent.map_or_else(|| staged.root.clone(), |parent| staged.root.join(parent));
+    let entries = std::fs::read_dir(&directory)
+        .map_err(|error| io_error("read", &directory, &error))?
+        .count();
+    for attempt in 0..=entries.saturating_add(linked.len()) {
+        let name = match attempt {
+            0 => RECASE_FOLDER.to_owned(),
+            _ => format!("{RECASE_FOLDER}-{attempt}"),
+        };
+        let private = parent.map_or_else(|| name.clone(), |parent| format!("{parent}/{name}"));
+        let private = WorkspacePath::try_from(private)
+            .map_err(|error| internal(format!("a private folder is invalid: {error}")))?;
+        let key = private.collision_key();
+        let reached = linked.iter().any(|id| {
+            id.strip_prefix(&key)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        });
+        if reached || staged.occupied(&private, None)? {
+            continue;
+        }
+        hop(staged, folder.as_str(), private.as_str())?;
+        return Ok(private);
+    }
+    Err(internal(format!(
+        "no private folder beside {} was free",
+        folder.as_str()
+    )))
+}
+
+/// Move everything under the folder `from` to `to`, a path no entry of the staged tree holds
+/// (the module header): every concept okf-core reads under `from`, in path order, with its links
+/// (`relink_in`); then every other file as it is, with the references that resolve to it
+/// (`follow`); then the emptied folder is removed, and every file under `from` the moves
+/// rewrote is named at its path under `to` (`Staged::rewritten`).
+fn hop(staged: &mut Staged, from: &str, to: &str) -> Result<(), ApiError> {
+    let below = |path: &str| {
+        path.strip_prefix(from)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .map(|rest| format!("{to}/{rest}"))
+    };
+    let bundle = load(&staged.root)?;
+    let concepts: Vec<(String, String)> = bundle
+        .concepts()
+        .iter()
+        .filter_map(|concept| relative(bundle.root(), &concept.path))
+        .filter_map(|path| below(&path).map(|moved| (path, moved)))
+        .collect();
+    for (old, new) in &concepts {
+        let current = load(&staged.root)?;
+        move_concept_in(staged, &current, old, new, new, Some("/destination"))?;
+    }
+    let mut moved = BTreeMap::new();
+    for old in files_under(&staged.root, from)? {
+        let Some(new) = below(&old) else {
+            continue;
+        };
+        let source = staged.root.join(&old);
+        let target = staged.root.join(&new);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| io_error("create", parent, &error))?;
+        }
+        std::fs::rename(&source, &target).map_err(|error| io_error("move", &source, &error))?;
+        // The concept a reference to the file resolves to (`Link::resolve` takes one `.md` off).
+        if let Ok(id) = ConceptId::parse(old.strip_suffix(".md").unwrap_or(&old)) {
+            moved.insert(id, new);
+        }
+    }
+    remove_folder(&staged.root.join(from))?;
+    follow(staged, &moved)?;
+    staged.rewritten = std::mem::take(&mut staged.rewritten)
+        .into_iter()
+        .map(|path| below(&path).unwrap_or(path))
+        .collect();
+    staged.rescan()
+}
+
+/// Make every reference of the staged tree that resolves to a file `moved` holds (by the
+/// concept a reference to its old path resolves to) name it at its new path: each link of a
+/// concept's body (`rewrite_markdown_links`, then `Link::resolve` from the concept, as
+/// `okf_core::move_concept` reads links) and each frontmatter path okf-core rebases when it
+/// moves a concept (`computation`, `executor.resource`, `attester.resource` and each
+/// `sources[].resource`; `follow_frontmatter`). A relative reference is written as the path from
+/// the concept's folder (`rebase_relative_path`), an absolute one as `/<path>`, each with its
+/// anchor (`followed`). Every concept this rewrote is named as rewritten. A link okf-core does not
+/// see (a reference-style definition, raw HTML) is left as written, as a concept move leaves it.
+fn follow(staged: &mut Staged, moved: &BTreeMap<ConceptId, String>) -> Result<(), ApiError> {
+    if moved.is_empty() {
+        return Ok(());
+    }
+    let bundle = load(&staged.root)?;
+    for concept in bundle.concepts() {
+        let mut document = concept.document.clone();
+        let (body, links) = rewrite_markdown_links(&document.body, |link, _| {
+            followed(link, &concept.id, moved)
+                .map_or(LinkRewriteAction::Keep, LinkRewriteAction::Rewrite)
+        });
+        let paths = follow_frontmatter(&mut document, &concept.id, moved);
+        if links == 0 && !paths {
+            continue;
+        }
+        if links > 0 {
+            document.body = body;
+        }
+        write_text(&concept.path, &document.serialize())?;
+        if let Some(path) = relative(bundle.root(), &concept.path) {
+            staged.rewritten.insert(path);
+        }
+    }
+    Ok(())
+}
+
+/// Rewrite each frontmatter path of `document`, the concept `from`, that resolves to a file
+/// `moved` holds (`follow`), and answer whether one was.
+fn follow_frontmatter(
+    document: &mut Document,
+    from: &ConceptId,
+    moved: &BTreeMap<ConceptId, String>,
+) -> bool {
+    let mut changed = false;
+    let mut follow_value = |value: &mut Yaml| {
+        if let Yaml::String(text) = value {
+            let reference = Link {
+                text: String::new(),
+                kind: Link::classify(text),
+                target: text.clone(),
+            };
+            if let Some(target) = followed(&reference, from, moved) {
+                *text = target;
+                changed = true;
+            }
+        }
+    };
+    let frontmatter = &mut document.frontmatter;
+    if let Some(value) = frontmatter.get_mut("computation") {
+        follow_value(value);
+    }
+    for key in ["executor", "attester"] {
+        if let Some(Yaml::Mapping(entry)) = frontmatter.get_mut(key)
+            && let Some(value) = entry.get_mut("resource")
+        {
+            follow_value(value);
+        }
+    }
+    if let Some(Yaml::Sequence(sources)) = frontmatter.get_mut("sources") {
+        for source in sources {
+            if let Yaml::Mapping(entry) = source
+                && let Some(value) = entry.get_mut("resource")
+            {
+                follow_value(value);
+            }
+        }
+    }
+    changed
+}
+
+/// The reference `link` of the concept `from` written for the new path of the file it resolves
+/// to, when that is a file `moved` holds: `/<path>` for an absolute one, the path from `from`'s
+/// folder for a relative one (`rebase_relative_path` from the root), each with the reference's
+/// anchor. `None` for any other reference.
+fn followed(link: &Link, from: &ConceptId, moved: &BTreeMap<ConceptId, String>) -> Option<String> {
+    let target = moved.get(&link.resolve(from)?)?;
+    let anchor = link
+        .target
+        .find('#')
+        .and_then(|at| link.target.get(at..))
+        .unwrap_or_default();
+    match link.kind {
+        LinkKind::Absolute => Some(format!("/{target}{anchor}")),
+        LinkKind::Relative => {
+            let folder = from
+                .parent()
+                .map(|parent| parent.segments().to_vec())
+                .unwrap_or_default();
+            Some(rebase_relative_path(
+                &[],
+                &folder,
+                &format!("{target}{anchor}"),
+            ))
+        }
+        _ => None,
+    }
 }
 
 /// Keep agent-supplied text beside the card; the card shows it unless a correction is shown.
@@ -883,9 +1284,9 @@ fn park(
 
 /// Every concept a reference of `bundle` resolves to, found as `okf_core::move_concept` finds
 /// the references it rewrites: each Markdown link of a body (`rewrite_markdown_links`, then
-/// `Link::resolve` from the document's own concept) and each `sources[].resource` of a
-/// frontmatter. A reference to a concept that does not exist counts: a move to that concept
-/// would rewrite it.
+/// `Link::resolve` from the document's own concept), and frontmatter's `computation`,
+/// `executor.resource`, `attester.resource` and `sources[].resource` (`follow_frontmatter`).
+/// A reference to a concept that does not exist counts: a move to that concept would rewrite it.
 fn linked(bundle: &Bundle) -> BTreeSet<ConceptId> {
     let mut found = BTreeSet::new();
     for concept in bundle.concepts() {
@@ -893,20 +1294,34 @@ fn linked(bundle: &Bundle) -> BTreeSet<ConceptId> {
             found.extend(link.resolve(&concept.id));
             LinkRewriteAction::Keep
         });
-        let Some(okf_core::Value::Sequence(sources)) = concept.document.frontmatter.get("sources")
-        else {
-            continue;
-        };
-        for source in sources {
-            if let okf_core::Value::Mapping(entry) = source
-                && let Some(okf_core::Value::String(resource)) = entry.get("resource")
-            {
+        let mut remember = |value: &Yaml| {
+            if let Yaml::String(resource) = value {
                 let link = Link {
                     text: String::new(),
                     kind: Link::classify(resource),
                     target: resource.clone(),
                 };
                 found.extend(link.resolve(&concept.id));
+            }
+        };
+        let frontmatter = &concept.document.frontmatter;
+        if let Some(value) = frontmatter.get("computation") {
+            remember(value);
+        }
+        for key in ["executor", "attester"] {
+            if let Some(Yaml::Mapping(entry)) = frontmatter.get(key)
+                && let Some(value) = entry.get("resource")
+            {
+                remember(value);
+            }
+        }
+        if let Some(Yaml::Sequence(sources)) = frontmatter.get("sources") {
+            for source in sources {
+                if let Yaml::Mapping(entry) = source
+                    && let Some(value) = entry.get("resource")
+                {
+                    remember(value);
+                }
             }
         }
     }
@@ -947,6 +1362,22 @@ fn move_in(
     ends: &str,
     field: Option<&str>,
 ) -> Result<(), ApiError> {
+    move_concept_in(staged, bundle, source, destination, ends, field)?;
+    staged.rescan()
+}
+
+/// `move_in` without indexing the staged tree again afterwards: a folder's hop moves many
+/// concepts and indexes the tree once, when they have all moved (`hop`). It also moves a concept
+/// that is not an item (a Markdown file without the application header), which okf-core moves
+/// as it moves any concept.
+fn move_concept_in(
+    staged: &mut Staged,
+    bundle: &Bundle,
+    source: &str,
+    destination: &str,
+    ends: &str,
+    field: Option<&str>,
+) -> Result<(), ApiError> {
     let from = concept(source)?;
     let to = concept(destination)?;
     let ends = concept(ends)?;
@@ -975,7 +1406,7 @@ fn move_in(
             staged.rewritten.insert(relative);
         }
     }
-    staged.rescan()
+    Ok(())
 }
 
 /// Write the body of the item okf-core just moved from `from` to `to` again (the module
@@ -1193,11 +1624,7 @@ pub(crate) fn correction_file(item: ItemId, digest: &Digest) -> String {
 /// back with it (`restore_items`): its source appearance, its accepted supplied text, or a file
 /// anywhere in its corrections folder.
 pub(crate) fn is_companion(path: &str, item: ItemId) -> bool {
-    path == appearance_file(item)
-        || path == supplied_file(item)
-        || path
-            .strip_prefix(&corrections_folder(item))
-            .is_some_and(|rest| rest.starts_with('/'))
+    item_companion_owner(path) == Some(item)
 }
 
 /// The tree path of the folder holding every correction of one item.
